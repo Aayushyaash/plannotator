@@ -66,6 +66,8 @@ export interface PlanReviewDecision {
 	savedPath?: string;
 	agentSwitch?: string;
 	permissionMode?: string;
+	/** The reviewer only answered the plan's questions (`answersOnly: true` on /api/deny). */
+	answersOnly?: boolean;
 }
 
 export interface PlanServerResult {
@@ -293,12 +295,13 @@ export async function startPlanReviewServer(options: {
 			});
 		} else if (url.pathname === "/api/config" && req.method === "POST") {
 			try {
-				const body = (await parseBody(req)) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; conventionalComments?: boolean; conventionalLabels?: unknown[] | null; pfmReminder?: boolean };
+				const body = (await parseBody(req)) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; conventionalComments?: boolean; conventionalLabels?: unknown[] | null; pfmReminder?: boolean };
 				const toSave: Record<string, unknown> = {};
 				if (body.displayName !== undefined) toSave.displayName = body.displayName;
 				if (body.diffOptions !== undefined) toSave.diffOptions = body.diffOptions;
 				if (body.theme !== undefined) toSave.theme = body.theme;
 				if (isFaviconStyle(body.favicon)) toSave.favicon = body.favicon;
+				if (typeof body.autoUpdate === "boolean") toSave.autoUpdate = body.autoUpdate;
 				if (body.conventionalComments !== undefined) toSave.conventionalComments = body.conventionalComments;
 				if (body.conventionalLabels !== undefined) toSave.conventionalLabels = body.conventionalLabels;
 				if (body.pfmReminder !== undefined) toSave.pfmReminder = body.pfmReminder;
@@ -473,10 +476,12 @@ export async function startPlanReviewServer(options: {
 			let planSaveEnabled = true;
 			let planSaveCustomPath: string | undefined;
 			let draftGeneration: number | undefined;
+			let answersOnly = false;
 			try {
 				const body = await parseBody(req);
 				draftGeneration = readDraftGenerationFromBody(body);
 				feedback = (body.feedback as string) || feedback;
+				answersOnly = body.answersOnly === true;
 				if (body.planSave !== undefined) {
 					const ps = body.planSave as { enabled: boolean; customPath?: string };
 					planSaveEnabled = ps.enabled;
@@ -498,7 +503,7 @@ export async function startPlanReviewServer(options: {
 			}
 			archivePlanDecision("denied", feedback);
 			deleteDraft(draftKey, draftGeneration);
-			publishDecision({ approved: false, feedback, savedPath });
+			publishDecision({ approved: false, feedback, savedPath, ...(answersOnly ? { answersOnly: true } : {}) });
 			json(res, { ok: true, savedPath });
 		} else if (url.pathname.startsWith("/api/")) {
 			handleApiNotFound(res, url.pathname);

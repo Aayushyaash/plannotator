@@ -35,7 +35,7 @@ import {
   probeAnnotateToken,
   selectAnnotateTokenTarget,
 } from "@plannotator/shared/annotate-target";
-import { parseReviewArgs } from "@plannotator/shared/review-args";
+import { formatIgnoredReviewWords, parseReviewArgs, resolveReviewTarget, withReviewDirectory } from "@plannotator/shared/review-args";
 import { urlToMarkdown, isConvertedSource } from "@plannotator/shared/url-to-markdown";
 import { buildLocalWorkspaceReview, type WorkspaceDiffType } from "@plannotator/server/review-workspace";
 import { statSync } from "fs";
@@ -85,6 +85,17 @@ export async function handleReviewCommand(
     return;
   }
   const urlArg = reviewArgs.prUrl;
+  let reviewDirectory: string | undefined;
+  try {
+    const target = resolveReviewTarget(reviewArgs, directory ?? process.cwd());
+    reviewDirectory = target.directory;
+    const notice = formatIgnoredReviewWords(target);
+    if (notice) client.app.log({ level: "info", message: `[Plannotator] ${notice}` });
+  } catch (err) {
+    client.app.log({ level: "error", message: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+  let reviewCwd = reviewDirectory ?? directory ?? process.cwd();
   const isPRMode = urlArg !== undefined;
   // Caller-pinned open state (--base/--diff-type): session-only seed, same
   // contract as the CLI. Fatal validation failures surface through the
@@ -96,6 +107,7 @@ export async function handleReviewCommand(
   let gitRef: string;
   let diffError: string | undefined;
   let initialFingerprint: string | undefined;
+  let initialFileIdentities: Record<string, string> | undefined;
   let userDiffType: DiffType | WorkspaceDiffType | undefined;
   let gitContext: Awaited<ReturnType<typeof prepareLocalReviewDiff>>["gitContext"] | undefined;
   let prMetadata: Awaited<ReturnType<typeof fetchPR>>["metadata"] | undefined;
@@ -144,8 +156,9 @@ export async function handleReviewCommand(
     client.app.log({ level: "info", message: "Opening code review UI..." });
 
     const config = loadConfig();
-    const cwd = directory ?? process.cwd();
-    const managedVcs = await detectManagedVcs(cwd, reviewArgs.vcsType);
+    const managedVcs = await detectManagedVcs(reviewCwd, reviewArgs.vcsType);
+    if (reviewDirectory) reviewCwd = await managedVcs?.getRoot?.(reviewCwd) ?? reviewCwd;
+    const cwd = reviewCwd;
     const forcedVcs = !!reviewArgs.vcsType && reviewArgs.vcsType !== "auto";
     if (managedVcs || forcedVcs) {
       const providerId = (managedVcs?.id ?? reviewArgs.vcsType) as
@@ -198,6 +211,7 @@ export async function handleReviewCommand(
         // server serves this patch under the detected default: a mixed-base
         // review.
         if (openState.requestedBase !== undefined) initialBaseFromFlags = diffResult.base;
+        initialFileIdentities = diffResult.fileIdentities;
       } catch (err) {
         client.app.log({ level: "error", message: err instanceof Error ? err.message : "Failed to prepare local review diff" });
         return;
@@ -240,7 +254,8 @@ export async function handleReviewCommand(
     gitRef,
     error: diffError,
     origin: "opencode",
-    project: (await detectProjectName()) ?? undefined,
+    project: (await detectProjectName(reviewDirectory ? reviewCwd : undefined)) ?? undefined,
+    includeReviewDirectory: !!reviewDirectory,
     diffType: isPRMode ? undefined : userDiffType,
     gitContext,
     initialBase: initialBaseFromFlags,
@@ -250,6 +265,7 @@ export async function handleReviewCommand(
     // undefined leaves PLANNOTATOR_GIT_REMOTE_CHECK / config.gitRemoteCheck deciding.
     gitRemoteCheck: reviewArgs.gitRemoteCheck,
     initialFingerprint,
+    initialFileIdentities,
     prMetadata,
     workspace,
     agentCwd,
@@ -267,6 +283,7 @@ export async function handleReviewCommand(
   });
 
   const result = await server.waitForDecision();
+  result.feedback = withReviewDirectory(result.feedback, result.reviewDirectory);
   await Bun.sleep(1500);
   server.stop();
 

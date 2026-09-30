@@ -26,13 +26,13 @@ import {
   resolveReviewDecisionAction,
 } from './reviewDecision';
 import { useUpdateCheck } from '@plannotator/ui/hooks/useUpdateCheck';
+import { claimAutoUpdateNotice, describeAutoUpdateNotice, parseAutoUpdateNotice, type AutoUpdateNotice } from '@plannotator/ui/utils/autoUpdateNotice';
 import { storage } from '@plannotator/ui/utils/storage';
 import { CompletionOverlay } from '@plannotator/ui/components/CompletionOverlay';
-import { GitHubIcon } from '@plannotator/ui/components/GitHubIcon';
-import { GitLabIcon } from '@plannotator/ui/components/GitLabIcon';
+import { PRPlatformIcon } from '@plannotator/ui/components/PRPlatformIcon';
 import { RepoIcon } from '@plannotator/ui/components/RepoIcon';
 import { PullRequestIcon } from '@plannotator/ui/components/PullRequestIcon';
-import { getPlatformLabel, getMRLabel, getMRNumberLabel, getDisplayRepo } from '@plannotator/shared/pr-types';
+import { getPlatformLabel, getMRLabel, getMRNumberLabel, getDisplayRepo, getPRNumber, getPRPlatformCapabilities } from '@plannotator/shared/pr-types';
 import type { SemanticDiffAdvert } from '@plannotator/shared/semantic-diff-types';
 import type { CallFlowAdvert, CallFlowNode } from '@plannotator/shared/call-flow-types';
 import { configStore, useConfigValue, setReviewPanelView } from '@plannotator/ui/config';
@@ -112,6 +112,7 @@ import { PRSwitchOverlay } from './components/PRSwitchOverlay';
 import { usePRStack } from './hooks/usePRStack';
 import { useDiffFreshness } from './hooks/useDiffFreshness';
 import { useAutoViewed } from './hooks/useAutoViewed';
+import { useReviewProgress } from './hooks/useReviewProgress';
 import { resolveDiffSwitchUnviews } from './utils/autoViewed';
 import { needsAutoViewedNotice, markAutoViewedNoticeSeen, turnOffAutoViewed, toggleAutoViewed } from './utils/autoViewedNotice';
 import { usePRSession, type PRSessionUpdate } from './hooks/usePRSession';
@@ -531,7 +532,7 @@ const ReviewApp: React.FC = () => {
   const [viewedFiles, setViewedFiles] = useState<Set<string>>(new Set());
   // Auto-mark-viewed (Rule 3): files the reviewer manually UN-viewed. That
   // gesture means "come back to this", so auto-view must never re-check them.
-  // Owned here because it rides the review draft alongside viewedFiles.
+  // Restored alongside durable viewed state (legacy drafts on unsupported surfaces).
   const [autoViewSuppressed, setAutoViewSuppressed] = useState<Set<string>>(new Set());
   // Read by the diff-apply path, which must not re-run on every checkmark.
   const viewedFilesRef = useRef(viewedFiles);
@@ -664,6 +665,10 @@ const ReviewApp: React.FC = () => {
   }, [repoInfo]);
 
   const { prMetadata, prStackInfo, prStackTree, prDiffScope, prDiffScopeOptions, prPatchIncomplete, prPatchUpgradeAvailable, updatePRSession } = usePRSession();
+  const { status: reviewProgressStatus, persistViewed, flush: flushReviewProgress } = useReviewProgress({
+    snapshotId, contextKey: JSON.stringify([prMetadata?.url, committedBase]),
+    enabled: !!origin, setViewedFiles, setSuppressedFiles: setAutoViewSuppressed,
+  });
   const reviewHistoryContext = snapshotId ?? prMetadata?.url ?? diffData?.gitRef ?? 'loading';
   const applyReviewHistory = useCallback((action: ReviewHistoryAction, direction: HistoryDirection) => {
     switch (action.kind) {
@@ -771,7 +776,10 @@ const ReviewApp: React.FC = () => {
   const platformMode = reviewDestination === 'platform' && !!prMetadata;
   // The viewer authored this PR/MR — forges refuse self-approval, so every
   // platform approve path mutes (never disappears) on this flag.
-  const isOwnPR = !!platformUser && prMetadata?.author === platformUser;
+  const prCapabilities = prMetadata ? getPRPlatformCapabilities(prMetadata) : null;
+  // Only platforms that refuse a self-review mute approve / request changes
+  // (Bitbucket Cloud lets an author approve their own PR).
+  const isOwnPR = !!platformUser && prMetadata?.author === platformUser && prCapabilities?.selfReviewBlocked !== false;
 
   // Platform-aware labels
   const platformLabel = prMetadata ? getPlatformLabel(prMetadata) : 'GitHub';
@@ -779,8 +787,9 @@ const ReviewApp: React.FC = () => {
   const mrNumberLabel = prMetadata ? getMRNumberLabel(prMetadata) : '';
   const displayRepo = prMetadata ? getDisplayRepo(prMetadata) : '';
   // #1611: GitHub has a REQUEST_CHANGES review (refused on your own PR, like
-  // approve); GitLab has none, so Request changes posts as a comment there.
-  const requestChangesSupported = prMetadata?.platform === 'github';
+  // approve) and Bitbucket a request-changes decision; GitLab has none, so
+  // Request changes posts as a comment there.
+  const requestChangesSupported = prCapabilities?.requestChanges === true;
   const requestChangesUnavailableReason = !requestChangesSupported
     ? `${platformLabel} has no request-changes review; this posts as a comment.`
     : isOwnPR
@@ -789,7 +798,13 @@ const ReviewApp: React.FC = () => {
   const appVersion = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0';
   const updateInfo = useUpdateCheck();
   const updateToastShown = useRef(false);
+  // True when the compiled CLI will install new releases itself (#1634); the
+  // "new version available" toast is then redundant and stays hidden. The
+  // payload lands long before the GitHub answer plus the toast delay, and a
+  // late flip still cancels the pending toast through the effect cleanup.
+  const [autoUpdateActive, setAutoUpdateActive] = useState(false);
   useEffect(() => {
+    if (autoUpdateActive) return;
     if (updateInfo?.updateAvailable && !updateInfo.dismissed && !updateToastShown.current) {
       updateToastShown.current = true;
       const t = setTimeout(() => {
@@ -802,7 +817,25 @@ const ReviewApp: React.FC = () => {
       }, 1500);
       return () => clearTimeout(t);
     }
-  }, [updateInfo?.updateAvailable, updateInfo?.dismissed]);
+  }, [updateInfo?.updateAvailable, updateInfo?.dismissed, autoUpdateActive]);
+  // One-time notice after a background auto-update (#1634); the compiled
+  // CLI's server attaches it to the initial payload.
+  const [autoUpdateNotice, setAutoUpdateNotice] = useState<AutoUpdateNotice | undefined>();
+  const [autoUpdateSetting, setAutoUpdateSetting] = useState<{ env?: boolean } | undefined>();
+  useEffect(() => {
+    if (!autoUpdateNotice || !claimAutoUpdateNotice(autoUpdateNotice)) return;
+    const { title, description } = describeAutoUpdateNotice(autoUpdateNotice);
+    const t = setTimeout(() => {
+      toast(title, {
+        description,
+        duration: autoUpdateNotice.kind === 'failed' ? 10000 : 6000,
+        position: 'top-right',
+        action: { label: 'Release notes', onClick: () => window.open(autoUpdateNotice.releaseUrl, '_blank', 'noopener,noreferrer') },
+        classNames: { toast: '!w-auto', description: '!text-foreground/70' },
+      });
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [autoUpdateNotice]);
 
   const identity = useConfigValue('displayName');
 
@@ -994,6 +1027,10 @@ const ReviewApp: React.FC = () => {
     isApiMode: !!origin,
     submitted: !!submitted,
     onDraftTargetMerge: (items) => draftTargetMergeRef.current(items),
+    // Only once the diff snapshot is known and progress support is settled:
+    // before that the status reads 'unsupported' (no snapshot yet), and a
+    // true -> false flip would flash the draft banner for a viewed-only draft.
+    persistViewedFiles: !!snapshotId && (reviewProgressStatus === 'unsupported' || reviewProgressStatus === 'error'),
   });
 
   // In-place PR / scope switch onto a target holding an unsent draft (#1590):
@@ -1786,7 +1823,7 @@ const ReviewApp: React.FC = () => {
   // Open the hosted PR/MR attachment gallery as a center dock panel.
   const openPRArtifactsPanel = useCallback(() => {
     const api = dockApi;
-    if (!api || !prMetadata) return;
+    if (!api || !prMetadata || !getPRPlatformCapabilities(prMetadata).artifacts) return;
     const existing = api.getPanel(REVIEW_PR_ARTIFACTS_PANEL_ID);
     if (existing) {
       existing.api.setActive();
@@ -1795,7 +1832,7 @@ const ReviewApp: React.FC = () => {
     api.addPanel({
       id: REVIEW_PR_ARTIFACTS_PANEL_ID,
       component: REVIEW_PANEL_TYPES.PR_ARTIFACTS,
-      title: prMetadata.platform === 'gitlab' ? 'MR Artifacts' : 'PR Artifacts',
+      title: `${getMRLabel(prMetadata)} Artifacts`,
     });
   }, [dockApi, prMetadata]);
 
@@ -2131,13 +2168,21 @@ const ReviewApp: React.FC = () => {
         baseBehindRemote?: boolean;
         openStatePinned?: boolean;
         snapshotId?: string;
-        serverConfig?: Record<string, unknown> & { displayName?: string; gitUser?: string };
+        serverConfig?: Record<string, unknown> & { displayName?: string; gitUser?: string; autoUpdate?: boolean; autoUpdateEnv?: boolean };
+        autoUpdateNotice?: unknown;
+        autoUpdateSupported?: boolean;
+        autoUpdateActive?: boolean;
       }) => {
         apiModeRef.current = true;
         // Initialize config store with server-provided values (config file > cookie > default)
         configStore.init(data.serverConfig);
         // gitUser drives the "Use git name" button in Settings; stays undefined (button hidden) when unavailable
         setGitUser(data.serverConfig?.gitUser);
+        // Only the compiled CLI running the installer-managed binary offers the
+        // toggle; OpenCode, Pi and dev runs send no autoUpdateSupported.
+        setAutoUpdateSetting(data.autoUpdateSupported === true && typeof data.serverConfig?.autoUpdate === 'boolean' ? { env: data.serverConfig.autoUpdateEnv } : undefined);
+        setAutoUpdateActive(data.autoUpdateActive === true);
+        setAutoUpdateNotice(parseAutoUpdateNotice(data.autoUpdateNotice));
         setSnapshotId(data.snapshotId);
         setAiEnabled(data.aiEnabled !== false);
         const apiFiles = orderFilesBySections(parseDiffToFiles(data.rawPatch), data.sections);
@@ -2529,9 +2574,9 @@ const ReviewApp: React.FC = () => {
 
   // Best-effort GitHub viewed sync, shared by the manual toggle and the
   // batched auto-view marks (`/api/pr-viewed` already takes an array).
-  const platformViewedSyncAvailable = !!prMetadata && prMetadata.platform === 'github';
+  const platformViewedSyncAvailable = !!prMetadata && getPRPlatformCapabilities(prMetadata).viewedSync;
   const syncPlatformViewed = useCallback((filePaths: string[], viewed: boolean) => {
-    if (!prMetadata || prMetadata.platform !== 'github' || filePaths.length === 0) return;
+    if (!prMetadata || !getPRPlatformCapabilities(prMetadata).viewedSync || filePaths.length === 0) return;
     fetch('/api/pr-viewed', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2568,18 +2613,23 @@ const ReviewApp: React.FC = () => {
       // suppresses auto-view for this file; marking it viewed by hand clears
       // that suppression.
       applyAutoViewSuppression(filePath, willBeViewed);
+      persistViewed([filePath], willBeViewed);
       // Sync viewed state to GitHub (fire and forget — best effort)
       // Capture willBeViewed inside the callback to ensure correctness with React batching
       syncPlatformViewed([filePath], willBeViewed);
       return next;
     });
-  }, [syncPlatformViewed, applyAutoViewSuppression]);
+  }, [syncPlatformViewed, applyAutoViewSuppression, persistViewed]);
 
   // Auto-mark-viewed. The marker never decides anything the reviewer can't
   // undo: it only ADDS to viewedFiles, exactly like the `v` shortcut, and
   // gates nothing on submit.
   const autoViewedEnabled = useConfigValue('reviewAutoViewed');
   const markFilesViewed = useCallback((paths: string[]) => {
+    // Auto-view re-reports files that are already checked; only persist the
+    // ones this call actually changes.
+    const newlyViewed = paths.filter(path => !viewedFilesRef.current.has(path));
+    if (newlyViewed.length > 0) persistViewed(newlyViewed, true);
     setViewedFiles(prev => {
       const missing = paths.filter(path => !prev.has(path));
       if (missing.length === 0) return prev;
@@ -2587,7 +2637,7 @@ const ReviewApp: React.FC = () => {
       for (const path of missing) next.add(path);
       return next;
     });
-  }, []);
+  }, [persistViewed]);
   const handleAutoView = useCallback(() => {
     // The notice fires the first time auto-view demonstrates itself. Deferred
     // (not lost) behind the guide takeover or a first-run dialog — the file
@@ -2619,7 +2669,7 @@ const ReviewApp: React.FC = () => {
     // Rule 4 — only the review target. The guide takeover CSS-hides the dock
     // (so its files are not what the reviewer is reading), and a commit diff
     // is a documented session-only detour, not the change under review.
-    suspended: guideOpen || !!commitShaFromMode(activeDiffBase),
+    suspended: guideOpen || !!commitShaFromMode(activeDiffBase) || reviewProgressStatus === 'loading',
     viewedFiles,
     suppressedFiles: autoViewSuppressed,
     onMark: markFilesViewed,
@@ -2662,13 +2712,14 @@ const ReviewApp: React.FC = () => {
   const handleFileViewedFromStage = useCallback(
     (path: string) => {
       setViewedFiles(prev => new Set(prev).add(path));
+      persistViewed([path], true);
       // Staging marks a file viewed, so it is a deliberate "I am done with
       // this" exactly like `v`, the header button and the tree row — and like
       // them it must clear any auto-view suppression, or a file the reviewer
       // un-viewed and later staged would stay permanently off-limits.
       applyAutoViewSuppression(path, true);
     },
-    [applyAutoViewSuppression],
+    [applyAutoViewSuppression, persistViewed],
   );
   // Files already staged when the sidecar snapshot was taken — the hook folds
   // these into the effective staged set so pre-staged files toggle correctly.
@@ -2809,6 +2860,7 @@ const ReviewApp: React.FC = () => {
   prStackCallbacksRef.current = {
     applyPRResponse,
     onError: (message) => setDiffError(message),
+    beforeSwitch: flushReviewProgress,
   };
 
   // Shared helper: fetch a diff switch and update state.
@@ -2833,6 +2885,7 @@ const ReviewApp: React.FC = () => {
   ): Promise<boolean> => {
     setIsLoadingDiff(true);
     try {
+      await flushReviewProgress();
       const res = await fetch('/api/diff/switch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2894,17 +2947,11 @@ const ReviewApp: React.FC = () => {
       if (data.imagePreviewSupported !== undefined) setImagePreviewSupported(data.imagePreviewSupported === true);
 
       const nextFiles = orderFilesBySections(parseDiffToFiles(data.rawPatch), data.sections);
-      // Rule 5 of auto-mark-viewed: a checkmark on content that has since
-      // changed is misleading, so it drops. No platform sync — GitHub applies
-      // the same rule to its own viewed state server-side.
-      //
-      // This is the ONE apply path every diff transition funnels through, so
-      // the scope gate lives in resolveDiffSwitchUnviews rather than here: an
-      // opt-in from the caller, re-checked against the identity of the diff.
-      // Without it, entering a commit detour or folding whitespace out would
-      // strip checkmarks off files nothing changed in.
+      // Durable progress reconciles every new snapshot independently of the
+      // auto-view setting. Keep the legacy in-memory rule only for surfaces
+      // without a stable persistence identity (e.g. piped patches).
       const unviewed = resolveDiffSwitchUnviews({
-        enabled: autoViewedEnabled,
+        enabled: autoViewedEnabled && reviewProgressStatus !== 'ready',
         contentRefresh: options?.contentRefresh === true,
         requestedDiffType: fullDiffType,
         activeDiffType: diffType,
@@ -3014,7 +3061,7 @@ const ReviewApp: React.FC = () => {
     } finally {
       setIsLoadingDiff(false);
     }
-  }, [dockApi, resetStagedFiles, selectedBase, diffHideWhitespace, files, activeFileIndex, openDiffFile, applySemanticDiffAdvert, applyCallFlowAdvert, clearPendingSelection, autoViewedEnabled, diffType]);
+  }, [dockApi, resetStagedFiles, selectedBase, diffHideWhitespace, files, activeFileIndex, openDiffFile, applySemanticDiffAdvert, applyCallFlowAdvert, clearPendingSelection, autoViewedEnabled, diffType, reviewProgressStatus, flushReviewProgress]);
 
   // Switch the base branch the current diff compares against.
   // Only triggers a refetch when the active mode actually uses a base.
@@ -3856,6 +3903,7 @@ const ReviewApp: React.FC = () => {
   const handleSendFeedback = useCallback(async (): Promise<boolean> => {
     setIsSendingFeedback(true);
     try {
+      await flushReviewProgress();
       const agentSwitchSettings = getAgentSwitchSettings('review');
       const effectiveAgent = getEffectiveAgentName(agentSwitchSettings);
 
@@ -3882,12 +3930,13 @@ const ReviewApp: React.FC = () => {
       setIsSendingFeedback(false);
       return false;
     }
-  }, [feedbackMarkdown, allAnnotations, getDraftGeneration]);
+  }, [feedbackMarkdown, allAnnotations, getDraftGeneration, flushReviewProgress]);
 
   // Exit review session without sending any feedback
   const handleExit = useCallback(async () => {
     setIsExiting(true);
     try {
+      await flushReviewProgress();
       const res = await fetch(`/api/exit?draftGeneration=${getDraftGeneration()}`, { method: 'POST' });
       if (res.ok) {
         setSubmitted('exited');
@@ -3898,7 +3947,7 @@ const ReviewApp: React.FC = () => {
       console.error('Failed to exit review:', error);
       setIsExiting(false);
     }
-  }, [getDraftGeneration]);
+  }, [getDraftGeneration, flushReviewProgress]);
 
   // Approve — bare (LGTM), with a composer note, or with the live annotations
   // riding along (PR5 delivery, spec §6.4). The old LGTM placeholder is gone:
@@ -3910,6 +3959,7 @@ const ReviewApp: React.FC = () => {
   const handleApprove = useCallback(async (options?: { note?: string; withAnnotations?: boolean }) => {
     setIsApproving(true);
     try {
+      await flushReviewProgress();
       const res = await fetch('/api/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3932,7 +3982,7 @@ const ReviewApp: React.FC = () => {
       setTimeout(() => setCopyFeedback(null), 2000);
       setIsApproving(false);
     }
-  }, [getDraftGeneration, feedbackMarkdown, allAnnotations]);
+  }, [getDraftGeneration, feedbackMarkdown, allAnnotations, flushReviewProgress]);
 
   // --- The unified review decision control, agent mode (spec §3.2/§4) ------
   // One primary, one callback: the header's left segment, the global
@@ -4120,7 +4170,7 @@ const ReviewApp: React.FC = () => {
         const currentTarget = plan.targets.find(t => t.prUrl === prMetadata?.url);
         targets = currentTarget ? [currentTarget] : [{
           prUrl: prMetadata?.url ?? '',
-          prNumber: prMetadata ? (prMetadata.platform === 'github' ? prMetadata.number : prMetadata.iid) : 0,
+          prNumber: prMetadata ? getPRNumber(prMetadata) : 0,
           prTitle: prMetadata?.title ?? '',
           prRepo: prMetadata ? getDisplayRepo(prMetadata) : '',
           fileComments: [], fileLevelComments: [], fileScopedBody: '',
@@ -4171,9 +4221,10 @@ const ReviewApp: React.FC = () => {
       const prLinks = openUrls.join(', ');
       const statusMessage = action === 'approve'
         ? `${mrLabel === 'MR' ? 'Merge request' : 'Pull request'} approved on ${platformLabel}${prLinks ? ': ' + prLinks : ''}`
-        : action === 'request_changes' && prMetadata.platform === 'github'
+        : action === 'request_changes' && getPRPlatformCapabilities(prMetadata).requestChanges
           ? `Changes requested on ${platformLabel}${prLinks ? ': ' + prLinks : ''}`
           : `${mrLabel === 'MR' ? 'Merge request' : 'Pull request'} reviewed on ${platformLabel}${prLinks ? ': ' + prLinks : ''}`;
+      await flushReviewProgress();
       fetch('/api/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4193,12 +4244,12 @@ const ReviewApp: React.FC = () => {
     } finally {
       setIsPlatformActioning(false);
     }
-  }, [platformOpenPR, platformLabel, mrLabel, prMetadata, getDraftGeneration]);
+  }, [platformOpenPR, platformLabel, mrLabel, prMetadata, getDraftGeneration, flushReviewProgress]);
 
   const openPlatformDialog = useCallback((action: PRReviewAction, chooseEvent = false) => {
     const diffPaths = new Set(files.map(f => f.path));
     const prMeta = prMetadata ? {
-      number: prMetadata.platform === 'github' ? prMetadata.number : prMetadata.iid,
+      number: getPRNumber(prMetadata),
       title: prMetadata.title,
       repo: getDisplayRepo(prMetadata),
     } : undefined;
@@ -4671,7 +4722,7 @@ const ReviewApp: React.FC = () => {
                 <PRSelector
                   mrNumberLabel={mrNumberLabel}
                   prTitle={prMetadata.title}
-                  currentNumber={prMetadata.platform === 'github' ? prMetadata.number : prMetadata.iid}
+                  currentNumber={getPRNumber(prMetadata)}
                   onSelect={handlePRSwitch}
                   disabled={isSwitchingPRScope}
                 />
@@ -4761,7 +4812,7 @@ const ReviewApp: React.FC = () => {
                     >
                       {reviewDestination === 'platform' ? (
                         <>
-                          {prMetadata?.platform === 'gitlab' ? <GitLabIcon className="w-3.5 h-3.5" /> : <GitHubIcon className="w-3.5 h-3.5" />}
+                          <PRPlatformIcon platform={prMetadata?.platform ?? 'github'} className="w-3.5 h-3.5" />
                           <span className="hidden lg:inline">{platformLabel}</span>
                         </>
                       ) : 'Agent'}
@@ -4848,7 +4899,7 @@ const ReviewApp: React.FC = () => {
                     working with the partial diff meanwhile. */}
                 {!isCompactTouchLayout && prPatchIncomplete && prDiffScope === 'layer' && !isSwitchingPRScope && (
                   <div className="flex items-center gap-2 text-xs text-amber-700 dark:text-amber-300 px-2 py-1 bg-amber-500/10 rounded border border-amber-500/25">
-                    <span className="hidden md:inline" title={`${prMetadata?.platform === 'gitlab' ? 'GitLab' : 'GitHub'} omitted diff content for some files because this PR is too large`}>
+                    <span className="hidden md:inline" title={`${platformLabel} omitted diff content for some files because this PR is too large`}>
                       Partial diff
                     </span>
                     <span className="md:hidden">Partial</span>
@@ -5269,10 +5320,11 @@ const ReviewApp: React.FC = () => {
                 onSelectPROverview={() => completeNavigatorSelection(openPROverviewPanel)}
                 isPROverviewActive={isPROverviewActive}
                 prOverviewNumber={prMetadata ? mrNumberLabel : undefined}
+                prOverviewPlatform={prMetadata?.platform}
                 prOverviewTitle={prMetadata?.title}
-                onSelectPRArtifacts={prMetadata ? () => completeNavigatorSelection(openPRArtifactsPanel) : undefined}
+                onSelectPRArtifacts={prCapabilities?.artifacts ? () => completeNavigatorSelection(openPRArtifactsPanel) : undefined}
                 isPRArtifactsActive={isPRArtifactsActive}
-                prArtifactCount={prMetadata ? prArtifacts.length : undefined}
+                prArtifactCount={prCapabilities?.artifacts ? prArtifacts.length : undefined}
                 onSelectSemanticDiff={() => completeNavigatorSelection(openSemanticDiffPanel)}
                 isSemanticDiffActive={isSemanticDiffActive}
                 semanticDiffAvailable={semanticDiffUsable}
@@ -5586,6 +5638,7 @@ const ReviewApp: React.FC = () => {
             mode="review"
             aiProviders={aiProviders}
             gitUser={gitUser}
+            autoUpdateSetting={autoUpdateSetting}
             externalOpen={openSettingsMenu}
             onExternalClose={() => setOpenSettingsMenu(false)}
             // Local git session where since-base isn't offered (base ref

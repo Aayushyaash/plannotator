@@ -89,6 +89,7 @@ import { getRepoInfo } from "./repo";
 import { handleImage, handleUpload, handleAgents, handleServerReady, handleApiNotFound, handleFavicon, readDraftGenerationFromBody, readDraftGenerationFromUrl, type OpencodeClient } from "./shared-handlers";
 import { contentHash } from "./draft";
 import { createReviewDraftSession, prDraftTargetKey, type ReviewDraftKeys } from "@plannotator/shared/review-draft";
+import { captureReviewProgress, handleReviewProgress } from "@plannotator/shared/review-progress";
 import { createEditorAnnotationHandler } from "./editor-annotations";
 import { createExternalAnnotationHandler } from "./external-annotations";
 import { createAgentJobHandler } from "./agent-jobs";
@@ -133,10 +134,11 @@ import {
   extractMarkerNonce,
   type MarkerEngineId,
 } from "./marker-review";
-import { loadConfig, saveConfig, detectGitUser, getServerConfig, parseReviewAnalysisConfig, resolveAIEnabled, resolveClaudeSandbox, resolveCursorSandbox, resolveFeedbackHistory, resolveGuideHistory, resolveGitRemoteCheck } from "./config";
+import { loadConfig, saveConfig, detectGitUser, getServerConfig, parseReviewAnalysisConfig, resolveAIEnabled, resolveClaudeSandbox, resolveCursorSandbox, resolveFeedbackHistory, resolveGuideHistory, resolveGitRemoteCheck, resolveReviewProgress } from "./config";
+import { getAutoUpdateAdvert } from "./auto-update";
 import { appendFeedbackRecord, countChangedFiles, deriveFeedbackProject, type FeedbackDecision, type FeedbackReviewTarget } from "@plannotator/shared/feedback-archive";
 import { isFaviconStyle, type FaviconStyle } from "@plannotator/shared/favicon";
-import { type PRMetadata, type PRRef, type PRReviewFileComment, type PRStackTree, type PRListItem, fetchPR, fetchPRFileContent, fetchPRFileBytes, fetchPRContext, submitPRReview, parseFileLevelComments, parsePRReviewAction, fetchPRViewedFiles, markPRFilesViewed, fetchPRStack, fetchPRList, getPRUser, parsePRUrl, prRefFromMetadata, isSameProject, getDisplayRepo, getMRLabel, getMRNumberLabel, prCommandRuntime } from "./pr";
+import { type PRMetadata, type PRRef, type PRReviewFileComment, type PRStackTree, type PRListItem, fetchPR, fetchPRFileContent, fetchPRFileBytes, fetchPRContext, submitPRReview, parseFileLevelComments, parsePRReviewAction, fetchPRViewedFiles, markPRFilesViewed, fetchPRStack, fetchPRList, getPRUser, parsePRUrl, prRefFromMetadata, isSameProject, getDisplayRepo, getMRLabel, getMRNumberLabel, getPRNumber, prCommandRuntime } from "./pr";
 import {
   PR_CONTEXT_HEARTBEAT_COMMENT,
   PR_CONTEXT_HEARTBEAT_INTERVAL_MS,
@@ -223,6 +225,7 @@ export interface ReviewServerOptions {
   openStatePinned?: boolean;
   /** Freshness token captured atomically with the initial provider patch. */
   initialFingerprint?: string;
+  initialFileIdentities?: Record<string, string>;
   /** Whether URL sharing is enabled (default: true) */
   sharingEnabled?: boolean;
   /**
@@ -263,6 +266,8 @@ export interface ReviewServerOptions {
    * `pool/pr-<n>` checkout, so records would bucket under `pr-123`).
    */
   project?: string;
+  /** Return the active local directory with the decision for cross-directory feedback. */
+  includeReviewDirectory?: boolean;
   /** Working directory for agent processes (e.g., --local worktree). Independent of diff pipeline. */
   agentCwd?: string;
   /** Per-PR worktree pool. When set, pr-switch creates worktrees instead of checking out. */
@@ -288,6 +293,7 @@ export interface ReviewServerResult {
   waitForDecision: () => Promise<{
     approved: boolean;
     feedback: string;
+    reviewDirectory?: string;
     annotations: unknown[];
     agentSwitch?: string;
     exit?: boolean;
@@ -409,6 +415,7 @@ export async function startReviewServer(
 
   // Mutable state for diff switching
   let currentPatch = options.rawPatch;
+  let currentFileIdentities = options.initialFileIdentities;
   let currentGitRef = options.gitRef;
   let currentDiffType: DiffType | WorkspaceDiffType = options.diffType || workspace?.diffType || "uncommitted";
   let currentError = options.error;
@@ -595,7 +602,25 @@ export async function startReviewServer(
       if (ok) callFlowService.invalidateRuntimeState();
     },
   });
+  // PLANNOTATOR_REVIEW_PROGRESS / config.reviewProgress: when off, no snapshot
+  // exists, so the endpoint answers `available: false` without touching disk and
+  // the client keeps viewed marks in the draft, as for unsupported modes.
+  const captureProgress = () => !resolveReviewProgress(loadConfig()) ? Promise.resolve(null) : captureReviewProgress({
+    patch: currentPatch,
+    fileIdentities: currentFileIdentities,
+    diffType: currentDiffType,
+    base: currentBase,
+    cwd: gitContext ? gitContext.cwd ?? process.cwd() : undefined,
+    vcsType: sessionVcsType,
+    prUrl: prMetadata?.url,
+    prScope: currentPRDiffScope,
+    workspaceRoot: workspace?.root,
+  }, gitRuntime.runGit);
+  // Captured once at startup: either by the initial fingerprint capture below
+  // or, when the caller already supplied a fingerprint, right after it.
+  let progressSnapshot: ReturnType<typeof captureProgress> = Promise.resolve(null);
   const captureDiffFingerprint = (knownFingerprint?: string): void => {
+    progressSnapshot = captureProgress();
     // A fingerprint capture marks a committed review-view change. Stop work
     // for the prior snapshot even when the new view cannot run CallDiff.
     callFlowService.cancelAll();
@@ -620,6 +645,7 @@ export async function startReviewServer(
     });
   };
   if (currentFingerprint === null) captureDiffFingerprint();
+  else progressSnapshot = captureProgress();
 
   const resolveReviewBase = (
     requestedBase?: string,
@@ -797,11 +823,12 @@ export async function startReviewServer(
                 currentDiffType as DiffType,
                 remote,
                 gitContext.cwd,
-                { hideWhitespace: currentHideWhitespace },
+                { hideWhitespace: currentHideWhitespace, captureFileIdentities: true },
               );
               if (!baseEverSwitched) {
                 currentBase = remote;
                 currentPatch = rebuilt.patch;
+                currentFileIdentities = rebuilt.fileIdentities;
                 currentGitRef = rebuilt.label;
                 currentError = rebuilt.error;
                 // draftKey doubles as the snapshot id the freshness probe
@@ -967,7 +994,7 @@ export async function startReviewServer(
   // itself stays a pure content hash — drafts survive content-identical
   // mode round-trips.
   const currentSnapshotId = (): string =>
-    `${draftKey}:${currentDiffType}${isPRMode ? `:${currentPRDiffScope}` : ""}${currentContextRevision ? `:${currentContextRevision}` : ""}`;
+    `${draftKey}:${currentDiffType}${isPRMode ? `:${currentPRDiffScope}` : ""}${currentContextRevision ? `:${currentContextRevision}` : ""}${currentFileIdentities ? `:${contentHash(JSON.stringify(currentFileIdentities))}` : ""}`;
 
   // --- Durable feedback archive --------------------------------------------
   //
@@ -1010,11 +1037,8 @@ export async function startReviewServer(
     if (prMetadata) {
       target.pr = {
         provider: prMetadata.platform,
-        repo:
-          prMetadata.platform === "github"
-            ? `${prMetadata.owner}/${prMetadata.repo}`
-            : prMetadata.projectPath,
-        number: prMetadata.platform === "github" ? prMetadata.number : prMetadata.iid,
+        repo: getDisplayRepo(prMetadata),
+        number: getPRNumber(prMetadata),
       };
     }
     return target;
@@ -1494,9 +1518,13 @@ export async function startReviewServer(
                 headSha: launchMetadata.headSha,
                 pr: {
                   url: launchMetadata.url,
-                  number: launchMetadata.platform === "github" ? launchMetadata.number : launchMetadata.iid,
+                  number: getPRNumber(launchMetadata),
                   title: launchMetadata.title,
-                  platform: launchMetadata.platform,
+                  // The portable guide format names only github/gitlab; other
+                  // platforms omit the optional field rather than widen it.
+                  ...(launchMetadata.platform === "github" || launchMetadata.platform === "gitlab"
+                    ? { platform: launchMetadata.platform }
+                    : {}),
                 },
               }
             : {
@@ -1589,7 +1617,7 @@ export async function startReviewServer(
       const jobPrMeta = jobPrUrl ? prSwitchCache.get(jobPrUrl)?.metadata : undefined;
       const jobPrContext = jobPrMeta ? {
         prUrl: jobPrUrl,
-        prNumber: jobPrMeta.platform === "github" ? jobPrMeta.number : jobPrMeta.iid,
+        prNumber: getPRNumber(jobPrMeta),
         prTitle: jobPrMeta.title,
         prRepo: getDisplayRepo(jobPrMeta),
       } : jobPrUrl ? { prUrl: jobPrUrl } : {};
@@ -1795,7 +1823,7 @@ export async function startReviewServer(
   // device: remote mode or --tailscale (#1617). Local sessions are unchanged.
   const compressAppHtml = isRemote || options.tailnetPublished === true;
   const wslFlag = await isWSL();
-  const gitUser = detectGitUser();
+  const gitUser = detectGitUser(workspace?.root ?? gitContext?.cwd);
 
   // Detect repo info (cached for this session)
   // In PR mode, derive from metadata instead of local git
@@ -1808,7 +1836,7 @@ export async function startReviewServer(
     ? { display: getDisplayRepo(prMetadata), branch: `${getMRLabel(prMetadata)} ${getMRNumberLabel(prMetadata)}` }
     : workspace
       ? { display: basename(workspace.root), branch: "Workspace" }
-    : await getRepoInfo();
+    : await getRepoInfo(gitContext?.cwd);
   if (!isStaticPatchMode && gitContext?.repository?.displayFallback) {
     repoInfo = {
       ...repoInfo,
@@ -1861,6 +1889,7 @@ export async function startReviewServer(
   let resolveDecision: (result: {
     approved: boolean;
     feedback: string;
+    reviewDirectory?: string;
     annotations: unknown[];
     agentSwitch?: string;
     exit?: boolean;
@@ -1868,6 +1897,7 @@ export async function startReviewServer(
   const decisionPromise = new Promise<{
     approved: boolean;
     feedback: string;
+    reviewDirectory?: string;
     annotations: unknown[];
     agentSwitch?: string;
     exit?: boolean;
@@ -2212,6 +2242,7 @@ export async function startReviewServer(
               semanticDiff: await getSemanticDiffAdvert(servedDiffType as DiffType),
               callFlow: await getCallFlowAdvert(servedDiffType as DiffType),
               serverConfig: getServerConfig(gitUser),
+              ...getAutoUpdateAdvert(),
             });
           }
 
@@ -2577,6 +2608,7 @@ export async function startReviewServer(
                 }
                 currentHideWhitespace = effectiveHideWhitespace;
                 currentPatch = snapshot.rawPatch;
+                currentFileIdentities = undefined;
                 currentGitRef = snapshot.gitRef;
                 currentDiffType = workspace.diffType;
                 currentError = snapshot.error;
@@ -2641,6 +2673,7 @@ export async function startReviewServer(
               // Run the new diff
               const result = await runVcsDiff(newDiffType as DiffType, base, defaultCwd, {
                 hideWhitespace: effectiveHideWhitespace,
+                captureFileIdentities: sessionVcsType === "git",
               });
               const resultContext = sessionVcsType === "gitbutler" && result.gitContext?.vcsType === "gitbutler"
                 ? result.gitContext
@@ -2712,6 +2745,7 @@ export async function startReviewServer(
               }
               currentHideWhitespace = effectiveHideWhitespace;
               currentPatch = result.patch;
+              currentFileIdentities = result.fileIdentities;
               currentGitRef = result.label;
               currentDiffType = newDiffType;
               currentBase = nextBase;
@@ -2869,6 +2903,7 @@ export async function startReviewServer(
                 }
                 if (scopeEpoch !== prScopeEpoch) return supersededResponse();
                 currentPatch = originalPRPatch;
+                currentFileIdentities = undefined;
                 currentGitRef = originalPRGitRef;
                 currentError = originalPRError;
                 currentPRDiffScope = "layer";
@@ -2921,6 +2956,7 @@ export async function startReviewServer(
 
               if (scopeEpoch !== prScopeEpoch) return supersededResponse();
               currentPatch = result.patch;
+              currentFileIdentities = undefined;
               currentGitRef = result.label;
               currentError = undefined;
               currentPRDiffScope = "full-stack";
@@ -3001,6 +3037,7 @@ export async function startReviewServer(
               prRef = prRefFromMetadata(pr.metadata);
               warmPRContext(pr.metadata.url, prRef);
               currentPatch = pr.rawPatch;
+              currentFileIdentities = undefined;
               currentGitRef = `${getMRLabel(pr.metadata)} ${getMRNumberLabel(pr.metadata)}`;
               currentError = undefined;
               originalPRPatch = pr.rawPatch;
@@ -3529,12 +3566,13 @@ export async function startReviewServer(
           // API: Update user config (write-back to ~/.plannotator/config.json)
           if (url.pathname === "/api/config" && req.method === "POST") {
             try {
-              const body = (await req.json()) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; reviewAnalysis?: Record<string, unknown>; conventionalComments?: boolean; conventionalLabels?: unknown[] | null };
+              const body = (await req.json()) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; reviewAnalysis?: Record<string, unknown>; conventionalComments?: boolean; conventionalLabels?: unknown[] | null };
               const toSave: Record<string, unknown> = {};
               if (body.displayName !== undefined) toSave.displayName = body.displayName;
               if (body.diffOptions !== undefined) toSave.diffOptions = body.diffOptions;
               if (body.theme !== undefined) toSave.theme = body.theme;
               if (isFaviconStyle(body.favicon)) toSave.favicon = body.favicon;
+              if (typeof body.autoUpdate === "boolean") toSave.autoUpdate = body.autoUpdate;
               if (body.reviewAnalysis !== undefined) {
                 const reviewAnalysis = parseReviewAnalysisConfig(body.reviewAnalysis);
                 if (!reviewAnalysis) {
@@ -3650,6 +3688,27 @@ export async function startReviewServer(
               }
               return Response.json({ instructions: writeGuideInstructions(instructions) });
             }
+          }
+
+          // API: Durable viewed-file progress
+          if (url.pathname === "/api/review-progress") {
+            if (req.method === "POST" && !callFlowInstallOriginAllowed(req.headers.get("origin"), url.host)) {
+              return Response.json({ error: "Cross-origin progress updates are not allowed" }, { status: 403 });
+            }
+            let body: unknown;
+            if (req.method === "POST") {
+              try {
+                body = await req.json();
+              } catch {
+                return Response.json({ error: "Invalid JSON" }, { status: 400 });
+              }
+            }
+            const result = await handleReviewProgress({
+              method: req.method, snapshotId: url.searchParams.get("snapshot"),
+              currentSnapshotId, progress: progressSnapshot, currentProgress: () => progressSnapshot,
+              body, platformViewed: isPRMode ? initialViewedFiles : [],
+            });
+            return Response.json(result.body, { status: result.status });
           }
 
           // API: Annotation draft persistence
@@ -3802,6 +3861,8 @@ export async function startReviewServer(
               resolveDecision({
                 approved,
                 feedback: feedbackValue,
+                ...(options.includeReviewDirectory && !isPRMode && !isStaticPatchMode
+                  ? { reviewDirectory: resolveAgentCwd() } : {}),
                 annotations: annotationsValue,
                 agentSwitch: body.agentSwitch,
               });

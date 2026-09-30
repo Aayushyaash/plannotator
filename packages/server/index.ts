@@ -43,6 +43,7 @@ import {
 import { getRepoInfo } from "./repo";
 import { detectProjectName } from "./project";
 import { loadConfig, saveConfig, detectGitUser, getServerConfig, resolveAIEnabled, resolveFeedbackHistory } from "./config";
+import { getAutoUpdateAdvert } from "./auto-update";
 import { appendFeedbackRecord, type FeedbackDecision } from "@plannotator/shared/feedback-archive";
 import { isFaviconStyle, type FaviconStyle } from "@plannotator/shared/favicon";
 import { readImprovementHook, getImprovementHookExpectedPath } from "@plannotator/shared/improvement-hooks";
@@ -111,6 +112,10 @@ export interface ServerResult {
     savedPath?: string;
     agentSwitch?: string;
     permissionMode?: string;
+    /** The reviewer's only feedback was answers to the plan's questions
+     *  (`answersOnly: true` on /api/deny). Consumers pick the
+     *  `plan.answered` prompt through `composePlanDeniedMessage`. */
+    answersOnly?: boolean;
   }>;
   /** Wait for user to close (archive mode only) */
   waitForDone?: () => Promise<void>;
@@ -176,6 +181,7 @@ export async function startPlannotatorServer(
     savedPath?: string;
     agentSwitch?: string;
     permissionMode?: string;
+    answersOnly?: boolean;
   }) => void;
   let decisionPromise: Promise<{
     approved: boolean;
@@ -183,6 +189,7 @@ export async function startPlannotatorServer(
     savedPath?: string;
     agentSwitch?: string;
     permissionMode?: string;
+    answersOnly?: boolean;
   }>;
 
   if (mode !== "archive") {
@@ -334,9 +341,10 @@ export async function startPlannotatorServer(
                 shareBaseUrl,
                 isWSL: wslFlag,
                 serverConfig: getServerConfig(gitUser),
+                ...getAutoUpdateAdvert(),
               });
             }
-            return Response.json({ plan, origin, permissionMode, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, projectRoot: process.cwd(), planDir: planFile?.dir, isWSL: wslFlag, serverConfig: getServerConfig(gitUser) });
+            return Response.json({ plan, origin, permissionMode, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, projectRoot: process.cwd(), planDir: planFile?.dir, isWSL: wslFlag, serverConfig: getServerConfig(gitUser), ...getAutoUpdateAdvert() });
           }
 
           // API: Serve a linked markdown document
@@ -373,12 +381,13 @@ export async function startPlannotatorServer(
           // API: Update user config (write-back to ~/.plannotator/config.json)
           if (url.pathname === "/api/config" && req.method === "POST") {
             try {
-              const body = (await req.json()) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; conventionalComments?: boolean; conventionalLabels?: unknown[] | null; pfmReminder?: boolean };
+              const body = (await req.json()) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; conventionalComments?: boolean; conventionalLabels?: unknown[] | null; pfmReminder?: boolean };
               const toSave: Record<string, unknown> = {};
               if (body.displayName !== undefined) toSave.displayName = body.displayName;
               if (body.diffOptions !== undefined) toSave.diffOptions = body.diffOptions;
               if (body.theme !== undefined) toSave.theme = body.theme;
               if (isFaviconStyle(body.favicon)) toSave.favicon = body.favicon;
+              if (typeof body.autoUpdate === "boolean") toSave.autoUpdate = body.autoUpdate;
               if (body.conventionalComments !== undefined) toSave.conventionalComments = body.conventionalComments;
               if (body.conventionalLabels !== undefined) toSave.conventionalLabels = body.conventionalLabels;
               if (body.pfmReminder !== undefined) toSave.pfmReminder = body.pfmReminder;
@@ -607,14 +616,17 @@ export async function startPlannotatorServer(
             let planSaveEnabled = true; // default to enabled for backwards compat
             let planSaveCustomPath: string | undefined;
             let draftGeneration: number | undefined;
+            let answersOnly = false;
             try {
               const body = (await req.json()) as {
                 feedback?: string;
                 planSave?: { enabled: boolean; customPath?: string };
                 draftGeneration?: number;
+                answersOnly?: unknown;
               };
               draftGeneration = readDraftGenerationFromBody(body);
               feedback = body.feedback || feedback;
+              answersOnly = body.answersOnly === true;
 
               // Capture plan save settings
               if (body.planSave !== undefined) {
@@ -635,7 +647,7 @@ export async function startPlannotatorServer(
             archivePlanDecision("denied", feedback);
 
             deleteDraft(draftKey, draftGeneration);
-            resolveDecision({ approved: false, feedback, savedPath });
+            resolveDecision({ approved: false, feedback, savedPath, ...(answersOnly ? { answersOnly: true } : {}) });
             return Response.json({ ok: true, savedPath });
           }
 
