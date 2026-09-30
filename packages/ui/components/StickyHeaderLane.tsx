@@ -237,6 +237,7 @@ export const StickyHeaderLane: React.FC<StickyHeaderLaneProps> = ({
       <div
         ref={wrapperRef}
         data-sticky-header-lane="true"
+        data-print-hide
         className={`${sticky ? 'sticky' : 'relative'} z-[60] w-full self-center pointer-events-none ${
           sticky ? (isNarrow ? 'top-[52px] md:top-[60px]' : 'top-3') : ''
         }`}
