@@ -1,4 +1,5 @@
 import React, { useState, useRef, useLayoutEffect, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import type { EditorMode, InputMethod } from '../types';
 import { TaterSpritePullup } from './TaterSpritePullup';
 
@@ -36,6 +37,12 @@ export interface AnnotationToolstripProps {
    * retain the complete action-mode group.
    */
   hideQuickLabel?: boolean;
+  /** When true, renders only the help link in document flow without tool buttons. */
+  helpOnly?: boolean;
+  /** Currently hovered button label, shared for external synchronization. */
+  hoveredButton?: string | null;
+  /** Callback fired when a button hover state changes. */
+  onHoverButton?: (label: string | null) => void;
 }
 
 /** Render the shared input-method and annotation-mode controls. */
@@ -50,6 +57,9 @@ export const AnnotationToolstrip: React.FC<AnnotationToolstripProps> = ({
   iconOnly = false,
   hideInputMethodSwitch = false,
   hideQuickLabel = false,
+  helpOnly = false,
+  hoveredButton,
+  onHoverButton,
 }) => {
   const [showHelp, setShowHelp] = useState(false);
   const [helpTab, setHelpTab] = useState<'selection' | 'plannotator'>('selection');
@@ -62,9 +72,9 @@ export const AnnotationToolstrip: React.FC<AnnotationToolstripProps> = ({
 
   return (
     <>
-      <div className={`flex items-center flex-wrap ${compact ? 'gap-1' : 'gap-1.5'}`}>
+      <div className={`flex items-center flex-wrap gap-1.5 ${helpOnly ? 'inline-flex' : ''}`}>
         {/* Input method group */}
-        {!hideInputMethodSwitch && (
+        {!helpOnly && !hideInputMethodSwitch && (
         <div className="inline-flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5 border border-border/30">
           <ToolstripButton
             active={inputMethod === 'drag'}
@@ -74,6 +84,8 @@ export const AnnotationToolstrip: React.FC<AnnotationToolstripProps> = ({
             mounted={mounted}
             compact={compact}
             iconOnly={iconOnly}
+            hovered={hoveredButton === 'Select'}
+            onHoverChange={(isHovered) => onHoverButton?.(isHovered ? 'Select' : null)}
             icon={
               <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                 <path d="M12 20h-1a2 2 0 0 1-2-2 2 2 0 0 1-2 2H6"/>
@@ -92,6 +104,8 @@ export const AnnotationToolstrip: React.FC<AnnotationToolstripProps> = ({
             mounted={mounted}
             compact={compact}
             iconOnly={iconOnly}
+            hovered={hoveredButton === 'Pinpoint'}
+            onHoverChange={(isHovered) => onHoverButton?.(isHovered ? 'Pinpoint' : null)}
             icon={
               <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="10" />
@@ -107,6 +121,7 @@ export const AnnotationToolstrip: React.FC<AnnotationToolstripProps> = ({
         )}
 
         {/* Action mode group */}
+        {!helpOnly && (
         <div className="inline-flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5 border border-border/30">
           <ToolstripButton
             active={mode === 'selection'}
@@ -116,6 +131,8 @@ export const AnnotationToolstrip: React.FC<AnnotationToolstripProps> = ({
             mounted={mounted}
             compact={compact}
             iconOnly={iconOnly}
+            hovered={hoveredButton === 'Markup'}
+            onHoverChange={(isHovered) => onHoverButton?.(isHovered ? 'Markup' : null)}
             icon={
               <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                 <path d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
@@ -130,6 +147,8 @@ export const AnnotationToolstrip: React.FC<AnnotationToolstripProps> = ({
             mounted={mounted}
             compact={compact}
             iconOnly={iconOnly}
+            hovered={hoveredButton === 'Comment'}
+            onHoverChange={(isHovered) => onHoverButton?.(isHovered ? 'Comment' : null)}
             icon={
               <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
@@ -144,6 +163,8 @@ export const AnnotationToolstrip: React.FC<AnnotationToolstripProps> = ({
             mounted={mounted}
             compact={compact}
             iconOnly={iconOnly}
+            hovered={hoveredButton === 'Redline'}
+            onHoverChange={(isHovered) => onHoverButton?.(isHovered ? 'Redline' : null)}
             icon={
               <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9.75L14.25 12m0 0l2.25 2.25M14.25 12l2.25-2.25M14.25 12L12 14.25m-2.58 4.92l-6.375-6.375a1.125 1.125 0 010-1.59L9.42 4.83c.211-.211.498-.33.796-.33H19.5a2.25 2.25 0 012.25 2.25v10.5a2.25 2.25 0 01-2.25 2.25h-9.284c-.298 0-.585-.119-.796-.33z" />
@@ -159,6 +180,8 @@ export const AnnotationToolstrip: React.FC<AnnotationToolstripProps> = ({
               mounted={mounted}
               compact={compact}
               iconOnly={iconOnly}
+              hovered={hoveredButton === 'Label'}
+              onHoverChange={(isHovered) => onHoverButton?.(isHovered ? 'Label' : null)}
               icon={
                 <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
@@ -167,12 +190,13 @@ export const AnnotationToolstrip: React.FC<AnnotationToolstripProps> = ({
             />
           )}
         </div>
+        )}
 
         {/* Help */}
-        {!compact && showHelpLink && (
+        {(!compact || helpOnly) && showHelpLink && (
           <button
             onClick={() => setShowHelp(true)}
-            className="ml-2 text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors hidden sm:block"
+            className="text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-colors hidden sm:block cursor-pointer ml-1"
           >
             how does this work?
           </button>
@@ -180,7 +204,7 @@ export const AnnotationToolstrip: React.FC<AnnotationToolstripProps> = ({
       </div>
 
       {/* Help Video Dialog */}
-      {showHelp && (
+      {showHelp && typeof document !== 'undefined' && createPortal(
         <div
           className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 backdrop-blur-sm p-4"
           onClick={() => setShowHelp(false)}
@@ -238,7 +262,8 @@ export const AnnotationToolstrip: React.FC<AnnotationToolstripProps> = ({
               />
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );
@@ -295,8 +320,21 @@ const ToolstripButton: React.FC<{
   mounted: boolean;
   compact?: boolean;
   iconOnly?: boolean;
-}> = ({ active, onClick, icon, label, color, mounted, compact = false, iconOnly = false }) => {
-  const [hovered, setHovered] = useState(false);
+  hovered?: boolean;
+  onHoverChange?: (hovered: boolean) => void;
+}> = ({
+  active,
+  onClick,
+  icon,
+  label,
+  color,
+  mounted,
+  compact = false,
+  iconOnly = false,
+  hovered: externalHovered,
+  onHoverChange,
+}) => {
+  const [internalHovered, setInternalHovered] = useState(false);
   const [labelWidth, setLabelWidth] = useState(0);
   const measureRef = useRef<HTMLSpanElement>(null);
   const styles = colorStyles[color];
@@ -309,13 +347,15 @@ const ToolstripButton: React.FC<{
     }
   }, [label]);
 
+  const hovered = externalHovered !== undefined ? (externalHovered || internalHovered) : internalHovered;
+
   // iconOnly: never expand (mobile sticky lane).
-  // compact: only active expands (sm+ sticky lane — shows current mode).
+  // compact: active or hovered expands (sm+ sticky lane).
   // default: active or hovered expands (top-of-doc full toolstrip).
   const expanded = iconOnly
     ? false
     : compact
-      ? active
+      ? (active || hovered)
       : (active || hovered || isTouchDevice);
   const expandedWidth = H_PAD + ICON_INNER + GAP + labelWidth + H_PAD;
   const currentWidth = expanded ? expandedWidth : ICON_SIZE;
@@ -337,8 +377,14 @@ const ToolstripButton: React.FC<{
   return (
     <button
       onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      onMouseEnter={() => {
+        setInternalHovered(true);
+        onHoverChange?.(true);
+      }}
+      onMouseLeave={() => {
+        setInternalHovered(false);
+        onHoverChange?.(false);
+      }}
       aria-pressed={active}
       className={`relative flex items-center h-7 rounded-md overflow-hidden ${colorClass}`}
       style={{ width: currentWidth, transition }}

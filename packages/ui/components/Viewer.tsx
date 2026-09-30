@@ -208,6 +208,8 @@ export interface ViewerProps {
   /** Fires once per highlight-restore pass with what it tried and what it could
    *  not anchor, so a host can mark the leftovers in its annotation panel. */
   onRestoreReport?: (report: AnnotationRestoreReport) => void;
+  /** Hide resting unattached badges (used when sticky lane is active). */
+  hideRestingBadges?: boolean;
 }
 
 export interface ViewerHandle {
@@ -480,6 +482,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   vimHudEnabled = false,
   vimHudKeyPanelEnabled = true,
   onVimHudKeyPanelChange,
+  hideRestingBadges = false,
 }, ref) => {
   const viewerAnnotationHeader = readOnly ? undefined : annotationHeader;
   const hasViewerAnnotationHeader = viewerAnnotationHeader !== undefined;
@@ -1204,7 +1207,13 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
       >
         {/* Legacy badge placement remains byte-for-byte opt-out behavior. */}
         {!viewerAnnotationHeader && (repoInfo || hasPreviousVersion || showDemoBadge || linkedDocInfo || archiveInfo || sourceInfo || openInAppPath) && (
-          <div ref={docBadgesRef} data-print-hide className={`absolute top-3 md:top-4 ${gridEnabled ? 'left-3 md:left-5' : 'left-0'}`}>
+          <div
+            ref={docBadgesRef}
+            data-print-hide
+            className={`absolute top-3 md:top-4 ${gridEnabled ? 'left-3 md:left-5' : 'left-0'} transition-opacity duration-200 ${
+              hideRestingBadges ? 'opacity-0 pointer-events-none' : 'opacity-100'
+            }`}
+          >
             <DocBadges
               layout="column"
               repoInfo={repoInfo}
@@ -1252,7 +1261,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
           <>
             {badgeClearance > 0 && <div data-print-hide style={{ height: badgeClearance }} aria-hidden="true" />}
             {stickyActions && <div ref={stickySentinelRef} className="h-0 w-0 float-right" aria-hidden="true" />}
-            <div data-print-hide data-sticky-actions className={`${stickyActions ? 'sticky top-3' : ''} z-30 float-right flex items-start gap-1 md:gap-2 rounded-lg p-1 md:p-2 transition-colors duration-150 ${isStuck ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''} ${gridEnabled ? '-mr-3 md:-mr-5 lg:-mr-7 xl:-mr-9' : '-mr-1 md:-mr-2'} mt-6 md:-mt-5 lg:-mt-7 xl:-mt-9`}>
+            <div data-print-hide data-sticky-actions className={`${stickyActions ? 'sticky top-3' : ''} z-30 float-right flex items-start gap-1 md:gap-2 rounded-lg p-1 md:p-2 transition-colors duration-150 bg-card/95 backdrop-blur-sm shadow-sm ${gridEnabled ? '-mr-3 md:-mr-5 lg:-mr-7 xl:-mr-9' : '-mr-1 md:-mr-2'} mt-6 md:-mt-5 lg:-mt-7 xl:-mt-9`}>
               {documentActions}
             </div>
           </>

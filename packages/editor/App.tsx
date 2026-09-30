@@ -641,6 +641,7 @@ const App: React.FC = () => {
   // BOTH surface kinds start armed; Esc (or the header pen) drops to
   // Interact.
   const [htmlAnnotateArmed, setHtmlAnnotateArmed] = useState(true);
+  const [hoveredToolstripButton, setHoveredToolstripButton] = useState<string | null>(null);
   const handleHtmlAnnotateToggle = useCallback(() => setHtmlAnnotateArmed((v) => !v), []);
   const handleHtmlToolsToggle = useCallback(() => setHtmlToolsHidden((v) => !v), []);
   const handleHtmlAnnotateExit = useCallback(() => setHtmlAnnotateArmed(false), []);
@@ -6480,6 +6481,7 @@ const App: React.FC = () => {
                   message switches). */}
               {!usesDocumentScroll && !goalSetupMode && !isPlanDiffActive && !isHtmlSurface && !archive.archiveMode && !isEditingMarkdown && uiPrefs.stickyActionsEnabled && (
                 <StickyHeaderLane
+                  visibility="always"
                   inputMethod={inputMethod}
                   onInputMethodChange={handleInputMethodChange}
                   mode={editorMode}
@@ -6493,7 +6495,10 @@ const App: React.FC = () => {
                   planDiffBaselineLabel={annotateMode ? 'since last review' : undefined}
                   planDiffBaselineTooltip={annotateMode ? 'Changes since you last reviewed this file' : undefined}
                   archiveInfo={archive.currentInfo}
+                  hoveredButton={hoveredToolstripButton}
+                  onHoverButton={setHoveredToolstripButton}
                   maxWidth={annotateReaderMaxWidth}
+                  gridEnabled={gridEnabled}
                   remountToken={viewerContentKey}
                 />
               )}
@@ -6504,27 +6509,68 @@ const App: React.FC = () => {
                   toolstrip ever overlays the rendered page. Hidden during plan
                   diff and archive browsing. */}
               {toolstripVisible && (
-                <div
-                  data-print-hide
-                  className="w-full mb-3 md:mb-4 flex items-center justify-start"
-                  style={annotateReaderMaxWidth == null ? undefined : { maxWidth: annotateReaderMaxWidth }}
-                >
-                  {isCompactTouchLayout ? (
+                isCompactTouchLayout ? (
+                  <div
+                    data-print-hide
+                    className={`w-full mb-3 md:mb-4 flex items-center justify-start ${gridEnabled ? 'pl-3 md:pl-5' : 'pl-0'}`}
+                    style={annotateReaderMaxWidth == null ? undefined : { maxWidth: annotateReaderMaxWidth }}
+                  >
                     <CompactAnnotationControls
                       inputMethod={effectiveInputMethod}
                       onInputMethodChange={handleInputMethodChange}
                     />
-                  ) : (
-                    <AnnotationToolstrip
-                      inputMethod={inputMethod}
-                      onInputMethodChange={handleInputMethodChange}
-                      mode={editorMode}
-                      onModeChange={handleEditorModeChange}
-                      taterMode={taterMode}
-                      showHelpLink
-                    />
-                  )}
-                </div>
+                  </div>
+                ) : (
+                  <div
+                    data-print-hide
+                    className={`w-full mb-3 md:mb-4 flex items-center justify-start ${gridEnabled ? 'pl-3 md:pl-5' : 'pl-0'}`}
+                    style={annotateReaderMaxWidth == null ? undefined : { maxWidth: annotateReaderMaxWidth }}
+                  >
+                    <div
+                      className="inline-flex flex-wrap items-center gap-x-3 gap-y-1 py-1 md:py-1.5"
+                      style={{ paddingLeft: 12, paddingRight: 12 }}
+                    >
+                      <div
+                        className={
+                          !usesDocumentScroll && !goalSetupMode && !isPlanDiffActive && !isHtmlSurface && !archive.archiveMode && !isEditingMarkdown && uiPrefs.stickyActionsEnabled
+                            ? 'invisible pointer-events-none'
+                            : ''
+                        }
+                        aria-hidden={
+                          !usesDocumentScroll && !goalSetupMode && !isPlanDiffActive && !isHtmlSurface && !archive.archiveMode && !isEditingMarkdown && uiPrefs.stickyActionsEnabled
+                            ? true
+                            : undefined
+                        }
+                      >
+                        <AnnotationToolstrip
+                          inputMethod={inputMethod}
+                          onInputMethodChange={handleInputMethodChange}
+                          mode={editorMode}
+                          onModeChange={handleEditorModeChange}
+                          taterMode={taterMode}
+                          compact={
+                            !usesDocumentScroll && !goalSetupMode && !isPlanDiffActive && !isHtmlSurface && !archive.archiveMode && !isEditingMarkdown && uiPrefs.stickyActionsEnabled
+                          }
+                          showHelpLink={
+                            !(!usesDocumentScroll && !goalSetupMode && !isPlanDiffActive && !isHtmlSurface && !archive.archiveMode && !isEditingMarkdown && uiPrefs.stickyActionsEnabled)
+                          }
+                          hoveredButton={hoveredToolstripButton}
+                        />
+                      </div>
+                      {!usesDocumentScroll && !goalSetupMode && !isPlanDiffActive && !isHtmlSurface && !archive.archiveMode && !isEditingMarkdown && uiPrefs.stickyActionsEnabled && (
+                        <AnnotationToolstrip
+                          inputMethod={inputMethod}
+                          onInputMethodChange={handleInputMethodChange}
+                          mode={editorMode}
+                          onModeChange={handleEditorModeChange}
+                          taterMode={taterMode}
+                          helpOnly
+                          showHelpLink
+                        />
+                      )}
+                    </div>
+                  </div>
+                )
               )}
 
               {/* Plan Diff View — rendered when diff data exists, hidden when inactive */}

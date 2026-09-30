@@ -82,9 +82,17 @@ export interface StickyHeaderLaneProps {
   planDiffBaselineLabel?: string;
   planDiffBaselineTooltip?: string;
   archiveInfo?: { status: 'approved' | 'denied' | 'unknown'; timestamp: string; title: string } | null;
+  /** Callback fired whenever the lane's stuck state changes. */
+  onStuckChange?: (stuck: boolean) => void;
+  /** Currently hovered button label, forwarded to AnnotationToolstrip. */
+  hoveredButton?: string | null;
+  /** Callback fired when a button hover state changes. */
+  onHoverButton?: (label: string | null) => void;
 
   // Layout
   maxWidth?: number | null;
+  /** Whether the document is rendered on the classic card grid look (defaults to true). When false (clean mode), drops the card inset. */
+  gridEnabled?: boolean;
 
   // Re-query token for the [data-sticky-actions] ResizeObserver. When the
   // Viewer remounts (e.g., toggling a linked doc), its `data-sticky-actions`
@@ -113,7 +121,11 @@ export const StickyHeaderLane: React.FC<StickyHeaderLaneProps> = ({
   planDiffBaselineLabel,
   planDiffBaselineTooltip,
   archiveInfo,
+  onStuckChange,
+  hoveredButton,
+  onHoverButton,
   maxWidth,
+  gridEnabled = true,
   remountToken,
 }) => {
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -124,15 +136,21 @@ export const StickyHeaderLane: React.FC<StickyHeaderLaneProps> = ({
   const scrollViewport = useScrollViewport();
   const laneIsStuck = sticky && isStuck;
   const isVisible = visibility === 'always' || laneIsStuck;
-  // Preserve the incumbent ghost lane exactly: its chrome remains mounted
-  // while the whole hidden bar fades out. Only the new always-visible mode
-  // removes chrome at rest for the supported chrome-free presentation.
-  const showChrome = visibility === 'always' ? laneIsStuck : true;
+  const hasBadges = Boolean((hasPreviousVersion && planDiffStats) || archiveInfo);
+  const isBadgesExpanded = laneIsStuck && hasBadges;
+  // Container chrome remains active by default both at rest and while stuck,
+  // matching the action container chrome.
+  const showChrome = true;
 
+  useEffect(() => {
+    onStuckChange?.(laneIsStuck);
+  }, [laneIsStuck, onStuckChange]);
+
+  const leftOffset = gridEnabled ? LEFT_OFFSET : 0;
   const headerGeometry = resolveCompactHeaderGeometry({
     containerWidth: wrapperWidth,
     trailingWidth: actionsWidth,
-    leadingInset: LEFT_OFFSET,
+    leadingInset: leftOffset,
   });
   const availableForBar = headerGeometry.availableForLeading;
   const isNarrow = headerGeometry.layout === 'narrow';
@@ -189,13 +207,13 @@ export const StickyHeaderLane: React.FC<StickyHeaderLaneProps> = ({
       ([entry]) => setIsStuck(!entry.isIntersecting),
       {
         root: getScrollViewportIntersectionRoot(scrollViewport),
-        rootMargin: '80px 0px 0px 0px',
+        rootMargin: visibility === 'always' ? '28px 0px 0px 0px' : '80px 0px 0px 0px',
         threshold: 0,
       }
     );
     observer.observe(sentinelRef.current);
     return () => observer.disconnect();
-  }, [scrollViewport, sticky]);
+  }, [scrollViewport, sticky, visibility]);
 
   return (
     <>
@@ -240,8 +258,9 @@ export const StickyHeaderLane: React.FC<StickyHeaderLaneProps> = ({
             `inert` removes the bar from the tab order whenever it is hidden. */}
         <div
           inert={!isVisible || undefined}
-          className={`absolute left-3 md:left-5 top-0 inline-flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0 overflow-hidden rounded-lg py-1 md:py-1.5 ${
-            showChrome ? 'bg-card/95 backdrop-blur-sm shadow-sm border border-border/30' : ''
+          onMouseLeave={() => onHoverButton?.(null)}
+          className={`absolute ${gridEnabled ? 'left-3 md:left-5' : 'left-0'} top-0 inline-flex flex-wrap items-center gap-y-1 min-w-0 overflow-hidden rounded-lg py-1 md:py-1.5 ${
+            showChrome ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''
           } motion-reduce:transform-none ${
             isVisible
               ? 'opacity-100 translate-y-0 pointer-events-auto'
@@ -256,7 +275,7 @@ export const StickyHeaderLane: React.FC<StickyHeaderLaneProps> = ({
                 ? availableForBar
                 : undefined,
             transition:
-              'opacity 180ms cubic-bezier(0.2, 0, 0, 1), transform 180ms cubic-bezier(0.2, 0, 0, 1)',
+              'opacity 180ms cubic-bezier(0.2, 0, 0, 1), transform 180ms cubic-bezier(0.2, 0, 0, 1), background-color 150ms ease, box-shadow 150ms ease',
             willChange: 'opacity, transform',
           }}
         >
@@ -269,20 +288,42 @@ export const StickyHeaderLane: React.FC<StickyHeaderLaneProps> = ({
               taterMode={taterMode}
               hideQuickLabel={hideQuickLabel}
               compact
+              showHelpLink={false}
               iconOnly={isNarrow || isToolstripIconOnly}
+              hoveredButton={hoveredButton}
+              onHoverButton={onHoverButton}
             />
           </div>
-          <DocBadges
-            layout="row"
-            repoInfo={repoInfo}
-            planDiffStats={planDiffStats}
-            isPlanDiffActive={isPlanDiffActive}
-            hasPreviousVersion={hasPreviousVersion}
-            onPlanDiffToggle={onPlanDiffToggle}
-            planDiffBaselineLabel={planDiffBaselineLabel}
-            planDiffBaselineTooltip={planDiffBaselineTooltip}
-            archiveInfo={archiveInfo}
-          />
+          <div
+            data-sticky-badges-compartment
+            className={`grid shrink-0 motion-reduce:transition-none ${
+              isBadgesExpanded
+                ? 'opacity-100 pointer-events-auto'
+                : 'opacity-0 pointer-events-none'
+            }`}
+            style={{
+              gridTemplateColumns: isBadgesExpanded ? '1fr' : '0fr',
+              transition:
+                'grid-template-columns 280ms cubic-bezier(0.2, 0, 0, 1), opacity 240ms cubic-bezier(0.2, 0, 0, 1)',
+              willChange: 'grid-template-columns, opacity',
+            }}
+          >
+            <div className="min-w-0 overflow-clip" style={{ overflow: 'clip' }}>
+              <div className="pl-3 w-max shrink-0 flex items-center whitespace-nowrap">
+                <DocBadges
+                  layout="row"
+                  repoInfo={repoInfo}
+                  planDiffStats={planDiffStats}
+                  isPlanDiffActive={isPlanDiffActive}
+                  hasPreviousVersion={hasPreviousVersion}
+                  onPlanDiffToggle={onPlanDiffToggle}
+                  planDiffBaselineLabel={planDiffBaselineLabel}
+                  planDiffBaselineTooltip={planDiffBaselineTooltip}
+                  archiveInfo={archiveInfo}
+                />
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </>
