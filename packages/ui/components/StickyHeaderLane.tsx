@@ -82,17 +82,17 @@ export interface StickyHeaderLaneProps {
   planDiffBaselineLabel?: string;
   planDiffBaselineTooltip?: string;
   archiveInfo?: { status: 'approved' | 'denied' | 'unknown'; timestamp: string; title: string } | null;
-  /** Callback fired whenever the lane's stuck state changes. */
-  onStuckChange?: (stuck: boolean) => void;
-  /** Currently hovered button label, forwarded to AnnotationToolstrip. */
-  hoveredButton?: string | null;
-  /** Callback fired when a button hover state changes. */
-  onHoverButton?: (label: string | null) => void;
 
   // Layout
   maxWidth?: number | null;
   /** Whether the document is rendered on the classic card grid look (defaults to true). When false (clean mode), drops the card inset. */
   gridEnabled?: boolean;
+
+  /**
+   * Optional custom sentinel element to observe for the stuck state.
+   * When omitted, an internal zero-size sentinel is rendered at the top of the lane.
+   */
+  sentinelRef?: React.RefObject<HTMLDivElement | null>;
 
   // Re-query token for the [data-sticky-actions] ResizeObserver. When the
   // Viewer remounts (e.g., toggling a linked doc), its `data-sticky-actions`
@@ -121,14 +121,13 @@ export const StickyHeaderLane: React.FC<StickyHeaderLaneProps> = ({
   planDiffBaselineLabel,
   planDiffBaselineTooltip,
   archiveInfo,
-  onStuckChange,
-  hoveredButton,
-  onHoverButton,
   maxWidth,
   gridEnabled = true,
+  sentinelRef: externalSentinelRef,
   remountToken,
 }) => {
-  const sentinelRef = useRef<HTMLDivElement>(null);
+  const internalSentinelRef = useRef<HTMLDivElement>(null);
+  const targetSentinelRef = externalSentinelRef ?? internalSentinelRef;
   const wrapperRef = useRef<HTMLDivElement>(null);
   const [isStuck, setIsStuck] = useState(false);
   const [wrapperWidth, setWrapperWidth] = useState(0);
@@ -138,13 +137,10 @@ export const StickyHeaderLane: React.FC<StickyHeaderLaneProps> = ({
   const isVisible = visibility === 'always' || laneIsStuck;
   const hasBadges = Boolean((hasPreviousVersion && planDiffStats) || archiveInfo);
   const isBadgesExpanded = laneIsStuck && hasBadges;
-  // Container chrome remains active by default both at rest and while stuck,
-  // matching the action container chrome.
-  const showChrome = true;
-
-  useEffect(() => {
-    onStuckChange?.(laneIsStuck);
-  }, [laneIsStuck, onStuckChange]);
+  // Preserve the incumbent ghost lane exactly: its chrome remains mounted
+  // while the whole hidden bar fades out. Only the new always-visible mode
+  // removes chrome at rest for the supported chrome-free presentation.
+  const showChrome = visibility === 'always' ? laneIsStuck : true;
 
   const leftOffset = gridEnabled ? LEFT_OFFSET : 0;
   const headerGeometry = resolveCompactHeaderGeometry({
@@ -191,36 +187,34 @@ export const StickyHeaderLane: React.FC<StickyHeaderLaneProps> = ({
 
   // IntersectionObserver-on-sentinel pattern (mirrors Viewer.tsx:257-267).
   // Sentinel sits inline at the top of the column. The 80px positive top
-  // rootMargin grows the effective viewport upward so the sentinel is
+  // rootMargin grows the effective viewport upward so the internal sentinel is
   // considered "visible" for an extra ~80px of scroll — delaying the bar's
-  // appearance until the real toolstrip has actually scrolled past. Without
-  // this, the sentinel fires the moment scrolling begins and the ghost bar
-  // doubles up with the still-visible toolstrip. Root is the OverlayScrollArea
-  // viewport from context, NOT <main> (which doesn't actually scroll).
+  // appearance until the real toolstrip has actually scrolled past. When an
+  // external sentinel is provided (anchored right below the resting toolstrip),
+  // -12px rootMargin matches the top-3 sticky pin position exactly. Root is the
+  // OverlayScrollArea viewport from context, NOT <main> (which doesn't actually scroll).
   useEffect(() => {
     if (!sticky) {
       setIsStuck(false);
       return;
     }
-    if (!sentinelRef.current || !scrollViewport) return;
+    const target = targetSentinelRef.current;
+    if (!target || !scrollViewport) return;
     const observer = new IntersectionObserver(
       ([entry]) => setIsStuck(!entry.isIntersecting),
       {
         root: getScrollViewportIntersectionRoot(scrollViewport),
-        rootMargin: visibility === 'always' ? '28px 0px 0px 0px' : '80px 0px 0px 0px',
-        threshold: 0,
+        rootMargin: externalSentinelRef ? '-12px 0px 0px 0px' : '80px 0px 0px 0px',
       }
     );
-    observer.observe(sentinelRef.current);
+    observer.observe(target);
     return () => observer.disconnect();
-  }, [scrollViewport, sticky, visibility]);
+  }, [scrollViewport, sticky, externalSentinelRef]);
 
   return (
     <>
-      {/* Sentinel — present only for sticky positioning. It sits at the top of
-          the column and activates the stuck state after scrolling out of the
-          OverlayScrollArea viewport. */}
-      {sticky && <div ref={sentinelRef} aria-hidden="true" className="h-0 w-0" />}
+      {/* Sentinel — rendered internally only when an external sentinel is not provided. */}
+      {sticky && !externalSentinelRef && <div ref={internalSentinelRef} aria-hidden="true" className="h-0 w-0" />}
 
       {/* Zero-height wrapper — sticky by default, relative when sticky is
           disabled so the absolutely positioned lane scrolls in normal flow.
@@ -259,9 +253,8 @@ export const StickyHeaderLane: React.FC<StickyHeaderLaneProps> = ({
             `inert` removes the bar from the tab order whenever it is hidden. */}
         <div
           inert={!isVisible || undefined}
-          onMouseLeave={() => onHoverButton?.(null)}
           className={`absolute ${gridEnabled ? 'left-3 md:left-5' : 'left-0'} top-0 inline-flex flex-wrap items-center gap-y-1 min-w-0 overflow-hidden rounded-lg py-1 md:py-1.5 ${
-            showChrome ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''
+            showChrome ? 'bg-card/95 backdrop-blur-sm shadow-sm border border-border/30' : ''
           } motion-reduce:transform-none ${
             isVisible
               ? 'opacity-100 translate-y-0 pointer-events-auto'
@@ -291,8 +284,6 @@ export const StickyHeaderLane: React.FC<StickyHeaderLaneProps> = ({
               compact
               showHelpLink={false}
               iconOnly={isNarrow || isToolstripIconOnly}
-              hoveredButton={hoveredButton}
-              onHoverButton={onHoverButton}
             />
           </div>
           <div
