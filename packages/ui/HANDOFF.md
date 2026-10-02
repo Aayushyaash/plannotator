@@ -1607,7 +1607,7 @@ Recommended: Local only, purged after 30 days
 
 **guides.show:** the viewer JS is unchanged, but the shared stylesheet gained the card's utility classes, so `guide-viewer-manifest.ts` pins a new CSS hash. Deploy guides.show before a release that ships this manifest.
 
-## Question host seams (ui 0.49.0, core 0.25.9; unpublished)
+## Question host seams (ui 0.49.0, core 0.25.9)
 
 Additive. What a host that keeps question answers ITSELF needs (Workspaces stores answers beside the document as structured records, not as Plannotator annotations, and turns some answers into project decisions). Plannotator passes none of the new props: its cards render exactly as in 0.48.0, except that a block carrying a `Decision:` line now shows it (below).
 
@@ -1635,7 +1635,7 @@ Not here (dropped with the owner's Q2 answer): record lines inside the block (`O
 
 ## Publishing & versioning
 
-- **core 0.25.9 / ui 0.49.0 (question host seams; versions not bumped yet): both change. Publish `core` first**: ui imports the new `@plannotator/core/markdown-structure` subpath and the new `findQuestionBlocks` / decision fields, so a ui on a published core 0.25.8 fails to compile in a consumer. See "Question host seams (ui 0.49.0, core 0.25.9; unpublished)".
+- **core 0.25.9 / ui 0.49.0 (question host seams): both change. Publish `core` first**: ui imports the new `@plannotator/core/markdown-structure` subpath and the new `findQuestionBlocks` / decision fields, so a ui on a published core 0.25.8 fails to compile in a consumer. See "Question host seams (ui 0.49.0, core 0.25.9)".
 - **core 0.25.8 / ui 0.48.0 (questions in documents): both change. Publish `core` 0.25.8 first, then `ui` 0.48.0**, which pins core `0.25.8` exactly and imports the new `@plannotator/core/question-block` subpath. Core is a patch bump because its change is additive and pre-1.0 caret ranges would not accept a minor. See "Questions in documents (0.48.0, core 0.25.8)".
 - **core 0.25.7 / ui 0.47.0 (host link widgets + model source hint + `persistViewedFiles`): both packages change, and both need unpublished upstream packages first.** Order: `@plannotator/atomic-editor` 0.9.0, then `@plannotator/markdown-editor` 0.5.0, then `bun install` here to refresh `bun.lock`, then publish `core` 0.25.7, then `ui` 0.47.0. ui pins core `0.25.7` exactly, `@plannotator/atomic-editor` `^0.9.0` and `@plannotator/markdown-editor` `^0.5.0`. See "Host link widgets (0.47.0, core 0.25.7)".
 - **ui 0.46.1 (fix, ui only, core pin unchanged at `0.25.6`):** `useVimSelection` (mounted by every `Viewer`) now only clears a page selection whose anchor or focus lies inside the viewer's own container; with vim off it used to clear the WHOLE page's selection on every mount and `contentVersion` change, so a selection in another host panel vanished whenever the document behind it loaded or changed.
