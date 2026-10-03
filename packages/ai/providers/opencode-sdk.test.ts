@@ -36,6 +36,7 @@ interface FakeSpawn {
 let spawned: FakeSpawn[] = [];
 let clientFactory: () => unknown = () => ({});
 let spawnGate: Promise<void> | null = null;
+let serverError: Error | null = null;
 
 mock.module("@opencode-ai/sdk", () => ({
 	createOpencodeServer: async (opts: {
@@ -43,6 +44,7 @@ mock.module("@opencode-ai/sdk", () => ({
 		port?: number;
 		timeout?: number;
 	}) => {
+		if (serverError) throw serverError;
 		const record: FakeSpawn = { ...opts, closed: false };
 		spawned.push(record);
 		if (spawnGate) await spawnGate;
@@ -69,6 +71,7 @@ beforeEach(() => {
 	spawned = [];
 	clientFactory = () => ({});
 	spawnGate = null;
+	serverError = null;
 });
 
 describe("OpenCodeProvider server lifecycle", () => {
@@ -172,6 +175,34 @@ describe("OpenCodeProvider server lifecycle", () => {
 		expect(spawned[1]!.closed).toBe(false);
 		provider.dispose();
 		expect(spawned[1]!.closed).toBe(true);
+	});
+
+	test("surfaces a friendly error when opencode is not on PATH (ENOENT)", async () => {
+		const provider = makeProvider();
+		const listenersBefore = process.listeners("exit").length;
+
+		const enoent = Object.assign(new Error("spawn opencode ENOENT"), {
+			code: "ENOENT",
+		});
+		serverError = enoent;
+
+		await expect(provider.ensureServer()).rejects.toThrow(
+			"opencode CLI not found on PATH — install it or disable the opencode provider",
+		);
+
+		// Must not register an exit handler when spawn fails before completion
+		expect(process.listeners("exit").length).toBe(listenersBefore);
+
+		// Provider recovers cleanly when CLI becomes available
+		serverError = null;
+		await provider.ensureServer();
+		expect(spawned.length).toBe(1);
+		expect(spawned[0]!.closed).toBe(false);
+		expect(process.listeners("exit").length).toBe(listenersBefore + 1);
+
+		provider.dispose();
+		expect(spawned[0]!.closed).toBe(true);
+		expect(process.listeners("exit").length).toBe(listenersBefore);
 	});
 });
 

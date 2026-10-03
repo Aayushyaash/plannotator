@@ -90,11 +90,25 @@ export class OpenCodeProvider implements AIProvider {
 		// real URL back from the child's "listening" line), so every Plannotator
 		// process gets its own server instead of piling onto a shared default
 		// port. An explicitly configured port is still honored verbatim.
-		const server: { url: string; close: () => void } = await createOpencodeServer({
-			hostname: this.config.hostname ?? "127.0.0.1",
-			port: this.config.port ?? 0,
-			timeout: 15_000,
-		});
+		let server: { url: string; close: () => void };
+		try {
+			server = await createOpencodeServer({
+				hostname: this.config.hostname ?? "127.0.0.1",
+				port: this.config.port ?? 0,
+				timeout: 15_000,
+			});
+		} catch (err: unknown) {
+			const isEnoent =
+				(err as NodeJS.ErrnoException)?.code === "ENOENT" ||
+				(err instanceof Error && /ENOENT|not found/i.test(err.message));
+			if (isEnoent) {
+				throw new Error(
+					"opencode CLI not found on PATH — install it or disable the opencode provider",
+					{ cause: err },
+				);
+			}
+			throw err;
+		}
 		// A SIGINT/SIGTERM death is routed through process.exit() by the CLI, so
 		// an "exit" handler is what keeps Ctrl-C from orphaning the spawned
 		// `opencode serve` child (server.close() kills it synchronously). The
