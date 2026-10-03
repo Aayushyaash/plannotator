@@ -98,12 +98,15 @@ export class OpenCodeProvider implements AIProvider {
 				timeout: 15_000,
 			});
 		} catch (err: unknown) {
-			const isEnoent =
-				(err as NodeJS.ErrnoException)?.code === "ENOENT" ||
-				(err instanceof Error && /ENOENT|not found/i.test(err.message));
-			if (isEnoent) {
+			// A missing CLI is a spawn error with code ENOENT in every runtime
+			// (Node: "spawn opencode ENOENT"; Bun: "Executable not found in
+			// $PATH"; cross-spawn re-emits the Windows cmd.exe miss the same
+			// way). Match the code only: the SDK's other failures embed the
+			// child's stderr in the message, which can say "not found" for
+			// reasons that have nothing to do with the binary.
+			if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") {
 				throw new Error(
-					"opencode CLI not found on PATH — install it or disable the opencode provider",
+					"OpenCode CLI (`opencode`) was not found on PATH. Install it (https://opencode.ai) or choose a different AI provider.",
 					{ cause: err },
 				);
 			}

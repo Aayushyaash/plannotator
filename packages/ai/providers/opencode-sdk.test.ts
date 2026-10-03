@@ -186,9 +186,12 @@ describe("OpenCodeProvider server lifecycle", () => {
 		});
 		serverError = enoent;
 
-		await expect(provider.ensureServer()).rejects.toThrow(
-			"opencode CLI not found on PATH — install it or disable the opencode provider",
+		const failure = await provider.ensureServer().then(
+			() => null,
+			(err: unknown) => err as Error,
 		);
+		expect(failure?.message).toContain("not found on PATH");
+		expect(failure?.cause).toBe(enoent);
 
 		// Must not register an exit handler when spawn fails before completion
 		expect(process.listeners("exit").length).toBe(listenersBefore);
@@ -203,6 +206,18 @@ describe("OpenCodeProvider server lifecycle", () => {
 		provider.dispose();
 		expect(spawned[0]!.closed).toBe(true);
 		expect(process.listeners("exit").length).toBe(listenersBefore);
+	});
+
+	test("passes other startup failures through unchanged", async () => {
+		const provider = makeProvider();
+		// The SDK's exit failure embeds the child's stderr; "not found" there
+		// is not a missing binary and must not be rewritten as one.
+		const exited = new Error(
+			"Server exited with code 1\nServer output: Error: model not found",
+		);
+		serverError = exited;
+
+		await expect(provider.ensureServer()).rejects.toBe(exited);
 	});
 });
 
