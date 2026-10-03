@@ -3,11 +3,15 @@ import {
   createDeferredModelDiscovery,
   createProvider,
   ProviderRegistry,
+  SESSION_BRIDGE_PROVIDER_NAME,
+  SessionBridgeProvider,
   SessionManager,
   type AIEndpoints,
   type PiSDKConfig,
+  type SessionBridge,
 } from "@plannotator/ai";
 import { resolveWindowsCommandShim } from "@plannotator/ai/providers/command-path";
+import { isLoopbackHostHeader } from "@plannotator/shared/loopback-host";
 
 export interface AIRuntime {
   endpoints: AIEndpoints;
@@ -19,6 +23,18 @@ export const AI_QUERY_ENDPOINT = "/api/ai/query";
 interface CreateAIRuntimeOptions {
   cwd?: string;
   getCwd?: () => string;
+  /**
+   * "Ask this session": a host that can answer Ask AI from the agent session
+   * that opened Plannotator passes its bridge here. It is registered after the
+   * SDK providers, so the server default is unchanged; the client prefers it.
+   */
+  sessionBridge?: SessionBridge;
+  /**
+   * The port this server listens on, once bound. Required for the bridge to
+   * answer: its requests must carry a loopback Host with exactly this port
+   * (DNS-rebinding guard). Undefined (not bound yet) refuses bridge requests.
+   */
+  getServerPort?: () => number | undefined;
 }
 
 export async function createAIRuntime(options: CreateAIRuntimeOptions = {}): Promise<AIRuntime> {
@@ -103,6 +119,9 @@ export async function createAIRuntime(options: CreateAIRuntimeOptions = {}): Pro
     // OpenCode not available.
   }
 
+  const bridgeProvider = options.sessionBridge ? new SessionBridgeProvider(options.sessionBridge) : null;
+  if (bridgeProvider) registry.register(bridgeProvider, SESSION_BRIDGE_PROVIDER_NAME);
+
   const endpoints = createAIEndpoints({
     registry,
     sessionManager,
@@ -111,11 +130,16 @@ export async function createAIRuntime(options: CreateAIRuntimeOptions = {}): Pro
       await Promise.allSettled(modelDiscovery);
     },
     beforeProviderSession: discovery.beforeProviderSession,
+    authorizeSessionBridgeRequest: (req) =>
+      isLoopbackHostHeader(req.headers.get("host"), options.getServerPort?.()),
   });
 
   return {
     endpoints,
     dispose: () => {
+      // Detach first: tearing the sessions down must not stop a turn the
+      // session is already running for us (the decision goes to that session).
+      bridgeProvider?.detach();
       sessionManager.disposeAll();
       registry.disposeAll();
     },

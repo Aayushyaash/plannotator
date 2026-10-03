@@ -116,6 +116,7 @@ import {
 import { handleApiNotFound, html, json, parseBody, parseJsonBody, readBody, requestUrl, send } from "./helpers.ts";
 import { captureReviewProgress, handleReviewProgress } from "../generated/review-progress.ts";
 import { createPiAIRuntime, handlePiAIRequest } from "./ai-runtime.ts";
+import type { SessionBridge } from "../generated/ai/session-bridge.ts";
 
 import { buildAdvertisedUrl, isRemoteSession, listenOnPort } from "./network.ts";
 import { getAvailableOpenInApps, openFileInApp } from "./open-in-apps.ts";
@@ -311,6 +312,8 @@ export interface ReviewServerResult {
 }
 
 export async function startReviewServer(options: {
+	/** "Ask this session": the in-process bridge to the Pi session that opened this review. */
+	sessionBridge?: SessionBridge;
 	/** Return the active local directory with the decision for cross-directory feedback. */
 	includeReviewDirectory?: boolean;
 	rawPatch: string;
@@ -1863,7 +1866,9 @@ export async function startReviewServer(options: {
 		resolveDecision = r;
 	});
 
-	const aiRuntime = aiEnabled ? await createPiAIRuntime({ getCwd: resolveAgentCwd }) : null;
+	// Set once bound: "Ask this session" answers only a loopback Host with this port.
+	let boundPort: number | undefined;
+	const aiRuntime = aiEnabled ? await createPiAIRuntime({ getCwd: resolveAgentCwd, sessionBridge: options.sessionBridge, getServerPort: () => boundPort }) : null;
 
 	const server = createServer(async (req, res) => {
 		const url = requestUrl(req);
@@ -3815,6 +3820,7 @@ export async function startReviewServer(options: {
 	});
 
 	const { port, portSource } = await listenOnPort(server);
+	boundPort = port;
 	// Remote sessions serve the app page compressed (#1617); start gzip (what
 	// browsers ask for over plain http) now so the first load does not wait.
 	if (isRemoteSession()) prewarmAppHtml(options.htmlContent, likelyAppHtmlEncoding(false));

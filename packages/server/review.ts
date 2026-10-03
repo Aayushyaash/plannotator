@@ -151,7 +151,7 @@ import {
   PRArtifactDocumentError,
 } from "@plannotator/shared/pr-artifact-document";
 import { AI_QUERY_ENDPOINT, createAIRuntime } from "./ai-runtime";
-import { isAIEndpointPath, type AIEndpoints } from "@plannotator/ai";
+import { isAIEndpointPath, type AIEndpoints, type SessionBridge } from "@plannotator/ai";
 import { isWSL } from "./browser";
 import { handleOpenInApps, handleOpenIn } from "./open-in";
 import type { LocalWorkspaceReview, WorkspaceDiffType } from "./review-workspace";
@@ -176,6 +176,8 @@ export { handleServerReady as handleReviewServerReady } from "./shared-handlers"
 // --- Types ---
 
 export interface ReviewServerOptions {
+  /** "Ask this session": the host bridge to the agent session that opened this review (see packages/ai/session-bridge.ts). */
+  sessionBridge?: SessionBridge;
   /**
    * The session is loopback-bound but published across the user's tailnet
    * (--tailscale), so its browser may be on another device: the app page is
@@ -1816,7 +1818,9 @@ export async function startReviewServer(
   });
 
   // AI provider setup (graceful — capabilities report unavailable if no provider is registered)
-  const aiRuntime = aiEnabled ? await createAIRuntime({ getCwd: resolveAgentCwd }) : null;
+  // Set once bound: "Ask this session" answers only a loopback Host with this port.
+  let boundPort: number | undefined;
+  const aiRuntime = aiEnabled ? await createAIRuntime({ getCwd: resolveAgentCwd, sessionBridge: options.sessionBridge, getServerPort: () => boundPort }) : null;
 
   const isRemote = isRemoteSession();
   // The app page is served compressed only to sessions reachable from another
@@ -4026,6 +4030,7 @@ export async function startReviewServer(
   );
 
   const port = server.port!;
+  boundPort = port;
   serverUrl = buildAdvertisedUrl(port);
   agentApiUrl = `http://127.0.0.1:${port}`;
   const exitHandler = () => agentJobs.killAll();

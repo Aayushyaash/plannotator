@@ -17,6 +17,7 @@ import { resolveModelChoice } from "@plannotator/core/model-catalog";
 import type { AIContext, AIMessage, AIProvider, CreateSessionOptions } from "./types.ts";
 import type { ProviderRegistry } from "./provider.ts";
 import type { SessionManager } from "./session-manager.ts";
+import { SessionBridgeProvider, SessionBridgeSession } from "./session-bridge.ts";
 
 /** Canonical paths handled by the shared AI endpoint runtime. */
 export const AI_ENDPOINT_PATHS = [
@@ -64,6 +65,8 @@ export interface QueryRequest {
   prompt: string;
   /** Optional context update (e.g., new annotations since session was created). */
   contextUpdate?: string;
+  /** "Ask this session" only: what to do when the host session is busy. */
+  busyPolicy?: "wait" | "interrupt";
 }
 
 export interface AbortRequest {
@@ -94,6 +97,28 @@ export interface AIEndpointDeps {
     reason: "session" | "activate",
     requestedModel?: string,
   ) => Promise<void> | void;
+  /**
+   * "Ask this session" only: whether a request may create a session on, or
+   * query, the session-bridge provider (the runtime checks the Host header is
+   * a loopback name with the server's own port, so a DNS-rebinding page cannot
+   * type into the user's agent session). Absent means refuse: the bridge never
+   * answers without a guard. Other providers never consult it.
+   */
+  authorizeSessionBridgeRequest?: (req: Request) => boolean;
+}
+
+/** Error code for a bridge request refused by `authorizeSessionBridgeRequest`. */
+export const SESSION_BRIDGE_FORBIDDEN_HOST = "session_bridge_forbidden_host";
+
+function sessionBridgeForbidden(): Response {
+  return Response.json(
+    {
+      error:
+        "Ask this session only answers pages opened on this machine (localhost, 127.0.0.1 or [::1] with this server's port).",
+      code: SESSION_BRIDGE_FORBIDDEN_HOST,
+    },
+    { status: 403 },
+  );
 }
 
 const MAX_CLIENT_MAX_TURNS = 99;
@@ -195,6 +220,7 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
     getCwd,
     beforeCapabilities,
     beforeProviderSession,
+    authorizeSessionBridgeRequest,
   } = deps;
 
   return {
@@ -221,6 +247,8 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
           models: p.models ?? [],
           ...(p.modelsSource ? { modelsSource: p.modelsSource } : {}),
           ...(p.toolVersion ? { toolVersion: p.toolVersion } : {}),
+          ...(p.label ? { label: p.label } : {}),
+          ...(p.sessionBridge ? { sessionBridge: p.sessionBridge } : {}),
         };
       });
       return Response.json({
@@ -256,6 +284,10 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
           { error: providerId ? `Provider "${providerId}" not found` : "No AI provider available" },
           { status: 503 }
         );
+      }
+
+      if (provider instanceof SessionBridgeProvider && !authorizeSessionBridgeRequest?.(req)) {
+        return sessionBridgeForbidden();
       }
 
       try {
@@ -319,6 +351,8 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
 
       const body = (await req.json()) as QueryRequest;
       const { sessionId, prompt, contextUpdate } = body;
+      const busyPolicy =
+        body.busyPolicy === "wait" || body.busyPolicy === "interrupt" ? body.busyPolicy : undefined;
 
       if (!sessionId || !prompt) {
         return Response.json(
@@ -333,6 +367,10 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
           { error: "Session not found" },
           { status: 404 }
         );
+      }
+
+      if (entry.session instanceof SessionBridgeSession && !authorizeSessionBridgeRequest?.(req)) {
+        return sessionBridgeForbidden();
       }
 
       sessionManager.touch(sessionId);
@@ -352,7 +390,10 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
       const stream = new ReadableStream({
         async start(controller) {
           try {
-            for await (const message of entry.session.query(effectivePrompt)) {
+            const messages = busyPolicy
+              ? entry.session.query(effectivePrompt, { busyPolicy })
+              : entry.session.query(effectivePrompt);
+            for await (const message of messages) {
               const data = JSON.stringify(message);
               controller.enqueue(
                 encoder.encode(`data: ${data}\n\n`)
