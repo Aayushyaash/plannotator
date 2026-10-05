@@ -1,5 +1,5 @@
 ---
-name: plan
+name: plannotator-plan
 description: Use this skill whenever the user asks to plan, architect, design, outline, or review any non-trivial coding task, refactor, feature, or bugfix before editing code. Trigger proactively on prompts like "plan this", "create an implementation plan", "architect this refactor", "design a roadmap", or "map out the steps first"—even if Plannotator or /plan is not mentioned. Researches the codebase, formulates a technical implementation plan in .agents/plans/<plan-name>.md, and opens Plannotator for user review.
 ---
 

@@ -10,6 +10,7 @@ Plannotator is an interactive, browser-based plan review and annotation interfac
 - **Deterministic Planning Lock**: When a plan is under review or rejected with user annotations, Plannotator enforces a workspace safety lock (`~/.plannotator/planning-locks/`). The agent is strictly prevented from editing source/code files until the user explicitly approves the plan in the browser.
 - **Inline Ask AI**: Reviewers can ask questions directly inside the plan browser. Plannotator queries the local `agy` CLI headlessly using the active Gemini model with zero external API keys.
 - **Single-Click Approval & Automation Tiers**: Reviewers approve plans with one click, restoring the desired automation level directly into Antigravity CLI via hook `permissionOverrides`.
+- **Surface Scope**: Plannotator is designed strictly for **Antigravity CLI (`agy`)** terminal sessions. When operating inside Antigravity 2.0 Desktop or Antigravity IDE, agents should rely on the host's native built-in Planning Mode.
 
 ---
 

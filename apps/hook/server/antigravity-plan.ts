@@ -44,6 +44,27 @@ function isPlanTarget(target: string, artifactDir?: string, metadata?: Record<st
   return false;
 }
 
+export function isAntigravityCliEvent(event: unknown): boolean {
+  if (!isRecord(event)) return false;
+  const artifactDir = typeof event.artifactDirectoryPath === "string" ? event.artifactDirectoryPath.replace(/\\/g, "/").toLowerCase() : "";
+  const transcript = typeof event.transcriptPath === "string" ? event.transcriptPath.replace(/\\/g, "/").toLowerCase() : "";
+
+  // Reject Antigravity IDE
+  if (artifactDir.includes("antigravity-ide") || transcript.includes("antigravity-ide")) {
+    return false;
+  }
+
+  // Reject Antigravity 2.0 Desktop (.gemini/antigravity/ without -cli or -ide)
+  if (
+    (artifactDir.includes("/.gemini/antigravity/") && !artifactDir.includes("antigravity-cli")) ||
+    (transcript.includes("/.gemini/antigravity/") && !transcript.includes("antigravity-cli"))
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 export interface PlanningLock {
   workspace: string;
   planFile: string;
@@ -112,6 +133,7 @@ export function clearPlanningLock(workspace: string): void {
 
 export function getAntigravityPlanTarget(event: unknown): string | null {
   if (!isRecord(event) || !isRecord(event.toolCall)) return null;
+  if (!isAntigravityCliEvent(event)) return null;
   const { name, args } = event.toolCall;
   if (name === "submit_plan" && isRecord(args) && typeof args.title === "string") {
     return args.title;
@@ -124,6 +146,7 @@ export function getAntigravityPlanTarget(event: unknown): string | null {
 
 export function getAntigravityPlanningLockDenial(event: unknown): string | null {
   if (!isRecord(event) || !isRecord(event.toolCall)) return null;
+  if (!isAntigravityCliEvent(event)) return null;
   const { name, args } = event.toolCall;
   if (typeof name !== "string") return null;
 
@@ -177,6 +200,7 @@ export function getAntigravityPlan(event: unknown): string | null {
   if (!isRecord(event) || !isRecord(event.toolCall)) {
     throw new Error("Invalid Antigravity toolCall payload.");
   }
+  if (!isAntigravityCliEvent(event)) return null;
   const { name, args } = event.toolCall;
   if (typeof name !== "string") return null;
 

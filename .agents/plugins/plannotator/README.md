@@ -1,6 +1,8 @@
 # Plannotator for Antigravity CLI
 
-Interactive plan review, code review, and markdown annotation for Google Antigravity CLI, Antigravity 2.0, and Antigravity IDE.
+Interactive plan review, code review, and markdown annotation strictly for Google Antigravity CLI (`agy`) terminal workflows.
+
+> **Note on Desktop 2.0 & IDE**: Antigravity 2.0 Desktop and Antigravity IDE feature their own built-in planning mode and native UI review tools. Plannotator operates specifically within Antigravity CLI terminal sessions.
 
 ## Overview
 

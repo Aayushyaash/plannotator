@@ -175,4 +175,69 @@ describe("Antigravity plan adapter", () => {
       rmSync(dataDir, { recursive: true, force: true });
     }
   });
+
+  test("strictly isolates hook execution to Antigravity CLI and abstains on 2.0 Desktop and IDE", () => {
+    const {
+      getAntigravityPlanTarget,
+      getAntigravityPlanningLockDenial,
+    } = require("./antigravity-plan");
+
+    const cliArtifacts = resolve(".gemini", "antigravity-cli", "brain", "session-cli");
+    const desktopArtifacts = resolve(".gemini", "antigravity", "brain", "session-desktop");
+    const ideArtifacts = resolve(".gemini", "antigravity-ide", "brain", "session-ide");
+
+    const cliEvent = {
+      conversationId: "cli-conv",
+      artifactDirectoryPath: cliArtifacts,
+      toolCall: {
+        name: "write_to_file",
+        args: {
+          TargetFile: join(cliArtifacts, "implementation_plan.md"),
+          CodeContent: "# CLI Plan",
+          Overwrite: true,
+        },
+      },
+    };
+
+    const desktopEvent = {
+      conversationId: "desktop-conv",
+      artifactDirectoryPath: desktopArtifacts,
+      toolCall: {
+        name: "write_to_file",
+        args: {
+          TargetFile: join(desktopArtifacts, "implementation_plan.md"),
+          CodeContent: "# Desktop Plan",
+          Overwrite: true,
+        },
+      },
+    };
+
+    const ideEvent = {
+      conversationId: "ide-conv",
+      artifactDirectoryPath: ideArtifacts,
+      toolCall: {
+        name: "write_to_file",
+        args: {
+          TargetFile: join(ideArtifacts, "implementation_plan.md"),
+          CodeContent: "# IDE Plan",
+          Overwrite: true,
+        },
+      },
+    };
+
+    // 1. Antigravity CLI triggers normally
+    expect(getAntigravityPlan(cliEvent)).toBe("# CLI Plan");
+    expect(getAntigravityPlanTarget(cliEvent)).toBe(join(cliArtifacts, "implementation_plan.md"));
+
+    // 2. Antigravity 2.0 Desktop immediately abstains (returns null)
+    expect(getAntigravityPlan(desktopEvent)).toBeNull();
+    expect(getAntigravityPlanTarget(desktopEvent)).toBeNull();
+    expect(getAntigravityPlanningLockDenial(desktopEvent)).toBeNull();
+
+    // 3. Antigravity IDE immediately abstains (returns null)
+    expect(getAntigravityPlan(ideEvent)).toBeNull();
+    expect(getAntigravityPlanTarget(ideEvent)).toBeNull();
+    expect(getAntigravityPlanningLockDenial(ideEvent)).toBeNull();
+  });
 });
+

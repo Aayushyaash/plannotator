@@ -1605,13 +1605,21 @@ if ($antigravityAvailable -and $skipAntigravityResolved) {
     Write-Host "Antigravity: detected, skipped ($skipAntigravitySource)."
 } elseif ($antigravityAvailable) {
     $antigravityPluginsDir = "$antigravityConfigDir\plugins\plannotator"
+    if (Test-Path $antigravityPluginsDir) {
+        Remove-Item -Path $antigravityPluginsDir -Recurse -Force
+    }
     New-Item -ItemType Directory -Force -Path $antigravityPluginsDir | Out-Null
     New-Item -ItemType Directory -Force -Path "$antigravityPluginsDir\rules" | Out-Null
-    New-Item -ItemType Directory -Force -Path "$antigravityPluginsDir\skills\plan" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$antigravityPluginsDir\skills\plannotator-plan" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$antigravityPluginsDir\skills\plannotator-annotate" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$antigravityPluginsDir\skills\plannotator-review" | Out-Null
 
     @'
 {
-  "name": "plannotator"
+  "name": "plannotator",
+  "displayName": "Plannotator",
+  "description": "Interactive browser-based plan review, code review diffs, and document annotation for Antigravity CLI.",
+  "version": "0.1.0"
 }
 '@ | Set-Content -Path "$antigravityPluginsDir\plugin.json"
 
@@ -1648,6 +1656,7 @@ Plannotator is an interactive, browser-based plan review and annotation interfac
 - **Deterministic Planning Lock**: When a plan is under review or rejected with user annotations, Plannotator enforces a workspace safety lock (`~/.plannotator/planning-locks/`). The agent is strictly prevented from editing source/code files until the user explicitly approves the plan in the browser.
 - **Inline Ask AI**: Reviewers can ask questions directly inside the plan browser. Plannotator queries the local `agy` CLI headlessly using the active Gemini model with zero external API keys.
 - **Single-Click Approval & Automation Tiers**: Reviewers approve plans with one click, restoring the desired automation level directly into Antigravity CLI via hook `permissionOverrides`.
+- **Surface Scope**: Plannotator is designed strictly for **Antigravity CLI (`agy`)** terminal sessions. When operating inside Antigravity 2.0 Desktop or Antigravity IDE, agents should rely on the host's native built-in Planning Mode.
 
 ---
 
@@ -1688,7 +1697,7 @@ Configured by the user in Plannotator Settings under **Permission Mode**:
 
     @'
 ---
-name: plan
+name: plannotator-plan
 description: Use this skill whenever the user asks to plan, architect, design, outline, or review any non-trivial coding task, refactor, feature, or bugfix before editing code. Trigger proactively on prompts like "plan this", "create an implementation plan", "architect this refactor", "design a roadmap", or "map out the steps first"--even if Plannotator or /plan is not mentioned. Researches the codebase, formulates a technical implementation plan in .agents/plans/<plan-name>.md, and opens Plannotator for user review.
 ---
 
@@ -1723,7 +1732,72 @@ Draft a structured plan containing:
 - If the write is denied, review the user's line annotations and notes returned by the hook.
 - Address all feedback directly inside the plan and resubmit the complete file using `write_to_file`.
 - Only proceed to implement code changes once the plan write succeeds (approval granted).
-'@ | Set-Content -Path "$antigravityPluginsDir\skills\plan\SKILL.md"
+'@ | Set-Content -Path "$antigravityPluginsDir\skills\plannotator-plan\SKILL.md"
+
+    @'
+---
+name: plannotator-annotate
+description: Open Plannotator's annotation UI for a markdown file, plain-text config file (.yaml, .json, .toml, .ini, .csv, .log, …), HTML file, URL, or folder and then respond to the returned annotations.
+disable-model-invocation: true
+---
+
+# Plannotator Annotate
+
+Use this skill when the user wants to annotate a document in Plannotator instead of reviewing it inline in chat.
+
+Run for ordinary annotation/feedback:
+
+```bash
+PLANNOTATOR_ORIGIN=antigravity plannotator annotate <path-or-url>
+```
+
+Run when the user asks to review, approve, accept, or gate a generated plan/spec/document:
+
+```bash
+PLANNOTATOR_ORIGIN=antigravity plannotator annotate <path-or-url> --gate --json
+```
+
+Plain `annotate` has no **Approve** button; it only supports feedback or closing the session. Never promise an approval action unless `--gate` is present. `--json` only changes the output format and does not enable approval by itself.
+
+Behavior:
+
+1. Run the command in the workspace directory using `run_command`. Set `PLANNOTATOR_ORIGIN=antigravity` for this invocation.
+2. Wait for the browser review to finish.
+3. If annotations are returned, address them directly.
+4. If the session closes without feedback, say so briefly and continue.
+5. In a `--gate --json` session, an approval may still carry notes — a `"decision": "approved"` result with a `"feedback"` field. Read those notes and carry them into subsequent work.
+
+Do not ask the user to paste a shell command into the chat. Run the command yourself.
+'@ | Set-Content -Path "$antigravityPluginsDir\skills\plannotator-annotate\SKILL.md"
+
+    @'
+---
+name: plannotator-review
+description: Open Plannotator's browser-based code review UI for the current worktree or a pull request URL, then act on the feedback that comes back.
+disable-model-invocation: true
+---
+
+# Plannotator Review
+
+Use this skill when the user wants to review current code changes in Plannotator instead of reading a diff inline.
+
+Run:
+
+```bash
+PLANNOTATOR_ORIGIN=antigravity plannotator review [--base <ref>] [--diff-type <type>] [optional-pr-url]
+```
+
+Reviewing one layer of a stacked branch? Pass `--base <the branch immediately below yours>` so the review shows only what this layer adds, instead of everything since `main`. Both flags are session-only and git-only.
+
+Behavior:
+
+1. Run the command in the workspace directory using `run_command`. Set `PLANNOTATOR_ORIGIN=antigravity` for this invocation.
+2. Wait for it to finish.
+3. If it returns feedback or annotations, address them in the same conversation.
+4. If it returns an approval/LGTM-style message, acknowledge that review passed and continue.
+
+Do not ask the user to copy shell commands into chat. Run the command yourself.
+'@ | Set-Content -Path "$antigravityPluginsDir\skills\plannotator-review\SKILL.md"
 
     Write-Host "Installed Antigravity plugin to $antigravityPluginsDir"
 }
