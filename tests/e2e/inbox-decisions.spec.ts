@@ -7,7 +7,8 @@
  *
  * What it proves (the window record's 3.1 and 3.2, the approved
  * inbox-decision-toggle): the tag is on for a `Decision: when answered`
- * question and off for a plain one; switching it off hides the row and
+ * question and off for a plain one, and the tag and the status tag beside
+ * it (Open, Answered) draw at one height on one line; switching it off hides the row and
  * holds across a reload; the tag's words open the card under it, drafted
  * answer first; Done keeps edits; Send records a decision only where the
  * switch is on (decisions.jsonl on disk) and the thread says "Settled"; a
@@ -102,6 +103,31 @@ function side(page: Page) {
   return page.getByRole('complementary', { name: 'Inbox navigation' });
 }
 
+/** Every question card's eyebrow pills (the decision tag beside Open,
+ *  Answered, Skipped, …) draw as one row: same top, bottom and height.
+ *  The owner saw the dashed "Open" tag sit 2 px taller and lower than the
+ *  decision tag beside it (only Open had a border). */
+async function expectEyebrowPillsAligned(page: Page): Promise<void> {
+  const rows = await pane(page).locator('[data-question-status]').evaluateAll((cards) =>
+    cards.map((card) => {
+      const group = card.firstElementChild?.querySelector(':scope > span.ml-auto');
+      return [...(group?.children ?? [])].map((pill) => {
+        const r = pill.getBoundingClientRect();
+        return { text: (pill.textContent ?? '').trim(), top: r.top, bottom: r.bottom, height: r.height };
+      });
+    }),
+  );
+  expect(rows.length).toBeGreaterThan(0);
+  for (const pills of rows) {
+    expect(pills.length, JSON.stringify(pills)).toBeGreaterThan(1);
+    for (const pill of pills.slice(1)) {
+      for (const edge of ['top', 'bottom', 'height'] as const) {
+        expect(Math.abs(pill[edge] - pills[0]![edge]), `${edge}: ${JSON.stringify(pills)}`).toBeLessThanOrEqual(0.5);
+      }
+    }
+  }
+}
+
 async function questionOf(agent: SimAgent, key: string): Promise<Record<string, any>> {
   const thread = await agent.readThread(world.threadId);
   return thread.messages[0].questions.find((q: { key: string }) => q.key === key);
@@ -182,6 +208,8 @@ test('the tag is on for a `Decision: when answered` question and off for a plain
   await expect(switches(page).nth(0)).toHaveAttribute('aria-pressed', 'true');
   await expect(switches(page).nth(1)).toHaveAttribute('aria-pressed', 'false');
   await expect(pane(page).getByText('Answering this records a decision')).toHaveCount(1);
+  // On beside Open and off beside Open: one row of equal pills.
+  await expectEyebrowPillsAligned(page);
   // The record says so too, and the sidebar counts the one that waits.
   expect((await questionOf(world.claude, world.q1)).decision_recording).toBe(true);
   expect((await questionOf(world.claude, world.q2)).decision_recording).toBe(false);
@@ -208,6 +236,8 @@ test("the tag's words open the card under the tag, drafted answer first", async 
   const { page } = world;
   await pane(page).getByText('Retry with the same idempotency key', { exact: true }).click();
   await expect(pane(page).getByText(/^Picked .*, not sent$/)).toHaveCount(1);
+  // Answered beside the on tag, Open beside the off tag.
+  await expectEyebrowPillsAligned(page);
   await words(page).nth(0).click();
   const card = page.getByRole('dialog', { name: 'Record as a decision' });
   await expect(card).toBeVisible();
