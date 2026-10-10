@@ -199,9 +199,11 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
     const spec = inboxAgentTool(session.inboxTools!)!
     const actions = (spec.inputSchema.properties as { action: { enum: string[] } }).action.enum
     expect(actions).toEqual(names!)
-    // The filled arguments never reach the agent's schema; the question guide rides `body`.
+    // The filled arguments never reach the agent's schema, except an optional project_path; the question guide rides `body`.
     const properties = Object.keys(spec.inputSchema.properties as object)
-    for (const filled of ['project_path', 'agent_session', 'agent_host', 'agent_name']) expect(properties).not.toContain(filled)
+    for (const filled of ['agent_session', 'agent_host', 'agent_name']) expect(properties).not.toContain(filled)
+    expect(properties).toContain('project_path')
+    expect(spec.inputSchema.required).toEqual(['action'])
     expect((spec.inputSchema.properties as { body: { description: string } }).body.description).toContain(':::question')
     expect(spec.description.length).toBeLessThan(2_048)
     w.proof(`registry present, Inbox running: plannotator_inbox actions = ${JSON.stringify(actions)}\n\n${spec.description}`)
@@ -412,6 +414,41 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
     expect(later.inboxTools?.map((tool) => tool.name)).toEqual(session.inboxTools?.map((tool) => tool.name))
     w.proof('a session starting while the Inbox is stopped registers the tool from the list the Inbox last offered')
   }, 90_000)
+
+  test("project_path names the project for a session working in another folder; a bad one is refused before the Inbox is reached", async () => {
+    const w = world('07b-project-path')
+    const first = startInbox(w)
+    const notes = join(w.root, 'meeting-notes')
+    mkdirSync(notes, { recursive: true })
+    writeFileSync(join(w.project, 'replay.sh'), '#!/bin/sh\necho replay\n')
+    const session = await open(w, 'session-notes')
+
+    const named = await session.callInbox({ action: 'send_message', body: 'The script I ran.', project_path: '../refund-service', attachments: ['replay.sh'] }, notes)
+    if ('deny' in named) throw new Error(named.deny)
+    const sent = JSON.parse(named.text.slice(named.text.indexOf('{'))) as { thread_id: string; attachments: { kind: string }[] }
+    expect((await thread(w, sent.thread_id)).project.root).toBe(w.project)
+    expect(sent.attachments[0]?.kind).toBe('code')
+    const plain = await session.callInbox({ action: 'send_message', body: 'From the notes folder.' }, notes)
+    if ('deny' in plain) throw new Error(plain.deny)
+    expect((await thread(w, JSON.parse(plain.text.slice(plain.text.indexOf('{'))).thread_id)).project.root).toBe(notes)
+    w.proof(`project_path "../refund-service" from ${notes} landed in ${w.project}; without it, in ${notes}`)
+
+    process.kill(first.pid, 'SIGKILL')
+    await waitFor('the Inbox to die', () => {
+      try {
+        process.kill(first.pid, 0)
+        return false
+      } catch {
+        return true
+      }
+    })
+    for (const bad of ['../missing', join(w.project, 'replay.sh'), 'two\nlines']) {
+      const refused = await session.callInbox({ action: 'send_message', body: 'x', project_path: bad }, notes)
+      expect('deny' in refused && refused.deny, bad).toContain('project_path')
+    }
+    // Nothing started the stopped Inbox: the registry still names the dead one.
+    expect(registry(w).pid).toBe(first.pid)
+  }, 60_000)
 
   // The failure this guards: the person's first prompt waits for session.start,
   // and `$.http.fetch` gives up only after 30 s, so an Inbox that accepts and

@@ -1133,6 +1133,8 @@ export class InboxStore {
   saveAnnotation(input: { attachment_id: string; version: unknown; annotation: unknown }): InboxAnnotationRecord {
     const hit = this.attachment(input.attachment_id);
     if (!hit) throw new InboxError("attachment_not_found", `No attachment ${input.attachment_id}.`);
+    // Code attachments are shown read-only (one code block, no selection comments).
+    if (hit.attachment.kind === "code") throw new InboxError("validation_error", "annotation: code attachments are read-only.", { field: "attachment_id" });
     if (!isInboxAnnotationVersion(input.version)) {
       throw new InboxError("validation_error", "version: \"current\" or the sent version's sha256.", { field: "version" });
     }

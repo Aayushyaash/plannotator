@@ -10,7 +10,9 @@
  * attachment id, never by a path: the current file as it is on disk now, or
  * the sent version from the blob. Annotate's file rules apply, without its
  * size bound (owner, 2026-10-06: no caps): the annotatable extension set,
- * `.env` refused, regular files only.
+ * `.env` refused, regular files only. Source code and scripts (the code-file
+ * set, `CODE_FILE_REGEX`) are taken too, as kind `code`: shown read-only as
+ * text, and refused at send time when their bytes are not UTF-8 text.
  *
  * The person's annotations on an attachment are stored per attachment and
  * version (`inbox/projects/<key>/annotations.jsonl`): `version` is "current"
@@ -20,10 +22,15 @@
  */
 
 import { diagramRenderKindForPath, isAnnotatableDocPath } from "./annotatable";
+import { CODE_FILE_REGEX } from "./code-file";
 import { ulid } from "./inbox-types";
 
-/** How the window draws a file: Plannotator's viewer for its type. */
-export type InboxAttachmentKind = "markdown" | "text" | "html" | "mermaid" | "graphviz";
+/**
+ * How the window draws a file: Plannotator's viewer for its type. `code` (a
+ * source file or script) is drawn as one read-only code block. A reader that
+ * meets a kind it does not know should show the file as text.
+ */
+export type InboxAttachmentKind = "markdown" | "text" | "html" | "mermaid" | "graphviz" | "code";
 
 export interface InboxAttachment {
   /** `att_<ULID>`. */
@@ -111,29 +118,51 @@ function baseName(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
+/** A source file or script by its name: the code-file set annotate links to (`CODE_FILE_REGEX`). */
+function isCodeName(name: string): boolean {
+  return CODE_FILE_REGEX.test(name);
+}
+
 /**
  * Annotate's file rules on a name, without the size bound: `.env` is refused
  * (it holds secrets, and the Inbox keeps a copy of what it was sent), and only
- * the annotatable extensions open (plain text, config and data formats,
- * diagram sources, HTML). Null when the name passes.
+ * the annotatable extensions (plain text, config and data formats, diagram
+ * sources, HTML) and source code and scripts open. Null when the name passes.
  */
 export function inboxAttachmentNameRefusal(path: string): string | null {
   const name = baseName(path);
   if (name === ".env" || /^\.env$/i.test(name)) return ".env files are never attached (they hold secrets).";
-  if (!isAnnotatableDocPath(name)) {
-    return "not a file the Inbox can open (markdown, plain text, config and data files, Mermaid and Graphviz sources, HTML).";
+  // The dotenv family under a code or other name (`.env.ts`, `.env.local.sh`); `.env.example` is a doc and stays.
+  if (/^\.env\./i.test(name) && !isAnnotatableDocPath(name)) return ".env files are never attached (they hold secrets).";
+  if (!isAnnotatableDocPath(name) && !isCodeName(name)) {
+    return "not a file the Inbox can open (markdown, plain text, config and data files, Mermaid and Graphviz sources, HTML, source code and scripts).";
   }
   return null;
 }
 
-/** The viewer for a file, by its extension. */
+/** The viewer for a file, by its extension. A name both sets know (`.json`, `.yaml`) stays text. */
 export function inboxAttachmentKind(path: string): InboxAttachmentKind {
   const name = baseName(path);
   if (/\.html?$/i.test(name)) return "html";
   const diagram = diagramRenderKindForPath(name);
   if (diagram) return diagram;
   if (/\.mdx?$/i.test(name)) return "markdown";
+  if (!isAnnotatableDocPath(name) && isCodeName(name)) return "code";
   return "text";
+}
+
+/**
+ * Whether bytes read as text: valid UTF-8 with no NUL byte. A `code`
+ * attachment must (a binary file under a source name is refused at send).
+ */
+export function isInboxTextBytes(bytes: Uint8Array): boolean {
+  if (bytes.includes(0)) return false;
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The kind as a tile names it: "Markdown", "HTML", "Mermaid". */
@@ -151,5 +180,11 @@ export function inboxAttachmentKindLabel(kind: InboxAttachmentKind, name: string
       const ext = /\.([A-Za-z0-9]+)$/.exec(name)?.[1];
       return ext && ext.toLowerCase() !== "txt" ? ext.toUpperCase() : "Text";
     }
+    case "code": {
+      const ext = /\.([A-Za-z0-9]+)$/.exec(name)?.[1];
+      return ext ? `Code (.${ext.toLowerCase()})` : `Code (${name})`;
+    }
+    default:
+      return "Text";
   }
 }

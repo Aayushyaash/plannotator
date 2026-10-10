@@ -15,6 +15,7 @@
  * token), starts a stopped Inbox with `plannotator inbox --background` (it
  * detaches into its own session and never opens a browser), and proxies the
  * call to the Inbox's `/mcp` with `project_path` the session's working folder
+ * (or the folder the agent named, resolved against it and checked to exist)
  * and `agent_session` the host's real session id.
  *
  * The wake: a 1 s tick long-polls `POST /api/inbox/bridge/poll` (bearer token,
@@ -121,6 +122,22 @@ export const INBOX_CLAIM_SCRIPT = [
 
 export function inboxClaimArgv(dir: string, claimant: string): string[] {
   return ['/bin/sh', '-c', INBOX_CLAIM_SCRIPT, 'plannotator-inbox-claim', dir, claimant]
+}
+
+/**
+ * An agent's `project_path` as an existing folder: `$2` as given when
+ * absolute, else under the working folder `$1` (never through CDPATH, and
+ * `./` first so a name starting with `-` is a name). Prints the physical
+ * path; exit 3 when it is not a folder this process can enter.
+ */
+export const INBOX_PROJECT_DIR_SCRIPT = [
+  'CDPATH=',
+  'case "$2" in /*) cd -- "$2" ;; *) cd -- "$1" && cd -- "./$2" ;; esac 2>/dev/null || exit 3',
+  'pwd -P',
+].join('\n')
+
+export function inboxProjectDirArgv(cwd: string, given: string): string[] {
+  return ['/bin/sh', '-c', INBOX_PROJECT_DIR_SCRIPT, 'plannotator-inbox-project', cwd, given]
 }
 
 async function mcpCall(host: Host, port: number, method: string, params: Record<string, unknown>): Promise<{ result?: unknown; error?: { message?: string } } | null> {
@@ -308,6 +325,13 @@ export class InboxLink {
       agent_name: INBOX_AGENT_NAME,
     })
     if ('error' in call) return { deny: call.error }
+    if (call.projectPath !== undefined) {
+      // The agent named the project: an existing folder, relative to the working folder, or nothing reaches the Inbox.
+      const dir = await this.host.run(inboxProjectDirArgv(cwd, call.projectPath), { timeoutMs: 5_000 }).catch(() => null)
+      const resolved = dir?.exitCode === 0 ? dir.stdout.replace(/\n$/, '') : ''
+      if (!resolved.startsWith('/')) return { deny: `Invalid plannotator_inbox call: project_path ${call.projectPath} is not an existing folder.` }
+      call.arguments.project_path = resolved
+    }
     if (call.name === 'wait_for_reply') {
       const asked = typeof call.arguments.timeout_seconds === 'number' ? call.arguments.timeout_seconds : INBOX_WAIT_MAX_SECONDS
       call.arguments.timeout_seconds = Math.max(1, Math.min(asked, INBOX_WAIT_MAX_SECONDS))

@@ -31,11 +31,32 @@ export type InboxToolAction = (typeof INBOX_TOOL_ACTIONS)[number]
 /**
  * Arguments the connection fills itself, on the Inbox tools that take them:
  * the session's working folder, the host's real session id, and who the
- * person sees. They never appear in the agent's schema.
+ * person sees. They never appear in the agent's schema, except
+ * `project_path` (INBOX_AGENT_PROJECT_PATH).
  */
 export const INBOX_FILLED_ARGUMENTS = ['project_path', 'agent_session', 'agent_host', 'agent_name'] as const
 
 export type InboxFilledArguments = Record<(typeof INBOX_FILLED_ARGUMENTS)[number], string>
+
+/**
+ * The one filled argument an agent may set itself: the repository or folder
+ * a call is about, when it is not the session's working folder (a session
+ * started in a notes subfolder). Optional in the agent's schema; absent, the
+ * working folder is filled as before. The connection resolves a relative path
+ * against the working folder and refuses a path that is not an existing
+ * folder before anything reaches the Inbox.
+ */
+export const INBOX_AGENT_PROJECT_PATH = 'project_path'
+
+export const INBOX_AGENT_PROJECT_PATH_DESCRIPTION = 'The repository or folder this is about; defaults to your working folder.'
+
+/** Why an agent's `project_path` is refused before any folder is looked at, or null when its shape passes. */
+export function inboxProjectPathShapeRefusal(value: unknown): string | null {
+  if (typeof value !== 'string' || value.trim() === '') return 'project_path: a folder path (absolute, or relative to your working folder).'
+  if (/[\u0000-\u001f\u007f]/.test(value)) return 'project_path: no control characters or line breaks.'
+  if (value.length > 4096) return 'project_path: at most 4096 characters.'
+  return null
+}
 
 /**
  * The `_meta` key a connection sets to `true` on its `tools/call` when the
@@ -135,13 +156,18 @@ export function inboxAgentTool(
   const usedBy = new Map<string, string[]>()
   for (const tool of tools) {
     for (const [name, schema] of Object.entries(propertiesOf(tool))) {
-      if (isFilled(name) || name === 'action') continue
+      if ((isFilled(name) && name !== INBOX_AGENT_PROJECT_PATH) || name === 'action') continue
       const users = usedBy.get(name)
       if (users) {
         users.push(tool.name)
         continue
       }
       usedBy.set(name, [tool.name])
+      if (name === INBOX_AGENT_PROJECT_PATH) {
+        // Optional, and described for the agent: the Inbox's own text is about the fill.
+        properties[name] = { type: 'string', description: INBOX_AGENT_PROJECT_PATH_DESCRIPTION }
+        continue
+      }
       // send_message's description carries the question-block guide: it rides
       // the body field, so the tool's own description stays short.
       const extra = tool.name === 'send_message' && name === 'body' ? `\n\n${tool.description}` : ''
@@ -158,13 +184,17 @@ export function inboxAgentTool(
 /**
  * The Inbox tool call an agent tool call stands for: the action's own fields
  * (any other field is refused, naming the action's fields) plus the filled
- * arguments that tool takes.
+ * arguments that tool takes. An agent's own `project_path` (shape-checked
+ * here) comes back as `projectPath`, with the working folder still in
+ * `arguments`: the connection resolves it against that folder, refuses a
+ * path that is not an existing folder, and puts the result in
+ * `arguments.project_path` before calling the Inbox.
  */
 export function inboxToolCall(
   input: unknown,
   tools: readonly InboxToolInfo[],
   filled: InboxFilledArguments,
-): { name: string; arguments: Record<string, unknown> } | { error: string } {
+): { name: string; arguments: Record<string, unknown>; projectPath?: string } | { error: string } {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { error: 'Invalid plannotator_inbox call: expected an object with an action.' }
   const { action, ...rest } = input as Record<string, unknown>
   const tool = tools.find((candidate) => candidate.name === action)
@@ -175,16 +205,23 @@ export function inboxToolCall(
   }
   const own = propertiesOf(tool)
   const args: Record<string, unknown> = {}
+  let projectPath: string | undefined
   for (const [name, value] of Object.entries(rest)) {
     if (value === undefined) continue
+    if (name === INBOX_AGENT_PROJECT_PATH && name in own) {
+      const refusal = inboxProjectPathShapeRefusal(value)
+      if (refusal) return { error: `Invalid plannotator_inbox call: ${refusal}` }
+      projectPath = value as string
+      continue
+    }
     if (!(name in own) || isFilled(name)) {
-      const fields = Object.keys(own).filter((field) => !isFilled(field))
+      const fields = Object.keys(own).filter((field) => !isFilled(field) || field === INBOX_AGENT_PROJECT_PATH)
       return { error: `Invalid plannotator_inbox call: ${tool.name} takes no "${name}" (its fields: ${fields.join(', ') || 'none'}).` }
     }
     args[name] = value
   }
   for (const name of INBOX_FILLED_ARGUMENTS) if (name in own) args[name] = filled[name]
-  return { name: tool.name, arguments: args }
+  return projectPath === undefined ? { name: tool.name, arguments: args } : { name: tool.name, arguments: args, projectPath }
 }
 
 /** An MCP `tools/call` result as the text the agent tool answers with: the text, then any structured content as JSON. */

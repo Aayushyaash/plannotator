@@ -63,6 +63,8 @@ export const SurfaceDocument = forwardRef<SurfaceDocumentHandle, Props>(function
   const isHtml = attachment.kind === 'html';
   const isDiagram = attachment.kind === 'mermaid' || attachment.kind === 'graphviz';
   const isText = !isHtml && !isDiagram;
+  // Code is shown read-only (one code block; the Inbox refuses annotations on it).
+  const isCode = attachment.kind === 'code';
   const fileRecords = useMemo(
     () => records.filter((r) => r.attachment_id === attachment.id && r.version === version),
     [records, attachment.id, version],
@@ -250,10 +252,11 @@ export const SurfaceDocument = forwardRef<SurfaceDocumentHandle, Props>(function
               stickyActions={false}
               disableCodePathValidation
               allowImages={false}
+              readOnly={isCode}
               onHostDraft={onHostDraft}
             />
           </div>
-          <div className="sf-toolstrip">
+          {!isCode && <div className="sf-toolstrip">
             <AnnotationToolstrip
               inputMethod={inputMethod}
               onInputMethodChange={(next) => {
@@ -270,7 +273,7 @@ export const SurfaceDocument = forwardRef<SurfaceDocumentHandle, Props>(function
               hideRedline
               compact
             />
-          </div>
+          </div>}
         </>
       )}
     </div>

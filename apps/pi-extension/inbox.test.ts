@@ -232,7 +232,10 @@ describe.skipIf(!piRuns)("Pi ↔ Plannotator Inbox (the real Pi in RPC mode, a r
 		expect(actions.length).toBeGreaterThan(0);
 		for (const action of actions) expect(offered).toContain(action);
 		const properties = Object.keys((tool.parameters as { properties: object }).properties);
-		for (const filled of ["project_path", "agent_session", "agent_host", "agent_name"]) expect(properties).not.toContain(filled);
+		for (const filled of ["agent_session", "agent_host", "agent_name"]) expect(properties).not.toContain(filled);
+		// The one filled argument the agent may set, optionally.
+		expect(properties).toContain("project_path");
+		expect((tool.parameters as { required?: string[] }).required).toEqual(["action"]);
 		w.proof(`Inbox running, switch on for pi: plannotator_inbox sent to the model with actions ${JSON.stringify(actions)}\n\n${tool.description}`);
 	}, 120_000);
 

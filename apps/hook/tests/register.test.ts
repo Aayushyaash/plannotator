@@ -434,7 +434,9 @@ describe('register', () => {
     const registered = w.tools.find((t) => t.name === 'plannotator_inbox')
     expect(registered?.inputSchema.properties.action.enum).toEqual(['send_message', 'read_thread', 'wait_for_reply', 'resolve_message', 'record_decision'])
     expect(Object.keys(registered?.inputSchema.properties)).not.toContain('agent_session')
-    expect(Object.keys(registered?.inputSchema.properties)).not.toContain('project_path')
+    // project_path is the one filled argument the agent may set (optional): the folder a call is about.
+    expect(registered?.inputSchema.properties.project_path?.type).toBe('string')
+    expect(registered?.inputSchema.required).toEqual(['action'])
   })
 
   test('an older Inbox whose /mcp has no record_decision: the tool is registered without it', async ($: any, on: any) => {

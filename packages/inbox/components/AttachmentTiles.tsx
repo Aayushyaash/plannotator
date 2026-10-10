@@ -3,7 +3,7 @@ import { clockTime, plural } from '../format';
 import { Icon, type IconName } from '../icons';
 
 function iconOf(attachment: InboxAttachmentState): IconName {
-  if (attachment.kind === 'html') return 'code';
+  if (attachment.kind === 'html' || attachment.kind === 'code') return 'code';
   if (attachment.kind === 'mermaid' || attachment.kind === 'graphviz') return 'diagram';
   return 'doc';
 }

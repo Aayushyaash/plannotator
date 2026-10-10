@@ -318,7 +318,7 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
             .array(z.string())
             .optional()
             .describe(
-              "Files for the person to open and annotate beside your message, e.g. [\"docs/plan.md\", \"proto/admin.html\", \"flow.mmd\"]: absolute, or relative to project_path, inside the project. Markdown, plain text, config and data files, Mermaid and Graphviz sources, and HTML (its relative images and frames load from its folder); .env is refused. The Inbox keeps the version you sent and shows the file as it is now, saying when it changed. The person's annotations come back in their reply.",
+              "Files for the person to open and annotate beside your message, e.g. [\"docs/plan.md\", \"proto/admin.html\", \"flow.mmd\"]: absolute, or relative to project_path, inside the project. Markdown, plain text, config and data files, Mermaid and Graphviz sources, HTML (its relative images and frames load from its folder), and source code and scripts (e.g. .ts, .mjs, .py, .sh, .swift, Makefile; shown read-only as text, binary content refused); .env is refused. The Inbox keeps the version you sent and shows the file as it is now, saying when it changed. The person's annotations come back in their reply.",
             ),
         })
         .strict(),

@@ -21,6 +21,7 @@ import {
   inboxAttachmentId,
   inboxAttachmentKind,
   inboxAttachmentNameRefusal,
+  isInboxTextBytes,
   type InboxAttachment,
   type InboxAttachmentState,
   type InboxAttachmentUnavailable,
@@ -62,8 +63,10 @@ export function writeBlob(inboxDirPath: string, sha256: string, bytes: Uint8Arra
 /**
  * Record the files an agent attached: each path absolute or relative to
  * `base` (the agent's project_path), resolved to its realpath, inside
- * `projectRoot`, a regular file passing annotate's name rules. Every file is
- * checked before any blob is written; one refusal refuses the whole send.
+ * `projectRoot`, a regular file passing annotate's name rules (or a source
+ * file or script, kind `code`, whose bytes must be UTF-8 text with no NUL).
+ * Every file is checked before any blob is written; one refusal refuses the
+ * whole send.
  */
 export function recordInboxAttachments(
   inboxDirPath: string,
@@ -101,6 +104,9 @@ export function recordInboxAttachments(
       bytes = readFileSync(real);
     } catch {
       return refuse(`${named}: could not be read.`);
+    }
+    if (inboxAttachmentKind(real) === "code" && !isInboxTextBytes(bytes)) {
+      refuse(`${basename(named)}: not UTF-8 text (binary or another encoding).`);
     }
     read.push({ named, real, bytes, mtime: stat.mtime.toISOString() });
   });

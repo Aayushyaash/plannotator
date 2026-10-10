@@ -21,7 +21,8 @@ import { parseInboxQuestionBlocks } from "@plannotator/core/inbox-questions";
 import { startInboxServer } from "@plannotator/server/inbox";
 import { INBOX_FILLED_ARGUMENTS } from "@plannotator/shared/inbox/connection";
 import { formatTopLevelHelp } from "./cli";
-import { formatInboxHelp, INBOX_HELP_MCP_URL, INBOX_QUESTION_EXAMPLE, TOOL_GUIDE } from "./inbox-help";
+import { inboxAttachmentKind, inboxAttachmentNameRefusal } from "@plannotator/core/inbox-types";
+import { formatInboxHelp, INBOX_HELP_CODE_EXAMPLES, INBOX_HELP_MCP_URL, INBOX_QUESTION_EXAMPLE, TOOL_GUIDE } from "./inbox-help";
 
 const entry = resolve(import.meta.dir, "index.ts");
 const distDir = resolve(import.meta.dir, "../dist");
@@ -86,6 +87,14 @@ describe("the guide against what it describes", () => {
       process.env.PATH = savedPath;
       if (savedTailscale === undefined) delete process.env.PLANNOTATOR_INBOX_TAILSCALE;
       else process.env.PLANNOTATOR_INBOX_TAILSCALE = savedTailscale;
+    }
+  });
+
+  test("every code file it names as attachable is one the Inbox takes, as kind code", () => {
+    for (const name of INBOX_HELP_CODE_EXAMPLES) {
+      expect(help).toContain(`\`${name}\``);
+      expect(inboxAttachmentNameRefusal(`/repo/${name}`), name).toBeNull();
+      expect(inboxAttachmentKind(`/repo/${name}`), name).toBe("code");
     }
   });
 

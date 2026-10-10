@@ -62,6 +62,12 @@ export const INBOX_QUESTION_EXAMPLE = [
   ":::",
 ].join("\n");
 
+/**
+ * Code files the guide names as attachable. inbox-help.test.ts checks each
+ * one against the Inbox's own name rule and kind.
+ */
+export const INBOX_HELP_CODE_EXAMPLES = ["run.sh", "build.mjs", "app.ts", "main.py", "View.swift", "Makefile"] as const;
+
 /** One block per MCP tool, in INBOX_MCP_TOOLS order. */
 export const TOOL_GUIDE: Record<InboxMcpToolName, InboxToolGuide> = {
   send_message: {
@@ -70,7 +76,7 @@ export const TOOL_GUIDE: Record<InboxMcpToolName, InboxToolGuide> = {
       "Post a markdown message to the person. `body` is required; question blocks in it render as answerable cards (see \"Asking the reviewer questions\").",
       "- `subject`: used when the message starts a thread. Default: the first question's prompt, else the first line.",
       "- `thread`, `reply_to`: where it lands (see \"Threads\").",
-      "- `attachments`: files for the person to open and annotate, e.g. `[\"docs/plan.md\", \"proto/admin.html\"]`, absolute or relative to `project_path`. Each must be a regular file inside the project, of a type Plannotator annotates (markdown, plain text, config and data files, Mermaid and Graphviz sources, HTML). `.env` files are refused, and one refused file refuses the whole send. The Inbox keeps the version you sent and shows the file as it is now; the person's annotations come back in their reply.",
+      `- \`attachments\`: files for the person to open and annotate, e.g. \`["docs/plan.md", "proto/admin.html"]\`, absolute or relative to \`project_path\`. Each must be a regular file inside the project, of a type Plannotator annotates (markdown, plain text, config and data files, Mermaid and Graphviz sources, HTML), or source code or a script (${INBOX_HELP_CODE_EXAMPLES.map(code).join(", ")} and the like), which the person sees read-only as text; a code file whose bytes are not UTF-8 text is refused. \`.env\` files are refused, and one refused file refuses the whole send. The Inbox keeps the version you sent and shows the file as it is now; the person's annotations come back in their reply.`,
       "- `idempotency_key`: any unique string. Sending again with the same key returns the first message instead of posting twice; the same key with another body, thread or `reply_to` is refused.",
       "- Returns `message_id`, `thread_id`, `new_thread`, `cursor` and the thread's `url`.",
     ],
@@ -231,7 +237,7 @@ export function formatInboxHelp(options: InboxHelpOptions): string {
     `2. Otherwise use the stdio MCP server: ${code(mcp)}. "Connecting other agents" below shows how to register it.`,
     `3. Only as a fallback: Streamable HTTP at ${code(INBOX_HELP_MCP_URL)}. The port can change when the Inbox restarts; ${code(`${self} inbox --background`)} prints the current URL. A request that carries an \`Origin\` header is refused.`,
     "",
-    `The \`${INBOX_TOOL_NAME}\` tool fills ${INBOX_FILLED_ARGUMENTS.map(code).join(", ")} for you. The stdio server fills \`project_path\` (its working folder, or \`PLANNOTATOR_CWD\`) and \`agent_session\` (one id per process). Over HTTP, pass \`project_path\` (the absolute path of the repository or folder you work in) and \`agent_session\` yourself.`,
+    `The \`${INBOX_TOOL_NAME}\` tool fills ${INBOX_FILLED_ARGUMENTS.map(code).join(", ")} for you. Pass \`project_path\` to it yourself only when the message is about another repository or folder than your working folder (absolute, or relative to your working folder; it must be an existing folder): it then lands in that project, and relative \`attachments\` resolve against it. The stdio server fills \`project_path\` (its working folder, or \`PLANNOTATOR_CWD\`) and \`agent_session\` (one id per process). Over HTTP, pass \`project_path\` (the absolute path of the repository or folder you work in) and \`agent_session\` yourself.`,
     "",
     "Every call starts a stopped Inbox in the background, without a browser tab, so never run `plannotator inbox` just to send. Bare `plannotator inbox` is for the person: it opens the window.",
     "",

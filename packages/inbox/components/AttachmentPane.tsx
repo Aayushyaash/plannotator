@@ -42,9 +42,9 @@ export interface AttachmentPaneProps {
 const recordKey = (path: string, version: string) => (version === 'current' ? path : `${path}#${version.slice(0, 12)}`);
 
 /**
- * An attachment opened (record 2.2 to 2.5): beside the thread for markdown
- * and diagrams, full screen for HTML, with Plannotator's viewers and its
- * annotation panel. The changed line offers the version the agent sent.
+ * An attachment opened (record 2.2 to 2.5): beside the thread for markdown,
+ * diagrams and code (read-only, one highlighted code block), full screen for
+ * HTML, with Plannotator's viewers and its annotation panel. The changed line offers the version the agent sent.
  */
 export function AttachmentPane(props: AttachmentPaneProps) {
   const { attachment, version } = props;
@@ -188,6 +188,8 @@ export function AttachmentPane(props: AttachmentPaneProps) {
 
   const isHtml = attachment.kind === 'html';
   const isText = attachment.kind === 'markdown' || attachment.kind === 'text';
+  // Code is shown read-only: one code block, no comments on it (the panel still lists other files').
+  const isCode = attachment.kind === 'code';
   const chipText = [
     props.strip.picks > 0 ? `${props.strip.picks} pick${props.strip.picks === 1 ? '' : 's'}` : null,
     `${props.strip.annotations} annotation${props.strip.annotations === 1 ? '' : 's'}`,
@@ -291,7 +293,7 @@ export function AttachmentPane(props: AttachmentPaneProps) {
                 disableCodePathValidation
                 copyLabel="Copy file"
                 allowImages={false}
-                readOnly={props.readOnly}
+                readOnly={props.readOnly || isCode}
                 onRestoreReport={(report) => setUnanchored(new Set(report.unanchored))}
               />
             </div>
