@@ -39,6 +39,8 @@ import { EmptyState } from './components/EmptyState';
 import { SettingsPage } from './components/Settings';
 import { NotificationAsk } from './components/NotificationAsk';
 import { useInboxNotifications } from './notify';
+import { useInboxSound } from './sound';
+import { notificationLine, SoundIntroDialog } from './components/SoundIntro';
 import { DecisionsPage } from './components/Decisions';
 import { GuidePane } from './components/GuidePane';
 import { AboutBlock, FailedDialog, RestartDialog, UpdateDialog, WhatsNewPage } from './components/Updates';
@@ -140,6 +142,13 @@ function platformOf(): ConnectContext['platform'] {
   return 'linux';
 }
 
+/** A reply is being typed: the box holds unsent text, or a text field has focus. The sound dialog waits. */
+function replyInProgress(): boolean {
+  if (unsentReply()) return true;
+  const active = document.activeElement as HTMLElement | null;
+  return !!active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT' || active.isContentEditable);
+}
+
 function hasRows(sections: readonly InboxListSection[] | null): boolean {
   return !!sections && sections.some((s) => s.threads.length > 0);
 }
@@ -178,10 +187,22 @@ function Inbox() {
   const [whatsNew, setWhatsNew] = useState<WhatsNewModel | null>(null);
   const [whatsNewError, setWhatsNewError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  /** The one-time sound dialog: open on this load, or shown on it (then the notification ask line waits for another load). */
+  const [soundDialog, setSoundDialog] = useState<'none' | 'open' | 'shown'>('none');
+  const soundDialogAsked = useRef(false);
+  const [toast, setToast] = useState<string | null>(null);
   const routeRef = useRef(route);
   routeRef.current = route;
+  const sound = useInboxSound({
+    settings: settings?.sound,
+    onSettings: (next) => setSettings((current) => (current ? { ...current, sound: next } : current)),
+  });
   const notifications = useInboxNotifications({
     settings: settings?.notifications ?? null,
+    // New questions ring the doorbell on their own rules (sound.ts), whatever notifications say.
+    onQuestions: sound.questionsArrived,
+    // Silent only when the bell can ring: on, and armed by a click in this tab.
+    silent: () => sound.settings.enabled && sound.armed,
     onSettings: (next) => setSettings((current) => (current ? { ...current, notifications: next } : current)),
     // A click on a notification: the thread opens, and the list on screen catches up.
     openThread: (threadId) => {
@@ -355,6 +376,41 @@ function Inbox() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+
+  // The one-time sound dialog: due when the Inbox says so (the first start of
+  // this version found someone who used an earlier Inbox; kept until claimed),
+  // never on a page that came through the tailnet, never before the list has
+  // loaded. It waits while a reply is being typed and while an update dialog
+  // is open, then asks the Inbox, which says yes to the first page only (a
+  // compare-and-set).
+  const soundDialogDue = latest !== null && settings?.sound?.dialog_due === true && (settings.via ?? 'local') === 'local';
+  const soundDialogBlocked = updateDialog !== null || restarting;
+  useEffect(() => {
+    if (!soundDialogDue || soundDialogBlocked || soundDialogAsked.current) return;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      if (cancelled || soundDialogAsked.current || replyInProgress()) return;
+      soundDialogAsked.current = true;
+      clearInterval(timer);
+      inboxApi
+        .claimSoundDialog()
+        .then((answer) => {
+          setSettings((current) => (current ? { ...current, sound: answer.sound } : current));
+          if (answer.show && !cancelled) setSoundDialog('open');
+        })
+        .catch(() => {});
+    }, 700);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [soundDialogDue, soundDialogBlocked]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 4200);
+    return () => clearTimeout(timer);
+  }, [toast]);
 
   const go = (next: Route) => {
     writeRoute(next);
@@ -607,6 +663,7 @@ function Inbox() {
         onToggleNotifications={(next) => void notifications.setEnabled(next)}
         onDeleteThread={deleteThread}
         onDeleteProject={deleteProject}
+        sound={settings?.sound ? sound : undefined}
         about={
           <AboutBlock
             version={latest?.version ?? settings?.version ?? 'dev'}
@@ -663,7 +720,17 @@ function Inbox() {
           narrow={route.thread !== null}
           selectedThreadId={route.thread}
           notice={notice}
-          ask={notifications.ask && <NotificationAsk kind={notifications.ask} onTurnOn={() => void notifications.turnOn()} onNotNow={notifications.notNow} />}
+          ask={
+            notifications.ask &&
+            soundDialog === 'none' && (
+              <NotificationAsk
+                kind={notifications.ask}
+                soundOn={sound.settings.enabled}
+                onTurnOn={() => void notifications.turnOn()}
+                onNotNow={notifications.notNow}
+              />
+            )
+          }
           onShowNew={() => setShown(latest.sections)}
           onOpen={openRow}
         />
@@ -711,6 +778,7 @@ function Inbox() {
             onDecisions={() => go({ page: 'decisions', project: null, thread: null })}
             onUpdate={pressUpdate}
             onWhatsNew={openWhatsNew}
+            soundNeedsClick={!!settings?.sound && sound.settings.enabled && !sound.armed}
           />
         }
       >
@@ -749,6 +817,22 @@ function Inbox() {
           onClose={() => setUpdateDialog(null)}
         />
       )}
+      {soundDialog === 'open' && settings && (
+        <SoundIntroDialog
+          line={notificationLine(settings.notifications.enabled, notifications.permission)}
+          playing={sound.playing}
+          onPlay={() => sound.preview()}
+          onTurnOnNotifications={() => void notifications.setEnabled(true)}
+          onKeep={() => setSoundDialog('shown')}
+          onTurnOff={() => {
+            setSoundDialog('shown');
+            void sound.setEnabled(false).then((saved) => setToast(saved ? 'Sound off.' : 'The sound setting was not saved.'));
+          }}
+        />
+      )}
+      <div className="ib-toast" role="status" aria-live="polite" data-hidden={toast ? undefined : ''} data-inbox-toast="">
+        {toast}
+      </div>
       {guideMessage && thread && (
         <GuidePane
           thread={thread}
