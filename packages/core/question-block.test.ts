@@ -629,3 +629,37 @@ describe("questionStatus", () => {
     expect(questionStatus(openQ, base({ other: "gRPC" }))).toBe("answered");
   });
 });
+
+describe("Replaces: lines (the Plannotator Inbox)", () => {
+  const OLD = "msg_01M4H6G73M9H3Z32T859E72DPY/q-4f7db09f";
+
+  test("are read wherever they sit, never as the prompt or context, and leave the key alone", () => {
+    const plain = parseQuestionBlock("question", "Retry a 409?\n\n- [ ] Yes\n- [ ] No");
+    for (const body of [`Replaces: ${OLD}\nRetry a 409?\n\n- [ ] Yes\n- [ ] No`, `Retry a 409?\n\nreplaces:  ${OLD}\n\n- [ ] Yes\n- [ ] No`]) {
+      const parsed = parseQuestionBlock("question", body)!;
+      expect(parsed.prompt).toBe("Retry a 409?");
+      expect(parsed.context).toBe("");
+      expect(parsed.replaces).toEqual([OLD]);
+      expect(parsed.key).toBe(plain!.key);
+    }
+  });
+
+  test("take several ids, and a value that is not an id stays prose", () => {
+    const parsed = parseQuestionBlock("question-text", `Why?\nReplaces: ${OLD}, msg_01M4H6G73M9H3Z32T859E72DPZ; q-12345678`)!;
+    expect(parsed.replaces).toEqual([OLD, "msg_01M4H6G73M9H3Z32T859E72DPZ", "q-12345678"]);
+    const prose = parseQuestionBlock("question-text", "Why?\nReplaces: the legacy cache")!;
+    expect(prose.replaces).toBeUndefined();
+    expect(prose.context).toBe("Replaces: the legacy cache");
+  });
+
+  test("a value that only starts like an id stays prose; a trailing period on an id is dropped", () => {
+    for (const line of ["Replaces: q-learning with PPO for the agent.", "Replaces: msg_ queue drain approach", `Replaces: ${OLD} and the other one`]) {
+      const parsed = parseQuestionBlock("question-text", `Why?\n${line}`)!;
+      expect(parsed.replaces).toBeUndefined();
+      expect(parsed.context).toBe(line);
+    }
+    const prompt = parseQuestionBlock("question-text", "Replaces: q-learning with PPO\nWhy?")!;
+    expect(prompt.prompt).toBe("Replaces: q-learning with PPO");
+    expect(parseQuestionBlock("question-text", `Why?\nReplaces: ${OLD}.`)!.replaces).toEqual([OLD]);
+  });
+});
