@@ -198,7 +198,18 @@ export interface InboxServerOptions {
   publishTailnet?: boolean;
   /** Tests: how a project root's `origin` is read (default `readInboxProjectRepo`, inbox-repos.ts). */
   readProjectRepo?: (root: string) => Promise<InboxProjectRepo | null>;
+  /**
+   * How long after a Mark read the asking agents are told what it closed (the
+   * window's Undo lasts 7 s). Default `INBOX_SET_ASIDE_DELAY_MS`. Tests shorten it.
+   */
+  setAsideDelayMs?: number;
 }
+
+/**
+ * After a Mark read, the set-aside note waits out the window's 7 s Undo with
+ * 3 s to spare (a slow click, a slow network), so an Undo never reaches an agent.
+ */
+export const INBOX_SET_ASIDE_DELAY_MS = 10_000;
 
 export interface InboxServer {
   port: number;
@@ -236,6 +247,8 @@ const ERROR_STATUS: Record<string, number> = {
   // an id that names no open question of the thread.
   question_superseded: 422,
   invalid_supersedes: 422,
+  // A pick on a question a Mark read closed: Move back first.
+  question_set_aside: 409,
   thread_resolved: 409,
   idempotency_key_reused: 409,
   config_not_saved: 500,
@@ -379,6 +392,24 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   // A send a crash interrupted leaves a temp blob; the next start removes it once it is stale.
   sweepStaleInboxSendTemps(store.dir);
   const serverSession = createServerSessionNonce();
+  // Mark read: the note to the asking agents goes once the Undo window has passed.
+  const setAsideDelayMs = options.setAsideDelayMs ?? INBOX_SET_ASIDE_DELAY_MS;
+  const setAsideTimers = new Set<ReturnType<typeof setTimeout>>();
+  const tellSetAside = (threadId: string) => {
+    try {
+      store.tellSetAside(threadId, setAsideDelayMs);
+    } catch (error) {
+      process.stderr.write(`Inbox: the set-aside note for ${threadId} was not written: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+  };
+  const scheduleSetAside = (threadId: string) => {
+    const timer = setTimeout(() => {
+      setAsideTimers.delete(timer);
+      tellSetAside(threadId);
+    }, setAsideDelayMs + 50);
+    (timer as { unref?: () => void }).unref?.();
+    setAsideTimers.add(timer);
+  };
   const token = createInboxToken();
   // Read once per start: the phone surface stays hidden until the iPhone app ships.
   const phonesOn = options.phones ?? resolveInboxPhones(loadConfig());
@@ -1132,6 +1163,18 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         return json({ thread: store.markSeen(seenMatch[1]!) });
       }
 
+      // Mark read and its Undo: the thread leaves the top for Quiet, its waiting questions closed (store.markRead).
+      const readMatch = /^\/api\/inbox\/threads\/([A-Za-z0-9_]+)\/(read|unread)$/.exec(path);
+      if (readMatch) {
+        if (req.method !== "POST") return json({ error: "Use POST." }, 405);
+        const body = await readBody(req);
+        if (checkServerSession(body, serverSession) === "mismatch") return json(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409);
+        const read = readMatch[2] === "read";
+        const row = store.markRead(readMatch[1]!, read);
+        if (read) scheduleSetAside(readMatch[1]!);
+        return json({ thread: row });
+      }
+
       // Guided reviews (step 5): the snapshot a message carries (packages/server/inbox-guides.ts).
       const guide = await inboxGuideRoute(req, path, store, serverSession);
       if (guide) return guide;
@@ -1154,14 +1197,25 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
             // An unknown message is the store's 404, never "not live".
             const asked = body.to === undefined ? undefined : store.message(messageId);
             const to = body.to === undefined || !asked ? undefined : live.replyTarget(asked.thread_id, body.to);
-            const result = store.sendReply(messageId, {
-              ...(to === undefined ? {} : { to }),
-              words: typeof body.words === "string" ? body.words : undefined,
-              questions: (body.questions as never) ?? [],
-              idempotency_key: body.idempotency_key as string,
-              feedback: typeof body.feedback === "string" ? body.feedback : undefined,
-              annotation_ids: body.annotation_ids as never,
-            });
+            let result: ReturnType<typeof store.sendReply>;
+            try {
+              result = store.sendReply(messageId, {
+                ...(to === undefined ? {} : { to }),
+                words: typeof body.words === "string" ? body.words : undefined,
+                questions: (body.questions as never) ?? [],
+                idempotency_key: body.idempotency_key as string,
+                feedback: typeof body.feedback === "string" ? body.feedback : undefined,
+                annotation_ids: body.annotation_ids as never,
+                skip_unanswered: body.skip_unanswered === true,
+              });
+            } catch (error) {
+              // A skip-only target whose questions closed meanwhile: a no-op, so
+              // the rest of a multi-message Send still goes.
+              if (error instanceof InboxError && error.code === "nothing_to_send") {
+                return json({ message_id: messageId, questions: store.questionsOf(messageId), reply: null, replayed: false, nothing_to_send: true, decisions: [], decisions_refused: [] });
+              }
+              throw error;
+            }
             // Step 3: the sent answers whose decision switch is on become
             // decisions, after the reply landed; a refused one never undoes it.
             const decisions = recordDecisionsForReply(store, result.reply.id);
@@ -1179,6 +1233,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
               throw new InboxError("validation_error", "resolved: must be a boolean.");
             }
             const thread = store.resolveThread(messageId, body.resolved !== false);
+            // Unarchived: a Mark read's set-aside note an archive held back is due again.
+            if (body.resolved === false) scheduleSetAside(thread.thread_id);
             return json({ thread });
           }
         }
@@ -1315,12 +1371,17 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   setTimeout(() => {
     if (stopped) return;
     for (const project of store.listProjects()) void repos.refresh(project.root);
+    // A set-aside note a stop interrupted (marked read, then the Inbox went away within the Undo window).
+    for (const threadId of store.setAsideDue(setAsideDelayMs)) tellSetAside(threadId);
+    for (const threadId of store.setAsideDue(0)) scheduleSetAside(threadId);
   }, 0);
 
   let stopped = false;
   const stop = () => {
     if (stopped) return;
     stopped = true;
+    for (const timer of setAsideTimers) clearTimeout(timer);
+    setAsideTimers.clear();
     updates.stop();
     void mcp.close().catch(() => {});
     server.stop(true);
