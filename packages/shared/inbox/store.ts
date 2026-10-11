@@ -64,10 +64,12 @@ import {
   INBOX_ANNOTATION_CURRENT,
   isInboxAnnotationId,
   isInboxAnnotationVersion,
+  isInboxAnnotatableKind,
   type InboxAnnotationRecord,
   type InboxAttachment,
 } from "@plannotator/core/inbox-types";
 import { inboxBlobSizes, removeUnusedInboxBlobs } from "./attachments";
+import { inboxMarkupNamesOf, removeInboxMarkups } from "./markups";
 import {
   ANNOTATIONS_FILE,
   DECISIONS_FILE,
@@ -1133,8 +1135,10 @@ export class InboxStore {
   saveAnnotation(input: { attachment_id: string; version: unknown; annotation: unknown }): InboxAnnotationRecord {
     const hit = this.attachment(input.attachment_id);
     if (!hit) throw new InboxError("attachment_not_found", `No attachment ${input.attachment_id}.`);
-    // Code attachments are shown read-only (one code block, no selection comments).
-    if (hit.attachment.kind === "code") throw new InboxError("validation_error", "annotation: code attachments are read-only.", { field: "attachment_id" });
+    // A PDF and a plain file are downloads: there is nothing in the window to comment on.
+    if (!isInboxAnnotatableKind(hit.attachment.kind)) {
+      throw new InboxError("annotation_not_allowed", `annotation: ${hit.attachment.name} is offered as a download; it takes no annotations.`, { field: "attachment_id" });
+    }
     if (!isInboxAnnotationVersion(input.version)) {
       throw new InboxError("validation_error", "version: \"current\" or the sent version's sha256.", { field: "version" });
     }
@@ -1255,6 +1259,7 @@ export class InboxStore {
     if (!project) throw new InboxError("project_not_found", `No project ${root.project_id}.`);
     const messageIds = new Set(this.threadMembers.get(threadId) ?? []);
     const folder = this.projectFolder(project);
+    const markups = this.markupsOf((record) => record.thread_id === threadId);
     this.keepSeqFloor();
     for (const name of [MESSAGES_FILE, QUESTIONS_FILE, ANNOTATIONS_FILE]) {
       const path = join(folder, name);
@@ -1276,20 +1281,33 @@ export class InboxStore {
       writeFileSync(temp, kept.length > 0 ? `${kept.join("\n")}\n` : "", { mode: 0o600 });
       renameSync(temp, path);
     }
-    this.reload();
+    this.reload(markups);
   }
 
   /** Delete a project: its whole folder, then every blob no other record uses. */
   deleteProject(projectId: string): void {
     const project = this.projectsById.get(projectId);
     if (!project) throw new InboxError("project_not_found", `No project ${projectId}.`);
+    const markups = this.markupsOf((record) => record.project_id === projectId);
     this.keepSeqFloor();
     rmSync(this.projectFolder(project), { recursive: true, force: true });
-    this.reload();
+    this.reload(markups);
   }
 
-  /** Read the store again from disk (after a deletion), then drop the blobs nothing uses. */
-  private reload(): void {
+  /** The marked-up images the annotations matching `which` name. */
+  private markupsOf(which: (record: InboxAnnotationRecord) => boolean): Set<string> {
+    const names = new Set<string>();
+    for (const record of this.annotations.values()) if (which(record)) for (const name of inboxMarkupNamesOf(this.dir, record.annotation)) names.add(name);
+    return names;
+  }
+
+  /**
+   * Read the store again from disk (after a deletion), then drop the blobs
+   * nothing uses and the deleted records' markups no remaining annotation
+   * names. A markup no annotation names yet (uploaded, its comment not saved)
+   * is never touched.
+   */
+  private reload(deletedMarkups: ReadonlySet<string> = new Set()): void {
     this.latest.clear();
     this.projectsById.clear();
     this.projectsByRoot.clear();
@@ -1310,6 +1328,8 @@ export class InboxStore {
       if (message.guide) used.add(message.guide.sha256);
     }
     removeUnusedInboxBlobs(this.dir, used);
+    const stillNamed = this.markupsOf(() => true);
+    removeInboxMarkups(this.dir, [...deletedMarkups].filter((name) => !stillNamed.has(name)));
   }
 
   /**

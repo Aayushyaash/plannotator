@@ -100,7 +100,7 @@ import { inboxGuideRoute } from "./inbox-guides";
 import { handleFavicon } from "./shared-handlers";
 import { createInboxAttachmentRoutes } from "./inbox-attachments";
 import { inboxMessageImageRoute } from "./inbox-message-images";
-import { recordInboxAttachments } from "@plannotator/shared/inbox/attachments";
+import { recordInboxAttachments, sweepStaleInboxSendTemps } from "@plannotator/shared/inbox/attachments";
 import { createInboxLiveSessions } from "./inbox-sessions";
 import { createInboxDevices, DOOR_PREFIX } from "./inbox-devices";
 import { createInboxRelay } from "./inbox-relay";
@@ -221,6 +221,10 @@ const ERROR_STATUS: Record<string, number> = {
   attachment_not_found: 404,
   attachment_missing: 404,
   attachment_changed_type: 409,
+  attachment_not_text: 415,
+  attachment_not_image: 415,
+  attachment_too_large: 413,
+  annotation_not_allowed: 422,
   annotation_not_found: 404,
   annotation_closed: 409,
   // New message (step 8).
@@ -352,6 +356,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   const dataDir = options.dataDir ?? getPlannotatorDataDir();
   const version = options.version ?? "dev";
   const store = InboxStore.open(dataDir);
+  // A send a crash interrupted leaves a temp blob; the next start removes it once it is stale.
+  sweepStaleInboxSendTemps(store.dir);
   const serverSession = createServerSessionNonce();
   const token = createInboxToken();
   // Read once per start: the phone surface stays hidden until the iPhone app ships.
@@ -386,7 +392,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         baseUrl: () => baseUrl,
         resolveProject,
         recordAttachments: (paths, project, base) =>
-          recordInboxAttachments(store.dir, paths, { base, projectRoot: project.root, at: new Date().toISOString() }),
+          recordInboxAttachments(store.dir, paths, { base, at: new Date().toISOString() }),
       }),
     { legacy: "stateless", maxRequestBodySize: INBOX_MAX_REQUEST_BYTES },
   );
