@@ -15,7 +15,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { InboxListRow, InboxListSection } from '@plannotator/core/inbox-types';
 
 const hasDom = typeof document !== 'undefined';
-const { InboxList } = (hasDom ? await import('./components/InboxList') : {}) as typeof import('./components/InboxList');
+const { InboxList, WIDE_ROWS_MIN_LIST_WIDTH } = (hasDom ? await import('./components/InboxList') : {}) as typeof import('./components/InboxList');
 const { SidebarProvider } = (hasDom ? await import('./shell/sidebar') : {}) as typeof import('./shell/sidebar');
 
 const AGENT = { kind: 'agent' as const, host: 'claude-code', session: 'ses_a', name: null };
@@ -50,7 +50,7 @@ const SECTIONS: InboxListSection[] = [
   { id: 'stopped', label: 'Stopped on you', threads: [row('msg_stop', 'stopped')] },
   { id: 'holding', label: 'Holding up work', threads: [row('msg_hold', 'holding')] },
   { id: 'waiting', label: 'Waiting on you', threads: [row('msg_wait', 'waiting', { thread_name: 'refund-webhooks', guide: true })] },
-  { id: 'sent', label: 'Sent', threads: [row('msg_sent', 'sent', { unread: false, sent: { at: '2026-10-10T10:01:00.000Z', checked_at: null } })] },
+  { id: 'sent', label: 'Sent', threads: [row('msg_sent', 'sent', { author: { kind: 'agent', host: 'pi', session: 'ses_b', name: null }, unread: false, sent: { at: '2026-10-10T10:01:00.000Z', checked_at: null } })] },
 ];
 
 let root: Root | null = null;
@@ -132,13 +132,88 @@ describe.if(hasDom)('the wide list', () => {
     // The thread chip and the guided review mark stay in the subject cell.
     const wait = rowEl(el, 'msg_wait').querySelector('.ib-subj')!;
     expect(wait.querySelector('.ib-key')!.textContent).toBe('refund-webhooks');
-    expect(wait.querySelector('[data-guide-mark]')).not.toBeNull();
+    const mark = wait.querySelector('[data-guide-mark]')!;
+    expect(mark.getAttribute('aria-label')).toBe('Guided review');
   });
 
-  test('one project beside an open thread: the narrow rows name the agent where the project was', () => {
-    const el = render(true, true);
+  test("beside an open thread: a narrow row's first line names its agent in one project, the project in all", () => {
+    let el = render(true, true);
+    const l1 = (id: string) => el.querySelector<HTMLElement>(`.ib-nrow[data-thread-id="${id}"] .ib-l1 .ib-p`)!.textContent;
     expect(el.querySelectorAll('.ib-row').length).toBe(0);
-    const first = el.querySelector<HTMLElement>('.ib-nrow[data-thread-id="msg_wait"] .ib-l1 .ib-p')!;
-    expect(first.textContent).not.toBe('billing-svc');
+    expect(l1('msg_wait')).toBe('Claude Code');
+    expect(l1('msg_sent')).toBe('Pi');
+    act(() => root?.unmount());
+    host?.remove();
+    el = render(false, true);
+    expect(l1('msg_wait')).toBe('billing-svc');
+    expect(l1('msg_sent')).toBe('billing-svc');
+  });
+
+  test('every project, in a list narrower than the wide row needs: two-line rows; one project keeps its wide rows', () => {
+    const saved = globalThis.ResizeObserver;
+    let width = 800;
+    // happy-dom lays nothing out: report the list's width the way a browser's observer would.
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe() {
+        this.callback([{ contentRect: { width } } as ResizeObserverEntry], this as unknown as ResizeObserver);
+      }
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    try {
+      let el = render(false);
+      expect(el.querySelectorAll('.ib-row').length).toBe(0);
+      expect(el.querySelectorAll('.ib-nrow').length).toBe(4);
+      // The guided review mark stays on the two-line row.
+      expect(el.querySelector('.ib-nrow[data-thread-id="msg_wait"] [data-guide-mark]')).not.toBeNull();
+      act(() => root?.unmount());
+      host?.remove();
+      el = render(true);
+      expect(el.querySelectorAll('.ib-row').length).toBe(4);
+      act(() => root?.unmount());
+      host?.remove();
+      width = WIDE_ROWS_MIN_LIST_WIDTH;
+      el = render(false);
+      expect(el.querySelectorAll('.ib-row').length).toBe(4);
+    } finally {
+      globalThis.ResizeObserver = saved;
+    }
+  });
+
+  test('a focused row keeps focus when the list crosses the two-line width, both ways', () => {
+    const saved = globalThis.ResizeObserver;
+    let resize: (width: number) => void = () => {};
+    // happy-dom lays nothing out: the stub reports the widths a browser's observer would.
+    globalThis.ResizeObserver = class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe() {
+        resize = (width) => this.callback([{ contentRect: { width } } as ResizeObserverEntry], this as unknown as ResizeObserver);
+        resize(1200);
+      }
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    try {
+      const el = render(false);
+      const wide = el.querySelector<HTMLElement>('.ib-row[data-thread-id="msg_hold"]')!;
+      wide.focus();
+      expect(document.activeElement).toBe(wide);
+      act(() => resize(800));
+      const narrow = el.querySelector<HTMLElement>('.ib-nrow[data-thread-id="msg_hold"]');
+      expect(narrow).not.toBeNull();
+      expect(document.activeElement).toBe(narrow);
+      act(() => resize(1000));
+      expect(document.activeElement).toBe(el.querySelector('.ib-row[data-thread-id="msg_hold"]'));
+      // Focus outside the list is left alone.
+      const outside = document.createElement('button');
+      document.body.append(outside);
+      outside.focus();
+      act(() => resize(800));
+      expect(document.activeElement).toBe(outside);
+      outside.remove();
+    } finally {
+      globalThis.ResizeObserver = saved;
+    }
   });
 });
