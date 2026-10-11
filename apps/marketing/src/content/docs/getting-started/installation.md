@@ -141,6 +141,16 @@ The install script also updates the Claude Code plugin when it is already instal
 - **Claude Code:** refreshing the marketplace alone does not update an installed plugin. Run `claude plugin marketplace update plannotator`, then `claude plugin update plannotator@plannotator`, then restart Claude Code. Inside Claude Code you can run `/plugin marketplace update plannotator`, then open `/plugin`, go to **Installed**, select **plannotator** and choose **Update now**.
 - **Pi:** run `pi update --extensions`. A plain `pi update` updates only Pi itself.
 
+### `plannotator update`
+
+`plannotator update` does the same thing in one command: it asks GitHub for the newest stable release and, if it is newer, runs the install script for it with the choices from your last install (the flags recorded in `~/.plannotator/install-flags.json`), showing the installer's output as it goes. `plannotator update --check` only says whether a newer release exists. Open reviews keep running on the old version; new ones start on the new one.
+
+### Update check
+
+Once a day, when a session starts, the `plannotator` binary asks GitHub for the latest stable release and caches the answer. When a newer one exists, a review you started yourself in a terminal ends with one line: `Plannotator X is available (you have Y). Update: plannotator update`.
+
+Turn the check off with `{ "updateCheck": false }` in `~/.plannotator/config.json` or `PLANNOTATOR_UPDATE_CHECK=0`. Off stops that request and auto-update, which needs it; `plannotator update` still checks when you run it.
+
 ### Automatic updates (opt-in)
 
 Plannotator can do this for you. Turn on **Settings → General → Keep Plannotator up to date**, or set it yourself:
