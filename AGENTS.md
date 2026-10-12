@@ -269,7 +269,29 @@ review is open, so the planning write gate still holds. The open review is
 closed (and its decision dropped) when plan mode is left, when a `/tree` path is
 not planning, and on `session_shutdown`; a plan decision is never re-targeted to
 a replacement session. The Esc-aborts-the-review behavior of the old blocking
-tool is gone: leaving plan mode is how to abandon a review.
+tool is gone: leaving plan mode is how to abandon a review. Closing it first
+calls the plan server's in-process `closeKeepingDraft()` (never reachable over
+HTTP, where a plan review stays unclosable): open tabs get the `session-closed`
+event with `by: "session"` (the tab shows "Review Closed", not "Closed by the
+Agent", which stays for `by: "agent"` host closes), and a late approve/deny
+answers `409`. The saved draft survives the close, but the server stops right
+after, so the last unsaved keystrokes (the draft autosave's debounce window)
+may be lost. The same close runs when planning ended while a review was still
+starting. Reviews opened through the `plannotator:request` event API
+(`plannotator-events.ts`) deliberately do NOT close on `session_shutdown`: the
+README promises `review-status` lets a caller recover across session restarts,
+so a decision made in that tab after `/reload` is recorded for `review-status`
+and never emitted (the replaced runtime's bus is gone). That status file is
+written atomically (temp file + rename), and one that cannot be parsed is left
+untouched (logged, the write skipped) rather than restarted from `{}`.
+Decision listeners run on a microtask (`publishDecision` in `serverPlan.ts`),
+because a replaced runtime's `pi.events.emit` throws Pi's stale-ctx error
+synchronously and an escape inside the HTTP handler ends the Pi process
+(#1864). In `plannotator-events.ts` the review-result emit, `request.respond`
+and the status writes are each wrapped in try/catch; `index.ts`'s
+`handoffApprovedPlan` emit is not wrapped itself: it runs either inside the
+submit tool call (auto-approve, a live session) or behind
+`deliverPlanDecision`'s liveness check inside a caught promise chain.
 
 **Revisions while a review is open update the same tab**: a resubmission while a review is pending calls the Pi plan
 server's `updatePlan`, which saves a new history version (slug from the revised

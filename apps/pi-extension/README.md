@@ -280,6 +280,7 @@ Plan review is asynchronous:
 - Plannotator opens the browser review and immediately responds with `{ status: "handled", result: { status: "pending", reviewId } }`
 - when the human approves or rejects in the browser, Plannotator emits `plannotator:review-result` with `{ reviewId, approved, feedback, savedPath?, agentSwitch?, permissionMode? }`
 - callers can query `review-status` with the same `reviewId` to recover from startup races or session restarts
+- the review tab outlives `/reload` and session switches: a decision made there after the session was replaced is recorded for `review-status` (the replaced runtime emits nothing, since its event bus is gone), so the new session can pick it up
 
 The other shared actions remain request/response flows. Payloads are intentionally minimal and only include fields the shared implementation actually uses.
 

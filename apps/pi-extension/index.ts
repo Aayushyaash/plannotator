@@ -797,6 +797,13 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		review.settled = true;
 		if (review.tracked) openReviews.remove(review.tracked);
 		try {
+			// The open tab learns it was closed (draft kept) instead of offering
+			// a decision nothing could deliver.
+			review.session.closeKeepingDraft?.();
+		} catch (err) {
+			console.error(`Plannotator: failed to tell the plan review tab it closed: ${err instanceof Error ? err.message : String(err)}`);
+		}
+		try {
 			review.session.stop();
 		} catch (err) {
 			console.error(`Plannotator: failed to close the plan review: ${err instanceof Error ? err.message : String(err)}`);
@@ -1925,6 +1932,12 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			// approval settling during the await, or plan mode turned off): this
 			// review would be an orphan whose decision nobody delivers.
 			if (phase !== "planning") {
+				try {
+					// A tab that already loaded learns the review closed.
+					session.closeKeepingDraft?.();
+				} catch {
+					// Best effort, as below.
+				}
 				try {
 					session.stop();
 				} catch {
