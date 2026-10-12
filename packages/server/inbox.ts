@@ -90,6 +90,7 @@ import {
 import {
   createInboxToken,
   inboxRegistryPath,
+  probeInboxData,
   readInboxRegistry,
   writeInboxRegistry,
   type InboxRegistryEntry,
@@ -129,6 +130,13 @@ const LOOPBACK = "127.0.0.1";
 export const INBOX_FORBIDDEN_PORT = 19432;
 const SSE_HEARTBEAT_MS = 15_000;
 const DEFAULT_HEALTH_TICK_MS = 60_000;
+/**
+ * How often the Inbox checks that `inbox.json` is still there and still its
+ * own (`probeInboxData`); two misses in a row end it, so an Inbox whose data
+ * folder was removed stops within about twice this. A check that cannot tell
+ * (EACCES, EIO, ...) is neither a miss nor a pass.
+ */
+export const INBOX_DATA_CHECK_MS = 5_000;
 /** `http://localhost:52817`: an origin as the page reports it, nothing more. */
 function isPageOrigin(value: string): boolean {
   try {
@@ -153,6 +161,15 @@ export interface InboxServerOptions {
   healthTickMs?: number;
   /** Called after the stop route was used, once the server has stopped. */
   onStopRequested?: () => void;
+  /**
+   * Called once the Inbox found its data folder or `inbox.json` gone, or
+   * `inbox.json` naming another Inbox (`probeInboxData`), after it has
+   * stopped: nothing can find it and it has no store, so the caller ends the
+   * process. Absent: the server only stops.
+   */
+  onDataGone?: (reason: string) => void;
+  /** How often that is checked. Default `INBOX_DATA_CHECK_MS`. Tests shorten it. */
+  dataCheckMs?: number;
   /**
    * Called after the window's Restart (the "A new version is ready" line),
    * once this server has stopped listening: the caller starts the binary on
@@ -1368,6 +1385,32 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   }
 
   updates.start();
+  // An Inbox whose data folder was removed (a test's temp dir, an uninstall
+  // that could not reach it, a person deleting ~/.plannotator/inbox) is found
+  // by no agent and keeps no store; it must not run on headless for days.
+  // Two misses in a row; an unknown answer leaves the count as it is. A
+  // timer: it cannot end an Inbox stuck in a synchronous loop, only one
+  // whose event loop still turns.
+  let dataMisses = 0;
+  const dataCheck = setInterval(() => {
+    if (stopped) return;
+    const probe = probeInboxData(dataDir, serverSession);
+    if (probe.state === "unknown") return;
+    dataMisses = probe.state === "gone" ? dataMisses + 1 : 0;
+    if (probe.state !== "gone" || dataMisses < 2) return;
+    // Stop first: a write to a stderr that is gone must not keep it running.
+    stop();
+    try {
+      process.stderr.write(`Plannotator Inbox: ${probe.reason}; stopped.\n`);
+      if (tailnetStopFailedPort !== null) {
+        process.stderr.write(`The tailnet address could not be taken down; run "tailscale serve --https=${tailnetStopFailedPort} off".\n`);
+      }
+    } catch {
+      // Nowhere to say it.
+    }
+    options.onDataGone?.(probe.reason);
+  }, options.dataCheckMs ?? INBOX_DATA_CHECK_MS);
+  (dataCheck as { unref?: () => void }).unref?.();
   // Every known project's `origin`, after the server is listening; the cache
   // runs at most a few gits at once and queues the rest.
   setTimeout(() => {
@@ -1379,9 +1422,12 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   }, 0);
 
   let stopped = false;
+  /** The tailnet port whose take-down failed at the stop, for the data-gone message. */
+  let tailnetStopFailedPort: number | null = null;
   const stop = () => {
     if (stopped) return;
     stopped = true;
+    clearInterval(dataCheck);
     for (const timer of setAsideTimers) clearTimeout(timer);
     setAsideTimers.clear();
     updates.stop();
@@ -1393,7 +1439,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     phones?.stopLan();
     relay?.stop();
     // Over your tailnet: the mapping and the tailnet-only listener, before a restart starts the new run.
-    tailscale.stop();
+    tailnetStopFailedPort = tailscale.stop().failedPort;
   };
 
   return { port, url: baseUrl, token, serverSession, portChanged, store, registry, tailscale, stop };

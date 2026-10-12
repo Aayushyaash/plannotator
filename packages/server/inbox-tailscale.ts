@@ -44,7 +44,7 @@ import {
   saveConfig,
   type InboxTailscaleSource,
 } from "@plannotator/shared/config";
-import { readInboxRegistry, writeInboxRegistry, type InboxRegistryEntry } from "@plannotator/shared/inbox/registry";
+import { readInboxRegistry, updateOwnInboxRegistry, type InboxRegistryEntry } from "@plannotator/shared/inbox/registry";
 import { checkTailnetIdentity, isServedTailnetHost, normalizeTailnetLogin, tailnetFetchSiteAllowed } from "@plannotator/shared/inbox/tailnet";
 import { InboxError } from "@plannotator/shared/inbox/schema";
 import {
@@ -161,14 +161,19 @@ export function createInboxTailscale(context: InboxTailscaleContext) {
 
   const record = () => context.registry().tailscale;
 
-  /** Keep the state in inbox.json (and this run's entry), so a reader of the file sees the address or the reason. */
+  /**
+   * Keep the state in inbox.json (and this run's entry), so a reader of the
+   * file sees the address or the reason. The file only while it is still this
+   * Inbox's: a stopping Inbox must never write its own pid over the entry of
+   * one that started since, nor make a removed data folder again.
+   */
   const save = (value: InboxRegistryEntry["tailscale"] | undefined) => {
-    const entry = { ...(readInboxRegistry(context.dataDir) ?? context.registry()) };
-    for (const target of [entry, context.registry()]) {
+    const apply = (target: InboxRegistryEntry) => {
       if (value) target.tailscale = { ...value };
       else delete target.tailscale;
-    }
-    writeInboxRegistry(context.dataDir, entry);
+    };
+    apply(context.registry());
+    updateOwnInboxRegistry(context.dataDir, context.registry().serverSession, apply);
   };
 
   /** The record with its ports kept (a mapping may exist), and why. */
@@ -396,20 +401,22 @@ export function createInboxTailscale(context: InboxTailscaleContext) {
    * A clean stop: the mapping and the listener go, so nothing is published
    * while the Inbox is stopped; the switch stays as saved and the next start
    * publishes again. A take-down that fails keeps the record for the next
-   * start or `uninstall --purge`.
+   * start or `uninstall --purge`, and answers its port (`failedPort`) so a
+   * caller with nobody else to tell can print the manual command.
    */
-  const stop = () => {
-    if (httpsPort === null && !listener && !record()) return;
-    const port = httpsPort;
+  const stop = (): { failedPort: number | null } => {
+    if (httpsPort === null && !listener && !record()) return { failedPort: null };
+    const port = httpsPort ?? record()?.https_port ?? null;
     if (unpublish() === "failed") {
-      keepRecord(`Could not take the tailnet address down; run "tailscale serve --https=${port ?? record()?.https_port} off".`);
+      keepRecord(`Could not take the tailnet address down; run "tailscale serve --https=${port} off".`);
       closeListener();
       httpsPort = null;
       guardProcess(false);
       state.url = null;
-    } else if (record()) {
-      save(undefined);
+      return { failedPort: port };
     }
+    if (record()) save(undefined);
+    return { failedPort: null };
   };
 
   /** The window's switch: saved to config.json, applied now. `via`: the request came through the tailnet. */
