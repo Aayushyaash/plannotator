@@ -54,6 +54,7 @@
         "@plannotator/inbox": "workspace:*",
         "@plannotator/server": "workspace:*",
         "@plannotator/shared": "workspace:*",
+        "@plannotator/t3-code": "workspace:*",
         "@plannotator/ui": "workspace:*",
         "@tailwindcss/vite": "^4.3.3",
         "react": "^19.2.8",
@@ -354,6 +355,21 @@
       },
       "devDependencies": {
         "fast-check": "4.9.0",
+      },
+    },
+    "packages/t3-code": {
+      "name": "@plannotator/t3-code",
+      "version": "0.0.1",
+      "dependencies": {
+        "@modelcontextprotocol/client": "2.2.0",
+        "@plannotator/ai": "workspace:*",
+        "@plannotator/core": "workspace:*",
+        "@plannotator/server": "workspace:*",
+        "@plannotator/shared": "workspace:*",
+        "zod": "4.5.4",
+      },
+      "devDependencies": {
+        "typescript": "~5.8.2",
       },
     },
     "packages/ui": {
@@ -1096,6 +1112,8 @@
     "@plannotator/server": ["@plannotator/server@workspace:packages/server"],
 
     "@plannotator/shared": ["@plannotator/shared@workspace:packages/shared"],
+
+    "@plannotator/t3-code": ["@plannotator/t3-code@workspace:packages/t3-code"],
 
     "@plannotator/ui": ["@plannotator/ui@workspace:packages/ui"],
 
