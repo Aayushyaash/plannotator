@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { InboxHealth } from '@plannotator/core/inbox-types';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import type { ProjectFolder } from '../api';
 import { connectPrompt } from '../connectPrompt';
+import { formatCount } from '../format';
 import { Icon } from '../icons';
 import { useSidebar } from '../shell/sidebar';
 import { useInboxTheme } from '../theme';
@@ -44,6 +45,29 @@ export interface SidebarProps {
 }
 
 /**
+ * Whether a scroll area has more below what it shows: the project list fades
+ * at its foot while it does, so a list cut mid-name says it scrolls.
+ */
+function useMoreBelow<T extends HTMLElement>(deps: unknown) {
+  const ref = useRef<T>(null);
+  const [more, setMore] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const read = () => setMore(el.scrollTop + el.clientHeight < el.scrollHeight - 1);
+    read();
+    el.addEventListener('scroll', read, { passive: true });
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(read);
+    observer?.observe(el);
+    return () => {
+      el.removeEventListener('scroll', read);
+      observer?.disconnect();
+    };
+  }, [deps]);
+  return [ref, more] as const;
+}
+
+/**
  * The Inbox's navigation: the Tater mark, the sections, the projects and
  * Settings. Drawn inside Workspaces' sidebar primitive (`../shell`): docked,
  * in the hover peek, and as the sheet on a phone width, which a pick closes.
@@ -51,6 +75,7 @@ export interface SidebarProps {
 export function Sidebar(props: SidebarProps) {
   const firstRun = props.projects.length === 0;
   const { setOpenMobile } = useSidebar();
+  const [projsRef, moreProjects] = useMoreBelow<HTMLDivElement>(props.projects.length);
   const pick = (go: () => void) => () => {
     setOpenMobile(false);
     go();
@@ -70,7 +95,7 @@ export function Sidebar(props: SidebarProps) {
       >
         <Icon name="inbox" />
         Inbox
-        {!firstRun && props.inboxCount > 0 && <span className="ib-n">{props.inboxCount}</span>}
+        {!firstRun && props.inboxCount > 0 && <span className="ib-n">{formatCount(props.inboxCount)}</span>}
       </button>
       <button
         type="button"
@@ -81,10 +106,10 @@ export function Sidebar(props: SidebarProps) {
       >
         <Icon name="diamond" />
         Decisions
-        {props.decisionsCount > 0 && <span className="ib-n">{props.decisionsCount}</span>}
+        {props.decisionsCount > 0 && <span className="ib-n">{formatCount(props.decisionsCount)}</span>}
       </button>
       <div className="ib-side-label">Projects</div>
-      <div className="ib-projs">
+      <div className="ib-projs" ref={projsRef} data-more={moreProjects ? '' : undefined}>
         {firstRun ? (
           <div className="ib-side-empty">Projects appear here when an agent writes from one.</div>
         ) : (
@@ -100,8 +125,8 @@ export function Sidebar(props: SidebarProps) {
                 aria-current={on ? 'page' : undefined}
                 title={project.root}
               >
-                <span className="ib-name">{project.name}</span>
-                {n > 0 && <span className="ib-n">{n}</span>}
+                <span className="ib-name" dir="auto">{project.name}</span>
+                {n > 0 && <span className="ib-n">{formatCount(n)}</span>}
               </button>
             );
           })

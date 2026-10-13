@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { InboxListRow } from '@plannotator/core/inbox-types';
 import { inboxApi, type ArchivedModel } from '../api';
-import { agentName, dayWords, plural } from '../format';
+import { agentName, dayWords, formatCount, plural } from '../format';
+import { titleIfClipped } from '../clipTitle';
 import { AuthorMark, Icon } from '../icons';
 
 /** Rows the block reads at a time ("Show more" reads the next ones). The server allows up to 200 per read. */
@@ -47,8 +48,8 @@ function ArchivedRow({ row, busy, onUnarchive }: { row: InboxListRow; busy: bool
       <AuthorMark author={row.author} />
       <span className="ib-arcinfo">
         <span className="ib-arcsub">
-          {row.thread_name && <span className="ib-key"><span className="ib-keyt">{row.thread_name}</span></span>}
-          <span className="ib-st">{subject}</span>
+          {row.thread_name && <span className="ib-key"><span className="ib-keyt" dir="auto" data-clip="">{row.thread_name}</span></span>}
+          <span className="ib-st" dir="auto" data-clip="">{subject}</span>
         </span>
         <span className="ib-d">
           {agentName(row.author)} · Archived {row.resolved_at ? dayWords(row.resolved_at) : ''} · {plural(row.message_count, 'message')}
@@ -160,7 +161,7 @@ export function ArchivedBlock({ refreshKey, onUnarchive }: ArchivedBlockProps) {
     </ul>
   );
   return (
-    <div className="ib-arcblock" data-settings-archived={loaded ? loaded.total : ''}>
+    <div className="ib-arcblock" onPointerOver={titleIfClipped} data-settings-archived={loaded ? loaded.total : ''}>
       {loaded && loaded.total > 0 && (
         <p className="ib-arcnone" data-archived-count="">
           {plural(loaded.total, 'archived thread')}
@@ -180,7 +181,7 @@ export function ArchivedBlock({ refreshKey, onUnarchive }: ArchivedBlockProps) {
           return (
             <section key={group.id} className="ib-arcgroup" data-archived-group={group.id} aria-label={`${group.name}, ${plural(count, 'archived thread')}`}>
               <h3 className="ib-arcghead">
-                {group.name} <span className="ib-d">· {count}</span>
+                <span dir="auto">{group.name}</span> <span className="ib-d">· {formatCount(count)}</span>
               </h3>
               {renderRows(group.rows, `Archived in ${group.name}`)}
             </section>
@@ -189,7 +190,7 @@ export function ArchivedBlock({ refreshKey, onUnarchive }: ArchivedBlockProps) {
       {loaded && left > 0 && (
         <div className="ib-srow">
           <span className="ib-d" data-archived-shown="">
-            Showing {loaded.rows.length} of {loaded.total}
+            Showing {formatCount(loaded.rows.length)} of {formatCount(loaded.total)}
           </span>
           <span className="ib-r">
             <button type="button" className="ib-btn ib-sm" disabled={more} data-archived-more="" onClick={() => void showMore()}>
