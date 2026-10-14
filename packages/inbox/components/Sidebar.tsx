@@ -9,6 +9,7 @@ import { useSidebar } from '../shell/sidebar';
 import { useInboxTheme } from '../theme';
 import { TaterMark } from './TaterMark';
 import { UpdateButton } from './Updates';
+import { openSearchAriaKeys, openSearchHint } from '../search/searchShortcut';
 
 export interface SidebarProps {
   page: 'inbox' | 'settings' | 'decisions' | 'whats-new';
@@ -25,6 +26,11 @@ export interface SidebarProps {
   restarting: boolean;
   /** This run started on a newer version: "What's new in X" above Settings. */
   updated: string | null;
+  /**
+   * Opens search (the approved "inbox-search" design): the field-shaped entry
+   * under the Tater mark. No key hint, because no key opens it. Absent: no entry.
+   */
+  onSearch?: (opener: HTMLElement) => void;
   onInbox: () => void;
   onProject: (projectId: string) => void;
   onSettings: () => void;
@@ -87,6 +93,28 @@ export function Sidebar(props: SidebarProps) {
         <b>Plannotator</b>
         <span>Inbox</span>
       </div>
+      {props.onSearch && (
+        <button
+          type="button"
+          className="ib-sp-entry"
+          data-open-search=""
+          aria-haspopup="dialog"
+          aria-keyshortcuts={openSearchAriaKeys()}
+          onClick={(event) => {
+            const opener = event.currentTarget;
+            // On a phone the sheet closes first; the search sheet takes the screen.
+            setOpenMobile(false);
+            props.onSearch?.(opener);
+          }}
+        >
+          <Icon name="search" />
+          Search
+          {/* The Inbox's one shortcut (search/searchShortcut.ts); the button's aria-keyshortcuts names it for a screen reader. */}
+          <kbd className="ib-kbd ib-sp-hint" aria-hidden="true" data-search-hint="">
+            {openSearchHint()}
+          </kbd>
+        </button>
+      )}
       <button
         type="button"
         className={`ib-nav${props.page === 'inbox' && props.projectId === null ? ' ib-on' : ''}`}

@@ -47,6 +47,8 @@ import { Sidebar } from './components/Sidebar';
 import { SidebarShell } from './shell/SidebarShell';
 import { InboxList } from './components/InboxList';
 import { ThreadPane } from './components/Thread';
+import { SearchHost, type SearchLanding } from './components/SearchHost';
+import { onOpenSearchKey } from './search/searchShortcut';
 import { EmptyState } from './components/EmptyState';
 import { AgentNoteDialog } from './components/AgentNoteDialog';
 import { cardReport, noteQuestionRows } from './agents';
@@ -109,6 +111,12 @@ interface Route {
   file?: { id: string; version: 'current' | 'sent'; focus: string | null } | null;
   /** The message whose guided review is open over the window (`#thread=…&guide=msg_…`). */
   guide?: string | null;
+  /**
+   * A message to land on (`#thread=…&msg=msg_…`, a search result): the thread
+   * opens there, the message unfolded, centred, focused and ringed. Dropped
+   * from the hash once landed, so a reload does not jump again.
+   */
+  msg?: string | null;
   /** Settings' section (`#settings/<section>`); null is `#settings` alone (settingsRoute.ts). */
   section?: SettingsSection | null;
   /** `#settings/devices/pair`: Pair a phone is open. */
@@ -136,6 +144,7 @@ function routeOf(fullHash: string): Route {
     thread,
     file: fileId ? { id: fileId, version: params.get('v') === 'sent' ? 'sent' : 'current', focus: params.get('at') } : null,
     guide: thread ? params.get('guide') : null,
+    msg: thread ? params.get('msg') : null,
   };
 }
 
@@ -153,6 +162,7 @@ function hashOf(route: Route): string {
     const params = new URLSearchParams();
     if (route.project) params.set('project', route.project);
     if (route.thread) params.set('thread', route.thread);
+    if (route.thread && route.msg) params.set('msg', route.msg);
     if (route.thread && route.file) {
       params.set('file', route.file.id);
       if (route.file.version === 'sent') params.set('v', 'sent');
@@ -186,6 +196,14 @@ function writeRoute(route: Route, options: { replace?: boolean } = {}): void {
     pushScreen(hash, currentHash(), next);
   }
   window.dispatchEvent(new HashChangeEvent('hashchange'));
+}
+
+/** A `msg=` with no thread to land in (a hand-edited or truncated link) leaves the address bar; the route already ignores it. */
+function stripStrayMsg(): void {
+  const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  if (!params.has('msg') || params.get('thread')) return;
+  const hash = hashOf(readRoute());
+  window.history.replaceState(window.history.state, '', hash || window.location.pathname + window.location.search);
 }
 
 /**
@@ -358,6 +376,16 @@ function Inbox() {
     settings: settings?.sound,
     onSettings: (next) => setSettings((current) => (current ? { ...current, sound: next } : current)),
   });
+  /**
+   * Search (the approved "inbox-search" design): the palette's code loads on
+   * the first open and stays mounted after. It opens from the sidebar's
+   * Search entry (and a phone's list header); no key opens it.
+   */
+  const [searchMounted, setSearchMounted] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchOpener = useRef<HTMLElement | null>(null);
+  /** The landing a search result asked for: the query's words to highlight in that message, a question's card to focus. */
+  const searchLanding = useRef<SearchLanding | null>(null);
   /** The one toast (Mark read, Archive) with its Undo, and what the live region last said. */
   const [toast, setToast] = useState<InboxToastModel | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -387,7 +415,11 @@ function Inbox() {
   const { observe: observeEvent, flush: flushNotifications } = notifications;
 
   useEffect(() => {
-    const onHash = () => setRoute(readRoute());
+    const onHash = () => {
+      stripStrayMsg();
+      setRoute(readRoute());
+    };
+    stripStrayMsg();
     window.addEventListener('hashchange', onHash);
     window.addEventListener('popstate', onHash);
     return () => {
@@ -850,6 +882,49 @@ function Inbox() {
   const go = (next: Route) => writeRoute(next);
   /** Back to the screen under this one (closeTo): a thread's list, a file's thread. */
   const close = (next: Route) => closeTo(next);
+
+  const openSearch = (opener?: HTMLElement | null) => {
+    searchOpener.current = opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    setSearchMounted(true);
+    setSearchOpen(true);
+  };
+  const openSearchRef = useRef(openSearch);
+  openSearchRef.current = openSearch;
+  // ⌘K / Ctrl+K opens search: the Inbox's one shortcut, an owner exception (approval amendment 2026-10-14;
+  // search/searchShortcut.ts). Capture phase, so it also reaches the open palette, whose keys stop at its dialog.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => onOpenSearchKey(event, (opener) => openSearchRef.current(opener));
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
+  const closeSearch = (reason: 'dismissed' | 'opened') => {
+    setSearchOpen(false);
+    if (reason !== 'dismissed') return;
+    // Focus back to what opened it, else the Search entry on screen (a phone's sheet has closed).
+    const opener = searchOpener.current;
+    searchOpener.current = null;
+    requestAnimationFrame(() => {
+      if (opener && opener.isConnected && opener.getClientRects().length > 0) opener.focus();
+      else focusFirst(['[data-open-search]']);
+    });
+  };
+  const openSearchResult = (hash: string, land: SearchLanding | null) => {
+    searchLanding.current = land;
+    const now = routeRef.current;
+    const next = routeOf(hash);
+    // As a row click does (openRow): searched from a project's list, the list stays that project's.
+    if (now.page === 'inbox' && next.page === 'inbox' && next.thread) next.project = now.project;
+    // Landing in the thread already open (nothing beside it) replaces the entry: once `msg=` drops,
+    // a new one would equal the last and the first Back would do nothing.
+    const sameThread = now.page === 'inbox' && !!now.thread && now.thread === next.thread && !now.file && !now.guide;
+    // Otherwise a new history entry: Back returns to where the search started (on a phone, the list).
+    writeRoute(next, sameThread ? { replace: true } : {});
+  };
+  /** The thread landed on the message `msg=` named: drop it from the hash, so a reload does not jump again. */
+  const landed = () => {
+    searchLanding.current = null;
+    if (routeRef.current.msg) writeRoute({ ...routeRef.current, msg: null }, { replace: true });
+  };
 
   // A phone shows one screen at a time (phone.ts, inbox.css), and its keyboard shrinks the window.
   const phone = usePhone();
@@ -1569,6 +1644,7 @@ function Inbox() {
           }}
           onOpen={openRow}
           onMarkRead={(row) => void markRead(row.thread_id, true)}
+          onSearch={(opener) => openSearch(opener)}
           phone={phone}
         />
         )}
@@ -1589,6 +1665,16 @@ function Inbox() {
             file={route.file ?? null}
             onOpenFile={(file, options) => (file ? writeRoute({ ...routeRef.current, file }, options) : closeTo({ ...routeRef.current, file }))}
             onOpenGuide={(messageId) => go({ ...route, guide: messageId })}
+            landing={
+              route.msg
+                ? {
+                    messageId: route.msg,
+                    terms: searchLanding.current?.messageId === route.msg ? searchLanding.current.terms : [],
+                    questionKey: searchLanding.current?.messageId === route.msg ? searchLanding.current.questionKey : null,
+                  }
+                : null
+            }
+            onLanded={landed}
             lookSeq={look?.threadId === thread.thread_id ? look.seq : undefined}
             seenThrough={look?.threadId === thread.thread_id ? look.through : null}
             onSeen={(through) => seenOnSight(thread.thread_id, through)}
@@ -1646,6 +1732,7 @@ function Inbox() {
             update={update}
             restarting={restarting}
             updated={updated}
+            onSearch={(opener) => openSearch(opener)}
             onInbox={() => go({ page: 'inbox', project: null, thread: null })}
             onProject={(projectId) => go({ page: 'inbox', project: projectId, thread: null })}
             onSettings={() => go({ page: 'settings', project: null, thread: null })}
@@ -1716,6 +1803,15 @@ function Inbox() {
         />
       )}
       {toast && soundDialog !== 'open' && !agentNoteOpen && <InboxToast toast={toast} onDismiss={dismissToast} phone={phone} />}
+      <SearchHost
+        mounted={searchMounted}
+        open={searchOpen}
+        phone={phone}
+        currentProject={route.page === 'inbox' ? route.project : null}
+        projects={projects}
+        onClose={closeSearch}
+        onOpenResult={openSearchResult}
+      />
       <div className="ib-sr" aria-live="polite" data-inbox-live="">
         {said}
       </div>
