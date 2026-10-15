@@ -6,7 +6,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import type { InboxComposeProject } from '@plannotator/core/inbox-types';
-import { actionLabel, composeActions, composeGroups, composeTargets, draftChip, filterGroups, isDirty, namesActionWord, preselect, statusLine } from './compose/model';
+import { actionLabel, composeActions, composeGroups, composeTargets, draftChip, filterGroups, isDirty, namesActionWord, pickerRows, preselect, statusLine } from './compose/model';
 
 const session = (id: string, host: string, extra: Partial<InboxComposeProject['sessions'][number]> = {}) => ({
   session: id,
@@ -45,6 +45,16 @@ describe('To', () => {
     const withSubject = composeGroups([{ ...PROJECTS[1]!, sessions: [session('ses-x', 'claude-code', { last_thread: { id: 'msg_1', subject: 'Relay rate limit', at: '2026-10-14T14:50:00.000Z' } })] }], null);
     expect(filterGroups(withSubject, 'rate').length).toBe(1);
     expect(filterGroups(groups, 'nothing-like-this')).toEqual([]);
+  });
+
+  test('the picker is one row per session, the current project first; a start time only where a project has two live sessions, whatever the filter', () => {
+    const groups = composeGroups(PROJECTS, { id: null, root: '/src/billing' });
+    const rows = pickerRows(groups);
+    expect(rows.map((r) => r.target.session)).toEqual(['ses-pi2', 'ses-oc', 'ses-cc1', 'ses-pi']);
+    expect(rows.map((r) => r.started !== null)).toEqual([false, false, true, true]);
+    // Filtered down to one plannotator session, it still names its start: the other one is live.
+    const filtered = pickerRows(filterGroups(groups, 'pi plan'), groups);
+    expect(filtered.map((r) => [r.target.session, r.started !== null])).toEqual([['ses-pi', true]]);
   });
 
   test('the status line says who takes it, or why nothing can be sent', () => {

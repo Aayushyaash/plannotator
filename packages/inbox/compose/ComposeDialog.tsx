@@ -26,7 +26,6 @@ import { InboxComposerField } from '../components/ComposerField';
 import { INBOX_MESSAGE_SKILL_AUDIENCE, inboxSkillsBlock, withSkillsBlock } from '../skills';
 import {
   NOTHING_SENT_NO_AGENT,
-  busyWord,
   composeGroups,
   composeTargets,
   draftSnapshot,
@@ -306,7 +305,7 @@ export function ComposeDialog(props: ComposeDialogProps) {
           aria-expanded={picker}
           aria-label={
             target
-              ? `To: ${hostLabel(target.host)} in ${target.project.name}, ${busyWord(target).toLowerCase()}. Change`
+              ? `To: ${hostLabel(target.host)} in ${target.project.name}. Change`
               : endedNote
                 ? `To: ${hostLabel(endedNote.host)}, ended. Pick a session`
                 : loading
@@ -324,7 +323,7 @@ export function ComposeDialog(props: ComposeDialogProps) {
               <HostMark host={target.host} />
               <b>{hostLabel(target.host)}</b>
               <span className="ib-cp-tod">
-                in <bdi>{target.project.name}</bdi> · started {whenTime(target.started_at)} · {busyWord(target).toLowerCase()}
+                · <bdi>{target.project.name}</bdi>
               </span>
             </>
           ) : endedNote ? (
@@ -332,12 +331,13 @@ export function ComposeDialog(props: ComposeDialogProps) {
               <HostMark host={endedNote.host} />
               <s>{hostLabel(endedNote.host)}</s>
               <span className="ib-cp-tod">
+                ·{' '}
                 {endedNote.project_name ? (
                   <>
-                    in <bdi>{endedNote.project_name}</bdi> ·{' '}
+                    <bdi>{endedNote.project_name}</bdi> ·{' '}
                   </>
                 ) : null}
-                {endedNote.started_at ? `started ${whenTime(endedNote.started_at)} · ` : ''}ended
+                ended
               </span>
             </>
           ) : (

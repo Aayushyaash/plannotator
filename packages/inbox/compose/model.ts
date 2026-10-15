@@ -13,7 +13,7 @@ export interface ComposeTarget extends InboxComposeSession {
   project: InboxComposeProject['project'];
 }
 
-/** A project's sessions as the picker draws them: the current project first, marked. */
+/** A project's live sessions, and whether it is the current project (the picker draws it first). */
 export interface ComposeGroup {
   project: InboxComposeProject['project'];
   current: boolean;
@@ -36,7 +36,7 @@ export function findTarget(projects: readonly InboxComposeProject[], session: st
 const isCurrent = (project: InboxComposeProject['project'], current: { id: string | null; root: string | null } | null): boolean =>
   !!current && ((current.id !== null && project.id === current.id) || (current.root !== null && project.root === current.root));
 
-/** The picker's groups: the current project first (marked "current"), the others in the server's order. */
+/** The picker's groups: the current project first, the others in the server's order. */
 export function composeGroups(projects: readonly InboxComposeProject[], current: { id: string | null; root: string | null } | null): ComposeGroup[] {
   const groups = projects.map((group) => ({
     project: group.project,
@@ -57,6 +57,26 @@ export function filterGroups(groups: readonly ComposeGroup[], query: string): Co
   return groups.map((group) => ({ ...group, sessions: group.sessions.filter(matches) })).filter((group) => group.sessions.length > 0);
 }
 
+/** One row of the To picker: a live session, and its start time only when its project has another live session. */
+export interface PickerRow {
+  target: ComposeTarget;
+  /** "6:33 PM", to tell two sessions of one project apart; null when the session is its project's only one. */
+  started: string | null;
+}
+
+/**
+ * The picker's rows, one line per live session, in the groups' order (the
+ * current project first, then the most recently active). Whether a row shows
+ * its start time is decided over `all` (every live session, not the filtered
+ * ones), so typing a filter never changes a row's words.
+ */
+export function pickerRows(shown: readonly ComposeGroup[], all: readonly ComposeGroup[] = shown): PickerRow[] {
+  const counts = new Map(all.map((group) => [group.project.root, group.sessions.length]));
+  return shown.flatMap((group) =>
+    group.sessions.map((target) => ({ target, started: (counts.get(group.project.root) ?? group.sessions.length) > 1 ? whenTime(target.started_at) : null })),
+  );
+}
+
 /**
  * Who To names when compose opens, in order: the session the person last
  * sent to, while it is live; else the most recently active session of the
@@ -74,21 +94,9 @@ export function preselect(
   return composeTargets(projects)[0] ?? null;
 }
 
-/** "Claude Code · started 9:12 AM". */
-export function sessionTitle(target: Pick<ComposeTarget, 'host' | 'started_at'>): string {
-  return `${hostLabel(target.host)} · ${startedLine(target)}`;
-}
-
 /** "started 2:41 PM": when the session started, without its host. */
 export function startedLine(target: Pick<ComposeTarget, 'started_at'>): string {
   return `started ${whenTime(target.started_at)}`;
-}
-
-/** "Last: Inbox search, part 2 · 2:41 PM", or "Hasn't written in the Inbox yet". */
-export function lastLine(target: Pick<ComposeTarget, 'last_thread'>): string {
-  const last = target.last_thread;
-  if (!last) return 'Hasn’t written in the Inbox yet';
-  return `Last: ${last.subject ?? '(no subject)'} · ${whenTime(last.at)}`;
 }
 
 /** The status chip: a word, never colour alone. */

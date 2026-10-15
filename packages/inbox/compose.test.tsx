@@ -279,3 +279,35 @@ test.skipIf(!hasDom)('git too slow to tell the project (project_unresolved): the
   act(() => (dialog()!.querySelector('[data-compose-discard]') as HTMLButtonElement).click());
   await until(() => dialog() === null, 'compose closed');
 });
+
+test.skipIf(!hasDom)('the To picker: one line per session, a start time only where one project has two live sessions, and To names the agent and project', async () => {
+  const other = join(dir!, 'other-project');
+  mkdirSync(other, { recursive: true });
+  await poll('ses_pair_a', 'claude-code', projects[0]!);
+  await poll('ses_pair_b', 'pi', projects[0]!);
+  await poll('ses_solo', 'claude-code', other);
+  const el = await renderApp();
+  await openCompose(el);
+  await until(() => dialog()!.querySelector('[data-compose-to^="ses_"]') !== null, 'To prefilled');
+  act(() => (dialog()!.querySelector('[data-compose-to]') as HTMLButtonElement).click());
+  await until(() => dialog()!.querySelector('[data-compose-session="ses_solo"]') !== null, 'the picker');
+  const option = (session: string) => dialog()!.querySelector(`[role="option"][data-compose-session="${session}"]`)!;
+  // No project groups: the options sit straight in the listbox.
+  expect(dialog()!.querySelector('[role="listbox"] [role="group"]')).toBeNull();
+  expect(option('ses_solo').parentElement!.getAttribute('role')).toBe('listbox');
+  // Two live sessions in one project: each names its start; the project with one does not.
+  expect(option('ses_pair_a').querySelector('[data-compose-started]')).not.toBeNull();
+  expect(option('ses_pair_b').querySelector('[data-compose-started]')).not.toBeNull();
+  expect(option('ses_solo').querySelector('[data-compose-started]')).toBeNull();
+  expect(option('ses_pair_a').getAttribute('aria-label')).toContain(', started ');
+  expect(option('ses_solo').getAttribute('aria-label')).not.toContain('started');
+  expect(option('ses_solo').getAttribute('aria-label')).toContain('Claude Code in other-project');
+  // Pick the solo session: To names the agent and the project (the approved "Claude Code · plannotator").
+  act(() => (option('ses_solo') as HTMLElement).click());
+  await until(() => dialog()!.querySelector('[data-compose-to="ses_solo"]') !== null, 'To changed');
+  const to = dialog()!.querySelector('[data-compose-to]')!;
+  expect(to.querySelector('b')!.textContent).toBe('Claude Code');
+  expect(to.querySelector('.ib-cp-tod')!.textContent).toBe('· other-project');
+  key('Escape');
+  await until(() => dialog() === null, 'compose closed');
+});

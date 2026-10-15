@@ -279,7 +279,9 @@ test('an agent connects: the draft reopens with To prefilled; Send starts a thre
   await expect(to).not.toHaveAttribute('data-compose-to', 'choose', { timeout: 15_000 });
   await to.click();
   await expect(dialog.locator('[data-compose-picker]')).toBeVisible();
-  await expect(dialog.locator('[data-compose-group]')).toHaveCount(2);
+  // One line per live session (ledger and billing, one each): no project headers, so no start times.
+  await expect(dialog.locator('[role="listbox"] > [role="option"]')).toHaveCount(2);
+  await expect(dialog.locator('[data-compose-started]')).toHaveCount(0);
   await shot(page, '01-compose-to-picker');
   await dialog.locator('[data-compose-session="ses-claude"]').click();
   await expect(to).toHaveAttribute('data-compose-to', 'ses-claude');

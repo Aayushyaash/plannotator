@@ -1,14 +1,18 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { HostMark, Icon } from '../icons';
 import { tildePath } from '../format';
-import { busyWord, filterGroups, hostLabel, lastLine, startedLine, type ComposeGroup, type ComposeTarget } from './model';
+import { splitPath } from '../agents';
+import { filterGroups, hostLabel, pickerRows, type ComposeGroup, type ComposeTarget } from './model';
 
 /**
- * The To picker (compose): a filter field over one listbox of live sessions,
- * grouped by project with the current project first. ↓ ↑ move a wrapping
- * highlight, Enter picks, Escape closes the picker only (the dialog stays),
- * typing filters by host, project and last subject. Focus stays in the
- * filter (`aria-activedescendant`).
+ * The To picker (compose; approval "inbox-compose-to-picker"): a filter field
+ * over one listbox of live sessions, one line each: the agent's mark and
+ * name, the project, its folder (muted, cut in the middle), a check on the
+ * chosen one. A start time shows only where one project has two or more live
+ * sessions. The current project first, then the most recently active.
+ * ↓ ↑ move a wrapping highlight, Enter picks, Escape closes the picker only
+ * (the dialog stays), typing filters by host, project and last subject.
+ * Focus stays in the filter (`aria-activedescendant`).
  */
 export function ToPicker({
   groups,
@@ -27,7 +31,8 @@ export function ToPicker({
 }) {
   const [query, setQuery] = useState('');
   const shown = useMemo(() => filterGroups(groups, query), [groups, query]);
-  const options = useMemo(() => shown.flatMap((group) => group.sessions), [shown]);
+  const rows = useMemo(() => pickerRows(shown, groups), [shown, groups]);
+  const options = useMemo(() => rows.map((row) => row.target), [rows]);
   // The highlight follows a session, not a row number: the list is read again
   // every 5 s, and a re-read that moves rows must not move the highlight.
   const [hlSession, setHlSession] = useState<string | null>(null);
@@ -84,7 +89,6 @@ export function ToPicker({
     }
   };
 
-  let index = -1;
   return (
     <div className="ib-cp-picker" ref={ref} data-compose-picker="" data-phone={phone ? '' : undefined} onKeyDown={onKey}>
       {phone && (
@@ -115,57 +119,61 @@ export function ToPicker({
         />
       </div>
       <div className="ib-cp-list" role="listbox" id={`ib-cp-list-${uid}`} aria-label="Live agent sessions">
-        {shown.length === 0 && <div className="ib-cp-none">No live session matches.</div>}
-        {shown.map((group) => {
-          const headingId = `ib-cp-g-${uid}-${group.project.root.replace(/[^A-Za-z0-9]/g, '')}`;
+        {rows.length === 0 && <div className="ib-cp-none">No live session matches.</div>}
+        {rows.map(({ target, started }, i) => {
+          const folder = tildePath(target.project.root, home);
           return (
-            <div key={group.project.root} role="group" aria-labelledby={headingId} className="ib-cp-group" data-compose-group={group.project.name}>
-              <div className="ib-cp-gh" id={headingId}>
-                <b dir="auto">{group.project.name}</b>
-                <span className="ib-cp-path" dir="auto">
-                  {tildePath(group.project.root, home)}
-                </span>
-                {group.current && <span className="ib-cp-cur">current</span>}
-                <span className="ib-sr">{group.current ? ', current project' : ''}</span>
-              </div>
-              {group.sessions.map((target) => {
-                index += 1;
-                const i = index;
-                const isSelected = target.session === selected;
-                return (
-                  <div
-                    key={target.session}
-                    id={optionId(i)}
-                    role="option"
-                    aria-selected={i === hl}
-                    aria-label={`${hostLabel(target.host)}, ${startedLine(target)}, ${busyWord(target).toLowerCase()}, ${lastLine(target)}`}
-                    className={`ib-cp-opt${i === hl ? ' ib-hl' : ''}`}
-                    data-compose-session={target.session}
-                    onPointerMove={() => i !== hl && setHl(i)}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => onPick(target)}
-                  >
-                    <HostMark host={target.host} />
-                    <span className="ib-cp-ot">
-                      <span className="ib-cp-o1">
-                        <b>{hostLabel(target.host)}</b> · {startedLine(target)}
-                      </span>
-                      <span className="ib-cp-o2" dir="auto">
-                        {lastLine(target)}
-                      </span>
-                    </span>
-                    <span className={`ib-cp-busy${target.busy ? ' ib-on' : ''}`}>{busyWord(target)}</span>
-                    <span className="ib-cp-check" aria-hidden="true">
-                      {isSelected && <Icon name="check" size={15} />}
-                    </span>
-                  </div>
-                );
-              })}
+            <div
+              key={target.session}
+              id={optionId(i)}
+              role="option"
+              aria-selected={i === hl}
+              aria-label={`${hostLabel(target.host)} in ${target.project.name}, ${folder}${started ? `, started ${started}` : ''}`}
+              className={`ib-cp-opt${i === hl ? ' ib-hl' : ''}`}
+              data-compose-session={target.session}
+              data-compose-project={target.project.name}
+              onPointerMove={() => i !== hl && setHl(i)}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => onPick(target)}
+            >
+              <HostMark host={target.host} />
+              <b className="ib-cp-oa">{hostLabel(target.host)}</b>
+              <span className="ib-cp-op" dir="auto">
+                {target.project.name}
+              </span>
+              <FolderPath path={folder} />
+              <span className="ib-cp-os" data-compose-started={started ?? undefined} title={started ? `Started ${started}` : undefined}>
+                {started ? `· ${started}` : null}
+              </span>
+              <span className="ib-cp-check" aria-hidden="true">
+                {target.session === selected && <Icon name="check" size={15} />}
+              </span>
             </div>
           );
         })}
       </div>
-      <div className="ib-cp-pickfoot">Live Claude Code, Pi and OpenCode sessions with Plannotator.</div>
     </div>
+  );
+}
+
+/** A project folder on one line, cut in the middle: the leading folders shrink with "…", the last name stays; the whole path in `title`. */
+function FolderPath({ path }: { path: string }) {
+  const split = splitPath(path);
+  // The slash before the last name stays with it, so a cut reads "~/pando/proj…/main".
+  const moveSlash = split.head.endsWith('/') && split.head.length > 1;
+  const head = moveSlash ? split.head.slice(0, -1) : split.head;
+  const tail = moveSlash ? `/${split.tail}` : split.tail;
+  const segments = (part: string) =>
+    part.split('/').map((name, index, all) => (
+      <Fragment key={index}>
+        {name && <bdi>{name}</bdi>}
+        {index < all.length - 1 && '/'}
+      </Fragment>
+    ));
+  return (
+    <span className="ib-cp-of" dir="ltr" title={path}>
+      <span className="ib-cp-ofh">{segments(head)}</span>
+      <span className="ib-cp-oft">{segments(tail)}</span>
+    </span>
   );
 }
