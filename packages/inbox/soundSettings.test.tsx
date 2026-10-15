@@ -1,7 +1,7 @@
 /**
  * The question sound in Settings and around the page: the one row (switch,
  * volume, Play), the "Click once in this tab to allow sound." line before
- * the first click, the sidebar hint, the notification ask's "Sound is on.",
+ * the first click, the notification ask's "Sound is on.",
  * and the hook itself against a recording AudioContext: nothing rings before
  * the first click or with the tab in front, a burst rings once, Play always
  * plays. Never audible: the AudioContext is a stub that only counts.
@@ -17,7 +17,6 @@ import type { SettingsModel } from './api';
 const hasDom = typeof document !== 'undefined';
 const { SettingsPage } = (hasDom ? await import('./components/Settings') : {}) as typeof import('./components/Settings');
 const { NotificationAsk } = (hasDom ? await import('./components/NotificationAsk') : {}) as typeof import('./components/NotificationAsk');
-const { Sidebar } = (hasDom ? await import('./components/Sidebar') : {}) as typeof import('./components/Sidebar');
 const { SidebarProvider } = (hasDom ? await import('./shell/sidebar') : {}) as typeof import('./shell/sidebar');
 const { useInboxSound } = (hasDom ? await import('./sound') : {}) as typeof import('./sound');
 
@@ -67,6 +66,7 @@ function fakeSound(over: Partial<InboxSound> = {}) {
     playing: false,
     preview: (volume) => void seen.push(`preview:${volume ?? 'saved'}`),
     questionsArrived: () => {},
+    otherTabInFront: () => false,
     setEnabled: async (next) => (seen.push(`enabled:${next}`), true),
     setVolume: async (next) => (seen.push(`volume:${next}`), true),
     ...over,
@@ -175,36 +175,6 @@ describe.if(hasDom)('around the page', () => {
     expect(el.textContent).toContain('Your browser asks once. Sound is on.');
     act(() => root!.render(<NotificationAsk kind="ask" soundOn={false} onTurnOn={noop} onNotNow={noop} />));
     expect(el.textContent).not.toContain('Sound is on.');
-  });
-
-  test('the sidebar shows "Click to turn on sound" only when asked to', () => {
-    const noop = () => {};
-    const sidebar = (soundNeedsClick: boolean) => (
-      <SidebarProvider>
-        <Sidebar
-          page="inbox"
-          projectId={null}
-          inboxCount={0}
-          decisionsCount={0}
-          projects={[]}
-          projectCounts={new Map()}
-          update={null}
-          restarting={false}
-          updated={null}
-          onInbox={noop}
-          onProject={noop}
-          onSettings={noop}
-          onDecisions={noop}
-          onUpdate={noop}
-          onWhatsNew={noop}
-          soundNeedsClick={soundNeedsClick}
-        />
-      </SidebarProvider>
-    );
-    const el = mount(sidebar(true));
-    expect(el.querySelector('[data-sound-hint]')?.textContent).toBe('Click to turn on sound');
-    act(() => root!.render(sidebar(false)));
-    expect(el.querySelector('[data-sound-hint]')).toBeNull();
   });
 });
 

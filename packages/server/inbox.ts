@@ -1134,7 +1134,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         // The display name (the folder's real name), as every other read gives it.
         return { seq: line.seq, kind: line.kind, id: line.id, project: { ...line.record, name: store.project(line.id)?.name ?? line.record.name } };
       case "message":
-        return { seq: line.seq, kind: line.kind, id: line.id, message: line.record };
+        // `first` (additive): this line is the message's first, not a later rewrite (a look, a resolve, an Unarchive).
+        return { seq: line.seq, kind: line.kind, id: line.id, first: store.messageCursor(line.id) === line.seq, message: line.record };
       case "question":
         // The store's one question state: a question an agent asked after the archive line is live (notifications, the sound).
         return { seq: line.seq, kind: line.kind, id: line.id, question: store.questionWire(line.record) };

@@ -13,6 +13,10 @@
  * otherwise reports as always focused), and the banner itself, which the test
  * reads as the recorded title, body and tag.
  *
+ * The rules (approval "inbox-notify-every-thread"): every new thread an agent
+ * starts notifies, the tab in front or not; a new question notifies unless it
+ * is in the thread open on screen; plain news in a thread never does.
+ *
  * Build the binary first (see inbox.spec.ts), then `bun run test:e2e:inbox`.
  * PNGs of the proved states land in .local/proof/notifications/.
  */
@@ -97,7 +101,9 @@ function registry(): { pid: number; port: number; serverSession: string; url: st
 }
 
 function config(): { inboxNotifications?: Record<string, unknown> } {
-  return JSON.parse(readFileSync(join(world.dataDir, 'config.json'), 'utf8'));
+  // Not written yet: an expect.poll on it waits instead of failing on ENOENT.
+  const file = join(world.dataDir, 'config.json');
+  return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
 }
 
 function startInbox(): string {
@@ -168,6 +174,8 @@ async function setFront(visible: boolean, focused: boolean): Promise<void> {
 /** Every Inbox notification carries this one tag, so the browser shows one at a time. */
 const TAG = 'plannotator-inbox';
 let stoppedThread = '';
+/** The Pi agent whose thread is Stopped on you. */
+let piAgent: SimAgent;
 
 /** The page has read the list the agent's write produced: the held list shows it behind "N new" (or on screen). */
 async function pageSaw(threadId: string): Promise<void> {
@@ -331,6 +339,7 @@ test('with permission, a Stopped thread raises exactly one notification with the
   await setFront(false, false);
   const before = (await calls()).length;
   const pi = await agent('Pi', 'pi');
+  piAgent = pi;
   // Two items in one message (a Stopped line and a Holds up line): one notification for the thread.
   const sent = await pi.send({ project_path: world.billing, body: DEMO_MESSAGES.stopped });
   await pageSaw(sent.thread_id);
@@ -359,16 +368,48 @@ test('a second item in the same thread replaces the first, and the title follows
   ]);
 });
 
-test('a focused, visible Inbox raises nothing', async () => {
+test('in front: every new thread notifies, a question in the thread open on screen does not, one in another thread does', async () => {
   const { page } = world;
   await setFront(true, true);
   const before = (await calls()).length;
+  // A new thread that asks nothing notifies, the tab in front.
+  const amp = await agent('Amp', 'amp');
+  const news = await amp.send({ project_path: world.docs, body: 'Deployed the docs preview to staging. Nothing needed from you yet.' });
+  await expect.poll(async () => (await calls()).length).toBe(before + 1);
+  const first = (await calls()).at(-1)!;
+  expect(first.title.startsWith('docs-site: Amp')).toBe(true);
+  expect(first.title).not.toContain('waiting');
+  expect(first.tag).toBe(TAG);
+  // A second new thread within the burst window: one notice for both, on the one tag.
   const codex = await agent('Codex', 'codex');
   const sent = await codex.send({ project_path: world.docs, body: question('Ship the install page?', 'Stopped: the docs deploy waits on this.') });
-  await pageSaw(sent.thread_id);
-  expect((await calls()).length).toBe(before);
-  await expect(page.locator('[data-inbox-notice]')).toBeVisible();
-  await shot('6.3-focused-silent');
+  await expect.poll(async () => (await calls()).length).toBe(before + 2);
+  expect((await calls()).at(-1)).toMatchObject({ body: 'docs-site', tag: TAG });
+  expect((await calls()).at(-1)!.title.startsWith('2 ')).toBe(true);
+  await pageSaw(news.thread_id);
+  await shot('6.3-focused-new-thread');
+
+  // Open Codex's thread: a new question in it, on screen, raises nothing.
+  await page.evaluate((id) => {
+    location.hash = `thread=${id}`;
+  }, sent.thread_id);
+  await expect(page.locator('section.ib-pane')).toContainText('Ship the install page?');
+  const opened = (await calls()).length;
+  const again = await codex.send({ project_path: world.docs, body: question('And publish the changelog with it?') });
+  expect(again.thread_id).toBe(sent.thread_id);
+  await expect(page.locator('section.ib-pane')).toContainText('And publish the changelog with it?');
+  await page.waitForTimeout(600);
+  expect((await calls()).length).toBe(opened);
+
+  // Plain news in an existing thread never notifies.
+  await piAgent.send({ project_path: world.billing, body: 'Retried the 409 once more; same answer.' });
+  await page.waitForTimeout(800);
+  expect((await calls()).length).toBe(opened);
+
+  // A question in another thread, with this one open: it notifies.
+  await piAgent.send({ project_path: world.billing, body: question('Should the worker give up after three tries?') });
+  await expect.poll(async () => (await calls()).length).toBe(opened + 1);
+  expect((await calls()).at(-1)!.tag).toBe(TAG);
 });
 
 test('a click on the notification focuses the tab and opens the thread', async () => {

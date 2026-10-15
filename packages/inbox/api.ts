@@ -631,7 +631,8 @@ export type InboxNoteResult = { ok: true; agent: InboxNoteAgentId; action: strin
 /** One store line as the event stream carries it (packages/server/inbox.ts, `eventPayload`). */
 export type InboxEvent =
   | { seq: number; kind: 'project'; id: string; project: InboxProject }
-  | { seq: number; kind: 'message'; id: string; message: InboxMessage }
+  /** `first`: the message's first line, not a later rewrite of it (a look, an archive, an Unarchive). Absent from an older Inbox. */
+  | { seq: number; kind: 'message'; id: string; first?: boolean; message: InboxMessage }
   | { seq: number; kind: 'question'; id: string; question: InboxQuestion }
   | { seq: number; kind: 'annotation'; id: string; annotation: InboxAnnotationRecord };
 

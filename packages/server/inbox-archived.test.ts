@@ -260,4 +260,37 @@ describe("archived threads", () => {
     expect(ids(archived.threads)).toContain(t.thread_id);
     expect(ids(allRows(await getJson<ListModel>(server, "/api/inbox/threads?archived=exclude")))).not.toContain(t.thread_id);
   });
+
+  test("the event stream marks a message's first line: an archive and an Unarchive rewrite the root, never as its first", async () => {
+    const { server, billing, send } = await setup();
+    // Live lines (a replay sends only each record's latest line).
+    const controller = new AbortController();
+    const events = await fetch(url(server, `/api/inbox/events?cursor=${server.store.cursor()}`), { signal: controller.signal });
+    const reader = events.body!.getReader();
+    const t = await send(billing, "Archived before the window loaded");
+    await resolve(server, t.thread_id, true);
+    await resolve(server, t.thread_id, false);
+    let text = "";
+    const rootLines = () =>
+      text
+        .split("\n")
+        .filter((line) => line.startsWith("data:") && line.includes('"kind":"message"'))
+        .map((line) => JSON.parse(line.slice(5)) as { id: string; first?: boolean; message: { resolved_at: string | null } })
+        .filter((event) => event.id === t.thread_id);
+    // A missing line ends the read (the abort) and fails the expectation below, instead of hanging.
+    const timer = setTimeout(() => controller.abort(), 3000);
+    try {
+      while (rootLines().length < 3) text += new TextDecoder().decode((await reader.read()).value);
+    } catch {
+      // Aborted.
+    }
+    clearTimeout(timer);
+    controller.abort();
+    // The send, the archive, the Unarchive (resolved_at null again, like the send): only the send is first.
+    expect(rootLines().map((e) => [e.first, e.message.resolved_at === null])).toEqual([
+      [true, true],
+      [false, false],
+      [false, true],
+    ]);
+  });
 });

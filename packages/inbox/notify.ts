@@ -1,15 +1,21 @@
 /**
  * Browser notifications from the open Inbox page (record 6.x; owner Q8: the
- * page first on every platform, the Mac helper later).
+ * page first on every platform, the Mac helper later; approval
+ * "inbox-notify-every-thread", 2026-10-15).
  *
- * An item is a new question in an agent's message (a `Stopped:` line, a
- * `Holds up:` line or any other question); news never notifies. Every Inbox
- * notification shares one tag, so the browser shows one at a time. While the
- * tab is away, the page keeps the threads it notified about: with one, the
+ * Two things notify: a new thread an agent starts (always, the tab in front
+ * or not), and a new question in an agent's message (a `Stopped:` line, a
+ * `Holds up:` line or any other question), unless it is in the thread the
+ * person has open and visible. Plain news in an existing thread never
+ * notifies. Every Inbox notification shares one tag, so the browser shows one
+ * at a time. The page keeps the threads of the current burst: with one, the
  * banner names the project, the agent and the subject, and a click opens that
- * thread; with more, a burst becomes one notice, "3 waiting in 2 projects",
- * and a click opens the list. The set clears when the tab comes to the front,
- * where nothing is raised: the "N new" notice and the counts are enough.
+ * thread; with more, the burst becomes one notice, "3 waiting in 2 projects",
+ * and a click opens the list. Away, a burst lasts until the tab comes to the
+ * front; in front, notices within `FRONT_BURST_MS` of each other are one.
+ * Several Inbox tabs raise each item once: a tab in front raises it, else
+ * the first tab to claim it (`claimNotices`). A notice is silent only when
+ * the Inbox's bell owns its sound (a question, every tab away, the bell on).
  *
  * The settings live on the Inbox server (config.json), not in localStorage:
  * the permission is per origin and the Inbox can move to another port, so
@@ -17,7 +23,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { InboxAuthor, InboxSectionId } from '@plannotator/core/inbox-types';
+import type { InboxAuthor, InboxListRow, InboxMessage, InboxSectionId } from '@plannotator/core/inbox-types';
 import { inboxApi, type InboxEvent, type ListModel, type NotificationSettings } from './api';
 import { agentName, plural } from './format';
 import { pageInFront } from './sound';
@@ -46,20 +52,138 @@ export function inboxNotificationOptions(text: { body: string }, options: { sile
   return options.silent ? { ...base, silent: true } : base;
 }
 
-/** One thread's banner (record 6.2): "billing-svc: Claude Code stopped on you", then the subject. */
-export function threadNotificationText(input: { project: string; agent: string; subject: string; section: InboxSectionId | null }): {
+/**
+ * One thread's banner (record 6.2): "billing-svc: Claude Code stopped on you",
+ * "… is waiting on you" while it asks, "… started a thread" for a new thread
+ * that asks nothing; the subject is the body.
+ */
+export function threadNotificationText(input: {
+  project: string;
+  agent: string;
+  subject: string;
+  section: InboxSectionId | null;
+  /** The notice is about a question (else a new thread that may ask nothing). Absent: a question. */
+  asks?: boolean;
+}): {
   title: string;
   body: string;
 } {
-  const what = input.section === 'stopped' ? 'stopped on you' : 'is waiting on you';
+  const asks = input.asks ?? true;
+  const what =
+    input.section === 'stopped'
+      ? 'stopped on you'
+      : asks || input.section === 'holding' || input.section === 'waiting'
+        ? 'is waiting on you'
+        : 'started a thread';
   return { title: `${input.project}: ${input.agent} ${what}`, body: input.subject };
 }
 
-/** A burst (record 6.2): "3 waiting in 2 projects", or "2 waiting in billing-svc"; the body names the projects. */
-export function burstNotificationText(projects: readonly string[]): { title: string; body: string } {
+/**
+ * A burst (record 6.2): "3 waiting in 2 projects", or "2 waiting in
+ * billing-svc"; "3 new in …" when a thread in it asks nothing. The body names
+ * the projects.
+ */
+export function burstNotificationText(projects: readonly string[], options: { waiting?: boolean } = {}): { title: string; body: string } {
   const distinct = [...new Set(projects)];
   const where = distinct.length === 1 ? distinct[0]! : plural(distinct.length, 'project');
-  return { title: `${projects.length} waiting in ${where}`, body: distinct.join(', ') };
+  const what = options.waiting === false ? 'new' : 'waiting';
+  return { title: `${projects.length} ${what} in ${where}`, body: distinct.join(', ') };
+}
+
+/** In front, notices this close together are one burst; away, a burst lasts until the tab is back. */
+export const FRONT_BURST_MS = 30_000;
+
+/**
+ * A message line that is a new thread an agent started: the root's FIRST
+ * line (`first` on the event; a look, an archive or an Unarchive rewrites the
+ * root and is never first), an agent's, open, and not a thread this page
+ * already knew. An Inbox without `first` notifies no new thread.
+ */
+export function isNewAgentThread(message: InboxMessage, first: boolean | undefined, known: ReadonlySet<string>): boolean {
+  return (
+    first === true &&
+    message.id === message.thread_id &&
+    message.author.kind === 'agent' &&
+    message.started_by_person !== true &&
+    message.resolved_at === null &&
+    (message.person_seen_seq ?? null) === null &&
+    (message.person_read_seq ?? null) === null &&
+    (message.agent_checked_seq ?? null) === null &&
+    !known.has(message.thread_id)
+  );
+}
+
+/** One thread a list read may notify about. */
+export interface NotifyItem {
+  threadId: string;
+  author: InboxAuthor;
+  /** A new question in it. */
+  asks: boolean;
+  /** The thread itself is new. */
+  fresh: boolean;
+  /** What brought it (`thread:<id>`, `<message id>/<question key>`): what tabs claim, so one tab raises each. */
+  keys: string[];
+}
+
+/** Several Inbox tabs: each item is raised by the first tab to claim it (`claimNotices`). */
+export const NOTICE_CLAIMS_KEY = 'plannotator-inbox-notified';
+/** A claim is kept this long: longer than a hidden tab's timers may lag behind the event. */
+export const NOTICE_CLAIM_MS = 10 * 60_000;
+
+/**
+ * Claim `keys` for this tab: answers the ones no other tab claimed first.
+ * The claims live in localStorage (one origin, every tab), read and written
+ * under one Web Lock where there is one; without it the check is close
+ * enough. Without storage this tab raises everything.
+ */
+export async function claimNotices(keys: readonly string[], now: number = Date.now()): Promise<string[]> {
+  const claim = (): string[] => {
+    let claims: Record<string, number> = {};
+    try {
+      claims = JSON.parse(window.localStorage.getItem(NOTICE_CLAIMS_KEY) ?? '{}') as Record<string, number>;
+      if (!claims || typeof claims !== 'object') claims = {};
+    } catch {
+      claims = {};
+    }
+    const kept: Record<string, number> = {};
+    for (const [key, at] of Object.entries(claims)) if (typeof at === 'number' && now - at < NOTICE_CLAIM_MS) kept[key] = at;
+    const mine = keys.filter((key) => !(key in kept));
+    for (const key of mine) kept[key] = now;
+    try {
+      window.localStorage.setItem(NOTICE_CLAIMS_KEY, JSON.stringify(kept));
+    } catch {
+      // No storage: this tab raises what it has.
+    }
+    return mine;
+  };
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  if (locks?.request) {
+    try {
+      return await locks.request(NOTICE_CLAIMS_KEY, async () => claim());
+    } catch {
+      // Fall through.
+    }
+  }
+  return claim();
+}
+
+/**
+ * Which items raise a notice: a new thread always; a question unless its
+ * thread is the one open and visible (`onScreen`, false whenever the tab is
+ * not in front).
+ */
+export function notifiableItems(items: readonly NotifyItem[], onScreen: (threadId: string) => boolean): NotifyItem[] {
+  return items.filter((item) => item.fresh || !onScreen(item.threadId));
+}
+
+/**
+ * Whether a notice starts a new burst: the tab went from away to in front or
+ * back since the last one, or, in front, the last one is older than
+ * `FRONT_BURST_MS`.
+ */
+export function startsNewBurst(last: { front: boolean; at: number } | null, front: boolean, now: number): boolean {
+  if (!last || last.front !== front) return true;
+  return front && now - last.at > FRONT_BURST_MS;
 }
 
 export type AskKind = 'ask' | 'moved';
@@ -106,7 +230,7 @@ export interface InboxNotifications {
   ask: AskKind | null;
   /** Every event-stream line, before the debounced list read. */
   observe: (event: InboxEvent | null) => void;
-  /** After the list read that the lines triggered: raise what they brought. */
+  /** After a list read: raise what the lines brought (and remember the threads it shows). */
   flush: (list: ListModel) => void;
   turnOn: () => Promise<void>;
   notNow: () => void;
@@ -120,8 +244,17 @@ export function useInboxNotifications(options: {
   openList: () => void;
   /** New questions arrived (before any notification rule): the sound decides for itself (sound.ts). */
   onQuestions?: () => void;
-  /** The Inbox's own sound is on: notifications are raised silent, so there is one sound on every OS. */
-  silent?: () => boolean;
+  /**
+   * The Inbox's bell owns a question's sound (on, armed, no other Inbox tab in
+   * front). A notice about a question raised while this tab is away is then
+   * silent, so there is one sound on every OS; every other notice (a new
+   * thread that asks nothing, anything raised in front) keeps the system's.
+   */
+  bellCovers?: () => boolean;
+  /** Another Inbox tab is in front: it raises what arrives, so this one does not. */
+  otherTabInFront?: () => boolean;
+  /** The thread is open and visible (its pane mounted and not covered): a question in it raises nothing while in front. */
+  threadOnScreen?: (threadId: string) => boolean;
 }): InboxNotifications {
   const [permission, setPermission] = useState(currentPermission);
   const [askRaised, setAskRaised] = useState(false);
@@ -131,14 +264,22 @@ export function useInboxNotifications(options: {
   openRef.current = { thread: options.openThread, list: options.openList };
   const onSettingsRef = useRef(options.onSettings);
   onSettingsRef.current = options.onSettings;
-  const soundRef = useRef({ questions: options.onQuestions, silent: options.silent });
-  soundRef.current = { questions: options.onQuestions, silent: options.silent };
+  const soundRef = useRef({ questions: options.onQuestions, bellCovers: options.bellCovers });
+  soundRef.current = { questions: options.onQuestions, bellCovers: options.bellCovers };
+  const tabsRef = useRef({ onScreen: options.threadOnScreen, otherInFront: options.otherTabInFront });
+  tabsRef.current = { onScreen: options.threadOnScreen, otherInFront: options.otherTabInFront };
   const messages = useRef(new Map<string, { threadId: string; author: InboxAuthor }>());
   const counted = useRef(new Set<string>());
-  /** Message ids with a new question, waiting for the list read. */
-  const pending = useRef<string[]>([]);
-  /** The threads notified since the tab was last in front, with their project names. */
-  const away = useRef(new Map<string, string>());
+  /** Every thread a list read showed this page: a later line of one of those roots is never a new thread. */
+  const known = useRef(new Set<string>());
+  /** New questions (message id and claim key), waiting for the list read. */
+  const pending = useRef<{ messageId: string; key: string }[]>([]);
+  /** New threads an agent started, waiting for the list read. */
+  const pendingThreads = useRef<string[]>([]);
+  /** The threads of the current burst, with their project names and whether they ask. */
+  const burst = useRef(new Map<string, { project: string; asks: boolean }>());
+  /** When the last notice was raised, and whether the tab was in front then. */
+  const lastNotice = useRef<{ front: boolean; at: number } | null>(null);
 
   // A grant or block made in the browser's site settings shows without a reload.
   useEffect(() => {
@@ -158,7 +299,7 @@ export function useInboxNotifications(options: {
   // Back in front: the person sees the list, so the next notice starts a new burst.
   useEffect(() => {
     const back = () => {
-      if (pageInFront()) away.current.clear();
+      if (pageInFront()) burst.current.clear();
     };
     window.addEventListener('focus', back);
     document.addEventListener('visibilitychange', back);
@@ -181,69 +322,134 @@ export function useInboxNotifications(options: {
   const observe = useCallback((event: InboxEvent | null) => {
     if (!event) return;
     if (event.kind === 'message' && event.message.author.kind === 'agent') {
-      messages.current.set(event.message.id, { threadId: event.message.thread_id, author: event.message.author });
+      const message = event.message;
+      messages.current.set(message.id, { threadId: message.thread_id, author: message.author });
+      const id = `thread:${message.thread_id}`;
+      if (!counted.current.has(id) && isNewAgentThread(message, event.first, known.current)) {
+        counted.current.add(id);
+        pendingThreads.current.push(message.thread_id);
+      }
     } else if (event.kind === 'question') {
       const q = event.question;
       const id = `${q.message_id}/${q.key}`;
       // A new question is open at revision 0; a pick or a Send of an old one is not an item.
       if (q.state !== 'open' || q.revision !== 0 || counted.current.has(id)) return;
       counted.current.add(id);
-      pending.current.push(q.message_id);
+      pending.current.push({ messageId: q.message_id, key: id });
     }
   }, []);
 
-  const flush = useCallback((list: ListModel) => {
-    const items = pending.current;
-    pending.current = [];
-    if (items.length === 0) return;
-    // The threads these items landed in, newest last, with the agent that wrote.
-    const threads = new Map<string, InboxAuthor>();
-    for (const messageId of items) {
-      const message = messages.current.get(messageId);
-      if (message) threads.set(message.threadId, message.author);
+  /** Raise one notice for `items` (this tab claimed them), folding them into the burst. */
+  const raise = useCallback((items: NotifyItem[], rows: Map<string, InboxListRow>, front: boolean) => {
+    const at = Date.now();
+    if (startsNewBurst(lastNotice.current, front, at)) burst.current.clear();
+    lastNotice.current = { front, at };
+    // A thread the person has open on screen has been seen: it leaves the burst.
+    if (front) {
+      for (const threadId of [...burst.current.keys()]) if (tabsRef.current.onScreen?.(threadId) === true) burst.current.delete(threadId);
     }
-    if (threads.size === 0) return;
-    // The sound does not depend on notifications: off, not allowed or blocked, it still rings.
-    soundRef.current.questions?.();
-    const settings = settingsRef.current;
-    if (!settings || !settings.enabled || !supported()) return;
-    const now = Notification.permission;
-    setPermission(now);
-    if (now === 'default') {
-      setAskRaised(true);
-      return;
+    for (const item of items) {
+      const earlier = burst.current.get(item.threadId);
+      burst.current.delete(item.threadId);
+      burst.current.set(item.threadId, {
+        project: rows.get(item.threadId)?.project.name ?? 'Plannotator Inbox',
+        asks: item.asks || (earlier?.asks ?? false),
+      });
     }
-    if (now !== 'granted' || pageInFront()) return;
-    const rows = new Map(list.sections.flatMap((section) => section.threads).map((row) => [row.thread_id, row]));
-    for (const threadId of threads.keys()) away.current.set(threadId, rows.get(threadId)?.project.name ?? 'Plannotator Inbox');
     let text: { title: string; body: string };
     let open: () => void;
-    if (away.current.size === 1) {
-      const [threadId, author] = [...threads][0]!;
-      const row = rows.get(threadId);
+    if (burst.current.size <= 1) {
+      const item = items.at(-1)!;
+      const row = rows.get(item.threadId);
       text = threadNotificationText({
         project: row?.project.name ?? 'Plannotator Inbox',
-        agent: agentName(author),
+        agent: agentName(item.author),
         subject: row?.subject ?? '(no subject)',
         section: row?.section ?? null,
+        asks: burst.current.get(item.threadId)?.asks ?? item.asks,
       });
-      open = () => openRef.current.thread(threadId);
+      open = () => openRef.current.thread(item.threadId);
     } else {
-      text = burstNotificationText([...away.current.values()]);
+      const entries = [...burst.current.values()];
+      text = burstNotificationText(
+        entries.map((entry) => entry.project),
+        { waiting: entries.every((entry) => entry.asks) },
+      );
       open = () => openRef.current.list();
     }
+    // Silent only when the bell owns this notice's sound: a question, this tab away, the bell on and armed.
+    const silent = !front && items.some((item) => item.asks) && soundRef.current.bellCovers?.() === true;
     try {
-      const notification = new Notification(text.title, inboxNotificationOptions(text, { silent: soundRef.current.silent?.() === true }));
+      const notification = new Notification(text.title, inboxNotificationOptions(text, { silent }));
       notification.onclick = () => {
         window.focus();
         notification.close();
-        away.current.clear();
+        burst.current.clear();
+        lastNotice.current = null;
         open();
       };
     } catch {
       // A browser that only notifies through a service worker: nothing to show.
     }
   }, []);
+
+  const flush = useCallback(
+    (list: ListModel) => {
+      const questions = pending.current;
+      const fresh = pendingThreads.current;
+      pending.current = [];
+      pendingThreads.current = [];
+      const rowList = list.sections.flatMap((section) => section.threads);
+      for (const row of rowList) known.current.add(row.thread_id);
+      if (questions.length === 0 && fresh.length === 0) return;
+      // The threads these items landed in, newest last, with the agent that wrote.
+      const threads = new Map<string, NotifyItem>();
+      for (const threadId of fresh) {
+        const root = messages.current.get(threadId);
+        if (root) threads.set(threadId, { threadId, author: root.author, asks: false, fresh: true, keys: [`thread:${threadId}`] });
+      }
+      for (const { messageId, key } of questions) {
+        const message = messages.current.get(messageId);
+        if (!message) continue;
+        const before = threads.get(message.threadId);
+        threads.delete(message.threadId);
+        threads.set(message.threadId, {
+          threadId: message.threadId,
+          author: message.author,
+          asks: true,
+          fresh: before?.fresh ?? false,
+          keys: [...(before?.keys ?? []), key],
+        });
+      }
+      if (threads.size === 0) return;
+      const asks = [...threads.values()].some((item) => item.asks);
+      // The sound does not depend on notifications (off, not allowed or blocked, it still rings), and rings for questions only.
+      if (asks) soundRef.current.questions?.();
+      const settings = settingsRef.current;
+      if (!settings || !settings.enabled || !supported()) return;
+      const now = Notification.permission;
+      setPermission(now);
+      if (now === 'default') {
+        // The one-time ask, as before: a new question raises it.
+        if (asks) setAskRaised(true);
+        return;
+      }
+      if (now !== 'granted') return;
+      const front = pageInFront();
+      // Another Inbox tab in front raises it (and knows what it has on screen).
+      if (!front && tabsRef.current.otherInFront?.() === true) return;
+      const items = notifiableItems([...threads.values()], (threadId) => front && tabsRef.current.onScreen?.(threadId) === true);
+      if (items.length === 0) return;
+      const rows = new Map(rowList.map((row) => [row.thread_id, row]));
+      // Several tabs: each item goes to the first tab that claims it.
+      void claimNotices(items.flatMap((item) => item.keys)).then((claimed) => {
+        const mine = new Set(claimed);
+        const raised = items.filter((item) => item.keys.some((key) => mine.has(key)));
+        if (raised.length > 0) raise(raised, rows, front);
+      });
+    },
+    [raise],
+  );
 
   const turnOn = useCallback(async () => {
     if (!supported()) return;

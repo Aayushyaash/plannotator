@@ -440,6 +440,12 @@ export interface ThreadPaneProps {
   onSeen?: (throughSeq: number) => void;
   /** Something over the thread from outside the pane (a guided review, a dialog): nothing counts as seen. */
   covered?: boolean;
+  /**
+   * Whether this thread is visible: called with its id and whether anything
+   * covers it (from outside, or a file over it), and with null when the pane
+   * goes. Notifications skip a question in the thread on screen (notify.ts).
+   */
+  onScreenChange?: (state: { threadId: string; covered: boolean } | null) => void;
   /** The thread's list row as it is now: Mark read's state and whether it is offered. Null until the list has it. */
   row?: InboxListRow | null;
   /** Mark read, or move it back (the pressed button). Absent: no Mark read button. */
@@ -515,7 +521,7 @@ function useThreadAttachments(threadId: string, revision: unknown) {
   return { model, load, patch };
 }
 
-export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, decisions, onOpenDecisionPage, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, row, onMarkRead, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
+export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, decisions, onOpenDecisionPage, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
   // "Open in" (OpenIn.tsx): apps on this computer; a new tab only through the tailnet or on a phone.
   const openIn: OpenInSurface | undefined = phone || remote === true ? 'tab' : remote === null ? undefined : 'apps';
   const root = thread.messages[0]!;
@@ -1006,6 +1012,14 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
   );
   // On a phone the pill sits in the foot and covers none of the thread.
   useSeenOnSight({ bodyRef, candidates, covered: covered || fileCovers, pill: chrome.pill > 0 && !phone, onSeen: sawOne });
+  // The thread on screen, for notifications: a question in it raises nothing while it is visible.
+  const screenRef = useRef(onScreenChange);
+  screenRef.current = onScreenChange;
+  const paneCovered = covered || fileCovers;
+  useEffect(() => {
+    screenRef.current?.({ threadId: thread.thread_id, covered: paneCovered });
+  }, [thread.thread_id, paneCovered]);
+  useEffect(() => () => screenRef.current?.(null), []);
 
   // Arrivals while the thread is open: announced to a screen reader, drawn
   // with a short entrance, and, when the person is at the end of the thread,
