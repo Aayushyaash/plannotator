@@ -104,11 +104,11 @@ function ToastBody({ toast, phone }: { toast: InboxToastModel; phone: boolean })
 }
 
 interface Anchor {
-  /** The center, from the left of the toast's containing block. */
+  /** The window's center, from the left of the toast's containing block. */
   x: number;
   /** From the bottom of the toast's containing block. */
   bottom: number;
-  /** The width of what it sits over. */
+  /** The window's width (the toast keeps 16 px from each edge). */
   width: number;
 }
 
@@ -136,48 +136,70 @@ interface Placement {
   pending?: boolean;
 }
 
+/** The window's width, without a classic scrollbar. */
+function viewportWidth(): number {
+  return document.documentElement.clientWidth || window.innerWidth;
+}
+
 /**
- * Where the desktop toast sits:
+ * Where the desktop toast sits. Always centered on the window (owner's
+ * request: never on a pane); only its height follows what is open:
  * - a file covering the thread (full screen, or a window too narrow for
- *   both): centered over the file, 12 px above its foot strip;
- * - an open pane (a thread, a decision): centered over it, 12 px above its
- *   foot, so it never covers Reply or New message;
+ *   both): 12 px above the file's foot strip;
+ * - an open pane (a thread, a decision): 12 px above its foot, so it never
+ *   covers Reply or New message;
  * - a thread routed whose pane is still loading: pending;
- * - no pane: centered over the list near its bottom;
+ * - no pane: near the list's bottom;
  * - elsewhere (Settings): null, the window's bottom center (inbox.css).
  */
 function placeOver(host: HTMLElement, threadRouted: boolean): Placement {
   const box = host.getBoundingClientRect();
-  const at = (over: DOMRect, edge: number, gap: number): Anchor => ({
-    x: Math.round(over.left + over.width / 2 - box.left),
+  const vw = viewportWidth();
+  const at = (edge: number, gap: number): Anchor => ({
+    x: Math.round(vw / 2 - box.left),
     bottom: Math.round(box.bottom - edge + gap),
-    width: Math.round(over.width),
+    width: Math.round(vw),
   });
-  let pane: { el: Element; box: DOMRect; foot: Element; footBox: DOMRect } | null = null;
+  let pane: { el: Element; foot: Element; footBox: DOMRect } | null = null;
   for (const el of host.querySelectorAll('section.ib-pane')) {
     const foot = el.querySelector('.ib-pfoot');
-    const paneBox = shown(el);
     const footBox = shown(foot);
-    if (paneBox && footBox) {
-      pane = { el, box: paneBox, foot: foot!, footBox };
+    if (shown(el) && footBox) {
+      pane = { el, foot: foot!, footBox };
       break;
     }
   }
   const view = host.querySelector('.ib-view');
   const viewBox = shown(view);
-  if (view && viewBox && (view.classList.contains('ib-full') || !pane)) {
+  // The file's foot: whichever is higher of its stepping strip and an image's or a film's comment row
+  // ([data-image-composer], which grows as the person types), else full view's `--ib-fvfoot` (AttachmentPane).
+  const fileFoot = (view: Element, viewBox: DOMRect) => {
     const foot = view.querySelector('[data-view-foot]');
     const footBox = shown(foot);
-    // Full view has no foot strip: an image's or a film's comment row (`--ib-fvfoot`, AttachmentPane) is the foot.
-    const fvfoot = footBox ? 0 : parseFloat(getComputedStyle(view).getPropertyValue('--ib-fvfoot')) || 0;
-    return { anchor: at(viewBox, footBox?.top ?? viewBox.bottom - fvfoot, footBox ? TOAST_FOOT_GAP : TOAST_LIST_GAP), watch: footBox ? [view, foot!] : [view], overFile: true };
+    const row = view.querySelector('[data-image-composer]');
+    const rowBox = shown(row);
+    const watch = [view, ...(footBox ? [foot!] : []), ...(rowBox ? [row!] : [])];
+    const gap = footBox ? TOAST_FOOT_GAP : TOAST_LIST_GAP;
+    if (rowBox && (!footBox || rowBox.top < footBox.top)) return { top: rowBox.top, gap, watch };
+    if (footBox) return { top: footBox.top, gap, watch };
+    const fvfoot = parseFloat(getComputedStyle(view).getPropertyValue('--ib-fvfoot')) || 0;
+    return { top: viewBox.bottom - fvfoot, gap, watch };
+  };
+  if (view && viewBox && (view.classList.contains('ib-full') || !pane)) {
+    const file = fileFoot(view, viewBox);
+    return { anchor: at(file.top, file.gap), watch: file.watch, overFile: true };
   }
-  if (pane) return { anchor: at(pane.box, pane.footBox.top, TOAST_FOOT_GAP), watch: [pane.el, pane.foot] };
+  if (pane) {
+    // A file beside the thread: centered on the window the toast may sit over the file, so it clears both feet.
+    const file = view && viewBox ? fileFoot(view, viewBox) : null;
+    const top = file ? Math.min(pane.footBox.top, file.top - file.gap + TOAST_FOOT_GAP) : pane.footBox.top;
+    return { anchor: at(top, TOAST_FOOT_GAP), watch: [pane.el, pane.foot, ...(file?.watch ?? [])] };
+  }
   if (threadRouted) return { anchor: null, watch: [], pending: true };
   const list = host.querySelector('.ib-listcol');
   const listBox = shown(list);
   if (!listBox) return { anchor: null, watch: [] };
-  return { anchor: at(listBox, listBox.bottom, TOAST_LIST_GAP), watch: [list!] };
+  return { anchor: at(listBox.bottom, TOAST_LIST_GAP), watch: [list!] };
 }
 
 interface Placed {

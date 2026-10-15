@@ -307,14 +307,18 @@ test('Mark read on a thread an agent is stopped on warns with Reply; Z undoes it
   const toast = page.locator('[data-inbox-toast]');
   await expect(toast).toContainText('Claude Code was stopped');
   await expect(toast.getByRole('button', { name: 'Reply' })).toBeVisible();
-  // One 40 px line, no close, centered over the thread pane 12 px above its foot (never over Reply).
+  // One 40 px line, no close, centered on the window (not the thread pane) 12 px above the pane's foot (never over Reply).
   await expect(toast.getByRole('button')).toHaveCount(2);
   await toast.evaluate((el) => Promise.all(el.getAnimations().map((a) => a.finished)).then(() => undefined));
   const [toastBox, paneBox, footBox] = await Promise.all([toast.boundingBox(), page.locator('section.ib-pane').boundingBox(), page.locator('section.ib-pane .ib-pfoot').boundingBox()]);
   expect(toastBox!.height).toBe(40);
   expect(toastBox!.width).toBeLessThanOrEqual(520);
-  expect(Math.abs(toastBox!.x + toastBox!.width / 2 - (paneBox!.x + paneBox!.width / 2))).toBeLessThanOrEqual(1);
+  const viewport = page.viewportSize()!;
+  expect(Math.abs(toastBox!.x + toastBox!.width / 2 - viewport.width / 2)).toBeLessThanOrEqual(1);
+  // The list sits beside the thread, so the window's center is not the pane's.
+  expect(Math.abs(paneBox!.x + paneBox!.width / 2 - viewport.width / 2)).toBeGreaterThan(40);
   expect(Math.abs(footBox!.y - (toastBox!.y + toastBox!.height) - 12)).toBeLessThanOrEqual(1);
+  expect(toastBox!.y + toastBox!.height).toBeLessThan(footBox!.y);
   await expect(page.locator('[data-mark-read]')).toHaveAttribute('aria-pressed', 'true');
   await shot('07-stopped-warning', ['light', 'dark']);
   await page.locator('body').press('z');
@@ -334,12 +338,12 @@ test('the row hover action marks read without opening the thread; its Undo puts 
   await action.click();
   await expect(page.locator('section.ib-pane')).toHaveCount(0);
   await expect.poll(() => sectionOf(page, threads.news)).toBe('quiet');
-  // No thread open: centered over the list, near its bottom.
+  // No thread open: centered on the window, near the list's bottom.
   const toast = page.locator('[data-inbox-toast]');
   await expect(toast).toContainText('Moved to Quiet');
   await toast.evaluate((el) => Promise.all(el.getAnimations().map((a) => a.finished)).then(() => undefined));
   const [toastBox, listBox] = await Promise.all([toast.boundingBox(), page.locator('.ib-listcol').boundingBox()]);
-  expect(Math.abs(toastBox!.x + toastBox!.width / 2 - (listBox!.x + listBox!.width / 2))).toBeLessThanOrEqual(1);
+  expect(Math.abs(toastBox!.x + toastBox!.width / 2 - page.viewportSize()!.width / 2)).toBeLessThanOrEqual(1);
   expect(Math.abs(listBox!.y + listBox!.height - (toastBox!.y + toastBox!.height) - 20)).toBeLessThanOrEqual(1);
   await toast.getByRole('button', { name: /Undo/ }).click();
   await expect.poll(() => sectionOf(page, threads.news)).toBe('new');
