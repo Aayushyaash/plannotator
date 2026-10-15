@@ -18,8 +18,8 @@ import { ATTACHMENT_FEEDBACK_HEADING, GUIDE_FEEDBACK_TITLE } from './attachments
 export const SKILL_REF_HIGHLIGHT = 'ib-skill-ref';
 export const SKILL_REF_HUMAN_HIGHLIGHT = 'ib-skill-ref-human';
 
-/** Text the references are never found in: code, the folded block itself, and form fields. */
-const SKIP = 'pre, code, [data-skills-line], [data-fold-head], script, style, textarea';
+/** Text the references are never found in: code, the folded block itself, a message's head row (folded or open), and form fields. */
+const SKIP = 'pre, code, [data-skills-line], [data-fold-head], [data-open-head], script, style, textarea';
 
 /**
  * Where the person's own words end: the first heading of what the Send wrote

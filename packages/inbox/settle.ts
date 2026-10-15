@@ -66,6 +66,13 @@ export const SETTLE_LEAVE_MS = 160;
 export const SETTLE_ENTER_MS = 160;
 export const SETTLE_ENTER_DELAY_MS = 120;
 export const SETTLE_EASE_OUT = 'cubic-bezier(0.23, 1, 0.32, 1)';
+/**
+ * Show's light on the rows it brought in (inbox.css `ib-lit`): it starts once
+ * the rows have slid into place (the move, and the entering rows' delayed
+ * fade), lasts its hold and its fade, and is then taken off.
+ */
+export const SHOW_LIT_AFTER_SLIDE_MS = Math.max(SETTLE_MOVE_MS, SETTLE_ENTER_DELAY_MS + SETTLE_ENTER_MS);
+export const SHOW_LIT_MS = 1500;
 /** The id every settle animation carries, so a new settle can cancel the last one's. */
 export const SETTLE_ANIMATION_ID = 'ib-settle';
 

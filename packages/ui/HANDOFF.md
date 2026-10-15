@@ -2311,6 +2311,10 @@ For the Plannotator Inbox's one viewer (approval "inbox-image-viewer", 2026-10-1
 - **`ImageLightbox`** gains **`images?: LightboxImage[]`** (`{ src, alt, section? }`): with two or more it is a full-screen stepping view ("2 of 4 · in “Options”", ← → and `]` `[`, the end note, Actual size, the pill and the peek); without it, the same single-image overlay byte for byte. Also exported: `collectDocumentImages(container)` and `lightboxImageName(image)`.
 - **`Viewer`** gains **`imageLightboxStepping?: boolean`** (the lightbox steps through every zoomable image of the rendered document; Plannotator's plan review and annotate pass it) and **`onImageClick?: (src, alt) => void`** (the host takes image clicks and no lightbox opens; the Inbox opens a message's captured image in its own viewer). Both absent: unchanged.
 
+## `Tooltip` `shouldOpen` (ui, next publish; additive, no core change)
+
+**`Tooltip`** (`components/Tooltip`) gains **`shouldOpen?: (trigger: Element) => boolean`**, asked each time the tooltip would open; `false` keeps it closed that time (Base UI's `onOpenChange` with `cancel()`). Unset, it always opens, as before. The Inbox passes a check that the trigger's text is cut (`scrollWidth > clientWidth`), so a list row's thread label and subject show their whole text only while they are cut.
+
 ## The law (guardrails for anyone editing `@plannotator/ui`)
 
 These are enforced socially and, where possible, by CI. They exist because a prior from-scratch reimplementation of this UI broke the app and was reverted.

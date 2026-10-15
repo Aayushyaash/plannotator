@@ -245,7 +245,8 @@ test('one live session: the box opens addressed to it (5.1); Send delivers once 
   // The person's message in the thread, addressed to that session, waiting for its turn.
   const mine = pane.locator('article.ib-message[data-author="person"]');
   await expect(mine).toHaveCount(1);
-  await expect(mine.locator('.ib-who')).toHaveText('You in ledger');
+  await expect(mine.locator('.ib-who')).toHaveText('You');
+  await expect(mine.locator('.ib-fl-meta')).toContainText('in ledger');
   await expect(mine.locator('.ib-to')).toHaveText('to Pi');
   await expect(mine).toContainText(words);
   const command = await waitFor('the message command', () => writer.commands[0]);

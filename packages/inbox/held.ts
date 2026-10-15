@@ -111,6 +111,23 @@ export function heldNotice(
 }
 
 /**
+ * The rows Show brings in (design record "inbox-polish", item 6): each row of
+ * `latest` the list on screen lacks, or that carries agent activity the row on
+ * screen does not show (so it moved or changed). A row that stays as it was,
+ * or that changed only by the person's own hand (already shown in place), is
+ * not one of them.
+ */
+export function showBroughtIn(shown: readonly InboxListSection[], latest: readonly InboxListSection[]): Set<string> {
+  const before = rowsById(shown);
+  const out = new Set<string>();
+  for (const row of rowsById(latest).values()) {
+    const old = before.get(row.thread_id);
+    if (old === undefined || hasNewAgentActivity(old, row)) out.add(row.thread_id);
+  }
+  return out;
+}
+
+/**
  * The held list with each row's own state brought up to date in place. The
  * rows keep their sections and their order, which wait for an action; but a
  * row whose thread changed without new agent activity (the reply was

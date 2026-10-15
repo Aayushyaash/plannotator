@@ -171,7 +171,7 @@ test.skipIf(!hasDom)('an agent message with files says so in its "to you" line, 
   const el = await openThread();
   const first = countOf(el, ids.files.first)!;
   // The quiet count, beside "to you": 3 attachments · 1 changed (plan.html was edited after it was sent).
-  expect(first.closest('.ib-to')?.textContent).toContain('to you');
+  expect(first.closest('.ib-fl-meta')?.textContent).toContain('to you');
   expect(words(first).replace(/\s*·\s*/g, ' · ')).toBe('3 attachments · 1 changed');
   expect(first.getAttribute('aria-label')).toBe('3 attachments, 1 changed');
   // A disclosure that starts closed, naming the band it opens.
@@ -185,14 +185,14 @@ test.skipIf(!hasDom)('an agent message with files says so in its "to you" line, 
   expect(countOf(el, ids.files.last)!.getAttribute('aria-label')).toBe('1 attachment');
   // The message with no files keeps its header as it was.
   expect(countOf(el, ids.files.middle)).toBeNull();
-  expect(article(el, ids.files.middle).querySelector('.ib-to-files')).toBeNull();
+  expect(article(el, ids.files.middle).querySelector('.ib-fl-meta .ib-hcount')).toBeNull();
   // The foot tiles are there as always.
   expect(article(el, ids.files.first).querySelectorAll('.ib-attachments:not(.ib-hatts-tiles) [data-attachment-id]')).toHaveLength(3);
 });
 
 test.skipIf(!hasDom)('a thread whose messages carry no files has no count; a one-message thread shows it in the sender line itself', async () => {
   const plain = await renderApp(`#thread=${ids.waiting}`);
-  await until(() => plain.querySelector('.ib-sender') !== null, 'the thread');
+  await until(() => plain.querySelector('[data-open-head]') !== null, 'the thread');
   expect(plain.querySelector('[data-header-files]')).toBeNull();
   expect(plain.querySelector('[data-header-band]')).toBeNull();
   act(() => root?.unmount());

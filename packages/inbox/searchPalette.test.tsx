@@ -401,7 +401,12 @@ test.skipIf(!hasDom)('recent searches: a click runs one, Clear forgets them', as
 
 test.skipIf(!hasDom)('the landing highlight finds the words in the text, not in the message header', () => {
   const article = document.createElement('article');
-  article.innerHTML = '<div data-fold-head>Claude Code retry</div><p>The first <b>retry</b> waits; a retry budget holds. Résumé.</p>';
+  // An open message's head row as Thread.tsx draws it: its text sits beside the fold button, not inside it.
+  article.innerHTML =
+    '<div class="ib-fline ib-is-open" data-open-head=""><button type="button" class="ib-fl-hit" data-fold-head="" aria-label="Claude Code retry"></button>' +
+    '<span class="ib-fl-nm ib-who"><bdi>Claude Code retry</bdi></span><span class="ib-fl-meta"><span class="ib-fl-in">in <bdi>retry-budget</bdi> </span>' +
+    '<span class="ib-fl-to"><span class="ib-to-sep">·</span> <span class="ib-to">to you</span></span></span></div>' +
+    '<div class="ib-msg"><p>The first <b>retry</b> waits; a retry budget holds. Résumé.</p></div>';
   const ranges = searchHitRanges(article, ['retry', 'budget', 'resume']);
   expect(ranges.map((r) => r.toString())).toEqual(['retry', 'retry', 'budget', 'Résumé']);
 });

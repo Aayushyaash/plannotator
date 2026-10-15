@@ -28,7 +28,7 @@ import {
   type UpdateDetails,
   type WhatsNewModel,
 } from './api';
-import { filterSections, heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread, waitingCount, type OpenThread } from './held';
+import { filterSections, heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread, showBroughtIn, waitingCount, type OpenThread } from './held';
 import {
   captureSettle,
   COVERED_LIST_SETTLES,
@@ -38,6 +38,8 @@ import {
   rowInSlot,
   SETTLE_AFTER_SIDEBAR_MS,
   SETTLE_BEAT_MS,
+  SHOW_LIT_AFTER_SLIDE_MS,
+  SHOW_LIT_MS,
   stopSettle,
   type SettleSnapshot,
 } from './settle';
@@ -490,6 +492,21 @@ function Inbox() {
     const body = prefersReducedMotion() ? null : listBody(rootRef.current);
     slideFrom.current = body ? captureSettle(body) : null;
   }, []);
+  /**
+   * Show's brief light (design record "inbox-polish", item 6): the list on
+   * screen when Show was pressed, until the list it brings in is drawn; then
+   * the rows it brought in (held.ts showBroughtIn) light up where they landed,
+   * once they have slid into place, and the light is taken off after it fades.
+   * Only Show lights rows: not a thread's close, not the first load.
+   */
+  const showFrom = useRef<InboxListSection[] | null>(null);
+  const [lit, setLit] = useState<ReadonlySet<string>>(() => new Set());
+  const litTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const clearLit = useCallback(() => {
+    for (const timer of litTimers.current) clearTimeout(timer);
+    litTimers.current = [];
+  }, []);
+  useEffect(() => clearLit, [clearLit]);
   /** The settle waiting out its beat after a thread closed (settle.ts). */
   const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /**
@@ -1752,6 +1769,20 @@ function Inbox() {
     slideFrom.current = null;
     const order = from?.order ?? listOrder.current;
     if (body && from) playSettle(body, from);
+    const showBefore = showFrom.current;
+    showFrom.current = null;
+    if (showBefore && shown) {
+      const ids = showBroughtIn(showBefore, shown);
+      clearLit();
+      setLit(new Set());
+      if (ids.size > 0) {
+        const start = from ? SHOW_LIT_AFTER_SLIDE_MS : 0;
+        litTimers.current.push(
+          setTimeout(() => setLit(ids), start),
+          setTimeout(() => setLit(new Set()), start + SHOW_LIT_MS),
+        );
+      }
+    }
     const shownAll = focusAfterShow.current;
     focusAfterShow.current = false;
     const gone = listFocus.current;
@@ -1925,6 +1956,7 @@ function Inbox() {
           // A stacked thread covers the list, which keeps its own width (and scroll) under it.
           narrow={route.thread !== null && !stack.thread}
           selectedThreadId={route.thread}
+          lit={lit}
           notice={notice}
           ask={
             notifications.ask && soundDialog === 'none' && agentNote === 'none' ? (
@@ -1940,6 +1972,7 @@ function Inbox() {
             // Show's line goes away with the press: after a key, focus goes to the first row it brought in.
             focusAfterShow.current = lastInput === 'keyboard';
             listOrder.current = [...(listBody(rootRef.current)?.querySelectorAll('[data-thread-id]') ?? [])].map((el) => el.getAttribute('data-thread-id')!);
+            if (latestRef.current) showFrom.current = shown;
             settleList('all', true);
           }}
           onOpen={openRow}

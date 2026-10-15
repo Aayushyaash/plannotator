@@ -31,6 +31,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync,
 import { join, resolve } from 'node:path';
 import { DEMO_MESSAGES, SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
+import { cutInHeadRow } from './head-row';
 
 const repo = resolve(__dirname, '../..');
 const builtBinary = resolve(process.env.PLANNOTATOR_E2E_BINARY ?? join(repo, '.local/plannotator'));
@@ -869,10 +870,23 @@ test('the header says the message has files: its count opens the same tiles unde
   const pane = page.locator(`[data-attachment-pane="${world.attachments.plan}"]`);
   await expect(pane).toBeVisible();
   expect(page.url()).toContain(`file=${world.attachments.plan}`);
+  // The thread beside the file is 440 px: the head row goes to two lines, and the count is drawn whole (inbox-polish, item 5).
+  expect(Math.round((await page.locator('section.ib-pane').first().boundingBox())!.width)).toBe(440);
+  expect(await cutInHeadRow(count)).toBeNull();
+  expect(await cutInHeadRow(count.locator('.ib-hflag'))).toBeNull();
   await pane.getByRole('button', { name: 'Close retry-plan.md' }).click();
   await expect(pane).toHaveCount(0);
   await count.click();
   await expect(band).toBeHidden();
+  // A thread pane of about 568 px (a 1180 px window beside the list): still whole.
+  await page.setViewportSize({ width: 1180, height: 900 });
+  try {
+    await expect.poll(async () => Math.round((await page.locator('section.ib-pane').boundingBox())!.width)).toBeLessThan(600);
+    expect(await cutInHeadRow(count)).toBeNull();
+    expect(await cutInHeadRow(count.locator('.ib-hflag'))).toBeNull();
+  } finally {
+    await page.setViewportSize({ width: 1440, height: 900 });
+  }
 });
 
 test('Send carries the picks and then the annotations as feedback; wait_for_reply returns both', async () => {

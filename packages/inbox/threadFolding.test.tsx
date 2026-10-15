@@ -324,6 +324,36 @@ test.skipIf(!hasDom)('opening a line keeps it where it was: the scroll moves by 
   expect(document.activeElement).toBe(article(el, 'msg_A3')!.querySelector('[data-fold-head]'));
 });
 
+test.skipIf(!hasDom)("a message's head is one row folded or open: the mark, the name and the time keep their cells; only the third column swaps, and only a body the person opened fades in", async () => {
+  const el = await render(seven());
+  const cells = (row: Element) => [...row.querySelectorAll(':scope > *, :scope > .ib-a11y-skip > *')].map((c) => c.className).filter((c) => c !== 'ib-a11y-skip' && c !== 'ib-fl-hit');
+  const folded = article(el, 'msg_A3')!.querySelector('.ib-fline')!;
+  const foldedMark = folded.querySelector('.ib-mk')!.className;
+  const foldedName = folded.querySelector('.ib-fl-nm')!.textContent;
+  expect(cells(folded)).toEqual(['ib-mk ib-big', 'ib-fl-nm', 'ib-fl-sn', 'ib-fl-chips', 'ib-fl-tm']);
+
+  act(() => article(el, 'msg_A3')!.querySelector<HTMLButtonElement>('[data-fold-head]')!.click());
+  const open = article(el, 'msg_A3')!.querySelector('[data-open-head]')!;
+  // The same row: the mark the same size (its classes), the name in the same cell, the snippet's column now
+  // says where it was sent and to whom, the time last.
+  expect(open.classList.contains('ib-fline')).toBe(true);
+  expect(cells(open)).toEqual(['ib-mk ib-big', 'ib-fl-nm ib-who', 'ib-fl-meta', 'ib-fl-chips', 'ib-fl-tm']);
+  expect(open.querySelector('.ib-mk')!.className).toBe(foldedMark);
+  expect(open.querySelector('.ib-fl-nm')!.textContent).toBe(foldedName);
+  expect(open.querySelector('.ib-fl-meta')!.textContent).toBe('in docs-site · to you');
+  // The fold button lies under the row; the row's text is its label's, hidden from screen readers.
+  const hit = open.querySelector('.ib-fl-hit')!;
+  expect(hit.getAttribute('data-fold-head')).toBe('');
+  expect(hit.getAttribute('aria-expanded')).toBe('true');
+  expect(open.querySelector('.ib-fl-nm')!.getAttribute('aria-hidden')).toBe('true');
+  // The body the person opened fades in; one open from the first draw does not.
+  expect(article(el, 'msg_A3')!.querySelector('.ib-msg')!.hasAttribute('data-revealed')).toBe(true);
+  expect(article(el, 'msg_A4')!.querySelector('.ib-msg')!.hasAttribute('data-revealed')).toBe(false);
+  // Folding is instant, and the line is the folded row again.
+  act(() => (hit as HTMLButtonElement).click());
+  expect(cells(article(el, 'msg_A3')!.querySelector('.ib-fline')!)).toEqual(['ib-mk ib-big', 'ib-fl-nm', 'ib-fl-sn', 'ib-fl-chips', 'ib-fl-tm']);
+});
+
 test.skipIf(!hasDom)('the thread opens at the divider with the last read line above it; with nothing new it opens at the top', async () => {
   // Every top-level element of the thread is 50px under the one before it.
   stub(HTMLElement.prototype, 'offsetTop', {
@@ -433,7 +463,13 @@ test.skipIf(!hasDom)('a one-message thread looks as it always did: no fold butto
   expect(el.querySelector('.ib-newtag')).toBeNull();
   expect(el.querySelector('[data-new-pill]')).toBeNull();
   expect(el.querySelector('.ib-pbody')!.classList.contains('ib-folding')).toBe(false);
-  expect(article(el, ROOT)!.querySelector('.ib-who')!.textContent).toBe('Claude Code in docs-site');
+  // The same head row as every other message (inbox-polish, item 5), with nothing to fold.
+  const head = article(el, ROOT)!.querySelector('[data-open-head]')!;
+  expect(head.classList.contains('ib-fline')).toBe(true);
+  expect(head.querySelector('.ib-who')!.textContent).toBe('Claude Code');
+  expect(head.querySelector('.ib-fl-meta')!.textContent).toBe('in docs-site · to you');
+  expect(head.querySelector('.ib-fl-nm')!.hasAttribute('aria-hidden')).toBe(false);
+  expect(head.querySelector('.ib-fl-in')!.hasAttribute('aria-hidden')).toBe(false);
 });
 
 test.skipIf(!hasDom)('a payload without seqs (an older Inbox) folds nothing and marks nothing new', async () => {

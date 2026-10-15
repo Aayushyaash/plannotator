@@ -25,8 +25,8 @@ function registry(): { highlights: HighlightRegistry; Highlight: new (...ranges:
   return { highlights: css.highlights, Highlight };
 }
 
-/** The ranges of `terms` in the text under `root`, skipping what `skip` matches (a message's header). */
-export function searchHitRanges(root: Node, terms: readonly string[], skip = '[data-fold-head], script, style, textarea'): Range[] {
+/** The ranges of `terms` in the text under `root`, skipping what `skip` matches (a message's head row, folded or open). */
+export function searchHitRanges(root: Node, terms: readonly string[], skip = '[data-fold-head], [data-open-head], script, style, textarea'): Range[] {
   const out: Range[] = [];
   if (terms.length === 0) return out;
   const doc = root.ownerDocument ?? document;

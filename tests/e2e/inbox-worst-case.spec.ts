@@ -218,15 +218,23 @@ test('the names: real folder names, a parent folder for two "api", days and year
     // No subject is cut inside a character (row 26).
     for (const subject of await page.locator('.ib-lbody .ib-st').allTextContents()) expect(subject).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
     // Hovered, what the list cuts with "…" has its full text as its title, and what it does not cut has none (row 23).
+    // The subject and the thread label show ui's tooltip instead, only while cut, and never a title as well (inbox-polish, item 3).
     const titles = await page.evaluate(() =>
       [...document.querySelectorAll<HTMLElement>('.ib-lbody .ib-st, .ib-lbody .ib-keyt, .ib-lbody .ib-p')].map((el) => {
         el.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
-        return { cut: el.scrollWidth > el.clientWidth + 1, text: el.textContent, title: el.getAttribute('title') };
+        return { tooltip: !el.classList.contains('ib-p'), cut: el.scrollWidth > el.clientWidth + 1, text: el.textContent, title: el.getAttribute('title') };
       }),
     );
     expect(titles.filter((t) => t.cut).length, 'the seed cuts something in this list').toBeGreaterThan(0);
-    expect(titles.filter((t) => t.cut && t.title !== t.text)).toEqual([]);
-    expect(titles.filter((t) => !t.cut && t.title !== null)).toEqual([]);
+    expect(titles.filter((t) => !t.tooltip && t.cut && t.title !== t.text)).toEqual([]);
+    expect(titles.filter((t) => (t.tooltip || !t.cut) && t.title !== null)).toEqual([]);
+    const cutIndex = titles.filter((t) => t.tooltip).findIndex((t) => t.cut);
+    expect(cutIndex, 'a cut subject or label').toBeGreaterThanOrEqual(0);
+    const cut = page.locator('.ib-lbody :is(.ib-st, .ib-keyt)').nth(cutIndex);
+    const full = titles.filter((t) => t.tooltip)[cutIndex]!.text!;
+    await cut.hover();
+    // The tooltip is portaled out of the window's root.
+    await expect(page.locator('body > :not(#root)').getByText(full, { exact: true })).toBeVisible();
     // A long project name and its folder stay in the 60 px header (row 25).
     await page.goto(`${world.url}/#project=${world.ids.long}&thread=${world.seed.threads.multiDay}`);
     await page.waitForSelector('section.ib-pane');

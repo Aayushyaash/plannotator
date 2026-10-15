@@ -488,7 +488,10 @@ test('a long thread name plus the Guided review mark never pushes a row out of s
             limit: wideRow ? box('.ib-c').left : el.getBoundingClientRect().right,
             keyRight: box('.ib-key').right,
             keyWidth: box('.ib-key').width,
-            keyTruncated: nameEl.scrollWidth > nameEl.clientWidth,
+            // Cut on one line with "…", or (a phone's row, which wraps the name) clamped at two lines.
+            keyTruncated: nameEl.scrollWidth > nameEl.clientWidth + 1 || nameEl.scrollHeight > nameEl.clientHeight + 1,
+            keyLines: Math.round(nameEl.getBoundingClientRect().height / parseFloat(getComputedStyle(nameEl).lineHeight)),
+            mailRow: el.classList.contains('ib-mrow'),
             markRight: box('[data-guide-mark]').right,
             subjectShown: Math.min(subject.right, line.right) - subject.left,
           };
@@ -502,7 +505,11 @@ test('a long thread name plus the Guided review mark never pushes a row out of s
         expect(measured.lineRight, `the subject line runs into the count ${where}`).toBeLessThanOrEqual(measured.limit);
         // The chip is shown with some of its name, or left out: never a bare border.
         expect(measured.keyWidth === 0 || measured.keyWidth >= 24, `the thread chip is squeezed to its border (${measured.keyWidth}px) ${where}`).toBe(true);
-        if (name.length === 120 && measured.keyWidth > 0) expect(measured.keyTruncated, `the thread chip keeps its ellipsis ${where}`).toBe(true);
+        // A row's chip cuts a long name with "…" on one line. A phone's row (the mail row) wraps it instead
+        // (inbox-polish, item 3): at most two lines, and a name that needs more is clamped there with "…"
+        // (the 120-character name fits two lines at 520 px and wider, and needs three at 360 px).
+        if (name.length === 120 && measured.keyWidth > 0 && (!measured.mailRow || width <= 400)) expect(measured.keyTruncated, `the thread chip keeps its ellipsis ${where}`).toBe(true);
+        expect(measured.keyWidth === 0 || measured.keyLines <= (measured.mailRow ? 2 : 1), `the thread chip's name runs past its lines ${where}`).toBe(true);
       }
     }
   }

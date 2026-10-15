@@ -32,6 +32,7 @@ import {
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
 import { NO_BROWSER } from '../helpers/no-browser';
+import { cutInHeadRow } from './head-row';
 
 const repo = resolve(__dirname, '../..');
 const binary = resolve(process.env.PLANNOTATOR_E2E_BINARY ?? join(repo, '.local/plannotator'));
@@ -200,6 +201,24 @@ test('the asking session stopped and another is live: the thread says so, Send a
   await expect(note).toBeVisible({ timeout: 100_000 });
   await expect(note).toHaveText('The Pi session that asked has ended. When you send, you can pick a live session in ledger to take your reply.');
   await expect(pane.locator('article.ib-message[data-author="agent"] .ib-to').first()).toHaveText('to you · session ended');
+  // "session ended" is drawn whole in the head row in a narrow thread too (inbox-polish, item 5): a thread of
+  // about 568 px (a 1180 px window beside the list) and one of 440 px (the width beside an open file).
+  const ended = pane.locator('article.ib-message[data-author="agent"] [data-session-ended]').first();
+  expect(await cutInHeadRow(ended)).toBeNull();
+  await page.setViewportSize({ width: 1180, height: 900 });
+  const narrow = await page.addStyleTag({ content: '/* a 440 px thread, below */' });
+  try {
+    await expect.poll(async () => Math.round((await pane.boundingBox())!.width)).toBeLessThan(600);
+    expect(await cutInHeadRow(ended)).toBeNull();
+    await narrow.evaluate((style) => {
+      style.textContent = 'section.ib-pane { flex: none !important; width: 440px !important; }';
+    });
+    await expect.poll(async () => Math.round((await pane.boundingBox())!.width)).toBe(440);
+    expect(await cutInHeadRow(ended)).toBeNull();
+  } finally {
+    await narrow.evaluate((style) => style.remove());
+    await page.setViewportSize({ width: 1440, height: 900 });
+  }
 
   await pane.getByText('Retry 3 times with backoff').click();
   await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M, not sent$/)).toBeVisible();

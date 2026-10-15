@@ -345,10 +345,30 @@ test('phone (WebKit, iPhone 15): an arrival under New message\'s sheet is not se
     const article = page.locator(`[data-message-article="${arrived.message_id}"]`);
     await expect(article).toHaveCount(1);
     await expect.poll(() => isBold(page, id)).toBe(true);
-    // The view followed it to the end: its first lines are inside the thread's view, under the sheet.
+    // The view followed it to the end (a smooth scroll; wait until it stops). The follow brings the first lines
+    // above the foot, not above the sheet, so with the phone's two-line head row (inbox-polish, item 5) the
+    // top of the head can show above the sheet's edge; the rule's lower sample point is still under the sheet,
+    // so it is not seen either way. Here the arrival is placed wholly under the sheet, inside the thread's view.
+    const scrollTop = () => body.evaluate((b) => b.scrollTop);
+    await expect
+      .poll(async () => {
+        const before = await scrollTop();
+        await page.waitForTimeout(200);
+        return before === (await scrollTop());
+      })
+      .toBe(true);
+    // Where the follow left it (partly above the sheet, or under it), it is not seen.
+    await page.waitForTimeout(DWELL_MS + 1200);
+    expect((await storeRow(id)).unseen).toBe(1);
+    await article.evaluate((a) => {
+      const body = a.closest('.ib-pbody') as HTMLElement;
+      const sheetTop = document.querySelector('[data-not-running]')!.getBoundingClientRect().top;
+      const headTop = (a.querySelector('.ib-fline') ?? a).getBoundingClientRect().top;
+      if (headTop < sheetTop + 16) body.scrollTop -= sheetTop + 16 - headTop;
+    });
     const under = await article.evaluate((a) => {
       const view = a.closest('.ib-pbody')!.getBoundingClientRect();
-      const r = (a.querySelector('.ib-sender') ?? a).getBoundingClientRect();
+      const r = (a.querySelector('.ib-fline') ?? a).getBoundingClientRect();
       const hit = document.elementFromPoint(r.left + r.width / 2, r.top + 8);
       return { inView: r.top >= view.top && r.bottom <= view.bottom, covered: hit !== null && hit.closest('[data-not-running]') !== null };
     });
@@ -361,6 +381,8 @@ test('phone (WebKit, iPhone 15): an arrival under New message\'s sheet is not se
     // The sheet closes (a press outside it): now it is on screen, and seen a second later.
     await body.dispatchEvent('mousedown');
     await expect(sheet).toHaveCount(0);
+    // Back at the end of the thread, where the follow had put it.
+    await body.evaluate((b) => (b.scrollTop = b.scrollHeight));
     await expect.poll(async () => (await storeRow(id)).unseen, { timeout: 6000 }).toBe(0);
     await expect.poll(() => isBold(page, id)).toBe(false);
     await shot(page, '11-phone-sheet-closed-seen');

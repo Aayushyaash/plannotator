@@ -126,7 +126,7 @@ beforeEach(() => {
       const box = article ? (boxes[article.getAttribute('data-message-article')!] ?? { top: 5000, height: 300 }) : null;
       if (!box) return rect(0, 0);
       // The sender row: the top 30 px of its message.
-      if (this.classList.contains('ib-sender') || this.classList.contains('ib-fline')) return rect(box.top, 30);
+      if (this.classList.contains('ib-fline')) return rect(box.top, 30);
       return this === article ? rect(box.top, box.height) : rect(box.top, 0);
     },
   });
@@ -136,7 +136,7 @@ beforeEach(() => {
       if (covers.some((c) => y >= c.top && y < c.bottom)) return coverElement;
       for (const article of document.querySelectorAll<HTMLElement>('[data-message-article]')) {
         const box = boxes[article.getAttribute('data-message-article')!];
-        if (box && y >= box.top && y < box.top + box.height) return article.querySelector('.ib-sender, .ib-fline') ?? article;
+        if (box && y >= box.top && y < box.top + box.height) return article.querySelector('.ib-fline') ?? article;
       }
       return document.querySelector('.ib-pbody');
     },
@@ -498,7 +498,7 @@ describe.skipIf(!hasDom)('seen on sight in the thread pane', () => {
     const article = document.createElement('article');
     article.setAttribute('data-message-article', 'msg_X');
     const sender = document.createElement('div');
-    sender.className = 'ib-sender';
+    sender.className = 'ib-fline';
     article.appendChild(sender);
     document.body.appendChild(article);
     try {

@@ -384,7 +384,7 @@ for (const phone of [
       await shot(page, '4-thread');
       expect(await sideways(page)).toEqual([]);
       expect(await overlaps(page, '.ib-phead', '.ib-pback, .ib-phsubj[data-on], .ib-iconbtn, .ib-ptool')).toEqual([]);
-      expect(await overlaps(page, '.ib-sender', '.ib-mk, .ib-whobox, .ib-tm')).toEqual([]);
+      expect(await overlaps(page, '.ib-fline.ib-is-open', '.ib-mk, .ib-fl-nm, .ib-fl-meta, .ib-fl-tm')).toEqual([]);
       const back = pane.getByRole('button', { name: 'Back to Inbox' });
       await expect(back).toBeVisible();
       await expect(back).toHaveText('Inbox');
@@ -426,9 +426,9 @@ for (const phone of [
       expect(await sideways(page)).toEqual([]);
       expect(await overlaps(page, '.ib-fline', '.ib-mk, .ib-fl-nm, .ib-fl-sn, .ib-fl-tm, .ib-fl-chip')).toEqual([]);
       await pane.locator('[data-expand-all]').click();
-      await expect(pane.locator('.ib-fline')).toHaveCount(0);
+      await expect(pane.locator('button.ib-fline')).toHaveCount(0);
       expect(await sideways(page)).toEqual([]);
-      expect(await overlaps(page, '.ib-sender', '.ib-mk, .ib-whobox, .ib-tm')).toEqual([]);
+      expect(await overlaps(page, '.ib-fline.ib-is-open', '.ib-mk, .ib-fl-nm, .ib-fl-meta, .ib-fl-tm')).toEqual([]);
     });
 
     test('a file opens over the thread, its comments are a sheet, and Back returns to the thread', async () => {
@@ -772,7 +772,7 @@ for (const narrow of [
         expect(Math.abs(paneBox!.width - mainBox!.width)).toBeLessThan(2);
         await page.screenshot({ path: join(proofDir, `${tag}-2-thread.png`) });
         expect(await sideways(page)).toEqual([]);
-        expect(await overlaps(page, '.ib-sender', '.ib-mk, .ib-whobox, .ib-tm')).toEqual([]);
+        expect(await overlaps(page, '.ib-fline.ib-is-open', '.ib-mk, .ib-fl-nm, .ib-fl-meta, .ib-fl-tm')).toEqual([]);
         expect(await overlaps(page, '.ib-phead', '.ib-pback, .ib-hbtn, .ib-phsubj[data-on], .ib-ptool')).toEqual([]);
         expect(await cardFits(page)).toEqual([]);
         // A pick: the foot gains "Not sent" and the skip chip, and wraps rather than running past the pane.

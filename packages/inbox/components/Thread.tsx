@@ -746,9 +746,16 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
     setHeaderOpen(id, false);
     bodyRef.current?.querySelector<HTMLElement>(`[data-header-files="${CSS.escape(id)}"]`)?.focus();
   };
+  /**
+   * The message the person just opened with its head: its body fades in
+   * (inbox.css). Folding is instant, and nothing else that opens messages
+   * (the first draw, Expand all, a jump) animates.
+   */
+  const [revealedId, setRevealedId] = useState<string | null>(null);
   const toggleMessage = (id: string) => {
     const folding = !fold.folded.has(id);
     if (folding) setHeaderOpen(id, false);
+    setRevealedId(folding ? null : id);
     anchorRef.current = { id, top: articleOf(id)?.getBoundingClientRect().top ?? 0, focus: id, folding };
     setFoldState((current) => {
       if (!current) return current;
@@ -1953,49 +1960,24 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                 onKeyDown={closeHeaderOnEscape(message.id)}
               />
             ) : null;
-          // With a count in a multi-message thread, the fold button cannot hold
-          // it (a button inside a button): the fold button lies under the
-          // sender as its hit area, and the sender's text (hidden from screen
-          // readers, the button's label says it) lets clicks through to it.
-          const cover = count !== null && !one;
+          // The open message's head is the folded line (design record
+          // "inbox-polish", item 5): one row, the same 24 px mark and name in
+          // the same place, so opening a message moves nothing the person
+          // clicked. Only the third column changes (where it was sent, to
+          // whom, the attachments count) and the body appears below. In a
+          // multi-message thread the fold button lies under the row as its
+          // hit area: the row holds buttons of its own (the count, Reply), and
+          // a button cannot hold them. The row's text is hidden from screen
+          // readers there, since the button's label says it.
+          const hide = one ? undefined : true;
           const toWords = (
             <>
               to {isAgent ? 'you' : message.to ? toName(message, message.to) : asker}
               {isAgent && askerEnded && message.id === asking?.message.id && <SessionEndedMark />}
             </>
           );
-          const who = (
-            <>
-              {isAgent ? (
-                cover ? (
-                  <span className="ib-a11y-skip" aria-hidden="true">
-                    <AuthorMark author={message.author} big />
-                  </span>
-                ) : (
-                  <AuthorMark author={message.author} big />
-                )
-              ) : (
-                <span className="ib-mk ib-big">
-                  <Icon name="reply" />
-                </span>
-              )}
-              {/* Spans, not divs: in a multi-message thread this sits inside the fold button. */}
-              <span className="ib-whobox">
-                <span className="ib-who" aria-hidden={cover || undefined} data-clip="">
-                  <bdi>{name}</bdi> <span>in <bdi>{thread.project.name}</bdi></span>
-                </span>
-                {count ? (
-                  <span className="ib-to ib-to-files">
-                    <span aria-hidden={cover || undefined}>{toWords}</span>
-                    {count}
-                  </span>
-                ) : (
-                  <span className="ib-to">{toWords}</span>
-                )}
-              </span>
-            </>
-          );
           const foldLabel = `${name}, ${time}${isNew ? ', new' : ''}. Fold this message`;
+          const revealed = revealedId === message.id;
           before.push(
             <article
               className="ib-message"
@@ -2009,35 +1991,41 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
               data-arrived={arrivedIds.has(message.id) ? '' : undefined}
               tabIndex={-1}
             >
-              <div className="ib-sender">
-                {one ? (
-                  who
-                ) : cover ? (
-                  <div className="ib-headwrap">
-                    <button
-                      type="button"
-                      className="ib-head"
-                      data-fold-head=""
-                      aria-expanded={true}
-                      aria-label={foldLabel}
-                      onClick={() => toggleMessage(message.id)}
-                    />
-                    <span className="ib-head-face">{who}</span>
-                  </div>
-                ) : (
-                  // The sender is the fold button; the time and Reply stay beside it.
+              <div className="ib-fline ib-is-open" data-open-head="" data-revealed={revealed ? '' : undefined}>
+                {!one && (
                   <button
                     type="button"
-                    className="ib-head"
+                    className="ib-fl-hit"
                     data-fold-head=""
                     aria-expanded={true}
                     aria-label={foldLabel}
                     onClick={() => toggleMessage(message.id)}
-                  >
-                    {who}
-                  </button>
+                  />
                 )}
-                <div className="ib-tm">
+                <span className="ib-a11y-skip" aria-hidden={hide}>
+                  {isAgent ? (
+                    <AuthorMark author={message.author} big />
+                  ) : (
+                    <span className="ib-mk ib-big">
+                      <Icon name="reply" />
+                    </span>
+                  )}
+                </span>
+                <span className="ib-fl-nm ib-who" aria-hidden={hide} data-clip={one ? '' : undefined}>
+                  <bdi>{name}</bdi>
+                </span>
+                {/* The project gives way first; "to you", the session-ended mark and the count never shrink (the row wraps instead). */}
+                <span className="ib-fl-meta">
+                  <span className="ib-fl-in" aria-hidden={hide}>
+                    in <bdi>{thread.project.name}</bdi>{' '}
+                  </span>
+                  <span className="ib-fl-to" aria-hidden={hide}>
+                    <span className="ib-to-sep">·</span> <span className="ib-to">{toWords}</span>
+                  </span>
+                  {count && <span className="ib-fl-files">{count}</span>}
+                </span>
+                <span className="ib-fl-chips" />
+                <span className="ib-fl-tm">
                   {isNew && <span className="ib-newtag">New</span>}
                   <span title={fullWhen}>{time}</span>
                   {isAgent && liveMessage(message) && (
@@ -2045,9 +2033,9 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                       <Icon name="reply" size={15} />
                     </button>
                   )}
-                </div>
+                </span>
               </div>
-              <div className="ib-msg">
+              <div className="ib-msg" data-revealed={revealed ? '' : undefined}>
                 {count && (
                   <div className="ib-hatts" id={bandId} role="region" aria-label="Attachments in this message" hidden={!filesOpen} onKeyDown={closeHeaderOnEscape(message.id)} data-header-band={message.id}>
                     {filesOpen && (

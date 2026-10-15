@@ -44,6 +44,12 @@ interface TooltipProps {
    * that use it for short button labels.
    */
   wide?: boolean;
+  /**
+   * Asked each time the tooltip would open, with the trigger element; `false`
+   * keeps it closed this time (e.g. open only while the trigger's text is cut
+   * off). Unset: it always opens, as before.
+   */
+  shouldOpen?: (trigger: Element) => boolean;
 }
 
 export const Tooltip: React.FC<TooltipProps> = ({
@@ -54,10 +60,20 @@ export const Tooltip: React.FC<TooltipProps> = ({
   delayDuration,
   sideOffset = 8,
   wide = false,
+  shouldOpen,
 }) => {
   const disableHoverablePopup = React.useContext(DisableHoverablePopupContext);
   return (
-    <BaseTooltip.Root disableHoverablePopup={disableHoverablePopup}>
+    <BaseTooltip.Root
+      disableHoverablePopup={disableHoverablePopup}
+      onOpenChange={
+        shouldOpen
+          ? (open, details) => {
+              if (open && !(details.trigger && shouldOpen(details.trigger))) details.cancel();
+            }
+          : undefined
+      }
+    >
       <BaseTooltip.Trigger render={children} delay={delayDuration} />
       <BaseTooltip.Portal>
         <BaseTooltip.Positioner side={side} align={align} sideOffset={sideOffset} className="isolate z-50">

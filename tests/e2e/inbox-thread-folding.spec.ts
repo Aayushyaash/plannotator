@@ -276,16 +276,38 @@ test('opening and folding a line keeps it where it was', async () => {
   const { page, ids } = world;
   const id = ids[4]!;
   const before = await top(id);
+  // The head row the person clicks (inbox-polish, item 5): the mark and the name stay exactly where they were.
+  const box = async (selector: string) => (await article(id).locator(selector).first().boundingBox())!;
+  const markBefore = await box('.ib-mk.ib-big');
+  const nameBefore = await box('.ib-fl-nm');
   await article(id).locator('[data-fold-head]').click();
   await expect(article(id)).toHaveAttribute('data-open', '');
   await expect(article(id).locator('.ib-body')).toBeVisible();
   expect(Math.abs((await top(id)) - before)).toBeLessThan(2);
+  const markAfter = await box('.ib-mk.ib-big');
+  const nameAfter = await box('.ib-fl-nm');
+  expect([markAfter.x, markAfter.y, markAfter.width, markAfter.height].map(Math.round)).toEqual([markBefore.x, markBefore.y, markBefore.width, markBefore.height].map(Math.round));
+  expect(markAfter.width).toBe(24);
+  expect(Math.round(nameAfter.x)).toBe(Math.round(nameBefore.x));
+  // The body lines up with the name.
+  const body = (await article(id).locator('.ib-body').first().boundingBox())!;
+  expect(Math.abs(body.x - nameAfter.x)).toBeLessThan(2);
   await expect(page.locator(':focus')).toHaveAttribute('aria-expanded', 'true');
   await shot('3-opened-in-place');
   await article(id).locator('[data-fold-head]').click();
   await expect(article(id)).toHaveAttribute('data-folded', '');
   expect(Math.abs((await top(id)) - before)).toBeLessThan(2);
   await expect(page.locator(':focus')).toHaveAttribute('aria-expanded', 'false');
+  // A 1280 or 1366 px window beside the list keeps the folded line one 44 px row (the two-line row is for a
+  // thread under 560 px of text: beside a file, or a phone).
+  try {
+    for (const width of [1280, 1366]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect.poll(async () => Math.round((await article(id).locator('button.ib-fline').boundingBox())!.height), { message: `${width} px` }).toBe(44);
+    }
+  } finally {
+    await page.setViewportSize({ width: 1440, height: 900 });
+  }
 });
 
 test('keys: n goes to the first new message, k and j move between messages; never while typing', async () => {

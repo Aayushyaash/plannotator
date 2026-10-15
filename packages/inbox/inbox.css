@@ -8,6 +8,10 @@
 
 .pn-inbox {
   --ib-band: color-mix(in oklch, var(--muted) 75%, var(--card));
+  /* A selected row's pill (dark first; light below), and the light a row gets after Show. */
+  --ib-sel: color-mix(in oklch, var(--primary) 15%, transparent);
+  --ib-sel-hover: color-mix(in oklch, var(--primary) 19%, transparent);
+  --ib-lit: color-mix(in oklch, var(--primary) 15%, var(--card));
   --ib-line: color-mix(in oklch, var(--border) 70%, transparent);
   --ib-hair: color-mix(in oklch, var(--border) 55%, transparent);
   height: 100%;
@@ -21,6 +25,9 @@
 }
 :root.light .pn-inbox {
   --ib-band: color-mix(in oklch, var(--muted) 55%, var(--card));
+  --ib-sel: color-mix(in oklch, var(--primary) 10%, transparent);
+  --ib-sel-hover: color-mix(in oklch, var(--primary) 14%, transparent);
+  --ib-lit: color-mix(in oklch, var(--primary) 10%, var(--card));
 }
 /* Resets in Tailwind's base layer: the window's own classes (unlayered) and
    ui's utilities (the question card inside Viewer) both win over them. */
@@ -54,6 +61,8 @@
   }
 }
 .ib-mut { color: var(--muted-foreground); }
+/* A message's Reply and the hold-ups toggle: icon buttons, so the focus ring follows a radius. */
+button.ib-mut { border-radius: 6px; }
 .ib-mono { font-family: var(--font-mono); }
 .pn-inbox svg.ib-ic {
   width: 16px;
@@ -91,6 +100,11 @@
 .ib-nav .ib-ic { color: var(--muted-foreground); }
 .ib-nav.ib-on .ib-ic { color: var(--primary); }
 .ib-nav:disabled { opacity: 0.55; }
+/* Keyboard focus on a row-like item (a sidebar row, a project, the Quiet band, a fold line, a message's
+   head): the 2 px ring inside the item, following its radius (inbox-polish, item 4), so no neighbour
+   paints over it and no scroll box (the projects' list) clips it. Free-standing controls keep the
+   base ring, 2 px outside. */
+.pn-inbox :is(.ib-nav, .ib-proj, button.ib-band, .ib-mrow):focus-visible { outline-offset: -2px; }
 .ib-side-label { font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted-foreground); padding: 18px 9px 6px; }
 .ib-projs { overflow-y: auto; min-height: 0; }
 /* Only the project list gives up height when there are many projects: Inbox, Decisions and the foot keep theirs (they
@@ -261,7 +275,6 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-row { display: grid; grid-template-columns: 130px 104px minmax(0, 1fr) minmax(96px, max-content) 76px; align-items: center; gap: 0 10px; height: 50px; padding: 0 12px; border-bottom: 1px solid var(--ib-hair); font-size: 14px; width: 100%; text-align: left; }
 /* One project's list: no project or badge column (InboxList's WideRow); a badge leads the subject cell. */
 .ib-noproj .ib-row { grid-template-columns: minmax(0, 1fr) minmax(96px, max-content) 76px; }
-.ib-row:hover, .ib-nrow:hover { background: color-mix(in oklch, var(--muted) 35%, transparent); }
 .ib-row .ib-p { font-weight: 400; font-size: 13px; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ib-row.ib-u .ib-s { font-weight: 600; }
 /* The thread chip: it can shrink to its border (flex), and its name keeps its
@@ -299,7 +312,26 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-nrow .ib-l2 { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13.5px; overflow: hidden; }
 .ib-nrow .ib-l2 .ib-s { color: var(--muted-foreground); }
 .ib-nrow.ib-u .ib-l2 .ib-s { color: var(--foreground); font-weight: 600; }
-.ib-row.ib-sel, .ib-nrow.ib-sel { background: color-mix(in oklch, var(--primary) 9%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 35%, transparent); border-radius: 6px; }
+/* Hover and the selected row (design record "inbox-polish", item 1, variant A · Inset): a pill 3 px inside
+   the row (its ::before, radius 8, no border), so the separators run on unbroken and never touch it, and the
+   first row under a band keeps a gap, as the sidebar's active row sits inside its column. The Decisions page's
+   rows take the same rule (.ib-drow, below). Keyboard focus is a 2 px ring on the same pill (item 4). */
+.ib-row, .ib-nrow, button.ib-drow { position: relative; isolation: isolate; }
+:is(.ib-row, .ib-nrow, button.ib-drow)::before { content: ""; position: absolute; inset: 3px 0; border-radius: 8px; z-index: -1; pointer-events: none; }
+/* !important: they win over Show's light (below), an animation, which would otherwise paint over them. */
+:is(.ib-row, .ib-nrow, button.ib-drow):hover::before { background: color-mix(in oklch, var(--muted) 45%, transparent) !important; }
+:is(.ib-row, .ib-nrow, .ib-drow).ib-sel::before { background: var(--ib-sel) !important; }
+:is(.ib-row, .ib-nrow, .ib-drow).ib-sel:hover::before { background: var(--ib-sel-hover) !important; }
+/* The ring is the pill's inset shadow; a transparent outline stays for forced colours (Windows High Contrast
+   draws it, and drops the shadow). */
+.pn-inbox :is(.ib-row, .ib-nrow, button.ib-drow):focus-visible { outline: 2px solid transparent; outline-offset: -2px; }
+.pn-inbox :is(.ib-row, .ib-nrow, button.ib-drow):focus-visible::before { box-shadow: inset 0 0 0 2px var(--ring); }
+/* After Show (the held list's "N new … Show"): each row it brought in lights up where it landed, on the
+   same pill, then fades (App.tsx sets data-lit once the rows have slid into place, for the animation's
+   length). It keeps running under the pointer: hover and the selection paint over it (above), and the
+   focus ring stays on top. Only a colour fades, so reduced motion keeps it. */
+@keyframes ib-lit { 0%, 40% { background-color: var(--ib-lit); } 100% { background-color: transparent; } }
+:is(.ib-row, .ib-nrow)[data-lit]::before { animation: ib-lit 1500ms cubic-bezier(0.23, 1, 0.32, 1) both; }
 .ib-nrow.ib-sent .ib-p, .ib-nrow.ib-sent .ib-l2 .ib-s { color: var(--muted-foreground); font-weight: 400; }
 .ib-att { display: inline-flex; align-items: center; gap: 4px; color: var(--muted-foreground); font-size: 13px; white-space: nowrap; flex: none; }
 .ib-notice { display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 14px; border-radius: 8px; background: color-mix(in oklch, var(--primary) 10%, var(--card)); border: 1px solid color-mix(in oklch, var(--primary) 25%, transparent); font-size: 13.5px; margin-bottom: 12px; width: 100%; text-align: left; }
@@ -324,18 +356,11 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--card); position: relative; }
 .ib-phead { height: 46px; flex: none; display: flex; align-items: center; gap: 2px; padding: 0 14px; border-bottom: 1px solid var(--ib-hair); }
 .ib-phead .ib-sp { flex: 1; }
-.ib-pbody { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 30px 18px; }
+.ib-pbody { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 30px 18px; container: ib-thread / inline-size; }
 .ib-subject { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 14px; line-height: 1.3; }
 .ib-message + .ib-message { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--ib-hair); }
-.ib-sender { display: flex; align-items: flex-start; gap: 11px; margin-bottom: 10px; }
-.ib-sender .ib-who { font-weight: 600; font-size: 14px; }
-.ib-sender .ib-who span { font-weight: 400; color: var(--muted-foreground); }
-.ib-sender .ib-to { font-size: 12.5px; color: var(--muted-foreground); }
-/* the sender's name and "to …" are spans (they sit inside the fold button), drawn as the lines they always were */
-.ib-whobox { display: block; min-width: 0; }
-.ib-whobox > .ib-who, .ib-whobox > .ib-to { display: block; }
-.ib-sender .ib-tm { margin-left: auto; font-size: 12.5px; color: var(--muted-foreground); display: flex; align-items: center; gap: 8px; }
-.ib-msg { padding-left: 41px; }
+/* The body lines up with the head row's name: the 24 px mark and its 10 px gap (inbox-polish, item 5). */
+.ib-msg { padding-left: 34px; }
 .ib-attach-h { font-size: 12.5px; color: var(--muted-foreground); margin: 16px 0 8px; display: flex; align-items: center; gap: 6px; }
 .ib-atts { display: flex; flex-wrap: wrap; gap: 8px; }
 .ib-atts.ib-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
@@ -709,7 +734,6 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-dsub { color: var(--muted-foreground); font-size: 14px; margin: 0 0 22px; }
 .ib-dpage .ib-group + .ib-group { margin-top: 18px; }
 .ib-drow { display: grid; grid-template-columns: 22px minmax(0, 1fr) 300px 120px 90px; align-items: center; gap: 12px; min-height: 50px; padding: 0 12px; border-bottom: 1px solid var(--ib-hair); font-size: 14px; width: 100%; text-align: left; }
-button.ib-drow:hover { background: color-mix(in oklch, var(--muted) 35%, transparent); }
 /* A long decision shows three lines; the open decision has all of it. */
 .ib-drow .ib-st { font-weight: 550; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; overflow-wrap: anywhere; }
 .ib-drow .ib-src, .ib-drow .ib-when { color: var(--muted-foreground); font-size: 13px; }
@@ -720,7 +744,6 @@ button.ib-drow:hover { background: color-mix(in oklch, var(--muted) 35%, transpa
 .ib-drow.ib-dnarrow { grid-template-columns: 22px minmax(0, 1fr) auto; padding: 9px 12px; }
 .ib-drow.ib-dnarrow svg.ib-dm { align-self: start; margin-top: 4px; }
 .ib-dtxt { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.ib-drow.ib-sel { background: color-mix(in oklch, var(--primary) 9%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 35%, transparent); border-radius: 6px; }
 .ib-dnone { color: var(--muted-foreground); font-size: 13.5px; margin: 10px 12px; }
 .ib-dstate { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 550; color: var(--muted-foreground); padding-left: 6px; }
 .ib-dfacts { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px 14px; margin: 6px 0 0; font-size: 14px; line-height: 1.5; }
@@ -1203,19 +1226,14 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
 .ib-tmeta > * { white-space: nowrap; }
 .ib-tmeta b { color: var(--primary); font-weight: 600; }
 .ib-tdot { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.6; }
-/* every message an article, a hairline between them */
-.ib-pbody.ib-folding .ib-message { margin: 0; padding: 16px 0 20px; border-top: 1px solid var(--ib-hair); scroll-margin-top: 12px; }
+/* every message an article, a hairline between them; an open message's head row sits where its folded line was */
+.ib-pbody.ib-folding .ib-message { margin: 0; padding: 0 0 20px; border-top: 1px solid var(--ib-hair); scroll-margin-top: 12px; }
 .ib-pbody.ib-folding .ib-message.ib-folded { padding: 0; }
-.ib-pbody.ib-folding .ib-tmeta + .ib-message { border-top: 0; padding-top: 6px; }
-.ib-pbody.ib-folding .ib-tmeta + .ib-message.ib-folded { padding-top: 0; }
+.ib-pbody.ib-folding .ib-tmeta + .ib-message { border-top: 0; }
 .ib-pbody.ib-folding .ib-newdiv + .ib-message { border-top: 0; }
-/* the open message's header: the sender part is the fold button; time and Reply stay beside it */
-.pn-inbox .ib-head { display: flex; align-items: flex-start; gap: 11px; flex: 1; min-width: 0; text-align: left; border-radius: 8px; margin: -4px -6px; padding: 4px 6px; }
-.pn-inbox .ib-head:hover { background: color-mix(in oklch, var(--muted) 35%, transparent); }
 
 /* ── Attachments in the message header (.product/approved/inbox-attachments-header/, variant Count, 2026-10-11) ──
-   A quiet count in the "to you" line opens the foot's tiles a second time, in a soft band under the sender row. */
-.ib-sender .ib-to.ib-to-files { display: flex; align-items: center; flex-wrap: wrap; column-gap: 6px; min-width: 0; }
+   A quiet count in the head row's "to you" column opens the foot's tiles a second time, in a soft band under the row. */
 .ib-to-sep { opacity: 0.6; }
 .pn-inbox .ib-hcount { position: relative; display: inline-flex; align-items: center; gap: 4px; height: 22px; margin: -2px 0; padding: 0 7px 0 6px; border-radius: 6px; font-size: 12.5px; color: var(--muted-foreground); white-space: nowrap; }
 .pn-inbox .ib-hcount:hover { background: var(--muted); color: var(--foreground); }
@@ -1229,11 +1247,6 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
 .ib-hatts:not([hidden]) { animation: ib-hatts-in 180ms cubic-bezier(0.23, 1, 0.32, 1); }
 @keyframes ib-hatts-in { from { opacity: 0; transform: translateY(-4px); } }
 .ib-hatts-note { font-size: 12px; color: var(--muted-foreground); margin: 8px 2px 0; }
-/* A multi-message thread: the fold button lies under the sender as its hit area; the count sits above it. */
-.ib-headwrap { position: relative; display: flex; flex: 1; min-width: 0; }
-.pn-inbox .ib-headwrap > .ib-head { position: absolute; inset: -4px -6px; margin: 0; padding: 0; }
-.ib-head-face { position: relative; display: flex; align-items: flex-start; gap: 11px; flex: 1; min-width: 0; pointer-events: none; }
-.ib-head-face .ib-hcount { pointer-events: auto; }
 .ib-a11y-skip { display: contents; }
 @media (prefers-reduced-motion: reduce) {
   .ib-hatts:not([hidden]) { animation: none; }
@@ -1242,9 +1255,48 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
 /* "New": a word in a tinted pill, never only a colour */
 .ib-newtag { display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border-radius: 6px; background: color-mix(in oklch, var(--primary) 15%, transparent); color: var(--primary); font-size: 11.5px; font-weight: 650; letter-spacing: 0.01em; white-space: nowrap; flex: none; }
 .ib-newtag::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-/* the folded line: mark, sender, a one-line snippet, what the message holds, time */
-.pn-inbox .ib-fline { display: grid; grid-template-columns: 24px 118px minmax(0, 1fr) auto minmax(66px, auto); align-items: center; gap: 0 10px; width: calc(100% + 16px); height: 44px; margin: 0 -8px; padding: 0 8px; border-radius: 8px; text-align: left; font-size: 13.5px; }
-.pn-inbox .ib-fline:hover { background: color-mix(in oklch, var(--muted) 40%, transparent); }
+/* A message's head row (design record "inbox-polish", item 5): folded or open, one row with the mark, the
+   sender, a third column, what the message holds, and the time, so opening a message moves nothing the person
+   clicked. Folded, the whole row is the fold button and the third column is a one-line snippet. Open, it is
+   "in <project> · to you" and the attachments count; the fold button lies under the row (.ib-fl-hit) and the
+   row's own buttons (the count, Reply) sit above it; the body fades in below. A one-message thread draws the
+   same open row, with no fold button. */
+.pn-inbox .ib-fline { position: relative; display: grid; grid-template-columns: 24px 118px minmax(0, 1fr) auto minmax(66px, auto); align-items: center; gap: 0 10px; width: calc(100% + 16px); height: 44px; margin: 0 -8px; padding: 0 8px; border-radius: 8px; text-align: left; font-size: 13.5px; }
+.pn-inbox :is(button.ib-fline, .ib-fline:has(> .ib-fl-hit)):hover { background: color-mix(in oklch, var(--muted) 40%, transparent); }
+.pn-inbox .ib-fl-hit { position: absolute; inset: 0; border-radius: inherit; }
+.ib-fline:has(> .ib-fl-hit) > :not(.ib-fl-hit) { position: relative; pointer-events: none; }
+/* The row's own buttons, and the time (its title is the whole moment, as it always was) take the pointer. */
+.ib-fline:has(> .ib-fl-hit) :is(.ib-hcount, .ib-fl-tm > button, .ib-fl-tm > [title]) { pointer-events: auto; }
+.ib-fline.ib-is-open .ib-fl-nm { font-weight: 600; }
+/* The open row's third column: the project gives way first ("in plann…"); "to you", the session-ended mark
+   and the attachments count never shrink, and the column wraps rather than cut them (the row grows). */
+.ib-fl-meta { display: flex; flex-wrap: wrap; align-items: center; column-gap: 6px; min-width: 0; color: var(--muted-foreground); font-size: 12.5px; }
+.ib-fl-in { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ib-fl-to, .ib-fl-files { flex: none; white-space: nowrap; }
+.ib-fl-files { display: inline-flex; align-items: center; gap: 6px; }
+/* the space after "·" made as wide as the column's gap before it */
+.ib-fl-to > .ib-to-sep { margin-inline-end: 2.5px; }
+/* One row: the open head keeps the folded line's 44 px and its centres (10 px above a 24 px line), and grows
+   downward only when its third column wraps, so the mark and the name never move. */
+@container ib-thread (min-width: 561px) {
+  .pn-inbox .ib-fline.ib-is-open { height: auto; min-height: 44px; align-items: start; padding-block: 10px; }
+  .ib-fline.ib-is-open > :is(.ib-fl-nm, .ib-fl-tm), .ib-fline.ib-is-open .ib-fl-meta { line-height: 24px; }
+  .ib-fline.ib-is-open .ib-fl-tm { min-height: 24px; }
+}
+.pn-inbox .ib-fl-tm > button.ib-mut { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; margin: 0 -5px 0 -3px; }
+.pn-inbox .ib-fl-tm > button.ib-mut:hover { background: var(--muted); color: var(--foreground); }
+/* Keyboard focus on a fold line or a message's head: the ring inside the row (inbox-polish, item 4). */
+.pn-inbox :is(button.ib-fline, .ib-fl-hit, .ib-mfold-b):focus-visible { outline-offset: -2px; }
+.pn-inbox .ib-mfold-b:focus-visible { border-radius: 8px; }
+/* Opening a message with its head: the body fades in with a 4 px rise, and the third column with it.
+   Folding is instant, and so is everything under reduced motion. */
+@keyframes ib-reveal { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes ib-fade-in { from { opacity: 0; } }
+.ib-msg[data-revealed] { animation: ib-reveal 160ms cubic-bezier(0.23, 1, 0.32, 1); }
+.ib-fline[data-revealed] .ib-fl-meta { animation: ib-fade-in 120ms ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .ib-msg[data-revealed], .ib-fline[data-revealed] .ib-fl-meta { animation: none; }
+}
 .ib-fline .ib-mk.ib-big { width: 24px; height: 24px; border-radius: 6px; }
 .ib-fline .ib-mk.ib-big > svg, .ib-fline .ib-mk.ib-big > img { width: 14px; height: 14px; }
 .ib-fl-nm { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1289,17 +1341,22 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
 @media (prefers-reduced-motion: reduce) {
   .ib-pbody .ib-message[data-arrived] { animation: none; }
 }
-/* narrow windows: a folded line takes two or three rows (name and time, the snippet, what it holds) */
-@media (max-width: 720px) {
-  .pn-inbox .ib-fline { grid-template-columns: 24px minmax(0, 1fr) auto; grid-template-areas: "mk nm tm" ". sn sn" ". ch ch"; height: auto; padding: 8px; row-gap: 2px; }
-  .ib-fline > .ib-mk { grid-area: mk; }
+/* A narrow thread (its own width: under 560 px of text, as beside a file or on a phone; a 1280 or 1366 px window
+   beside the list keeps one row): a message's head row, folded or open, takes two or three rows (name and time;
+   the snippet, or "in <project> · to you" and the count; what it holds), the same rows either way, so opening
+   one still moves nothing. */
+@container ib-thread (max-width: 560px) {
+  .pn-inbox .ib-fline { grid-template-columns: 24px minmax(0, 1fr) auto; grid-template-areas: "mk nm tm" ". sn sn" ". ch ch"; height: auto; min-height: 44px; padding: 8px; row-gap: 2px; }
+  .ib-fline > .ib-mk, .ib-fline > .ib-a11y-skip > .ib-mk { grid-area: mk; }
   .ib-fl-nm { grid-area: nm; }
   .ib-fl-tm { grid-area: tm; }
   .ib-fl-sn { grid-area: sn; }
-  .ib-fl-chips { grid-area: ch; }
+  .ib-fl-chips { grid-area: ch; flex-wrap: wrap; }
   .ib-fl-chips:empty { display: none; }
+  .ib-fl-meta { grid-area: sn; row-gap: 2px; }
+}
+@media (max-width: 720px) {
   .ib-ptool-l { display: none; }
-  .ib-pbody.ib-folding .ib-who span { display: none; }
 }
 
 /* The question sound (.product/approved/inbox-sound/): the one-time dialog, the Settings row, the hints (its "Sound off." uses the window's one toast, below). */
@@ -1466,7 +1523,9 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   .ib-mrow.ib-sent .ib-m2 { color: var(--muted-foreground); }
   .ib-m3 { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; margin-top: 3px; }
   .ib-m3 .ib-key { max-width: 100%; }
-  .ib-m3 .ib-key > .ib-keyt { max-width: none; }
+  /* No hover on a phone, so no tooltip: the thread's name wraps to two lines instead of being cut on one. */
+  .ib-m3 .ib-key > .ib-keyt { max-width: none; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  .ib-mrow[data-lit] { animation: ib-lit 1500ms cubic-bezier(0.23, 1, 0.32, 1) both; }
   .ib-m3 .ib-c, .ib-m3 .ib-att { font-size: 12.5px; color: var(--muted-foreground); white-space: nowrap; }
 
   /* a thread: Back on the left, the actions on the right, the reply at the foot above the keyboard */
@@ -1492,23 +1551,11 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   .ib-msg, .ib-pane.ib-withfile .ib-msg { padding-left: 0; }
   /* a message landed on from search: its ring clears the text (the message has no padding of its own here), and nothing moves */
   .pn-inbox [data-message-article].ib-q-target, .pn-inbox [data-message-article].ib-q-target-out { margin-inline: -8px; padding-inline: 8px; }
-  .ib-sender { gap: 10px; align-items: center; }
-  .ib-whobox { flex: 1; }
-  .ib-whobox > .ib-who, .ib-whobox > .ib-to { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* the header's attachments count wraps under "to you" rather than being cut, and takes a thumb's height */
-  .ib-whobox > .ib-to.ib-to-files { white-space: normal; overflow: visible; row-gap: 2px; }
+  /* the head row's attachments count takes a thumb's height */
   .pn-inbox .ib-hcount::after { content: ""; position: absolute; inset: -11px -2px; }
   .ib-hatts { margin-bottom: 14px; }
-  .ib-sender .ib-tm { flex: none; white-space: nowrap; }
-  .pn-inbox .ib-sender .ib-tm > button { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin: -12px -10px -12px -6px; }
-  .ib-pbody.ib-folding .ib-who span { display: none; }
-  .pn-inbox .ib-fline { grid-template-columns: 24px minmax(0, 1fr) auto; grid-template-areas: "mk nm tm" ". sn sn" ". ch ch"; height: auto; min-height: 44px; padding: 8px; row-gap: 2px; }
-  .ib-fline > .ib-mk { grid-area: mk; }
-  .ib-fl-nm { grid-area: nm; }
-  .ib-fl-tm { grid-area: tm; }
-  .ib-fl-sn { grid-area: sn; }
-  .ib-fl-chips { grid-area: ch; flex-wrap: wrap; }
-  .ib-fl-chips:empty { display: none; }
+  .ib-fline.ib-is-open + .ib-msg { padding-top: 6px; }
+  .pn-inbox .ib-fl-tm > button.ib-mut { width: 44px; height: 44px; margin: -12px -10px -12px -6px; }
   .pn-inbox .ib-mfold-b { height: 44px; }
   .ib-tmeta { margin-top: -6px; }
   /* the question cards (ui's QuestionBlock): rows and buttons a thumb can hit */
@@ -1907,8 +1954,6 @@ label.ib-anote-r:hover { background: color-mix(in oklch, var(--muted) 40%, trans
 .ib-gto { display: flex; min-width: 0; }
 .ib-gto > .ib-fname { margin-inline-start: 0.28em; }
 
-/* A message's time keeps its line when the sender line is long (a real, long project name): the name wraps instead. */
-.ib-sender .ib-tm { flex: none; white-space: nowrap; }
 
 /* "Where should this reply go?" with many live sessions: the reply area stops at 70% of the thread, the list of
    sessions scrolls inside it, and Send and Back stay in view. The foot itself never scrolls or clips (New

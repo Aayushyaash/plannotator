@@ -1,5 +1,6 @@
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import type { InboxListRow, InboxListSection } from '@plannotator/core/inbox-types';
+import { inboxThreadNameKey, type InboxListRow, type InboxListSection } from '@plannotator/core/inbox-types';
+import { Tooltip, TooltipProvider } from '@plannotator/ui/components/Tooltip';
 import { agentName, formatCount, questionCount, shortTime } from '../format';
 import { titleIfClipped } from '../clipTitle';
 import { AuthorMark, Icon } from '../icons';
@@ -39,6 +40,11 @@ export interface InboxListProps {
   onCompose?: (opener: HTMLElement) => void;
   /** What an empty list says (one project whose threads are all archived). Drawn only while no row shows. */
   empty?: ReactNode;
+  /**
+   * The rows Show just brought in (new to the list, or moved or changed by an
+   * agent): each lights up briefly where it landed (`data-lit`, inbox.css).
+   */
+  lit?: ReadonlySet<string>;
 }
 
 /**
@@ -73,24 +79,59 @@ function countOf(row: InboxListRow): string {
 }
 
 /**
+ * The thread's name as a chip, unless the subject already starts with it
+ * (agents often begin the subject with the thread's name, and the row then
+ * said it twice). Compared the way threads are matched (`inboxThreadNameKey`),
+ * and only when the name ends where the subject's words do: the subject ends
+ * there, or goes on with a space, or with ":", "-", "–" or "—" and a space.
+ * So `search` still shows beside "Searchable…", `v2` beside "v2.1 release"
+ * and `auth` beside "auth-service down".
+ */
+export function chipName(row: InboxListRow): string | null {
+  if (!row.thread_name) return null;
+  const name = inboxThreadNameKey(row.thread_name);
+  const subject = inboxThreadNameKey(subjectOf(row));
+  if (name && subject.startsWith(name) && /^(?:$|\s|[:\-–—]\s)/u.test(subject.slice(name.length))) return null;
+  return row.thread_name;
+}
+
+/** The text is cut with "…" across (its own overflow): only then is the tooltip worth opening. */
+function isCut(el: Element): boolean {
+  return el.scrollWidth > el.clientWidth + 1;
+}
+
+/**
+ * One line of text the row may cut with "…": ui's tooltip shows it whole on
+ * hover (the list's provider sets the delays), only while it is cut. Never a
+ * focus stop, and nothing for a screen reader to add: the row's name already
+ * holds the whole text.
+ */
+function ClipText({ className, text }: { className: string; text: string }) {
+  return (
+    <Tooltip content={text} side="top" wide shouldOpen={isCut}>
+      <span className={className} dir="auto">
+        {text}
+      </span>
+    </Tooltip>
+  );
+}
+
+/**
  * The thread chip, the subject and the guided review mark, shared by both row
  * shapes. When the line is short of room the subject gives way first, down to
  * a floor (inbox.css), then the chip; the mark drops its label to its icon.
  */
 function SubjectLine({ row }: { row: InboxListRow }) {
+  const chip = chipName(row);
   return (
     <>
-      {row.thread_name && (
+      {chip && (
         <span className="ib-key">
-          <span className="ib-keyt" dir="auto" data-clip="">
-            {row.thread_name}
-          </span>
+          <ClipText className="ib-keyt" text={chip} />
         </span>
       )}
       <span className="ib-s">
-        <span className="ib-st" dir="auto" data-clip="">
-          {subjectOf(row)}
-        </span>
+        <ClipText className="ib-st" text={subjectOf(row)} />
       </span>
       {/* The record's 1.1: a thread that carries a guided review says so after its subject. */}
       {row.guide && row.section !== 'sent' && (
@@ -117,7 +158,7 @@ export const WIDE_ROWS_MIN_LIST_WIDTH = 900;
  * row has one, leads the subject cell, so a row starts at the list's left edge
  * instead of after an empty block.
  */
-function WideRow({ row, selected, filtered, onOpen }: { row: InboxListRow; selected: boolean; filtered: boolean; onOpen: () => void }) {
+function WideRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow; selected: boolean; filtered: boolean; lit: boolean; onOpen: () => void }) {
   const badge = badgeOf(row);
   const sent = row.section === 'sent';
   const badgeEl = badge && <span className="ib-badge">{badge}</span>;
@@ -129,6 +170,7 @@ function WideRow({ row, selected, filtered, onOpen }: { row: InboxListRow; selec
       aria-current={selected ? 'true' : undefined}
       data-thread-id={row.thread_id}
       data-section={row.section}
+      data-lit={lit ? '' : undefined}
     >
       {!filtered && <span className="ib-p" dir="auto" data-clip="">{row.project.name}</span>}
       {!filtered && <span>{badgeEl}</span>}
@@ -174,7 +216,7 @@ function RowWithAction({ row, onMarkRead, children }: { row: InboxListRow; onMar
   );
 }
 
-function NarrowRow({ row, selected, filtered, onOpen }: { row: InboxListRow; selected: boolean; filtered: boolean; onOpen: () => void }) {
+function NarrowRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow; selected: boolean; filtered: boolean; lit: boolean; onOpen: () => void }) {
   const badge = badgeOf(row);
   const count = countOf(row);
   return (
@@ -185,6 +227,7 @@ function NarrowRow({ row, selected, filtered, onOpen }: { row: InboxListRow; sel
       aria-current={selected ? 'true' : undefined}
       data-thread-id={row.thread_id}
       data-section={row.section}
+      data-lit={lit ? '' : undefined}
     >
       <div className="ib-l1">
         <span className="ib-p" dir="auto" data-clip="">{filtered ? agentName(rowAgent(row)) : row.project.name}</span>
@@ -207,10 +250,11 @@ function NarrowRow({ row, selected, filtered, onOpen }: { row: InboxListRow; sel
  * badge, the thread's name, the question count, the guided review mark),
  * which wraps rather than pushing anything off the row.
  */
-function PhoneRow({ row, filtered, onOpen }: { row: InboxListRow; filtered: boolean; onOpen: () => void }) {
+function PhoneRow({ row, filtered, lit, onOpen }: { row: InboxListRow; filtered: boolean; lit: boolean; onOpen: () => void }) {
   const badge = badgeOf(row);
   const count = countOf(row);
   const guide = row.guide && row.section !== 'sent';
+  const chip = chipName(row);
   return (
     <button
       type="button"
@@ -218,6 +262,7 @@ function PhoneRow({ row, filtered, onOpen }: { row: InboxListRow; filtered: bool
       onClick={onOpen}
       data-thread-id={row.thread_id}
       data-section={row.section}
+      data-lit={lit ? '' : undefined}
     >
       <span className="ib-m1">
         <AuthorMark author={rowAgent(row)} />
@@ -225,12 +270,12 @@ function PhoneRow({ row, filtered, onOpen }: { row: InboxListRow; filtered: bool
         <span className="ib-t">{shortTime(row.last_at)}</span>
       </span>
       <span className="ib-m2" dir="auto">{subjectOf(row)}</span>
-      {(badge || row.thread_name || count || guide) && (
+      {(badge || chip || count || guide) && (
         <span className="ib-m3">
           {badge && <span className="ib-badge">{badge}</span>}
-          {row.thread_name && (
+          {chip && (
             <span className="ib-key">
-              <span className="ib-keyt" dir="auto">{row.thread_name}</span>
+              <span className="ib-keyt" dir="auto">{chip}</span>
             </span>
           )}
           {count && <span className={`ib-c${row.section === 'quiet' ? ' ib-qlabel' : ''}`}>{count}</span>}
@@ -269,6 +314,7 @@ export function InboxList(props: InboxListProps) {
   const columnId = useId();
   const resizable = props.narrow && !isMobile;
   const visible = props.sections.filter((s) => s.threads.length > 0);
+  const lit = (row: InboxListRow) => props.lit?.has(row.thread_id) === true;
   return (
     <section
       ref={listRef}
@@ -298,50 +344,53 @@ export function InboxList(props: InboxListProps) {
           </button>
         )}
       </div>
-      <div className="ib-lbody" ref={bodyRef}>
-        {props.ask}
-        {props.notice && (
-          <button type="button" className="ib-notice" onClick={props.onShowNew} data-inbox-notice="">
-            <Icon name="inbox" size={15} />
-            {props.notice}
-            <b>Show</b>
-          </button>
-        )}
-        {visible.length === 0 && props.empty}
-        {visible.map((section) => {
-          const quiet = section.id === 'quiet';
-          const open = !quiet || quietOpen;
-          return (
-            <div key={section.id} className="ib-group" data-section-id={section.id} role="group" aria-label={section.label}>
-              {quiet ? (
-                <button type="button" className="ib-band" onClick={() => setQuietOpen((v) => !v)} aria-expanded={quietOpen}>
-                  {section.label} <span className="ib-n">{formatCount(section.threads.length)}</span>
-                  <Icon name={quietOpen ? 'chevD' : 'chevR'} size={14} />
-                </button>
-              ) : (
-                <div className="ib-band">
-                  {section.label} <span className="ib-n">{formatCount(section.threads.length)}</span>
-                </div>
-              )}
-              {open &&
-                section.threads.map((row) =>
-                  // A phone's row has no hover action (a hover on a touch screen is a first tap): Mark read is in the thread's header there.
-                  props.phone ? (
-                    <PhoneRow key={row.thread_id} row={row} filtered={props.filtered} onOpen={() => props.onOpen(row)} />
-                  ) : (
-                    <RowWithAction key={row.thread_id} row={row} onMarkRead={props.onMarkRead}>
-                      {twoLine ? (
-                        <NarrowRow row={row} filtered={props.filtered} selected={row.thread_id === props.selectedThreadId} onOpen={() => props.onOpen(row)} />
-                      ) : (
-                        <WideRow row={row} filtered={props.filtered} selected={row.thread_id === props.selectedThreadId} onOpen={() => props.onOpen(row)} />
-                      )}
-                    </RowWithAction>
-                  ),
+      {/* One provider for every row's tooltip: 150 ms to open, and the next one at once within 400 ms. */}
+      <TooltipProvider delayDuration={150} skipDelayDuration={400} disableHoverableContent>
+        <div className="ib-lbody" ref={bodyRef}>
+          {props.ask}
+          {props.notice && (
+            <button type="button" className="ib-notice" onClick={props.onShowNew} data-inbox-notice="">
+              <Icon name="inbox" size={15} />
+              {props.notice}
+              <b>Show</b>
+            </button>
+          )}
+          {visible.length === 0 && props.empty}
+          {visible.map((section) => {
+            const quiet = section.id === 'quiet';
+            const open = !quiet || quietOpen;
+            return (
+              <div key={section.id} className="ib-group" data-section-id={section.id} role="group" aria-label={section.label}>
+                {quiet ? (
+                  <button type="button" className="ib-band" onClick={() => setQuietOpen((v) => !v)} aria-expanded={quietOpen}>
+                    {section.label} <span className="ib-n">{formatCount(section.threads.length)}</span>
+                    <Icon name={quietOpen ? 'chevD' : 'chevR'} size={14} />
+                  </button>
+                ) : (
+                  <div className="ib-band">
+                    {section.label} <span className="ib-n">{formatCount(section.threads.length)}</span>
+                  </div>
                 )}
-            </div>
-          );
-        })}
-      </div>
+                {open &&
+                  section.threads.map((row) =>
+                    // A phone's row has no hover action (a hover on a touch screen is a first tap): Mark read is in the thread's header there.
+                    props.phone ? (
+                      <PhoneRow key={row.thread_id} row={row} filtered={props.filtered} lit={lit(row)} onOpen={() => props.onOpen(row)} />
+                    ) : (
+                      <RowWithAction key={row.thread_id} row={row} onMarkRead={props.onMarkRead}>
+                        {twoLine ? (
+                          <NarrowRow row={row} filtered={props.filtered} lit={lit(row)} selected={row.thread_id === props.selectedThreadId} onOpen={() => props.onOpen(row)} />
+                        ) : (
+                          <WideRow row={row} filtered={props.filtered} lit={lit(row)} selected={row.thread_id === props.selectedThreadId} onOpen={() => props.onOpen(row)} />
+                        )}
+                      </RowWithAction>
+                    ),
+                  )}
+              </div>
+            );
+          })}
+        </div>
+      </TooltipProvider>
       {resizable && <ListColumnEdge controls={columnId} />}
     </section>
   );
