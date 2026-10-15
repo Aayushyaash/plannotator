@@ -205,6 +205,8 @@ export interface InboxServerOptions {
   onDataGone?: (reason: string) => void;
   /** How often that is checked. Default `INBOX_DATA_CHECK_MS`. Tests shorten it. */
   dataCheckMs?: number;
+  /** How long a streamed attachment answer may go unread before its file handle closes (inbox-byte-range.ts). Default `STREAM_IDLE_CLOSE_MS`; tests shorten it. */
+  streamIdleMs?: number;
   /**
    * Called after the window's Restart (the "A new version is ready" line),
    * once this server has stopped listening: the caller starts the binary on
@@ -346,6 +348,7 @@ const ERROR_STATUS: Record<string, number> = {
   attachment_changed_type: 409,
   attachment_not_text: 415,
   attachment_not_image: 415,
+  attachment_not_video: 415,
   attachment_not_html: 415,
   // "Open in" (packages/server/inbox-open-in.ts): an app the per-kind policy refuses, or one not installed.
   open_not_allowed: 422,
@@ -1854,7 +1857,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     return handle(req, "local");
   };
 
-  attachmentRoutes = createInboxAttachmentRoutes({ store, serverSession, readBody });
+  attachmentRoutes = createInboxAttachmentRoutes({ store, serverSession, readBody, streamIdleMs: options.streamIdleMs });
   const started = startOnLoopback(fetch, previous?.port ?? null);
   server = started.server;
   portChanged = started.portChanged;

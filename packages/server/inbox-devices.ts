@@ -110,9 +110,11 @@ const ALLOWLIST: readonly { method: "GET" | "POST"; route: RegExp; window: (m: R
   { method: "POST", route: /^threads\/([^/]+)\/delete$/, window: (m) => `/api/inbox/threads/${m[1]}/delete` },
   { method: "GET", route: /^threads\/([^/]+)\/attachments$/, window: (m) => `/api/inbox/threads/${m[1]}/attachments` },
   { method: "GET", route: /^attachments\/([^/]+)\/view$/, window: (m) => `/api/inbox/attachments/${m[1]}/view` },
-  // An image's bytes and any kind's download: the window's own routes, so the
-  // phone gets the same dotenv refusal, sniffed type and headers.
-  { method: "GET", route: /^attachments\/([^/]+)\/(image|download)$/, window: (m) => `/api/inbox/attachments/${m[1]}/${m[2]}` },
+  // An image's bytes, a video's (by Range) and any kind's download (by Range
+  // too): the window's own routes, so the phone gets the same dotenv refusal,
+  // sniffed type and headers. Of the phone's request headers the door forwards
+  // Range, If-Range and If-None-Match (and Last-Event-ID to the event stream).
+  { method: "GET", route: /^attachments\/([^/]+)\/(image|video|download)$/, window: (m) => `/api/inbox/attachments/${m[1]}/${m[2]}` },
   { method: "GET", route: /^markups\/([^/]+)$/, window: (m) => `/api/inbox/markups/${m[1]}` },
   // An image a message's body shows (`?path=<src as written>`, a question
   // block's context included): the window's own route, so the phone gets the
@@ -405,10 +407,20 @@ export function createInboxDevices(context: InboxDevicesContext) {
     if (body !== null) headers.set("Content-Type", "application/json");
     const lastEventId = req.headers.get("last-event-id");
     if (lastEventId) headers.set("Last-Event-ID", lastEventId);
-    // The image routes' validator (attachments/<id>/image, messages/<id>/image):
-    // a phone that cached the bytes revalidates and gets the window's 304.
+    // Of the phone's own headers the door forwards exactly three, and the
+    // window's answer comes back unchanged: If-None-Match, the image routes'
+    // validator (attachments/<id>/image, messages/<id>/image: a phone that
+    // cached the bytes revalidates and gets the window's 304); and a GET's
+    // Range and If-Range, a player's byte range (the `video` and `download`
+    // routes answer 206 with Content-Range, Accept-Ranges and ETag).
     const ifNoneMatch = req.headers.get("if-none-match");
     if (ifNoneMatch) headers.set("If-None-Match", ifNoneMatch);
+    if (req.method === "GET") {
+      const range = req.headers.get("range");
+      if (range) headers.set("Range", range);
+      const ifRange = req.headers.get("if-range");
+      if (ifRange) headers.set("If-Range", ifRange);
+    }
     return context.dispatch(new Request(`http://127.0.0.1:${context.port()}${windowPath}${search}`, { method: req.method, headers, body, signal }));
   };
 
@@ -513,6 +525,11 @@ export function createInboxDevices(context: InboxDevicesContext) {
    * relay replays writes nothing again. Two door routes are not carried:
    * `pair` (pairing through the relay is not in v1) and `events` (the down
    * items are the relay's stream; an endless answer cannot be one result).
+   * A sealed command carries no headers in v1, so no Range reaches the
+   * window from here: `attachments/:id/video` and `download` answer the whole
+   * file (`200`), which the relay carries when it fits one frame and answers
+   * `413 result_too_large` otherwise, without reading it (inbox-relay.ts).
+   * A phone plays a video over the Wi-Fi or the tailnet; relay ranges are v1.1.
    */
   const asDevice = async (deviceId: string, input: { method: string; path: string; body?: unknown }): Promise<Response> => {
     try {

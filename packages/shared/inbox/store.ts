@@ -74,6 +74,9 @@ import {
   isInboxAnnotationId,
   isInboxAnnotationVersion,
   isInboxAnnotatableKind,
+  INBOX_VIDEO_BLOCK_ID,
+  readInboxAttachmentKind,
+  readInboxVideoTime,
   type InboxAnnotationRecord,
   type InboxAttachment,
 } from "@plannotator/core/inbox-types";
@@ -201,6 +204,13 @@ export interface InboxDiskUsage {
   dir: string;
   bytes: number;
   projects: InboxProjectUsage[];
+}
+
+/** An annotation as stored: without the exporter's `exportLocation`, which only the window sets, on its export copies. */
+function withoutExportLocation(annotation: Record<string, unknown>): Record<string, unknown> {
+  if (!("exportLocation" in annotation)) return annotation;
+  const { exportLocation: _dropped, ...rest } = annotation;
+  return rest;
 }
 
 function refusalError(refusal: InboxAnswerRefusal): InboxError {
@@ -1909,6 +1919,15 @@ export class InboxStore {
     }
     const id = (annotation as Record<string, unknown>).id;
     if (!isInboxAnnotationId(id)) throw new InboxError("validation_error", "annotation.id: a short id.", { field: "annotation.id" });
+    // A comment on a video is at a moment: `blockId: "video"` and `inboxVideo.time` in seconds (contract 4).
+    if (readInboxAttachmentKind(hit.attachment.kind) === "video") {
+      if ((annotation as Record<string, unknown>).blockId !== INBOX_VIDEO_BLOCK_ID) {
+        throw new InboxError("validation_error", `annotation.blockId: "${INBOX_VIDEO_BLOCK_ID}" on a video.`, { field: "annotation.blockId" });
+      }
+      if (readInboxVideoTime(annotation) === null) {
+        throw new InboxError("validation_error", "annotation.inboxVideo.time: the moment in seconds from the start (a number, 0 or more).", { field: "annotation.inboxVideo" });
+      }
+    }
     if (this.closedByArchive(hit.message)) throw new InboxError("thread_resolved", "This thread is resolved; reopen it to annotate.");
     const existing = this.annotations.get(id);
     // A draft's key is the file's path and the version, so an annotation
@@ -1928,7 +1947,9 @@ export class InboxStore {
       attachment_id: existing?.attachment_id ?? hit.attachment.id,
       path: hit.attachment.path,
       version: input.version,
-      annotation: annotation as Record<string, unknown>,
+      // `exportLocation` is the exporter's line the window computes at Send
+      // (a video comment's "At 1:42 …"): never taken from a client.
+      annotation: withoutExportLocation(annotation as Record<string, unknown>),
       created_at: existing?.created_at ?? at,
       updated_at: at,
       removed_at: null,

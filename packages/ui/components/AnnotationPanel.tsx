@@ -191,6 +191,28 @@ interface PanelProps {
   questionRows?: readonly QuestionPanelRow[];
   /** A Questions row was clicked (the host scrolls to the card). */
   onSelectQuestion?: (row: QuestionPanelRow) => void;
+  /**
+   * The order of the comment timeline (and of each document group), for a
+   * host whose comments have an order of their own (the Inbox's video
+   * comments, by the moment they are at). Ties keep creation order. Absent:
+   * creation order, exactly as before.
+   */
+  compareAnnotations?: (a: Annotation, b: Annotation) => number;
+  /**
+   * The panel's title (default "Annotations") and a quiet note at the right
+   * of its header (the Inbox's "By time" for a video's comments). Absent:
+   * the header is exactly as before.
+   */
+  title?: string;
+  titleNote?: string;
+  /**
+   * Which built-in parts a plan-annotation card draws: its quoted text
+   * (`quote`) and its attached images under the comment (`images`). A host
+   * that draws them itself (the Inbox's video comments show the moment and
+   * the frame in `renderCardHeader`) turns them off per card. Absent: both
+   * drawn, exactly as before.
+   */
+  cardParts?: (annotation: Annotation) => { quote?: boolean; images?: boolean };
 }
 
 export const AnnotationPanel: React.FC<PanelProps> = ({
@@ -229,6 +251,10 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
   onEditInDocument,
   questionRows,
   onSelectQuestion,
+  compareAnnotations,
+  title = 'Annotations',
+  titleNote,
+  cardParts,
 }) => {
   const isMobile = useIsMobile();
   const embedded = presentation === 'embedded';
@@ -240,7 +266,9 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
   const timelineAnnotations = questionRows !== undefined
     ? annotations.filter((a) => a.questionAnswer == null)
     : annotations;
-  const sortedAnnotations = [...timelineAnnotations].sort((a, b) => a.createdA - b.createdA);
+  const byCreation = (a: Annotation, b: Annotation) => a.createdA - b.createdA;
+  const byHost = compareAnnotations ? (a: Annotation, b: Annotation) => compareAnnotations(a, b) || byCreation(a, b) : byCreation;
+  const sortedAnnotations = [...timelineAnnotations].sort(byHost);
   const sortedCodeAnnotations = [...codeAnnotations].sort((a, b) => a.createdAt - b.createdAt);
   // Replies (`inReplyTo`) thread under their parent: each reply is lifted to
   // sit right after its parent (and the parent's earlier replies) at the
@@ -251,13 +279,15 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
   // comparator with a linear parent lookup was O(n^2 log n) and froze the
   // tab on a few thousand threaded comments.
   const threadRootTs = resolveThreadRootTimestamps(sortedAnnotations);
-  const timelineEntries = [
-    ...threadedAnnotations.map(({ annotation, isReply }) => ({ kind: 'plan' as const, ts: annotation.createdA, threadTs: threadRootTs.get(annotation.id) ?? annotation.createdA, annotation, isReply })),
-    ...sortedCodeAnnotations.map(annotation => ({ kind: 'code' as const, ts: annotation.createdAt, threadTs: annotation.createdAt, annotation, isReply: false })),
-  ].sort((a, b) => {
-    if (a.threadTs !== b.threadTs) return a.threadTs - b.threadTs;
-    return a.ts - b.ts;
-  });
+  const planEntries = threadedAnnotations.map(({ annotation, isReply }) => ({ kind: 'plan' as const, ts: annotation.createdA, threadTs: threadRootTs.get(annotation.id) ?? annotation.createdA, annotation, isReply }));
+  const codeEntries = sortedCodeAnnotations.map(annotation => ({ kind: 'code' as const, ts: annotation.createdAt, threadTs: annotation.createdAt, annotation, isReply: false }));
+  // A host order keeps the plan comments as the host sorted them (code comments after).
+  const timelineEntries = compareAnnotations
+    ? [...planEntries, ...codeEntries]
+    : [...planEntries, ...codeEntries].sort((a, b) => {
+        if (a.threadTs !== b.threadTs) return a.threadTs - b.threadTs;
+        return a.ts - b.ts;
+      });
   const totalCount = annotations.length + codeAnnotations.length + (editorAnnotations?.length ?? 0);
   const timelineCount = timelineAnnotations.length + codeAnnotations.length + (editorAnnotations?.length ?? 0);
 
@@ -335,7 +365,7 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
           <div className="flex h-10 items-center justify-between px-3">
             <div className="flex items-center gap-2">
               <h2 className="text-xs font-medium text-foreground">
-                Annotations
+                {title}
               </h2>
               {headerCount > 0 && (
                 <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-primary/10 px-1 font-mono text-[10px] font-medium tabular-nums text-primary">
@@ -343,6 +373,7 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
                 </span>
               )}
             </div>
+            {titleNote && <span data-annotation-panel-note="" className="ml-auto mr-1 text-[11px] text-muted-foreground">{titleNote}</span>}
             {mobilePanel && onClose && (
               <button
                 onClick={onClose}
@@ -427,7 +458,7 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
               const groupAnnotations = group.isCurrent && questionRows !== undefined
                 ? group.annotations.filter((a) => a.questionAnswer == null)
                 : group.annotations;
-              const sorted = [...groupAnnotations].sort((a, b) => a.createdA - b.createdA);
+              const sorted = [...groupAnnotations].sort(byHost);
               const threaded = threadReplies(sorted);
               return (
                 <section key={group.path} data-annotation-group={group.path}>
@@ -482,6 +513,7 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
                             readOnly={readOnly}
                             footer={group.isCurrent ? renderCardFooter?.(annotation) : undefined}
                             header={group.isCurrent ? renderCardHeader?.(annotation) : undefined}
+                            parts={group.isCurrent ? cardParts?.(annotation) : undefined}
                             mentionSource={mentionSource}
                             unanchored={group.isCurrent ? (unanchoredIds?.has(annotation.id) ?? false) : false}
                           />
@@ -595,6 +627,7 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
                       readOnly={readOnly}
                       footer={renderCardFooter?.(entry.annotation)}
                       header={renderCardHeader?.(entry.annotation)}
+                  parts={cardParts?.(entry.annotation)}
                       mentionSource={mentionSource}
                       unanchored={unanchoredIds?.has(entry.annotation.id) ?? false}
                     />
@@ -611,6 +644,7 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
                   readOnly={readOnly}
                   footer={renderCardFooter?.(entry.annotation)}
                   header={renderCardHeader?.(entry.annotation)}
+                  parts={cardParts?.(entry.annotation)}
                   mentionSource={mentionSource}
                   unanchored={unanchoredIds?.has(entry.annotation.id) ?? false}
                 />
@@ -928,7 +962,9 @@ const AnnotationCard: React.FC<{
   mentionSource?: MentionSource;
   /** The annotation has no live location in the document (host-reported). */
   unanchored?: boolean;
-}> = ({ annotation, isSelected, isMe, onSelect, onDelete, onEdit, readOnly = false, footer, header, mentionSource, unanchored = false }) => {
+  /** Built-in parts to draw (see `cardParts`). */
+  parts?: { quote?: boolean; images?: boolean };
+}> = ({ annotation, isSelected, isMe, onSelect, onDelete, onEdit, readOnly = false, footer, header, mentionSource, unanchored = false, parts }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState(annotation.text || '');
 
@@ -1071,9 +1107,11 @@ const AnnotationCard: React.FC<{
       ) : (
         <>
           {/* Quote — the annotated text */}
-          <p className="mb-1.5 line-clamp-2 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground/80">
-            "{annotation.originalText}"
-          </p>
+          {parts?.quote !== false && (
+            <p className="mb-1.5 line-clamp-2 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground/80">
+              "{annotation.originalText}"
+            </p>
+          )}
 
           {/* Comment/Replacement Text */}
           {annotation.type !== AnnotationType.DELETION && (
@@ -1091,7 +1129,7 @@ const AnnotationCard: React.FC<{
       )}
 
       {/* Attached Images */}
-      {annotation.images && annotation.images.length > 0 && (
+      {parts?.images !== false && annotation.images && annotation.images.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {annotation.images.map((img, idx) => (
             <div key={idx} className="text-center">

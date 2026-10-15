@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { inboxAttachmentKindLabel, isInboxAnnotatableKind, readInboxAttachmentKind, type InboxAttachmentState } from '@plannotator/core/inbox-types';
+import { inboxAttachmentKindLabel, inboxVideoMeta, isInboxAnnotatableKind, readInboxAttachmentKind, type InboxAttachmentState } from '@plannotator/core/inbox-types';
 import { attachmentDownloadUrl, attachmentImageUrl, imageFitsWithin, readableVersion, WIDE_IMAGE_RATIO } from '../attachments';
 import { formatBytes, plural, shortTime, whenTime } from '../format';
 import { Icon, type IconName } from '../icons';
@@ -17,6 +17,8 @@ export function iconOf(attachment: InboxAttachmentState): IconName {
       return 'diagram';
     case 'image':
       return 'photo';
+    case 'video':
+      return 'film';
     case 'file':
       return 'cube';
     default:
@@ -24,10 +26,14 @@ export function iconOf(attachment: InboxAttachmentState): IconName {
   }
 }
 
-/** "1280 × 800, 79 KB" for an image; "PDF, 2.3 MB" otherwise. */
+/** "1280 × 800, 79 KB" for an image; "MP4 video · 7:41 · 1920 × 1080 · 461 MB" for a video; "PDF, 2.3 MB" otherwise. */
 function sizeLine(attachment: InboxAttachmentState): string {
   const size = formatBytes(attachment.current?.size ?? attachment.size);
-  if (readInboxAttachmentKind(attachment.kind) === 'image' && attachment.width && attachment.height) return `${attachment.width} × ${attachment.height}, ${size}`;
+  const kind = readInboxAttachmentKind(attachment.kind);
+  if (kind === 'video') {
+    return [inboxAttachmentKindLabel(attachment.kind, attachment.name, attachment.media_type), inboxVideoMeta(attachment), size].filter(Boolean).join(' · ');
+  }
+  if (kind === 'image' && attachment.width && attachment.height) return `${attachment.width} × ${attachment.height}, ${size}`;
   return `${inboxAttachmentKindLabel(attachment.kind, attachment.name, attachment.media_type)}, ${size}`;
 }
 
@@ -181,12 +187,14 @@ export function AttachmentTiles({
           // text and what a screen reader hears.
           const changed = changedLine(attachment, true);
           const changedLong = changedLine(attachment);
-          const counted = count > 0 ? `, ${plural(count, 'annotation')}` : '';
+          const isImage = readInboxAttachmentKind(attachment.kind) === 'image';
+          const isVideo = readInboxAttachmentKind(attachment.kind) === 'video';
+          // A video's caption keeps one separator throughout: "WebM video · 81.8 KB · 2 comments".
+          const counted = count > 0 ? (isVideo ? ` · ${plural(count, 'comment')}` : `, ${plural(count, 'annotation')}`) : '';
           const detail = `${changed ?? sizeLine(attachment)}${counted}`;
           const detailLong = `${changedLong ?? sizeLine(attachment)}${counted}`;
           // The header's band shows the same tiles while the foot's are on the page: ids stay unique.
           const detailId = `ib-${header ? 'hatt' : 'att'}-detail-${attachment.id}`;
-          const isImage = readInboxAttachmentKind(attachment.kind) === 'image';
           const icon = isImage ? (
             <span className="ib-fi ib-thumb">
               <img src={attachmentImageUrl(attachment, readableVersion(attachment))} alt="" loading="lazy" decoding="async" draggable={false} data-small={imageFitsWithin(attachment, 30) ? '' : undefined} />
@@ -255,7 +263,7 @@ export function AttachmentTiles({
               className={`ib-att-t${isOpen ? ' ib-open-beside' : ''}`}
               key={attachment.id}
               onClick={() => onOpen(attachment)}
-              aria-label={isOpen ? `${attachment.name}, open beside the thread` : `Open ${attachment.name}`}
+              aria-label={isOpen ? `${attachment.name}, open beside the thread` : `${isVideo ? 'Play' : 'Open'} ${attachment.name}`}
               aria-current={isOpen ? 'true' : undefined}
               aria-describedby={detailId}
               data-attachment-id={attachment.id}
@@ -265,7 +273,7 @@ export function AttachmentTiles({
               {icon}
               {text}
               <span className="ib-open" aria-hidden="true">
-                {isOpen ? 'Open beside' : 'Open'}
+                {isOpen ? 'Open beside' : isVideo ? 'Play' : 'Open'}
               </span>
             </button>,
           );
