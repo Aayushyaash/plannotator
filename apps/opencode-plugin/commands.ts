@@ -295,7 +295,9 @@ export async function handleReviewCommand(
     htmlContent: reviewHtmlContent,
     opencodeClient: client,
     onReady: (url, isRemote, port) => {
-      handleReviewServerReady(url, isRemote, port);
+      // announce: false. The embedded runtime shares stderr with OpenCode's
+      // TUI renderer; announceSessionUrl is its visible channel for the URL.
+      handleReviewServerReady(url, isRemote, port, { announce: false });
       announceSessionUrl(client, "code review", url);
     },
   });
@@ -550,7 +552,9 @@ export async function handleAnnotateCommand(
     agentCwd,
     htmlContent,
     onReady: (url, isRemote, port) => {
-      handleAnnotateServerReady(url, isRemote, port);
+      // announce: false. The embedded runtime shares stderr with OpenCode's
+      // TUI renderer; announceSessionUrl is its visible channel for the URL.
+      handleAnnotateServerReady(url, isRemote, port, { announce: false });
       announceSessionUrl(client, "annotation UI", url);
     },
   });
@@ -690,7 +694,9 @@ export async function handleAnnotateLastCommand(
     approvalNotesSupported: true,
     htmlContent,
     onReady: (url, isRemote, port) => {
-      handleAnnotateServerReady(url, isRemote, port);
+      // announce: false. The embedded runtime shares stderr with OpenCode's
+      // TUI renderer; announceSessionUrl is its visible channel for the URL.
+      handleAnnotateServerReady(url, isRemote, port, { announce: false });
       announceSessionUrl(client, "annotation UI", url);
     },
   });

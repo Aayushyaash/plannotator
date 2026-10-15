@@ -458,16 +458,18 @@ function getPlanHtml(): string {
  * The embedded runtime's ready hook: put the session URL where a reviewer can
  * see it, and nowhere else.
  *
- * This still must NOT go to `client.app.log`. That is `console.error`, the same
- * stderr stream `handleServerReady` has already printed the URL to, so logging
- * here would duplicate the line in remote mode and add a stray one locally
- * (which is why this hook used to be empty). The transcript notice is a
- * different surface entirely, and on OpenCode 2 it is the only one a remote
- * reviewer can actually see: the host discards a server plugin's stderr unless
- * it was started with `OPENCODE_PRINT_LOGS=1`.
+ * This still must NOT go to `client.app.log`. That is `console.error`, and on
+ * OpenCode 2 the host discards a server plugin's stderr unless it was started
+ * with `OPENCODE_PRINT_LOGS=1`, so it is no substitute. (`runEmbeddedPlanReview`,
+ * this hook's caller, passes `handleServerReady` `{ announce: false }`: the
+ * embedded runtime shares stderr with OpenCode's TUI renderer, so the raw ready
+ * line is not printed there.) The transcript notice is the surface a reviewer
+ * can actually see, remote or local.
  *
- * Best-effort in both directions: an older host exposes no `session.synthetic`,
- * so `notifyUrl` is absent and this stays silent, exactly as before.
+ * An older host exposes no `session.synthetic`, so `notifyUrl` is absent; the
+ * URL then goes to `client.app.log`, the console output such a host shows only
+ * with `OPENCODE_PRINT_LOGS=1`. (That used to be the ready line
+ * `handleServerReady` printed itself; with `announce: false` it is this log.)
  */
 export function createPlanReadyNotifier(
   client: V2Client,
@@ -481,7 +483,14 @@ export function createPlanReadyNotifier(
       // The list entry is best-effort.
     }
     const notify = client.notifyUrl;
-    if (typeof notify !== "function") return;
+    if (typeof notify !== "function") {
+      try {
+        client.app.log({ level: "info", message: formatSessionUrlNotice(url) });
+      } catch {
+        // Logging is best-effort.
+      }
+      return;
+    }
     try {
       void notify({ url, message: formatSessionUrlNotice(url) }).catch(() => {
         // A cosmetic notice must never surface as an unhandled rejection.

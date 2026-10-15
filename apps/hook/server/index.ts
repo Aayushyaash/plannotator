@@ -123,9 +123,8 @@ import { plannotatorBundleSubject } from "@plannotator/shared/plannotator-tool";
 import { createWorktreePool, type WorktreePool, type PoolEntry } from "@plannotator/shared/worktree-pool";
 import { parsePRUrl, checkPRAuth, fetchPR, getCliName, getCliInstallUrl, getMRLabel, getMRNumberLabel, getDisplayRepo, getPlatformLabel, getPRNumber, getPRHeadFetchSpec, getPRCloneCommand } from "@plannotator/server/pr";
 import { writeRemoteShareLink } from "@plannotator/server/share-url";
-import { enableTailscaleServe } from "@plannotator/server/tailscale-serve";
+import { announceTailscaleSession, enableTailscaleServe } from "@plannotator/server/tailscale-serve";
 import { discardEnvPullSessionBridgeConfig, takeEnvPullSessionBridgeConfig } from "@plannotator/server/ai-runtime";
-import { writeUrlQr } from "@plannotator/server/qr";
 import { resolveAnnotateTarget } from "./annotate-resolution";
 import { annotateDecisionTarget, reviewDecisionTarget, takeHostReviewId, targetText } from "./decision-target";
 import { formatSessionsJson, formatSessionsTable } from "./sessions-output";
@@ -407,9 +406,7 @@ async function handleTailscaleReady(port: number): Promise<void> {
       }),
     );
   }
-  process.stderr.write(`\n  Plannotator session ready — served over your tailnet:\n  ${url}\n\n`);
-  writeUrlQr(url);
-  await handleServerReady(url, false, port, { skipBrowserOpen: true });
+  await announceTailscaleSession(url, port);
 }
 
 // Global flag: --no-jina (disables Jina Reader for URL annotation)

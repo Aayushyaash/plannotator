@@ -51,6 +51,14 @@ plannotator sessions --open 2     # reopens session #2
 
 Stale sessions from crashed processes are cleaned up automatically. You can also force cleanup with `plannotator sessions --clean`.
 
+Every session also prints its URL on one line to stderr when it starts, before it opens a browser:
+
+```
+  Plannotator session ready: http://localhost:54321
+```
+
+The format is stable (two spaces, the prefix, then the URL), so an agent or a script can find the line in the output it already captures. A remote session adds a line under it about forwarding the port, and a browser that could not be opened adds "Could not open a browser automatically". For a session whose output you no longer have, use `plannotator sessions`: it lists only the servers that are still running.
+
 ## Where does Plannotator store data?
 
 Plannotator-managed files live under `~/.plannotator/` by default:

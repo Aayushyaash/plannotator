@@ -135,6 +135,8 @@ type CodeReviewOptions = {
 	 * `config.gitRemoteCheck`.
 	 */
 	gitRemoteCheck?: boolean;
+	/** The caller shows the URL in its own in-turn message (`sessionOpenedMessage`). */
+	announcedInTurn?: boolean;
 };
 
 export type CodeReviewDecision = {
@@ -251,12 +253,22 @@ export async function startServerWithSelfPreemption<T>(
 	}
 }
 
-async function openBrowserForServer(serverUrl: string, ctx: ExtensionContext): Promise<void> {
+/**
+ * Open the browser, then tell the person what they need after the turn.
+ *
+ * Slash commands, the `plannotator` tool and plan review show the URL in
+ * their in-turn "opened" message (`sessionOpenedMessage`), so for them this
+ * only speaks up when the launch failed. The archive and the event API have
+ * no in-turn message, so they get the URL here.
+ */
+async function openBrowserForServer(serverUrl: string, ctx: ExtensionContext, announcedInTurn = false): Promise<void> {
 	const browserResult = await openBrowser(serverUrl);
-	if (ctx.mode === "rpc" || isRemoteSession()) {
-		ctx.ui.notify(`[Plannotator] ${serverUrl}`, "info");
-	} else if (!browserResult.opened) {
-		ctx.ui.notify(`Open this URL to review: ${serverUrl}`, "info");
+	const failedLocally = !isRemoteSession() && !browserResult.opened;
+	if (!announcedInTurn) {
+		const suffix = failedLocally ? " (could not open a browser automatically; open this URL)" : "";
+		ctx.ui.notify(`Plannotator session ready: ${serverUrl}${suffix}`, "info");
+	} else if (failedLocally) {
+		ctx.ui.notify(`Could not open a browser automatically. Open ${serverUrl} to review.`, "info");
 	}
 }
 
@@ -314,6 +326,7 @@ export function startBrowserDecisionSession<T>(
 	ctx: ExtensionContext,
 	waitForResult: () => Promise<T>,
 	signal?: AbortSignal,
+	options: { announcedInTurn?: boolean } = {},
 ): BrowserDecisionSession<T> {
 	let stopped = false;
 	let stopReject: ((err: Error) => void) | undefined;
@@ -337,7 +350,7 @@ export function startBrowserDecisionSession<T>(
 		// Nothing may escape: an unhandled rejection here (a launcher that failed,
 		// or a `ctx` invalidated by a session replacement while the browser was
 		// opening) is an uncaught error that kills the whole pi process.
-		void openBrowserForServer(server.url, ctx).catch((err: unknown) => {
+		void openBrowserForServer(server.url, ctx, options.announcedInTurn === true).catch((err: unknown) => {
 			console.error(
 				`Plannotator: could not announce the browser URL ${server.url}: ${err instanceof Error ? err.message : String(err)}`,
 			);
@@ -373,7 +386,7 @@ export async function startPlanReviewBrowserSession(
 	ctx: ExtensionContext,
 	planContent: string,
 	signal?: AbortSignal,
-	options: { sessionBridge?: SessionBridge; planRevisions?: boolean } = {},
+	options: { sessionBridge?: SessionBridge; planRevisions?: boolean; announcedInTurn?: boolean } = {},
 ): Promise<PlanReviewBrowserSession> {
 	if (!ctx.hasUI) {
 		throw new Error("Plannotator browser review is unavailable in this session.");
@@ -394,7 +407,9 @@ export async function startPlanReviewBrowserSession(
 		planRevisions: options.planRevisions,
 	}));
 
-	const session = startBrowserDecisionSession(server, ctx, server.waitForDecision, signal);
+	const session = startBrowserDecisionSession(server, ctx, server.waitForDecision, signal, {
+		announcedInTurn: options.announcedInTurn,
+	});
 	server.onDecision(() => {
 		setTimeout(() => session.stop(), 1500);
 	});
@@ -810,7 +825,9 @@ async function createCodeReviewBrowserSession(
 		onCleanup: worktreeCleanup,
 	}));
 
-	return startBrowserDecisionSession(server, ctx, server.waitForDecision);
+	return startBrowserDecisionSession(server, ctx, server.waitForDecision, undefined, {
+		announcedInTurn: options.announcedInTurn,
+	});
 }
 
 export async function openMarkdownAnnotation(
@@ -857,6 +874,8 @@ export async function startMarkdownAnnotationSession(
 	sessionBridge?: SessionBridge,
 	/** Several files reviewed as one (mode "annotate-bundle"), in review order. */
 	bundleFiles?: AnnotateBundleFile[],
+	/** The caller shows the URL in its own in-turn message (`sessionOpenedMessage`). */
+	announcedInTurn?: boolean,
 ): Promise<BrowserDecisionSession<AnnotateDecision>> {
 	if (!ctx.hasUI) {
 		throw new Error("Plannotator annotation browser is unavailable in this session.");
@@ -920,7 +939,7 @@ export async function startMarkdownAnnotationSession(
 		project: detectProjectName(),
 	}));
 
-	return startBrowserDecisionSession(server, ctx, server.waitForDecision);
+	return startBrowserDecisionSession(server, ctx, server.waitForDecision, undefined, { announcedInTurn });
 }
 
 export async function openLastMessageAnnotation(
@@ -939,6 +958,8 @@ export async function startLastMessageAnnotationSession(
 	gate?: boolean,
 	recentMessages?: { messageId: string; text: string; timestamp?: string }[],
 	sessionBridge?: SessionBridge,
+	/** The caller shows the URL in its own in-turn message (`sessionOpenedMessage`). */
+	announcedInTurn?: boolean,
 ): Promise<BrowserDecisionSession<AnnotateDecision>> {
 	return startMarkdownAnnotationSession(
 		ctx,
@@ -955,6 +976,8 @@ export async function startLastMessageAnnotationSession(
 		recentMessages,
 		undefined,
 		sessionBridge,
+		undefined,
+		announcedInTurn,
 	);
 }
 

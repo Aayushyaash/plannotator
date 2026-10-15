@@ -12,6 +12,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { TailscaleRunResult } from "@plannotator/shared/tailscale";
 import {
+  announceTailscaleSession,
   disableTailscaleServe,
   enableTailscaleServe,
   resetTailscaleServeForTests,
@@ -233,5 +234,38 @@ describe("enableTailscaleServe for the Inbox (8443, persisted, re-pointed)", () 
     const { runner, calls } = makeRunner({ status: { status: 0, stdout: mapped("http://127.0.0.1:3000"), stderr: "" } });
     expect(() => enableTailscaleServe(52900, runner, { httpsPort: 8443, ownTargets: ["http://127.0.0.1:52900"], persist: true })).toThrow(/already routes port 8443/);
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe("announceTailscaleSession", () => {
+  const withoutReadyFile = async (fn: () => Promise<void>): Promise<void> => {
+    const original = process.env.PLANNOTATOR_READY_FILE;
+    delete process.env.PLANNOTATOR_READY_FILE;
+    try {
+      await fn();
+    } finally {
+      if (original === undefined) delete process.env.PLANNOTATOR_READY_FILE;
+      else process.env.PLANNOTATOR_READY_FILE = original;
+    }
+  };
+
+  // The tailnet path used to print its own "served over your tailnet" block;
+  // with the shared ready line on every start it would have printed the URL
+  // twice. One ready line, then the tailnet line and the QR.
+  test("prints the ready line once, above the tailnet line, and opens no browser", async () => {
+    const url = "https://vps-1.tail1234.ts.net:4321";
+    const capture = captureStderr();
+    try {
+      await withoutReadyFile(() => announceTailscaleSession(url, 4321));
+    } finally {
+      capture.restore();
+    }
+    const output = capture.output();
+    // Literal text, not the constant (see shared-handlers.test.ts).
+    expect(output.split("Plannotator session ready: ").length - 1).toBe(1);
+    expect(output.split(url).length - 1).toBe(1);
+    expect(output).toContain(`\n  Plannotator session ready: ${url}\n`);
+    expect(output.indexOf("Plannotator session ready: ")).toBeLessThan(output.indexOf("Served over your tailnet"));
+    expect(output).not.toContain("Could not open a browser");
   });
 });
