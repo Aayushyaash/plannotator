@@ -171,6 +171,7 @@ export function formatTopLevelHelp(): string {
     "",
     "Note:",
     "  running 'plannotator' without arguments is for hook integration and expects JSON on stdin",
+    "  --browser <name> picks the browser for one run; --browser none opens no browser (the URL is always printed)",
   ].join("\n");
 }
 

@@ -263,9 +263,14 @@ export async function startServerWithSelfPreemption<T>(
  */
 async function openBrowserForServer(serverUrl: string, ctx: ExtensionContext, announcedInTurn = false): Promise<void> {
 	const browserResult = await openBrowser(serverUrl);
-	const failedLocally = !isRemoteSession() && !browserResult.opened;
+	// PLANNOTATOR_BROWSER=none is a choice, not a failure: the in-turn message
+	// already said so, and a caller without one says it here.
+	const notOpening = browserResult.notOpening;
+	const failedLocally = !notOpening && !isRemoteSession() && !browserResult.opened;
 	if (!announcedInTurn) {
-		const suffix = failedLocally ? " (could not open a browser automatically; open this URL)" : "";
+		const suffix = notOpening
+			? ` — ${notOpening}`
+			: failedLocally ? " (could not open a browser automatically; open this URL)" : "";
 		ctx.ui.notify(`Plannotator session ready: ${serverUrl}${suffix}`, "info");
 	} else if (failedLocally) {
 		ctx.ui.notify(`Could not open a browser automatically. Open ${serverUrl} to review.`, "info");

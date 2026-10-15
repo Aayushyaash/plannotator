@@ -4,11 +4,12 @@
  * sentinel value. Pure functions over one file's text, so the test runs them
  * over the repo AND over fixtures in memory.
  *
- * Why it matters: packages/server/browser.ts treats `none`, `true`, `false`,
- * `:`, `0` and `1` (any case, surrounding spaces ignored) as "no browser
- * configured" (#756) and falls through to the system default, which opens a
- * real tab on the developer's screen. Use NO_BROWSER from
- * tests/helpers/no-browser.ts instead.
+ * Why it matters: a binary from before packages/shared/browser-intent.ts
+ * treated `none`, `true`, `false`, `:`, `0` and `1` (any case, surrounding
+ * spaces ignored) as "no browser configured" (#756) and fell through to the
+ * system default, which opens a real tab on the developer's screen. Current
+ * builds open nothing for them, but tests can reach older binaries. Use
+ * NO_BROWSER from tests/helpers/no-browser.ts instead.
  *
  * Comments are blanked first (a comment that explains the bug is not the bug).
  * A line that tests the sentinel handling itself, in process, without opening
@@ -20,7 +21,13 @@ import { stripComments } from "./real-inbox-scan";
 /** The marker for a line that deliberately sets a sentinel to test its handling. */
 export const SENTINEL_UNDER_TEST_MARK = "no-browser-guard: sentinel under test";
 
-/** The values packages/server/browser.ts NOOP_BROWSER_VALUES reads as unset. */
+/**
+ * The values a binary from before browser-intent read as unset (#756).
+ * Intentionally only #756's six, not `off` / `no`, which current builds also
+ * read as "open nothing": an older binary treats `off` or `no` as a browser
+ * name, whose launch fails rather than opening the default browser, so those
+ * cannot open a real tab and are not scanned for.
+ */
 const SENTINEL = String.raw`\s*(?:none|true|false|0|1|:)\s*`;
 
 /** A sentinel value, quoted (a TS, JSON, YAML or shell string) or bare (shell, YAML). */

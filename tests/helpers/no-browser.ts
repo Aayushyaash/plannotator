@@ -3,14 +3,15 @@
  * PLANNOTATOR_BROWSER so that a session's openBrowser() runs a program that
  * exits at once and opens nothing.
  *
- * Why not `PLANNOTATOR_BROWSER=none`: packages/server/browser.ts (and Pi's
- * apps/pi-extension/server/network.ts) read `none`, `true`, `false`, `:`, `0`
- * and `1` as "no browser configured" (#756: Claude Code's agent view sets
- * BROWSER=true, and Plannotator must still open its window there). A sentinel
- * is dropped as if the variable were unset, and openBrowser falls through to
- * the system default: `open <url>` on macOS, `xdg-open` on Linux. So a test
- * that sets `none` opens real tabs on the developer's screen.
- * tests/no-browser-sentinel.test.ts fails on any test or script that does.
+ * Why not `PLANNOTATOR_BROWSER=none`: a current build opens nothing for it
+ * (packages/shared/browser-intent.ts), but a binary from before that change
+ * read `none`, `true`, `false`, `:`, `0` and `1` as "no browser configured"
+ * (#756) and fell through to the system default: `open <url>` on macOS,
+ * `xdg-open` on Linux. Tests can reach such a binary (the version matrix, an
+ * older installed `plannotator`), and a bug in the "none" handling itself
+ * would do the same, so a test that sets `none` could open real tabs on the
+ * developer's screen. tests/no-browser-sentinel.test.ts fails on any test or
+ * script that does, except a line marked as testing that handling.
  *
  * The value is an absolute path, so it works under any PATH a test builds
  * (some specs give the binary a PATH of fakes only):

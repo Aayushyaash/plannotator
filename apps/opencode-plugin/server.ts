@@ -458,9 +458,10 @@ function getPlanHtml(): string {
  * The embedded runtime's ready hook: put the session URL where a reviewer can
  * see it, and nowhere else.
  *
- * This still must NOT go to `client.app.log`. That is `console.error`, and on
- * OpenCode 2 the host discards a server plugin's stderr unless it was started
- * with `OPENCODE_PRINT_LOGS=1`, so it is no substitute. (`runEmbeddedPlanReview`,
+ * The transcript notice comes first. `client.app.log` is no substitute for it:
+ * that is `console.error`, and on OpenCode 2 the host discards a server
+ * plugin's stderr unless it was started with `OPENCODE_PRINT_LOGS=1`, so it is
+ * only the fallback below for a host without the notice. (`runEmbeddedPlanReview`,
  * this hook's caller, passes `handleServerReady` `{ announce: false }`: the
  * embedded runtime shares stderr with OpenCode's TUI renderer, so the raw ready
  * line is not printed there.) The transcript notice is the surface a reviewer

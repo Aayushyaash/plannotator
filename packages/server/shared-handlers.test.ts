@@ -256,6 +256,54 @@ describe("handleServerReady", () => {
     }
   });
 
+  // PLANNOTATOR_BROWSER=none (or --browser none) opens nothing: the reason
+  // goes under the URL, and no launch (so no failure line) follows.
+  test.each([
+    ["local", false, ""],
+    ["remote", true, "  Open it on your local machine (forward port 6000 if needed).\n"],
+  ])("PLANNOTATOR_BROWSER=none: a %s session says why and never calls the opener", async (_label, isRemote, middle) => { // no-browser-guard: sentinel under test (expected text, nothing is set)
+    const saved = process.env.PLANNOTATOR_BROWSER;
+    // no-browser-guard: sentinel under test (in process; the opener is a stub that records)
+    process.env.PLANNOTATOR_BROWSER = "none";
+    let called = false;
+    try {
+      const { stdout, stderr } = await captureStreams(async () => {
+        await handleServerReady("http://localhost:6000", isRemote as boolean, 6000, {
+          openBrowser: async () => {
+            called = true;
+            return true;
+          },
+        });
+      });
+      expect(called).toBe(false);
+      expect(stdout).toBe("");
+      expect(stderr).toBe(
+        "\n  Plannotator session ready: http://localhost:6000\n" +
+          middle +
+          "  Not opening a browser (PLANNOTATOR_BROWSER=none).\n\n", // no-browser-guard: sentinel under test (expected text, nothing is set)
+      );
+    } finally {
+      if (saved === undefined) delete process.env.PLANNOTATOR_BROWSER;
+      else process.env.PLANNOTATOR_BROWSER = saved;
+    }
+  });
+
+  // A host that opens the browser itself (skipBrowserOpen) has nothing to explain.
+  test("PLANNOTATOR_BROWSER=none with skipBrowserOpen prints no reason line", async () => { // no-browser-guard: sentinel under test (expected text, nothing is set)
+    const saved = process.env.PLANNOTATOR_BROWSER;
+    // no-browser-guard: sentinel under test (in process; nothing is launched)
+    process.env.PLANNOTATOR_BROWSER = "none";
+    try {
+      const { stderr } = await captureStreams(async () => {
+        await handleServerReady("http://localhost:6100", false, 6100, { skipBrowserOpen: true });
+      });
+      expect(stderr).toBe("\n  Plannotator session ready: http://localhost:6100\n\n");
+    } finally {
+      if (saved === undefined) delete process.env.PLANNOTATOR_BROWSER;
+      else process.env.PLANNOTATOR_BROWSER = saved;
+    }
+  });
+
   // OpenCode's embedded runtime shares stderr with its TUI and shows the URL
   // itself: announce: false prints nothing but still writes the ready file
   // and opens the browser.

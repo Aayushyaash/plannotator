@@ -803,7 +803,8 @@ export class PlannotatorMod {
         }
         return opened.text
       case 'starting':
-        return `Starting Plannotator for ${opened.subject}… it opens in your browser when ready, and your feedback comes back here as a message.`
+        // Neutral on purpose: PLANNOTATOR_BROWSER=none opens no browser.
+        return `Starting Plannotator for ${opened.subject}… \`plannotator sessions\` lists its link once it is up, and your feedback comes back here as a message.`
       case 'ready':
         return openedText(kind, opened.subject, opened.url, opened.extra)
     }

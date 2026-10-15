@@ -9,6 +9,7 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { openBrowser as openBrowserImpl } from "./browser";
+import { browserNoneReason, resolveBrowserIntent } from "@plannotator/shared/browser-intent";
 import { isUrlHostOverridden } from "./remote";
 import { writeUrlQr } from "./qr";
 import { validateImagePath, validateUploadExtension, UPLOAD_DIR } from "./image";
@@ -331,9 +332,17 @@ export async function handleServerReady(
       process.stderr.write(`  Open it on your local machine (forward port ${port} if needed).\n`);
     }
   }
-  if (announce) process.stderr.write("\n");
 
   const skipBrowserOpen = options.skipBrowserOpen ?? process.env.PLANNOTATOR_SKIP_BROWSER_OPEN === "1";
+  // PLANNOTATOR_BROWSER=none (or --browser none): open nothing, anywhere, and
+  // say so under the URL instead of reporting a failed launch. A host that
+  // opens the browser itself (skipBrowserOpen) has nothing to explain.
+  const intent = resolveBrowserIntent(process.env);
+  if (!skipBrowserOpen && intent.kind === "none") {
+    if (announce) process.stderr.write(`  ${browserNoneReason(intent)}\n\n`);
+    return;
+  }
+  if (announce) process.stderr.write("\n");
   if (skipBrowserOpen) return;
 
   const opened = await (options.openBrowser ?? openBrowserImpl)(url, { isRemote, useGlimpse: true });

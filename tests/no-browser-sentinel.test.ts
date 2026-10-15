@@ -1,11 +1,11 @@
 /**
  * No test or script may set PLANNOTATOR_BROWSER to a no-op sentinel.
  *
- * packages/server/browser.ts reads `none`, `true`, `false`, `:`, `0` and `1`
- * as "no browser configured" on purpose (#756: Claude Code's agent view sets
- * BROWSER=true and Plannotator must still open its window there), so a session
- * started with PLANNOTATOR_BROWSER=none falls through to the system default
- * and opens a real tab on the developer's screen. Tests set NO_BROWSER from
+ * A current build opens nothing for PLANNOTATOR_BROWSER=none
+ * (packages/shared/browser-intent.ts), but a binary from before it read
+ * `none`, `true`, `false`, `:`, `0` and `1` as "no browser configured" (#756)
+ * and fell through to the system default: a real tab on the developer's
+ * screen. Tests can reach such binaries, so they set NO_BROWSER from
  * tests/helpers/no-browser.ts instead: a program that exits at once.
  *
  * Also checked here: NO_BROWSER itself is an executable that opens nothing,
@@ -16,6 +16,7 @@ import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { isNoOpBrowserSentinel } from "../packages/server/browser";
+import { isBrowserNoneValue } from "../packages/shared/browser-intent";
 import { NO_BROWSER } from "./helpers/no-browser";
 import { SENTINEL_UNDER_TEST_MARK, sentinelBrowserFindings } from "./helpers/no-browser-scan";
 
@@ -70,11 +71,12 @@ describe("PLANNOTATOR_BROWSER in tests and scripts", () => {
     const findings = files
       .filter((file) => !SCANNER_FILES.has(file))
       .flatMap((file) => sentinelBrowserFindings(readFileSync(join(repoRoot, file), "utf8"), file).map((finding) => `${file}:${finding}`));
-    // A sentinel (none, true, false, 0, 1, :) is read as "unset" by
-    // packages/server/browser.ts (#756), which then opens the SYSTEM DEFAULT
-    // browser: real tabs on the developer's screen. Use NO_BROWSER from
+    // A sentinel (none, true, false, 0, 1, :) was read as "unset" by every
+    // binary before browser-intent (#756), which then opened the SYSTEM
+    // DEFAULT browser: real tabs on the developer's screen. Use NO_BROWSER from
     // tests/helpers/no-browser.ts. A line that tests the sentinel handling
-    // itself, in process, may carry `${SENTINEL_UNDER_TEST_MARK}`.
+    // itself (in process, or in a child whose PATH holds only stand-in
+    // openers) may carry `${SENTINEL_UNDER_TEST_MARK}`.
     expect(findings).toEqual([]);
   });
 
@@ -116,6 +118,8 @@ describe("PLANNOTATOR_BROWSER in tests and scripts", () => {
     }
     // If browser.ts gains a sentinel, add it to tests/helpers/no-browser-scan.ts too.
     expect(isNoOpBrowserSentinel(NO_BROWSER)).toBe(false);
+    // NO_BROWSER is a real program that runs; a "none" value never launches.
+    expect(isBrowserNoneValue(NO_BROWSER)).toBe(false);
   });
 });
 

@@ -126,3 +126,5 @@ export PLANNOTATOR_BROWSER="chrome.exe"
 ```
 
 You can also point `PLANNOTATOR_BROWSER` at a custom script that handles URL opening in your specific environment — for example, a script that opens the URL on a different machine or sends a notification with the link.
+
+To open nothing at all, set `PLANNOTATOR_BROWSER=none` (or pass `--browser none`). A remote session then also skips the VS Code tab and the remote host's own opener; the session prints its URL and `Not opening a browser (PLANNOTATOR_BROWSER=none).`, and you open the URL yourself.

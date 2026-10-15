@@ -44,7 +44,7 @@ describe("shouldUseLocalPrCheckout", () => {
 
 describe("browser URL notification", () => {
 	/** Run one session start with a launcher that opens nothing and collect what it notifies. */
-	async function notificationsFor(options: { mode?: string; announcedInTurn?: boolean }): Promise<string[]> {
+	async function notificationsFor(options: { mode?: string; announcedInTurn?: boolean; plannotatorBrowser?: string }): Promise<string[]> {
 		const previousRemote = process.env.PLANNOTATOR_REMOTE;
 		const previousPlannotatorBrowser = process.env.PLANNOTATOR_BROWSER;
 		const previousBrowser = process.env.BROWSER;
@@ -52,7 +52,7 @@ describe("browser URL notification", () => {
 
 		process.env.PLANNOTATOR_REMOTE = "0";
 		// A program that exits at once: the launch "succeeds" and opens nothing.
-		process.env.PLANNOTATOR_BROWSER = NO_BROWSER;
+		process.env.PLANNOTATOR_BROWSER = options.plannotatorBrowser ?? NO_BROWSER;
 		delete process.env.BROWSER;
 
 		try {
@@ -101,6 +101,17 @@ describe("browser URL notification", () => {
 		expect(await notificationsFor({ mode: "rpc", announcedInTurn: true })).toEqual([]);
 		expect(await notificationsFor({ announcedInTurn: true })).toEqual([]);
 	});
+
+	// PLANNOTATOR_BROWSER=none is a choice, not a failed launch. openBrowser
+	// returns before launching anything, so this stays in process.
+	test("PLANNOTATOR_BROWSER=none: the after-turn notice says why, and a failure notice never shows", async () => {
+		// no-browser-guard: sentinel under test (openBrowser returns before any launch)
+		expect(await notificationsFor({ plannotatorBrowser: "none" })).toEqual([
+			"Plannotator session ready: http://localhost:4321 — Not opening a browser (PLANNOTATOR_BROWSER=none).", // no-browser-guard: sentinel under test (expected text, nothing is set)
+		]);
+		// no-browser-guard: sentinel under test (openBrowser returns before any launch)
+		expect(await notificationsFor({ plannotatorBrowser: "none", announcedInTurn: true })).toEqual([]);
+	});
 });
 
 describe("sessionOpenedMessage", () => {
@@ -121,6 +132,20 @@ describe("sessionOpenedMessage", () => {
 	test("carries the URL for a local session", () => {
 		const message = withRemote("0", () => sessionOpenedMessage("Code review opened", url));
 		expect(message.split(url).length - 1).toBe(1);
+	});
+
+	test("says no browser opens when PLANNOTATOR_BROWSER says none", () => {
+		const previous = process.env.PLANNOTATOR_BROWSER;
+		// no-browser-guard: sentinel under test (nothing is launched here)
+		process.env.PLANNOTATOR_BROWSER = "none";
+		try {
+			const message = withRemote("0", () => sessionOpenedMessage("Code review opened", url));
+			expect(message.split(url).length - 1).toBe(1);
+			expect(message).toContain("Not opening a browser (PLANNOTATOR_BROWSER=none)."); // no-browser-guard: sentinel under test (expected text, nothing is set)
+		} finally {
+			if (previous === undefined) delete process.env.PLANNOTATOR_BROWSER;
+			else process.env.PLANNOTATOR_BROWSER = previous;
+		}
 	});
 
 	test("carries the URL for a remote session", () => {

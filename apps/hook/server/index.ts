@@ -932,8 +932,12 @@ if (args[0] === "sessions") {
       console.error(`Session #${n} not found. ${sessions.length} active session(s).`);
       process.exit(1);
     }
-    await openBrowser(session.url);
-    console.error(`Opened ${session.mode} session in browser: ${session.url}`);
+    // false when nothing opened (PLANNOTATOR_BROWSER=none says why on its own
+    // line, a failed launch is left to the URL): never claim a tab that isn't there.
+    const opened = await openBrowser(session.url);
+    console.error(opened
+      ? `Opened ${session.mode} session in browser: ${session.url}`
+      : `${session.mode} session: ${session.url}`);
     process.exit(0);
   }
 
