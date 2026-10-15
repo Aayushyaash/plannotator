@@ -173,15 +173,25 @@ test('Copy connect prompt copies the prompt naming this binary, says Copied, and
   const { page, context, url } = world;
   await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(url).origin });
   const foot = side(page).locator('.ib-side-foot');
-  // Just above Settings, an ordinary row of the same height.
-  await expect(foot.locator('.ib-nav')).toHaveText(['Copy connect prompt', 'Settings']);
-  const row = foot.getByRole('button', { name: 'Copy connect prompt' });
-  const settings = foot.getByRole('button', { name: 'Settings' });
-  expect((await row.boundingBox())!.height).toBe((await settings.boundingBox())!.height);
+  // Just above Settings: an outlined pill with the four agents' marks, inside the sidebar.
+  const row = foot.getByRole('button', { name: 'Copy prompt to connect an agent' });
+  await expect(row).toBeVisible();
+  const marks = row.locator('.ib-cpill-ag');
+  await expect(marks).toHaveCount(4);
+  const pill = (await row.boundingBox())!;
+  const footBox = (await foot.boundingBox())!;
+  expect(pill.x + pill.width).toBeLessThanOrEqual(footBox.x + footBox.width + 0.5);
+  for (const mark of await marks.all()) {
+    const box = (await mark.boundingBox())!;
+    expect(box.width).toBe(16);
+    expect(box.x + box.width).toBeLessThanOrEqual(pill.x + pill.width);
+  }
+  expect((await foot.getByRole('button', { name: 'Settings' }).boundingBox())!.y).toBeGreaterThan(pill.y + pill.height);
   // The settings carry this run's absolute binary; the row copies it once they have loaded.
   await expect.poll(() => page.evaluate(() => fetch('/api/inbox/settings').then((r) => r.json()).then((s) => s.mcp_command[0]))).toBe(builtBinary);
   await row.click();
   await expect(foot.locator('button[data-connect-prompt]')).toHaveText('Copied');
+  await expect(marks).toHaveCount(4);
   await expect(foot.locator('button[data-connect-prompt]')).toBeFocused();
   await expect(side(page).locator('[data-connect-prompt-live]')).toHaveText('Connect prompt copied.');
   const copied = await page.evaluate(() => navigator.clipboard.readText());
@@ -189,7 +199,7 @@ test('Copy connect prompt copies the prompt naming this binary, says Copied, and
   expect(copied).toContain(`${builtBinary} inbox --help`);
   expect(copied).toContain('plannotator inbox --help');
   await shot('connect-prompt-copied');
-  await expect(foot.locator('button[data-connect-prompt]')).toHaveText('Copy connect prompt', { timeout: 4_000 });
+  await expect(foot.locator('button[data-connect-prompt]')).toHaveText('Copy prompt to connect an agent', { timeout: 4_000 });
 });
 
 test('⌘B and Ctrl+B toggle it, and the choice survives a reload', async () => {

@@ -163,12 +163,17 @@
 .pn-inbox .ib-theme-tg:hover { background: var(--muted); color: var(--foreground); }
 .pn-inbox .ib-theme-tg:focus-visible { outline-offset: 0; }
 .ib-theme-tg .ib-ic { width: 15px; height: 15px; }
-/* Copy connect prompt: a plain .ib-nav; only the copied state is new (a check in --success).
-   Dragged narrower than its words, the label ends in an ellipsis and never wraps. */
-.ib-cp .ib-cp-l { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ib-cp[data-connect-prompt="copied"] .ib-ic { color: var(--success); }
-/* The swap is instant, like the window's other copy buttons: no 150 ms colour fade on the check. */
-.ib-cp .ib-ic { transition: none; }
+/* Copy connect prompt (approval inbox-connect-row, 1b): an outlined pill as wide as its content,
+   the four agent marks in their own colours, then the label. In a sidebar narrower than its
+   content (the 200 px minimum) the label ends in an ellipsis; the marks never shrink. */
+.pn-inbox .ib-cpill { display: flex; align-items: center; gap: 9px; box-sizing: border-box; width: max-content; max-width: 100%; height: 34px; margin: 4px 0; padding: 0 12px 0 10px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--foreground); font-size: 14px; text-align: left; flex-shrink: 0; }
+.pn-inbox .ib-cpill:hover { background: color-mix(in oklch, var(--muted) 60%, transparent); }
+.pn-inbox .ib-cpill:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.ib-cpill-ags { display: inline-flex; gap: 3px; flex: none; color: var(--foreground); }
+.ib-cpill-ag { display: block; width: 16px; height: 16px; flex: none; }
+.ib-cpill-l { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pn-inbox .ib-cpill svg.ib-ic { flex: none; margin-right: -3px; color: var(--muted-foreground); transition: none; }
+.ib-cpill[data-connect-prompt="copied"] svg.ib-ic { color: var(--success); }
 /* Under reduced motion a theme switch lands in one frame (theme.ts holds this class for two frames). */
 html.ib-theme-instant, html.ib-theme-instant *, html.ib-theme-instant *::before, html.ib-theme-instant *::after { transition: none !important; }
 /* Settings → Appearance: Light, Dark, Match system, as one segmented control of native radios. */
@@ -1670,6 +1675,7 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   /* the navigation sheet and the dialogs */
   .ib-sb-sheet { width: calc(var(--sidebar-width) + env(safe-area-inset-left)); padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) env(safe-area-inset-left); background: var(--background); }
   .ib-nav { height: 44px; font-size: 15.5px; flex: none; }
+  .pn-inbox .ib-cpill { height: 44px; font-size: 15.5px; }
   .ib-setrow > .ib-nav { padding-right: 50px; }
   .pn-inbox .ib-theme-tg { width: 40px; height: 40px; right: 2px; border-radius: 8px; }
   /* drawn at 40 px, hit at 44 px (the row's height) */

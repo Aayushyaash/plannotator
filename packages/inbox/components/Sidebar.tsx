@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { InboxHealth } from '@plannotator/core/inbox-types';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
+import { ClaudeIcon, CodexIcon, OpenCodeIcon, PiIcon } from '@plannotator/ui/components/icons/AgentIcons';
 import type { ProjectFolder } from '../api';
 import { connectPrompt } from '../connectPrompt';
 import { formatCount } from '../format';
@@ -289,12 +290,16 @@ export const CONNECT_COPY_FAILED_ANNOUNCEMENT = "Couldn't copy the connect promp
 
 /**
  * "Copy connect prompt" (owner approval 2026-10-13, design record
- * `inbox-sidebar-connect-prompt`): one plain row above Settings that copies
- * the prompt an agent on this computer needs to connect itself
- * (connectPrompt.ts). Only a copy button: no preview, no tooltip, no
- * shortcut. The row says "Copied" for 2 s (or "Couldn't copy"), focus stays
- * on it, and a polite live region says the same. Not navigation, so the
- * phone sheet stays open to show it. Shown everywhere, the tailnet included.
+ * `inbox-sidebar-connect-prompt`; its look amended 2026-10-15 by
+ * `inbox-connect-row`, option 1b): an outlined pill above Settings with the
+ * four agent marks and "Copy prompt", which copies the prompt an agent on
+ * this computer needs to connect itself (connectPrompt.ts). Only a copy
+ * button: no preview, no tooltip, no shortcut. The label says "Copied" for
+ * 2 s (or "Couldn't copy"), the marks stay, focus stays on it, and a polite
+ * live region says the same. Its name reads "Copy prompt to connect an
+ * agent": the visible words first, then what they are for. Not navigation,
+ * so the phone sheet stays open to show it. Shown everywhere, the tailnet
+ * included.
  */
 function CopyConnectPrompt({ mcpCommand }: { mcpCommand: readonly string[] | null }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
@@ -319,12 +324,26 @@ function CopyConnectPrompt({ mcpCommand }: { mcpCommand: readonly string[] | nul
     <>
       <button
         type="button"
-        className="ib-nav ib-cp"
+        className="ib-cpill"
         data-connect-prompt={state}
         onClick={() => void copy()}
       >
-        <Icon name={state === 'copied' ? 'check' : state === 'failed' ? 'warn' : 'copy'} />
-        <span className="ib-cp-l">{state === 'copied' ? 'Copied' : state === 'failed' ? "Couldn't copy" : 'Copy connect prompt'}</span>
+        <span className="ib-cpill-ags" aria-hidden="true">
+          <ClaudeIcon className="ib-cpill-ag" />
+          <CodexIcon className="ib-cpill-ag" />
+          <PiIcon className="ib-cpill-ag" />
+          <OpenCodeIcon className="ib-cpill-ag" />
+        </span>
+        {state === 'idle' ? (
+          <span className="ib-cpill-l">
+            Copy prompt<span className="ib-sr"> to connect an agent</span>
+          </span>
+        ) : (
+          <>
+            <Icon name={state === 'copied' ? 'check' : 'warn'} />
+            <span className="ib-cpill-l">{state === 'copied' ? 'Copied' : "Couldn't copy"}</span>
+          </>
+        )}
       </button>
       <div className="ib-sr" role="status" aria-live="polite" data-connect-prompt-live="">
         {announcement}
