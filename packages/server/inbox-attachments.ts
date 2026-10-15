@@ -39,7 +39,7 @@ import {
   readInboxAttachmentText,
 } from "@plannotator/shared/inbox/attachments";
 import { INBOX_MESSAGE_IMAGE_CSP } from "@plannotator/shared/inbox/message-images";
-import { readInboxMarkup, writeInboxMarkup } from "@plannotator/shared/inbox/markups";
+import { readInboxMarkup, readInboxMarkupBody, writeInboxMarkup } from "@plannotator/shared/inbox/markups";
 import { readImageDimensions, sniffImageContentType } from "@plannotator/shared/review-image";
 import { sniffInboxVideo } from "@plannotator/shared/inbox/video";
 import { byteRangeResponse, decideByteRange, handleRangeStream } from "./inbox-byte-range";
@@ -325,7 +325,7 @@ export function createInboxAttachmentRoutes(context: InboxAttachmentRoutesContex
       if (session !== null && checkServerSession({ serverSession: session }, serverSession) === "mismatch") {
         return json(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409);
       }
-      const markup = writeInboxMarkup(store.dir, new Uint8Array(await req.arrayBuffer()));
+      const markup = writeInboxMarkup(store.dir, await readInboxMarkupBody(req.body, req.headers.get("content-length")));
       return json({ path: markup.path, name: markup.name, url: `/api/inbox/markups/${markup.name}` });
     }
     const markupFile = /^\/api\/inbox\/markups\/([0-9a-f]{64}\.(?:png|jpg|webp))$/.exec(path);

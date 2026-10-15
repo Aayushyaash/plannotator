@@ -18,6 +18,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, sep } from "node:path";
 import { sniffImageContentType } from "../review-image";
+import { INBOX_MAX_REQUEST_BYTES } from "./connection";
 import { InboxError } from "./schema";
 
 export const MARKUPS_DIR = "markups";
@@ -31,6 +32,64 @@ export function inboxMarkupsDir(inboxDirPath: string): string {
 
 export function isInboxMarkupName(name: string): boolean {
   return NAME_RE.test(name);
+}
+
+/**
+ * The most bytes one marked-up image may have from the window: the Inbox's
+ * request bound, as before it had a bound of its own. The annotator exports a
+ * PNG at the image's own size, so a 24 MP photo with strokes can pass 40 MB.
+ * Still a bound the read enforces, because the route buffers the image whole.
+ */
+export const INBOX_MARKUP_MAX_BYTES = INBOX_MAX_REQUEST_BYTES;
+
+/**
+ * The phone door's bound for a drawing (`POST markups`, contract 7.49): a
+ * phone's drawing is a screen-sized image, and the door counts the body
+ * itself because the window's handler runs in-process.
+ */
+export const INBOX_DEVICE_MARKUP_MAX_BYTES = 32 * 1024 * 1024;
+
+function markupTooLarge(max: number): InboxError {
+  return new InboxError("markup_too_large", `A drawing is at most ${Math.round(max / (1024 * 1024))} MB.`, { max_bytes: max });
+}
+
+/**
+ * Read a markup's body, at most `max` bytes (default
+ * `INBOX_MARKUP_MAX_BYTES`): a declared Content-Length over it is refused
+ * before a byte is read, and a body that grows past it is cancelled there
+ * (`markup_too_large`), never buffered past the bound.
+ */
+export async function readInboxMarkupBody(
+  body: ReadableStream<Uint8Array> | null,
+  declaredLength: string | null,
+  max: number = INBOX_MARKUP_MAX_BYTES,
+): Promise<Uint8Array> {
+  const declared = declaredLength === null ? Number.NaN : Number(declaredLength);
+  if (Number.isFinite(declared) && declared > max) {
+    await body?.cancel().catch(() => {});
+    throw markupTooLarge(max);
+  }
+  if (!body) return new Uint8Array(0);
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => {});
+      throw markupTooLarge(max);
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return bytes;
 }
 
 /** Keep a marked-up image (PNG, JPEG or WebP by its bytes), once. Returns its absolute path and file name. */

@@ -18,8 +18,8 @@
  *
  * Read routes: the loopback window and the owner over the tailnet, like every
  * other read; another site is refused (`403 cross_origin`), because the
- * answers name folders on this computer. Not on the phone's device door (its
- * allowlist is explicit). Agents never use these: MCP has no skills field.
+ * answers name folders on this computer. The phone's device door carries both
+ * (contract 7.46, 7.47). Agents never use these: MCP has no skills field.
  */
 import { handleReferenceSkillContent, handleReferenceSkills } from "./shared-handlers";
 import { INBOX_CROSS_SITE_BODY, isCrossSiteRequest } from "./inbox-cross-site";

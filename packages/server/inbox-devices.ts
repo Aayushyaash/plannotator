@@ -47,6 +47,8 @@ import {
 } from "@plannotator/shared/inbox/devices";
 import { readInboxRegistry, updateOwnInboxRegistry, type InboxRegistryEntry } from "@plannotator/shared/inbox/registry";
 import { InboxError, inboxDir } from "@plannotator/shared/inbox/schema";
+import { INBOX_DEVICE_MARKUP_MAX_BYTES } from "@plannotator/shared/inbox/markups";
+import { INBOX_UPLOAD_MAX_BYTES } from "@plannotator/shared/inbox/uploads";
 import { runTailscale, serveStatusProxy, TAILSCALE_SERVE_TIMEOUT_MS, type TailscaleRunner } from "@plannotator/shared/tailscale";
 import { createInboxLan, LanUnavailableError } from "./inbox-lan";
 import {
@@ -87,15 +89,31 @@ function refuse(status: number, code: string, error: string, details: Record<str
  * The allowlist (contract section 2): door route to the window's route. A
  * door path outside it is `404 device_route_not_found`; the window, `/mcp`,
  * the bridge, control, settings, restart, the raw text route
- * (`attachments/<id>`; text reaches the phone through `view`), uploading a
- * markup, project deletion, decision retire and replace, pairing and the
- * device list are never on it. An attachment's bytes reach the phone only
- * through the window's own `image` and `download` routes, so the dotenv
- * refusal, the size checks and the headers are the window's. The images a
- * message's body shows come the same way, through the window's
+ * (`attachments/<id>`; text reaches the phone through `view`), project
+ * deletion, decision retire and replace, drafts, recent searches, "Open in",
+ * pairing and the device list are never on it. An attachment's bytes reach
+ * the phone only through the window's own `image` and `download` routes, so
+ * the dotenv refusal, the size checks and the headers are the window's. The
+ * images a message's body shows come the same way, through the window's
  * `messages/<id>/image`.
+ *
+ * `raw`: the two routes whose body is a file, not JSON (an upload, a
+ * drawing). The door streams the body as it came and passes the query on;
+ * the idempotency key rides the query (`?idempotency_key=`). The relay does
+ * not carry them (`413 relay_upload_unavailable`): v1 sends files over the
+ * Wi-Fi or the tailnet only.
  */
-const ALLOWLIST: readonly { method: "GET" | "POST"; route: RegExp; window: (m: RegExpExecArray) => string }[] = [
+interface DoorRoute {
+  method: "GET" | "POST";
+  route: RegExp;
+  window: (m: RegExpExecArray) => string;
+  /** A raw body (a file), at most `max` bytes, refused past it with `413 <code>`. */
+  raw?: { max: number; code: string; what: string };
+  /** Body fields the door refuses (`422`): what the window takes and the phone may not use. */
+  refuse?: readonly { field: string; message: string }[];
+}
+
+const ALLOWLIST: readonly DoorRoute[] = [
   { method: "GET", route: /^health$/, window: () => "/api/inbox/health" },
   { method: "GET", route: /^threads$/, window: () => "/api/inbox/threads" },
   { method: "GET", route: /^projects$/, window: () => "/api/inbox/projects" },
@@ -106,7 +124,8 @@ const ALLOWLIST: readonly { method: "GET" | "POST"; route: RegExp; window: (m: R
   // Mark read and its Undo.
   { method: "POST", route: /^threads\/([^/]+)\/(read|unread)$/, window: (m) => `/api/inbox/threads/${m[1]}/${m[2]}` },
   { method: "GET", route: /^events$/, window: () => "/api/inbox/events" },
-  { method: "POST", route: /^messages\/([^/]+)\/(picks|reply|resolve)$/, window: (m) => `/api/inbox/messages/${m[1]}/${m[2]}` },
+  // `to`: Send to another session (7.41), a person message no session took yet.
+  { method: "POST", route: /^messages\/([^/]+)\/(picks|reply|resolve|to)$/, window: (m) => `/api/inbox/messages/${m[1]}/${m[2]}` },
   { method: "POST", route: /^threads\/([^/]+)\/delete$/, window: (m) => `/api/inbox/threads/${m[1]}/delete` },
   { method: "GET", route: /^threads\/([^/]+)\/attachments$/, window: (m) => `/api/inbox/threads/${m[1]}/attachments` },
   { method: "GET", route: /^attachments\/([^/]+)\/view$/, window: (m) => `/api/inbox/attachments/${m[1]}/view` },
@@ -126,10 +145,31 @@ const ALLOWLIST: readonly { method: "GET" | "POST"; route: RegExp; window: (m: R
   { method: "POST", route: /^annotations\/([^/]+)\/remove$/, window: (m) => `/api/inbox/annotations/${m[1]}/remove` },
   { method: "GET", route: /^messages\/([^/]+)\/guide$/, window: (m) => `/api/inbox/messages/${m[1]}/guide` },
   { method: "POST", route: /^messages\/([^/]+)\/guide\/reviewed$/, window: (m) => `/api/inbox/messages/${m[1]}/guide/reviewed` },
+  // A comment on a guided review's diff (7.53), new or edited (same annotation id); removed through annotations/:id/remove.
+  { method: "POST", route: /^messages\/([^/]+)\/guide\/annotations$/, window: (m) => `/api/inbox/messages/${m[1]}/guide/annotations` },
   { method: "POST", route: /^messages\/([^/]+)\/decision$/, window: (m) => `/api/inbox/messages/${m[1]}/decision` },
   { method: "GET", route: /^decisions$/, window: () => "/api/inbox/decisions" },
   { method: "GET", route: /^threads\/([^/]+)\/sessions$/, window: (m) => `/api/inbox/threads/${m[1]}/sessions` },
   { method: "POST", route: /^threads\/([^/]+)\/message$/, window: (m) => `/api/inbox/threads/${m[1]}/message` },
+  // Compose (7.39, 7.40): every live session, and a thread the person starts (the body's key is also the store's own).
+  { method: "GET", route: /^sessions$/, window: () => "/api/inbox/sessions" },
+  // `draft_id` deletes a shared draft, and drafts stay on the computer (never seen by phones).
+  {
+    method: "POST",
+    route: /^messages$/,
+    window: () => "/api/inbox/messages",
+    refuse: [{ field: "draft_id", message: "draft_id: drafts stay on the computer; a phone sends without one." }],
+  },
+  // Search (7.42), read only; the query rides through. The door sends no Origin, so the route's cross-site check passes.
+  { method: "GET", route: /^search$/, window: () => "/api/inbox/search" },
+  // The project menu (7.43 to 7.45): Mark all as read, Archive all, and their Undo. The door's log replays a batch's answer.
+  { method: "POST", route: /^projects\/([^/]+)\/(read|unread|resolve)$/, window: (m) => `/api/inbox/projects/${m[1]}/${m[2]}` },
+  // The skill catalog (7.46, 7.47), read only.
+  { method: "GET", route: /^skills$/, window: () => "/api/inbox/skills" },
+  { method: "GET", route: /^skills\/content$/, window: () => "/api/inbox/skills/content" },
+  // Uploads and drawings (7.48, 7.49): raw bodies, the key in the query; never through the relay.
+  { method: "POST", route: /^uploads$/, window: () => "/api/inbox/uploads", raw: { max: INBOX_UPLOAD_MAX_BYTES, code: "upload_too_large", what: "a file" } },
+  { method: "POST", route: /^markups$/, window: () => "/api/inbox/markups", raw: { max: INBOX_DEVICE_MARKUP_MAX_BYTES, code: "markup_too_large", what: "a drawing" } },
 ];
 
 /** Where a pairing attempt reached the door: the Wi-Fi's listener, the tailnet's, or this computer's own port (the simulator). */
@@ -234,6 +274,92 @@ function sameSecret(a: string, b: string): boolean {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+/** How much of a file the door reads and drops after a replay or a refusal before it closes the connection instead. */
+export const DOOR_DRAIN_MAX_BYTES = 1024 * 1024;
+export const DOOR_DRAIN_MAX_MS = 2_000;
+
+/**
+ * A raw body (a file) on its way to the window, counted. The window reads
+ * `stream`; past `max` bytes the stream errors and the client's body is
+ * cancelled, so nothing past the bound is read or buffered, whatever the
+ * Content-Length said (a chunked body declares none). The window's handler
+ * is called in-process, so Bun's request size bound does not apply to it.
+ *
+ * `settle()` after the answer: true when the client's body was read to its
+ * end, reading and dropping what is left up to `DOOR_DRAIN_MAX_BYTES` within
+ * `DOOR_DRAIN_MAX_MS` (an HTTP/1.1 client still sending waits for its body to
+ * be read); false when it stopped short, and the answer then closes the
+ * connection.
+ */
+function meteredBody(body: ReadableStream<Uint8Array>, max: number, tooLarge: () => Error) {
+  const reader = body.getReader();
+  let seen = 0;
+  let done = false;
+  let stopped = false;
+  let over = false;
+  const stop = async () => {
+    if (stopped || done) return;
+    stopped = true;
+    await reader.cancel().catch(() => {});
+  };
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          done = true;
+          controller.close();
+          return;
+        }
+        seen += next.value.byteLength;
+        if (seen > max) {
+          over = true;
+          await stop();
+          controller.error(tooLarge());
+          return;
+        }
+        controller.enqueue(next.value);
+      } catch (error) {
+        stopped = true;
+        controller.error(error);
+      }
+    },
+    cancel: () => stop(),
+  });
+  const settle = async (): Promise<boolean> => {
+    if (done) return true;
+    if (stopped) return false;
+    const deadline = Date.now() + DOOR_DRAIN_MAX_MS;
+    let dropped = 0;
+    while (dropped <= DOOR_DRAIN_MAX_BYTES) {
+      const left = deadline - Date.now();
+      if (left <= 0) break;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const next = await Promise.race([
+        reader.read().catch(() => null),
+        new Promise<"late">((resolve) => (timer = setTimeout(() => resolve("late"), left))),
+      ]);
+      clearTimeout(timer);
+      if (next === "late" || next === null) break;
+      if (next.done) {
+        done = true;
+        return true;
+      }
+      dropped += next.value.byteLength;
+    }
+    await stop();
+    return false;
+  };
+  return { stream, over: () => over, settle };
+}
+
+/** The same answer, closing the connection after it (a request body left unread past the drain bound). */
+function withClose(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set("Connection", "close");
+  return new Response(response.body, { status: response.status, headers });
 }
 
 function bearer(req: Request): string | null {
@@ -402,9 +528,21 @@ export function createInboxDevices(context: InboxDevicesContext) {
   // ── The door (contract section 2) ──
 
   /** Hand one allowed request to the window's handler, on loopback, as the window would send it. */
-  const toWindow = (req: Request, windowPath: string, search: string, body: string | null, signal: AbortSignal): Promise<Response> => {
+  const toWindow = (
+    req: Request,
+    windowPath: string,
+    search: string,
+    body: string | ReadableStream<Uint8Array> | null,
+    signal: AbortSignal,
+    raw = false,
+  ): Promise<Response> => {
     const headers = new Headers({ Accept: "application/json" });
-    if (body !== null) headers.set("Content-Type", "application/json");
+    if (raw) {
+      // A file's bytes (an upload, a drawing): its type and length as the phone sent them, so the window's own 413 check runs first.
+      headers.set("Content-Type", req.headers.get("content-type") ?? "application/octet-stream");
+      const length = req.headers.get("content-length");
+      if (length) headers.set("Content-Length", length);
+    } else if (body !== null) headers.set("Content-Type", "application/json");
     const lastEventId = req.headers.get("last-event-id");
     if (lastEventId) headers.set("Last-Event-ID", lastEventId);
     // Of the phone's own headers the door forwards exactly three, and the
@@ -425,7 +563,36 @@ export function createInboxDevices(context: InboxDevicesContext) {
   };
 
   /** A POST through the door: answered once per device and key, then replayed. */
-  const command = async (req: Request, device: InboxDevice, doorPath: string, windowPath: string): Promise<Response> => {
+  /** A POST through the door: answered once per device and key, then replayed. */
+  const command = async (req: Request, device: InboxDevice, url: URL, windowPath: string, entry: DoorRoute): Promise<Response> => {
+    const doorPath = url.pathname;
+    const raw = entry.raw ?? null;
+    // A raw body (a file): the key in the query, which rides on whole; the body streams through, counted.
+    // JSON: the key in the body, no query.
+    if (raw) {
+      const tooLarge = () =>
+        refuse(413, raw.code, `Not accepted: ${raw.what} is at most ${Math.round(raw.max / (1024 * 1024))} MB.`, { max_bytes: raw.max });
+      const declared = Number(req.headers.get("content-length") ?? "");
+      // Declared past the bound: refused before a byte is read, and the connection closes rather than read the rest.
+      if (Number.isFinite(declared) && declared > raw.max) {
+        await req.body?.cancel().catch(() => {});
+        return withClose(tooLarge());
+      }
+      const metered = req.body ? meteredBody(req.body, raw.max, () => new InboxError(raw.code, `${raw.what} is too large.`)) : null;
+      /** Every raw answer: what is left of the file read and dropped (bounded), else the connection closes. */
+      const finish = async (response: Response) => ((await metered?.settle()) === false ? withClose(response) : response);
+      const key = url.searchParams.get("idempotency_key");
+      if (key === null || !key.trim()) {
+        return finish(refuse(422, "validation_error", "idempotency_key: required on a phone's command (in the query for a file).", { field: "idempotency_key" }));
+      }
+      return claim(req, device, doorPath, key, finish, async () => {
+        const response = await toWindow(req, windowPath, url.search, metered?.stream ?? null, req.signal, true);
+        const answer = await response.text();
+        // Past the bound: the door's own refusal (nothing kept, nothing recorded), whatever the window made of the cut stream.
+        if (metered?.over()) return { response: withClose(tooLarge()), record: false };
+        return { response: await finish(new Response(answer, { status: response.status, headers: response.headers })), answer, status: response.status, record: true };
+      });
+    }
     let text: string;
     let body: unknown;
     try {
@@ -435,35 +602,60 @@ export function createInboxDevices(context: InboxDevicesContext) {
       throw new InboxError("validation_error", "body: expected a JSON object.");
     }
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new InboxError("validation_error", "body: expected a JSON object.");
-    const key = (body as Record<string, unknown>).idempotency_key;
+    const fields = body as Record<string, unknown>;
+    const key = fields.idempotency_key;
     if (typeof key !== "string" || !key.trim()) {
       throw new InboxError("validation_error", "idempotency_key: required on a phone's command.", { field: "idempotency_key" });
     }
+    for (const refused of entry.refuse ?? []) {
+      if (fields[refused.field] !== undefined) throw new InboxError("validation_error", refused.message, { field: refused.field });
+    }
+    return claim(req, device, doorPath, key, async (response) => response, async () => {
+      const response = await toWindow(req, windowPath, "", text, req.signal);
+      const answer = await response.text();
+      return { response: new Response(answer, { status: response.status, headers: response.headers }), answer, status: response.status, record: true };
+    });
+  };
+
+  /**
+   * One command under its key: a replay answers the recorded status and body
+   * (`finish` settles a raw body first); otherwise `apply` runs once, and an
+   * answer under 500 is recorded. Replays match on method and door path, never
+   * on the query or the body.
+   */
+  const claim = async (
+    req: Request,
+    device: InboxDevice,
+    doorPath: string,
+    key: string,
+    finish: (response: Response) => Promise<Response>,
+    apply: () => Promise<{ response: Response; answer?: string; status?: number; record: boolean }>,
+  ): Promise<Response> => {
     const slot = `${device.id}\n${key}`;
     // Wait while the same command runs; no await when none does, so the check and the claim below happen in one turn.
     while (inFlight.has(slot)) await inFlight.get(slot);
     const seen = commands.get(slot);
     if (seen) {
       if (seen.method !== req.method || seen.path !== doorPath) {
-        return refuse(409, "idempotency_key_reused", "This idempotency_key was already used on another route.", { field: "idempotency_key" });
+        return finish(refuse(409, "idempotency_key_reused", "This idempotency_key was already used on another route.", { field: "idempotency_key" }));
       }
-      return json(seen.body, seen.status, { "Idempotent-Replayed": "true" });
+      // A replayed file is not kept: the answer names the upload or drawing the first one made.
+      return finish(json(seen.body, seen.status, { "Idempotent-Replayed": "true" }));
     }
     const run = (async () => {
-      const response = await toWindow(req, windowPath, "", text, req.signal);
-      const answer = await response.text();
-      if (response.status < 500) {
+      const result = await apply();
+      if (result.record && result.status !== undefined && result.status < 500) {
         let parsed: unknown = null;
         try {
-          parsed = JSON.parse(answer);
+          parsed = JSON.parse(result.answer ?? "");
         } catch {
-          parsed = answer;
+          parsed = result.answer ?? null;
         }
-        const line: CommandLine = { v: 1, at: now().toISOString(), device_id: device.id, key, method: req.method, path: doorPath, status: response.status, body: parsed };
+        const line: CommandLine = { v: 1, at: now().toISOString(), device_id: device.id, key, method: req.method, path: doorPath, status: result.status, body: parsed };
         commandLog.append(line);
         commands.set(slot, line);
       }
-      return new Response(answer, { status: response.status, headers: response.headers });
+      return result.response;
     })();
     inFlight.set(slot, run.catch(() => {}));
     try {
@@ -487,7 +679,7 @@ export function createInboxDevices(context: InboxDevicesContext) {
       const match = entry.route.exec(route);
       if (!match) continue;
       const windowPath = entry.window(match);
-      if (req.method === "POST") return await command(req, device, url.pathname, windowPath);
+      if (req.method === "POST") return await command(req, device, url, windowPath, entry);
       if (route !== "events") return await toWindow(req, windowPath, url.search, null, req.signal);
       // The event stream lives until the phone leaves or is removed.
       const stream = new AbortController();
@@ -522,9 +714,10 @@ export function createInboxDevices(context: InboxDevicesContext) {
    * A command that came up through the relay (contract section 4), applied
    * in-process as the device whose key opened it: the same revocation check,
    * allowlist and idempotency log as a request at the door, so a command the
-   * relay replays writes nothing again. Two door routes are not carried:
-   * `pair` (pairing through the relay is not in v1) and `events` (the down
-   * items are the relay's stream; an endless answer cannot be one result).
+   * relay replays writes nothing again. Four door routes are not carried:
+   * `pair` (pairing through the relay is not in v1), `events` (the down
+   * items are the relay's stream; an endless answer cannot be one result),
+   * and the raw-body `uploads` and `markups` (`413 relay_upload_unavailable`).
    * A sealed command carries no headers in v1, so no Range reaches the
    * window from here: `attachments/:id/video` and `download` answer the whole
    * file (`200`), which the relay carries when it fits one frame and answers
@@ -546,6 +739,11 @@ export function createInboxDevices(context: InboxDevicesContext) {
       const route = url.pathname.startsWith(DOOR_PREFIX) ? url.pathname.slice(DOOR_PREFIX.length) : "";
       if (!route || route === "pair" || route === "events" || url.origin !== `http://127.0.0.1:${context.port()}`) {
         return refuse(404, "device_route_not_found", "Not a phone route.");
+      }
+      // A file (an upload, a drawing) is not carried: a sealed command's body is JSON, and a file in it would be
+      // base64 inside the envelope, past Cloudflare's message limit well under the 100 MB cap. v1: the Wi-Fi or the tailnet.
+      if (input.method === "POST" && ALLOWLIST.some((entry) => entry.raw && entry.method === "POST" && entry.route.test(route))) {
+        return refuse(413, "relay_upload_unavailable", "Files and drawings are sent over the Wi-Fi or the tailnet, not the relay.");
       }
       const req = new Request(url, {
         method: input.method,

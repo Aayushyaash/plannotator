@@ -113,8 +113,8 @@ Every phone request goes to `/api/inbox/device/*`. The door's checks, in order:
 2. `pair`: no token (above).
 3. `Authorization: Bearer tok_...`. None: `401 device_token_missing`. No device with that hash: `401 device_token_invalid`. A revoked device: `401 device_revoked`.
 4. The path is in the allowlist below, else `404 device_route_not_found`.
-5. A POST in the allowlist carries `idempotency_key` in its body (section 6), else `422 validation_error`. The two exceptions are `pair` and `revoke`, which change nothing when repeated.
-6. The request is handed to the window's own handler under the window's path. The door adds nothing to the route, the query or the body; the phone sends no `serverSession`, which the window's guard accepts (`checkServerSession`: absent passes). Of the phone's headers it passes on only `Last-Event-ID` (the event stream) and `If-None-Match` (the image routes' cache validator, added 2026-10-14 with `messages/:id/image`), so a phone that cached an image gets the window's `304`. The "referenced in that message's body" rule limits what an agent's message exposes, not what the person's own clients can read: a paired device, like the window, can send a reply that references any image-type file of 10 MB or less under a project root and then read it, so a device token is as powerful as the window (revoke a lost phone), and over the relay the phone gets the image bytes with only a content type, so the app must draw an SVG as an untrusted image.
+5. A POST in the allowlist carries `idempotency_key` in its body (section 6), else `422 validation_error`. The two exceptions are `pair` and `revoke`, which change nothing when repeated. The two raw-body routes, `uploads` and `markups` (added 2026-10-15), carry it in the query instead (`?idempotency_key=`), since their body is a file.
+6. The request is handed to the window's own handler under the window's path. The door adds nothing to the route, the query or the body; the phone sends no `serverSession`, which the window's guard accepts (`checkServerSession`: absent passes). Of the phone's headers it passes on only `Last-Event-ID` (the event stream), `If-None-Match` (the image routes' cache validator, added 2026-10-14 with `messages/:id/image`), so a phone that cached an image gets the window's `304`, and on a GET `Range` and `If-Range` (a player's byte range, section 11). On the two raw-body routes it also passes on `Content-Type` and `Content-Length` and streams the body through with the query unchanged (key included); a `serverSession` the phone puts in that query is checked by the window like any other, so a wrong one is `409 session_mismatch`. The door bounds a raw body itself, because the window's handler runs in-process where the listener's request size bound does not apply: 100 MB for `uploads` (`413 upload_too_large`), 32 MB for `markups` (`413 markup_too_large`). A declared `Content-Length` past the bound is refused before a byte is read; a body without one (chunked) is counted as it streams and cut at the bound. Either answer carries `Connection: close`, and nothing is recorded under the key. After a replay or a refusal the door reads and drops what is left of the body only up to 1 MiB or 2 s, then answers with `Connection: close` (a client should not reuse that connection). The "referenced in that message's body" rule limits what an agent's message exposes, not what the person's own clients can read: a paired device, like the window, can send a reply that references any image-type file of 10 MB or less under a project root and then read it, so a device token is as powerful as the window (revoke a lost phone), and over the relay the phone gets the image bytes with only a content type, so the app must draw an SVG as an untrusted image.
 
 Where the door answers. On the loopback listener, the door sits beside the window. The tailnet reaches a second loopback listener, open only while "Reach from my tailnet" is on, that serves the door and nothing else: any path outside `/api/inbox/device/` answers `404 device_route_not_found` there, whatever its Host. `tailscale serve` points at that listener, never at the window's port. On the LAN listener only the door exists (section 3).
 
@@ -135,6 +135,7 @@ The allowlist. Each row is the window's handler as it is today, with the request
 | `POST messages/:id/picks` | same | `{ idempotency_key, questions: [{ key, revision, answer or null }] }` | `{ message_id, questions, reply: null }` | 7.10 |
 | `POST messages/:id/reply` | same | `{ idempotency_key, words?, questions?, feedback?, annotation_ids?, skip_unanswered? }` (`skip_unanswered: true` skips the message's questions left without a pick; a phone sends it only as the window does, see 7.11) | `{ message_id, questions, reply, replayed, decisions, decisions_refused }` | 7.11 |
 | `POST messages/:id/resolve` | same | `{ idempotency_key, resolved? }` | `{ thread: summary }` | 7.12 |
+| `POST messages/:id/to` | same | `{ idempotency_key, to: { host?, session } }` | `{ message, row }`: Send to another session, for a person message no session took yet. `409 already_delivered`, `409 thread_resolved`, `422 not_addressed`, `409 session_not_live` pass through. Added 2026-10-15 | 7.41 |
 | `POST threads/:id/delete` | same | `{ idempotency_key }` | `{ ok, store }` | 7.13 |
 | `GET threads/:id/attachments` | same | | `{ serverSession, attachments: [state], annotations }` | 7.14 |
 | `GET attachments/:id/view[?version=sent]` | same | | `{ serverSession, attachment, version, text, html }`; also Share (the "..." menu of section 4 of the record), which writes `text` to a file named `attachment.name` | 7.15 |
@@ -146,16 +147,25 @@ The allowlist. Each row is the window's handler as it is today, with the request
 | `POST annotations/:id/remove` | same | `{ idempotency_key }` | `{ annotation }` | 7.18 |
 | `GET messages/:id/guide` | same | | `{ message_id, guide, snapshot }` | 7.19 |
 | `POST messages/:id/guide/reviewed` | same | `{ idempotency_key, reviewed: boolean[] }` | `{ message_id, reviewed }` | 7.20 |
+| `POST messages/:id/guide/annotations` | same | `{ idempotency_key, annotation }` (the review app's line comment: `id`, `filePath` in the guide's patch, `side` `old`/`new`, `lineStart`/`lineEnd`, `text`); an edit is the same annotation id under a new key | `{ annotation: record }`. Removed through `annotations/:id/remove` (7.18). The window's refusals pass through: `422 validation_error` (a file not in the patch, a bad side, lines not in one hunk), `404 guide_not_found` / `message_not_found`, `409 annotation_closed`, `409 thread_resolved`. Added 2026-10-15 | 7.53 |
 | `POST messages/:id/decision` | same | `{ idempotency_key, key, recording?, draft? }` | `{ question }` | 7.21 |
 | `GET decisions?project=prj_...` | same | | `{ serverSession, cursor, project_id, waiting, decisions, project_counts }` (`project_counts`, added later, is every project's `{ project_id, waiting, settled }`; a phone may ignore it) | 7.22 |
 | `GET threads/:id/sessions` | same | | `{ serverSession, home, project, sessions }` | 7.23 |
 | `POST threads/:id/message` | same | `{ idempotency_key, session, body }` | `{ message, replayed }` | 7.24 |
+| `GET sessions[?session=ses_...]` | `GET /api/inbox/sessions` | | `{ serverSession, home, projects: [{ project: { id or null, name, root }, sessions: [{ session, host, started_at, last_seen_at, busy, idle_since, last_thread }] }], session? }`: every live session, any project (compose's To). A snapshot: a session may have ended by the time a relayed answer is read. Added 2026-10-15 | 7.39 |
+| `POST messages` | `POST /api/inbox/messages` | `{ idempotency_key, to: { host?, session }, body, uploads?: [upl_...] }` | `{ thread_id, message, project, replayed }`: a thread the person starts, addressed to one live session. `draft_id` (which deletes a shared draft) is refused by the door, `422 { "field": "draft_id" }`: drafts stay on the computer. The body key is also the store's own. `409 session_not_live` (nothing written), `503 project_unresolved` (not recorded, so the same call runs again), `422 validation_error`, `409 idempotency_key_reused` pass through. Added 2026-10-15 | 7.40 |
+| `GET search?q=&project=&status=&from=&group=&offset=&limit=&current=` | `GET /api/inbox/search` | | the window's search answer: `{ serverSession, q, terms, took_ms, indexing, threads, totals, groups, recent, recent_searches? }`. `indexing: true` with no groups: ask again. Read only; the window's cross-site check passes because the door sends no `Origin` and forwards no fetch metadata. Added 2026-10-15 | 7.42 |
+| `POST projects/:id/read`, `POST projects/:id/unread`, `POST projects/:id/resolve` | same | `{ idempotency_key }`; Undo of read `{ idempotency_key, threads: [ids] }`; Archive all `{ idempotency_key, resolved?: true }`, its Undo `{ idempotency_key, resolved: false, threads: { resolved: [ids], read: [ids] } }` | `{ project, batch?, threads, skipped?, error?, replayed }`: the project menu. The door's log (on disk) replays a batch's recorded answer, `threads` lists included, so a retry never runs a second batch; the window's own `batch_id` (in memory) may also be sent. An Undo that lands after the 10 s set-aside delay sends the agents the "Set aside" notes and then the "reopened" notes. Added 2026-10-15 | 7.43, 7.44, 7.45 |
+| `GET skills` | `GET /api/inbox/skills` | | `{ skills: [{ name, root, description?, humanOnly, dir }] }`. Added 2026-10-15 | 7.46 |
+| `GET skills/content?name=` | `GET /api/inbox/skills/content` | | `{ skill: { name, dir, path, content, truncated, humanOnly } }`, content capped at 20,000 characters; `404` for a name not discovered. Added 2026-10-15 | 7.47 |
+| `POST uploads?name=<name>&idempotency_key=<key>` | `POST /api/inbox/uploads?name=` | the file's bytes, raw | `{ upload: { upload_id, name, size, kind, sha256, created_at, media_type?, width?, height? } }`; `413 upload_too_large` (100 MB), `422 upload_refused` (dotenv names, path separators). A retry with the key answers the same `upl_` id. Not carried by the relay (section 4). Added 2026-10-15 | 7.48 |
+| `POST markups?idempotency_key=<key>` | `POST /api/inbox/markups` | a PNG, JPEG or WebP, raw, at most 32 MB | `{ path, name, url }` (the name is the bytes' SHA-256; read back with `GET markups/<name>`); `422` when the body is not one of those images; `413 markup_too_large` past 32 MB. Not carried by the relay (section 4). Added 2026-10-15 | 7.49 |
 | `POST revoke` | (the door's own) | `{}` | `{ device }` | 7.25 |
 | `POST pair` | (the door's own) | `{ secret or code, name, platform }` | see above | 7.2, 7.3 |
 
 Door routes are written relative to `/api/inbox/device/`; window routes keep their full paths.
 
-What the door never answers, by construction (none is in the allowlist, and the tailnet's listener serves nothing else): `/`, `/favicon.png`, `/mcp`, `/api/inbox/bridge/*`, `/api/inbox/control/*`, `/api/inbox/attachments/:id` (raw bytes; every attachment kind is text and `view` carries it), `/api/inbox/settings`, `/api/inbox/restart`, `/api/inbox/projects/:id/delete`, `/api/inbox/decisions/:id/retire` and `replace`, `/api/inbox/pairing`, `/api/inbox/devices*`, `/api/inbox/tailnet`, `/api/inbox/lan`. The computer chores stay on the computer (decision 5). The bridge and control routes keep their own guards and refuse a device token like any other wrong token (`401 unauthorized`).
+What the door never answers, by construction (none is in the allowlist, and the tailnet's listener serves nothing else): `/`, `/favicon.png`, `/mcp`, `/api/inbox/bridge/*`, `/api/inbox/control/*`, `/api/inbox/attachments/:id` (raw bytes; every attachment kind is text and `view` carries it), `/api/inbox/settings`, `/api/inbox/restart`, `/api/inbox/projects/:id/delete`, `/api/inbox/decisions/:id/retire` and `replace`, `/api/inbox/drafts*` (shared drafts: exchanges 7.50 to 7.52 are held for them, not built), `/api/inbox/search/recent` (the phone keeps its own recent searches), `/api/inbox/open-in*` and `/api/inbox/attachments/:id/page`, `/api/inbox/pairing`, `/api/inbox/devices*`, `/api/inbox/tailnet`, `/api/inbox/lan`. The computer chores stay on the computer (decision 5). The bridge and control routes keep their own guards and refuse a device token like any other wrong token (`401 unauthorized`).
 
 ### Error codes
 
@@ -176,6 +186,9 @@ The door answers in the window's shape, `{ error, code, ...details }`, with thes
 | 409 | `tailnet_unavailable` | the window's tailnet switch: Tailscale cannot publish (window route) |
 | 409 | `lan_unavailable` | the window's Wi-Fi switch: `openssl` cannot make the certificate (window route, section 3) |
 | 400 | `code_not_accepted_here` | a redemption by six digits on the LAN listener: over the Wi-Fi a phone pairs by the QR only (section 3) |
+| 413 | `upload_too_large`, `markup_too_large` | a raw body past its bound (100 MB, 32 MB), declared or counted as it streams; answered with `Connection: close`, not recorded under the key |
+| 422 | `validation_error` with `field: "draft_id"` | `POST messages` naming a draft: drafts stay on the computer |
+| 413 | `relay_upload_unavailable` | `uploads` or `markups` as an up command through the relay: files go over the Wi-Fi or the tailnet in v1 (section 4) |
 
 ## 3. The LAN listener
 
@@ -269,6 +282,8 @@ Down item plaintexts:
 - `{ "v": 1, "type": "result", "id", "status", "content_type", "body_b64" }`: the door's answer to an up command, its status, its `Content-Type` and its body bytes exactly, as base64 (standard alphabet, padded). It goes only to a device with carriage on. `id` is the id sealed inside the command, never the relay's plaintext frame `id`, and the Inbox refuses a command whose sealed `id` is not its frame's (written in by R2 after its review: otherwise the relay could file one command's authentic result under another command's id, a GET's 200 under a Send it dropped). A result whose `item` frame would pass Cloudflare's WebSocket message limit (32 MiB, the platform's own) is replaced by `status: 413`, `content_type: application/json; charset=utf-8` and the body `{ "error", "code": "result_too_large", "limit_bytes": 33554432 }`, and the command is reported applied (written in by R2 after its review: one frame over the limit closed the socket, the command was handed over again at every `hello`, and every command behind it waited forever). The phone opens such a file over the Wi-Fi or the tailnet.
 
 Files have no item of their own (written in by R2): a file is the result of a GET. An attachment is `GET attachments/:id/view` (the current version) or `GET attachments/:id/view?version=sent` (the version the agent sent), whose result carries 7.15's JSON with `text` and `html`; an HTML asset is `GET html-assets/<token>/<path>`, whose result carries the asset's bytes and type as 7.16 answers them; a message's image is `GET messages/:id/image?path=...` (7.38), its bytes and sniffed type. A result frame carries the body base64 twice (`body_b64`, then the sealed envelope as base64url), about 16/9 of the body, so the route's 10 MB image cap (`MAX_REVIEW_IMAGE_PREVIEW_BYTES`) is a frame of about 17.8 MiB, inside the 32 MiB limit: every image the route serves fits one result (`inbox-relay-bounds.test.ts`, and the relay proof fetches one at the cap). A command carries no headers, so there is no `If-None-Match` through the relay: the result is always the bytes. A result is one envelope whatever its size (kept in parts at the relay, above).
+
+Files do not go up either (written in 2026-10-15 with 7.48 and 7.49). A command's `body` is JSON, so a file would ride base64 inside the sealed envelope, about 16/9 of its size, and Cloudflare's 32 MiB message would cap a relayed upload near 18 MiB, under the window's 100 MB. In v1 the Inbox answers an up command for `uploads` or `markups` with `413 { "code": "relay_upload_unavailable" }` without running the window's route, beside `pair` and `events` as the door routes the relay does not carry. The phone uploads over the Wi-Fi or the tailnet (as section 11.5 does for video) and may then send the message naming the `upl_` id through the relay. Every other row added 2026-10-15 (7.39 to 7.47, 7.53) is an ordinary command: a GET with a fresh random `id`, a POST with its `idempotency_key` as `id`.
 
 Up command plaintext: `{ "v": 1, "id", "method", "path", "body" }`, sealed under the up key `U`, where `path` is a door path (`/api/inbox/device/...`, with its query string when the route takes one, `?version=sent` or `?project=prj_...`) and `body` is the JSON body the phone would have sent directly (a POST only). The Inbox applies it in-process through the door as that device (never as a loopback HTTP call), so the allowlist, the revocation check and the idempotency rule are the same on every path: every POST goes through the door's idempotency log per device and key, so a command the relay hands over again, or replays later, answers the stored result and writes nothing. A GET through the relay (the list after a long absence, an attachment's view, an HTML asset) is a command whose `id` is a fresh random id; a POST's `id` is its `idempotency_key` (section 6). Two door routes are not carried, and answer a result of `404 device_route_not_found`: `pair` (pairing through the relay is not in v1) and `events` (the down items are the relay's event stream; an endless answer cannot be one result).
 
@@ -392,14 +407,20 @@ Every command a phone sends carries one key: `idempotency_key` in the request bo
 | Tick | `POST messages/:id/guide/reviewed` | body `idempotency_key` |
 | Decision switch | `POST messages/:id/decision` | body `idempotency_key` |
 | New message | `POST threads/:id/message` | body `idempotency_key` (also the store's own key) |
+| Compose | `POST messages` | body `idempotency_key` (also the store's own key) |
+| Send to another session | `POST messages/:id/to` | body `idempotency_key` (the door's log only) |
+| Project menu, its Undo | `POST projects/:id/read`, `unread`, `resolve` | body `idempotency_key` (the door's log; the window's in-memory `batch_id` is optional) |
+| Guided-review comment | `POST messages/:id/guide/annotations` | body `idempotency_key` (an edit is the same annotation id under a new key) |
+| Upload | `POST uploads?name=` | query `idempotency_key` (the body is the file) |
+| Drawing | `POST markups` | query `idempotency_key` (the body is the image; its name is its SHA-256, so a replay writes nothing new anyway) |
 
-- **The door** keeps `inbox/device-commands.jsonl`, one line per applied command: `{ v: 1, at, device_id, key, method, path, status, body }`, with the answer's status and JSON body. It is read at start. A key seen before for that device on the same method and path answers the recorded status and body, adds `Idempotent-Replayed: true`, and writes nothing. That header is the replay signal: a replayed Send answers its recorded body, whose `replayed` field reads as it did the first time. The log keeps every answer body, reply bodies included, for as long as the store lives. The same key on another route is `409 idempotency_key_reused`. A 5xx is not recorded, so a retry runs again.
+- **The door** keeps `inbox/device-commands.jsonl`, one line per applied command: `{ v: 1, at, device_id, key, method, path, status, body }`, with the answer's status and JSON body. It is read at start. A key seen before for that device on the same method and path answers the recorded status and body, adds `Idempotent-Replayed: true`, and writes nothing. Only the method and the door path are compared, never the query or the body: a raw route's replay answers the first file's upload or drawing whatever bytes or `name` came with it. That header is the replay signal: a replayed Send answers its recorded body, whose `replayed` field reads as it did the first time. The log keeps every answer body, reply bodies included, for as long as the store lives. The same key on another route is `409 idempotency_key_reused`. A 5xx is not recorded, so a retry runs again.
 - **The relay path** carries the key as the up command's `id`. The relay holds one command per `id`, and the Inbox applies it through the door, so a command posted twice, or re-sent after the Inbox applied it but before the relay heard, writes once.
 - **The lock-screen answer** is one Send with the pick inside it (7.11): `{ idempotency_key, questions: [{ key, revision, answer: { v: 1, key, kind: "single", prompt, selected: [label] } }] }`. It tries the direct path first, then the relay, with the same key.
 
 ## 7. The exchanges
 
-P1 replays 7.1 to 7.25, 7.36 and 7.37 against a compiled binary; P2 replays 7.2 over the LAN; R1 and R2 replay 7.26 to 7.35 against `wrangler dev`. Fixture values are placeholders, never secrets: `AAAA...` stands for a 32-byte value, `tok_exampleaaaa...` for a token, repeated hex for a hash.
+P1 replays 7.1 to 7.25, 7.36, 7.37 and 7.53 against a compiled binary, and 7.39 to 7.49 against an Inbox in process (the raw upload over the tailnet's door listener too, and the relay's refusal through `asDevice`); P2 replays 7.2 over the LAN; R1 and R2 replay 7.26 to 7.35 against `wrangler dev`. Fixture values are placeholders, never secrets: `AAAA...` stands for a 32-byte value, `tok_exampleaaaa...` for a token, repeated hex for a hash.
 
 ```sh
 INBOX=https://macbook-pro.tail0000.ts.net:8443   # or http://127.0.0.1:<port> in a proof
@@ -1011,6 +1032,136 @@ curl -sS "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000031/image?
 ```
 
 `200` with the bytes, `Content-Type: image/png` (sniffed), `ETag: "<sha256 of the bytes>"`, `Cache-Control: private, no-cache` and the guard headers of the door table. `path` is the source exactly as the body writes it (percent-encoded in the query). Again with `-H 'If-None-Match: "<that sha256>"'`: `304`, no body, the same headers, while the file is unchanged; a changed file answers `200` with a new ETag. A path the body does not reference: `403 { "code": "image_not_referenced" }`.
+
+### 7.39 Every live session (compose)
+
+Added 2026-10-15 with 7.40 to 7.49 and 7.53, the phone parity rows. Each mirrors a window route as it is in 0.28.21 and adds nothing to it.
+
+```sh
+curl -sS "$INBOX/api/inbox/device/sessions?session=ses_01K70000000000000000000003" -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "serverSession": "00000000000000000000000000000001",
+  "home": "/Users/me",
+  "projects": [
+    {
+      "project": { "id": "prj_01K70000000000000000000002", "name": "billing-svc", "root": "/Users/me/code/billing-svc" },
+      "sessions": [
+        { "session": "ses_01K70000000000000000000003", "host": "claude-code", "started_at": "2026-10-15T09:30:00.000Z", "last_seen_at": "2026-10-15T10:55:01.000Z", "busy": false, "idle_since": "2026-10-15T10:43:00.000Z", "last_thread": { "id": "msg_01K70000000000000000000010", "subject": "Retry worker", "at": "2026-10-15T10:42:00.000Z" } }
+      ]
+    }
+  ],
+  "session": { "session": "ses_01K70000000000000000000003", "live": true }
+}
+```
+
+A folder the Inbox has not seen yet has `project.id: null`. `session` is present only with `?session=`.
+
+### 7.40 Start a thread (compose)
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000040","to":{"host":"claude-code","session":"ses_01K70000000000000000000003"},"body":"Add a retry budget to the webhook worker.","uploads":["upl_01K70000000000000000000048"]}'
+```
+
+`{ "thread_id": "msg_01K70000000000000000000040", "message": { "id": "msg_01K70000000000000000000040", "started_by_person": true, "reply_to": null, "to": { "host": "claude-code", "session": "ses_01K70000000000000000000003" }, "attachments": [{ "name": "notes.txt", "...": "an ordinary attachment" }], "...": "the rest of the message" }, "project": { "id": "prj_01K70000000000000000000002", "name": "billing-svc", "root": "/Users/me/code/billing-svc" }, "replayed": false }`. The same key again: the recorded answer with `Idempotent-Replayed: true`. No live session: `409 session_not_live`, nothing written; the phone keeps the words. Through the relay this is applied only when the computer is online, so `session_not_live` is the likely answer after a long wait.
+
+### 7.41 Send to another session
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000040/to" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000041","to":{"host":"pi","session":"ses_01K70000000000000000000004"}}'
+```
+
+`{ "message": { "id": "msg_01K70000000000000000000040", "to": { "host": "pi", "session": "ses_01K70000000000000000000004" }, "...": "" }, "row": { "...": "the thread's list row" } }`. Once a session took it: `409 already_delivered`; an agent's message: `422 not_addressed`; a session not live: `409 session_not_live`.
+
+### 7.42 Search
+
+```sh
+curl -sS "$INBOX/api/inbox/device/search?q=retry%20budget&status=waiting" -H "Authorization: Bearer $TOKEN"
+```
+
+The window's answer unchanged (CLAUDE.md, "Search"): `{ "serverSession": "…", "q": "retry budget", "terms": ["retry", "budget"], "took_ms": 4, "indexing": false, "threads": 412, "totals": { "threads": 1, "messages": 2, "files": 0, "decisions": 0, "projects": 0 }, "groups": { "threads": [ { "type": "thread", "id": "msg_01K70000000000000000000040", "...": "" } ], "...": "" }, "recent": null }`. The first search after a start may answer `indexing: true` with `groups: null`: ask again a moment later. A bad parameter: `422`.
+
+### 7.43 Mark a project read
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/projects/prj_01K70000000000000000000002/read" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000043"}'
+```
+
+`{ "project": { "id": "prj_01K70000000000000000000002", "...": "" }, "batch": { "read": ["msg_01K70000000000000000000010", "msg_01K70000000000000000000020"] }, "threads": [ { "...": "each row" } ], "replayed": false }`. A write that failed partway is still `200`, with `error: { code: "batch_incomplete" }` and the threads that did change. The same key again replays this answer and runs nothing.
+
+### 7.44 Undo it
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/projects/prj_01K70000000000000000000002/unread" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000044","threads":["msg_01K70000000000000000000010","msg_01K70000000000000000000020"]}'
+```
+
+`{ "project": { "...": "" }, "threads": [ { "...": "" } ], "skipped": [] }`.
+
+### 7.45 Archive a project, and its Undo
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/projects/prj_01K70000000000000000000002/resolve" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000045"}'
+```
+
+`{ "project": { "...": "" }, "batch": { "resolved": ["msg_01K70000000000000000000010"], "read": [] }, "threads": [ { "...": "" } ], "replayed": false }`. Undo: `{ "idempotency_key": "…046", "resolved": false, "threads": { "resolved": ["msg_01K70000000000000000000010"], "read": [] } }` answers `{ project, threads, skipped }`.
+
+### 7.46 The skill catalog
+
+```sh
+curl -sS "$INBOX/api/inbox/device/skills" -H "Authorization: Bearer $TOKEN"
+```
+
+`{ "skills": [ { "name": "readback", "root": "claude", "description": "State the request back.", "humanOnly": true, "dir": "/Users/me/.claude/skills/readback" } ] }`.
+
+### 7.47 One skill's SKILL.md
+
+```sh
+curl -sS "$INBOX/api/inbox/device/skills/content?name=readback" -H "Authorization: Bearer $TOKEN"
+```
+
+`{ "skill": { "name": "readback", "dir": "/Users/me/.claude/skills/readback", "path": "/Users/me/.claude/skills/readback/SKILL.md", "content": "---\nname: readback\n…", "truncated": false, "humanOnly": true } }`. A name not discovered: `404`.
+
+### 7.48 Upload a file
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/uploads?name=notes.txt&idempotency_key=00000000-0000-4000-8000-000000000048" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: text/plain' --data-binary @notes.txt
+```
+
+`{ "upload": { "upload_id": "upl_01K70000000000000000000048", "name": "notes.txt", "size": 19, "kind": "text", "sha256": "aaaa…", "created_at": "2026-10-15T11:00:00.000Z" } }`. The same key again: the same `upl_` id and `Idempotent-Replayed: true`; of the bytes sent again the door reads and drops at most 1 MiB or 2 s, then answers with `Connection: close`. No key: `422 { "field": "idempotency_key" }`. `.env`: `422 upload_refused`. Over 100 MB, declared or counted as it streams: `413 upload_too_large` with `Connection: close`, nothing recorded under the key. An upload no message names is forgotten after a day. Through the relay: `413 relay_upload_unavailable`.
+
+### 7.49 Upload a drawing
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/markups?idempotency_key=00000000-0000-4000-8000-000000000049" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: image/png' --data-binary @drawing.png
+```
+
+`{ "path": "/Users/me/.plannotator/inbox/markups/aaaa….png", "name": "aaaa….png", "url": "/api/inbox/markups/aaaa….png" }`. Read back with `GET markups/<name>`; name it in an annotation's `images` as the window does. Not an image: `422`. Past 32 MB (declared, or counted as it streams): `413 markup_too_large` with `Connection: close`. Through the relay: `413 relay_upload_unavailable`.
+
+### 7.53 A comment on a guided review's diff
+
+7.50 to 7.52 (shared drafts) and 7.54, 7.55 (decision retire and replace) are held and not built.
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/guide/annotations" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000053","annotation":{"id":"ann-guide-1","type":"comment","scope":"line","filePath":"src/auth.ts","lineStart":1,"lineEnd":1,"side":"new","text":"Refresh before it expires.","createdAt":1760526000000}}'
+```
+
+`{ "annotation": { "id": "ann-guide-1", "message_id": "msg_01K70000000000000000000020", "attachment_id": "", "path": "src/auth.ts", "version": "<the guide snapshot's sha256>", "guide": { "title": "Token refresh", "file": "src/auth.ts", "side": "new", "line_start": 1, "line_end": 1 }, "sent_reply_id": null, "...": "" } }`. Rides the next Send like the window's (`annotation_ids` on 7.11, the feedback text built as the window builds it). Remove with 7.18. A file not in the patch or lines outside one hunk: `422 validation_error`; no guide on the message: `404 guide_not_found`; removed or sent: `409 annotation_closed`.
 
 ## 8. What this contract leaves out
 

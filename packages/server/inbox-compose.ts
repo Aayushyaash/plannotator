@@ -6,7 +6,8 @@
  * session in any project. Nothing is sent without a live session: the window
  * saves a draft instead. The window's routes (same origin and the page's
  * `serverSession`, as every window write; the owner's page over the tailnet
- * too; never the phone's door, whose allowlist has none of them):
+ * too; the phone's door carries sessions, messages, messages/:id/to and
+ * uploads, never drafts):
  *
  *   GET  /api/inbox/sessions                 every live session, grouped by project;
  *                                            `?session=<id>` adds `session: { session, live }`

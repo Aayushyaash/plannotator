@@ -17,7 +17,7 @@
  *
  * Both answer the loopback window and the owner over the tailnet listener,
  * like every read route and the window's own writes. The phone's device door
- * does not carry them (its allowlist is explicit).
+ * carries the search (`GET search`, contract 7.42), not the recent searches.
  */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";

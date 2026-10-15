@@ -367,6 +367,7 @@ const ERROR_STATUS: Record<string, number> = {
   draft_conflict: 409,
   upload_refused: 422,
   upload_too_large: 413,
+  markup_too_large: 413,
   upload_not_found: 404,
   // Over your tailnet (packages/server/inbox-tailscale.ts).
   tailscale_env_decides: 409,
@@ -1662,7 +1663,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       // The project menu (design record "inbox-project-menu"): Mark all as
       // read and Archive all on one project, and their Undo. Loops over the
       // single actions (packages/shared/inbox/project-batch.ts); the same
-      // guards as every window write. Not on the phone's door.
+      // guards as every window write. On the phone's door too (contract
+      // 7.43 to 7.45), whose idempotency log replays a batch's answer.
       const projectBatchMatch = /^\/api\/inbox\/projects\/([A-Za-z0-9_]+)\/(read|unread|resolve)$/.exec(path);
       if (projectBatchMatch) {
         if (req.method !== "POST") return json({ error: "Use POST." }, 405);
