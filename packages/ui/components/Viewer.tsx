@@ -1,7 +1,7 @@
 import { generateId } from '../utils/generateId';
 import React, { useRef, useState, useEffect, useLayoutEffect, useMemo, forwardRef, useImperativeHandle, useCallback, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
-import { ImageLightbox } from './ImageLightbox';
+import { collectDocumentImages, ImageLightbox, type LightboxImage } from './ImageLightbox';
 import { AnnotationType, type Block, type Annotation, type EditorMode, type InputMethod, type ImageAttachment, type ActionsLabelMode, type HostDraft } from '../types';
 import { applyHighlight, codeBlockClassName, onCodeHighlightSwap } from '../utils/codeHighlight';
 import { paintCodeBlockMark } from '../utils/codeBlockMark';
@@ -163,6 +163,18 @@ export interface ViewerProps {
    */
   resolveLocalLink?: LocalLinkResolver;
   imageBaseDir?: string;
+  /**
+   * A click on an image in the document. Given: the host handles it (the
+   * Inbox opens a message's image in its own viewer) and no lightbox opens.
+   * Absent: the lightbox, as always.
+   */
+  onImageClick?: (src: string, alt: string) => void;
+  /**
+   * The lightbox steps through every image the document shows (← →, the
+   * peek; approval "inbox-image-viewer": plan review and annotate's light
+   * version). Absent or false: the single image overlay, as always.
+   */
+  imageLightboxStepping?: boolean;
   /** Directory the active document lives in — used by the code-path validator
    *  so out-of-tree relative references (e.g. `../foo.ts` in a linked doc)
    *  resolve against the doc's own directory rather than only cwd. */
@@ -681,6 +693,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   resolveLocalLink,
   linkedDocInfo,
   imageBaseDir,
+  onImageClick: hostImageClick,
+  imageLightboxStepping = false,
   codePathBaseDir,
   disableCodePathValidation,
   onRestoreReport,
@@ -726,7 +740,16 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   // Where `#123` / `@user` link: `refRepo` when the host gave one, else `repoInfo`.
   const linkRepo = refRepo ?? repoInfo;
   const [copied, setCopied] = useState(false);
-  const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
+  const [lightbox, setLightboxState] = useState<{ src: string; alt: string; images?: LightboxImage[] } | null>(null);
+  // A host that handles image clicks (the Inbox) gets them; otherwise the lightbox opens, stepping through
+  // the document's images when the host asked for it.
+  const setLightbox = (image: { src: string; alt: string }) => {
+    if (hostImageClick) {
+      hostImageClick(image.src, image.alt);
+      return;
+    }
+    setLightboxState(imageLightboxStepping ? { ...image, images: collectDocumentImages(containerRef.current) } : image);
+  };
   const [locationHash, setLocationHash] = useState(() => window.location.hash);
   const globalCommentButtonRef = useRef<HTMLButtonElement>(null);
   // Read through a ref: only the imperative removeHighlight path below needs
@@ -1931,7 +1954,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
 
       {/* Image lightbox */}
       {lightbox && createPortal(
-        <ImageLightbox src={lightbox.src} alt={lightbox.alt} onClose={() => setLightbox(null)} />,
+        <ImageLightbox src={lightbox.src} alt={lightbox.alt} images={lightbox.images} onClose={() => setLightboxState(null)} />,
         document.body
       )}
     </div>

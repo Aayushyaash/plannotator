@@ -116,7 +116,7 @@ import { createInboxRepoCache } from "./inbox-repos";
 import { createInboxProjectRoots, nearestProjectHolding, type InboxGitRunner } from "./inbox-project-root";
 import { handleFavicon } from "./shared-handlers";
 import { createInboxAttachmentRoutes } from "./inbox-attachments";
-import { inboxMessageImageRoute } from "./inbox-message-images";
+import { createInboxImageCapture, inboxMessageImageRoute, type InboxImageCapture } from "./inbox-message-images";
 import { createInboxOpenInRoute, systemOpenInLauncher, type InboxOpenInLauncher } from "./inbox-open-in";
 import { recordInboxAttachments, sweepStaleInboxSendTemps } from "@plannotator/shared/inbox/attachments";
 import { inboxBodyForAgent } from "@plannotator/shared/inbox/uploads";
@@ -308,6 +308,8 @@ export interface InboxServer {
   connectAgents: () => Promise<InboxConnectReport>;
   /** The search index (built on the first search): tests and the benchmark read its build stats. */
   search: InboxSearchIndex;
+  /** The background capture of images messages show (inbox-message-images.ts): tests wait on its `idle`. */
+  imageCapture: InboxImageCapture;
   stop: () => void;
 }
 
@@ -528,6 +530,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   // per folder (packages/server/inbox-project-root.ts). One cache for sends,
   // live sessions and the message-image route, so they always agree.
   const projectRoots = createInboxProjectRoots(options.projectRootGit ? { git: options.projectRootGit } : {});
+  // Images messages show that have no captured file yet: copied in the background after a read of their thread (inbox-message-images.ts).
+  const imageCapture = createInboxImageCapture(store, projectRoots);
   const projectLocks = new Map<string, Promise<InboxProject>>();
   const resolveProject = async (path: string): Promise<InboxProject> => {
     const { root, name, folder, settled } = await projectRoots.resolve(path);
@@ -1627,6 +1631,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       const threadMatch = /^\/api\/inbox\/threads\/([A-Za-z0-9_]+)$/.exec(path);
       if (threadMatch && req.method === "GET") {
         // The window's thread: each message's seq (what is new since the last look) and a reply's sent annotations.
+        // Images the messages show with no captured file yet: copied in the background; the read never waits (approval "inbox-image-viewer").
+        if (store.thread(threadMatch[1]!)) imageCapture.schedule(threadMatch[1]!);
         const thread = store.windowThread(threadMatch[1]!);
         if (!thread) return json({ error: "No such thread.", code: "thread_not_found" }, 404);
         const decisionIds = thread.messages.flatMap((m) => (m.questions ?? []).map((q) => q.decision_id));
@@ -1860,7 +1866,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     return handle(req, "local");
   };
 
-  attachmentRoutes = createInboxAttachmentRoutes({ store, serverSession, readBody, streamIdleMs: options.streamIdleMs });
+  attachmentRoutes = createInboxAttachmentRoutes({ store, serverSession, readBody, streamIdleMs: options.streamIdleMs, scheduleImageCapture: imageCapture.schedule });
   const started = startOnLoopback(fetch, previous?.port ?? null);
   server = started.server;
   portChanged = started.portChanged;
@@ -1968,6 +1974,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     connectStop.abort();
     updates.stop();
     search.dispose();
+    // No capture writes after stop (a restart to update starts the next binary on this store).
+    imageCapture.stop();
     clearInterval(uploadSweep);
     void mcp.close().catch(() => {});
     server.stop(true);
@@ -1980,7 +1988,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     tailnetStopFailedPort = tailscale.stop().failedPort;
   };
 
-  return { port, url: baseUrl, token, serverSession, portChanged, store, registry, tailscale, connectAgents, search: search.index, stop };
+  return { port, url: baseUrl, token, serverSession, portChanged, store, registry, tailscale, connectAgents, search: search.index, imageCapture, stop };
 }
 
 /** Print where the Inbox is, and open it when a person asked for it. */

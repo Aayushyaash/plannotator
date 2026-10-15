@@ -18,6 +18,7 @@ import {
 } from '@plannotator/core/inbox-types';
 import { AnnotationType, type Annotation, type Block, type CodeAnnotation, type ImageAttachment } from '@plannotator/ui/types';
 import { diagramDocumentBlocks, exportLinkedDocAnnotations, parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
+import { whenTime } from './format';
 
 /** Plannotator's blocks for a file: one diagram block for a diagram source, one code block for code, the markdown pipeline for text, none for HTML or a binary kind. */
 export function attachmentBlocks(kindValue: InboxAttachmentKind | string, text: string, name: string): Block[] {
@@ -125,8 +126,9 @@ export function annotationQuote(annotation: Annotation): string {
   return annotation.originalText ?? '';
 }
 
-/** A file's path as the agent knows it: relative to its project when inside it, else the absolute path it attached. */
-export function attachmentLabel(attachment: Pick<InboxAttachmentState, 'path' | 'name'>, projectRoot: string): string {
+/** A file's path as the agent knows it: an image in a message's text by its src as written; an attached file relative to its project when inside it, else the absolute path it attached. */
+export function attachmentLabel(attachment: Pick<InboxAttachmentState, 'path' | 'name' | 'ref'>, projectRoot: string): string {
+  if (attachment.ref !== undefined) return attachment.ref;
   const root = projectRoot.replace(/[\\/]+$/, '');
   if (attachment.path.startsWith(`${root}/`) || attachment.path.startsWith(`${root}\\`)) return attachment.path.slice(root.length + 1);
   return attachment.path || attachment.name;
@@ -430,9 +432,52 @@ export function guideFeedback(records: readonly InboxAnnotationRecord[]): string
     .join('\n\n');
 }
 
+/**
+ * A file's heading in the export: an attached file by its path; an image the
+ * message's text shows by its src as written plus the message it was in, so
+ * the agent knows which picture it was: `design/checkout-b.png (image in
+ * your 11:22 AM message)`. When another message of `others` shows the same
+ * src within the same minute, the time carries its seconds (`11:22:41 AM`),
+ * and when that still ties, the message's place among them (`message 2`), so
+ * two pictures never share one heading.
+ */
+export function exportFileLabel(
+  attachment: Pick<InboxAttachmentState, 'path' | 'name' | 'ref' | 'sent_at'> & { message_id?: string },
+  projectRoot: string,
+  others: readonly Pick<InboxAttachmentState, 'ref' | 'sent_at' | 'message_id'>[] = [],
+  /** The image is in the person's own message: "(image in my … message)", never "your". */
+  mine = false,
+): string {
+  const label = attachmentLabel(attachment, projectRoot);
+  if (attachment.ref === undefined) return label;
+  const whose = mine ? 'my' : 'your';
+  const minute = whenTime(attachment.sent_at);
+  const sameRef = others.filter((o) => o.ref === attachment.ref && o.message_id !== attachment.message_id && whenTime(o.sent_at) === minute);
+  if (sameRef.length === 0) return `${label} (image in ${whose} ${minute ? `${minute} ` : ''}message)`;
+  const secondsOf = (iso: string) => {
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  };
+  const second = secondsOf(attachment.sent_at);
+  const tied = sameRef.filter((o) => secondsOf(o.sent_at) === second);
+  if (tied.length === 0) return `${label} (image in ${whose} ${second} message)`;
+  const order = [...tied, { sent_at: attachment.sent_at, message_id: attachment.message_id ?? '' }]
+    .map((o) => `${o.sent_at}\0${o.message_id ?? ''}`)
+    .filter((key, index, all) => all.indexOf(key) === index)
+    .sort();
+  const place = order.indexOf(`${attachment.sent_at}\0${attachment.message_id ?? ''}`) + 1;
+  return `${label} (image in ${whose} ${second} message ${place})`;
+}
+
 export const ATTACHMENT_FEEDBACK_HEADING = {
   title: 'Feedback on the attached files',
   intro: 'The following feedback is on the files you attached, one section per file and version.',
+};
+
+/** The same heading when the feedback covers an image your message's text showed. */
+export const ATTACHMENT_AND_IMAGE_FEEDBACK_HEADING = {
+  title: ATTACHMENT_FEEDBACK_HEADING.title,
+  intro: 'The following feedback is on the files you attached and the images your messages showed, one section per file and version.',
 };
 
 /**
@@ -447,16 +492,31 @@ export function attachmentFeedback(
   attachments: readonly InboxAttachmentState[],
   texts: ReadonlyMap<string, string>,
   projectRoot: string,
+  /** The person's own messages (their images are named "image in my … message"). */
+  options: { personMessageIds?: ReadonlySet<string> } = {},
 ): string {
   if (records.length === 0) return '';
+  let inlineImages = false;
   const groups = new Map<string, { annotations: Annotation[]; markdown?: string; blocks: Block[]; video?: { durationMs?: number } }>();
   for (const record of records) {
     // Comments on a guided review's diff go in their own section, after the files'.
     if (record.guide) continue;
     const attachment = attachments.find((a) => a.id === record.attachment_id) ?? attachments.find((a) => a.path === record.path);
-    if (!attachment) continue;
     const sent = record.version !== 'current';
-    const label = `${attachmentLabel(attachment, projectRoot)}${sent ? ' (the version you sent)' : ''}`;
+    if (!attachment) {
+      // A file the caller does not list (an image a message shows, on a phone app older than
+      // `inline_images`): its comment still rides the Send, under the path it was made on.
+      const label = `${record.path}${sent ? ' (the version you sent)' : ''}`;
+      const group = groups.get(label) ?? { annotations: [], blocks: [] };
+      groups.set(label, group);
+      const { exportLocation: _dropped, ...annotation } = annotationOf(record) as Annotation & { exportLocation?: unknown };
+      group.annotations.push(annotation as Annotation);
+      continue;
+    }
+    if (attachment.ref !== undefined) inlineImages = true;
+    const mine = attachment.ref !== undefined && options.personMessageIds?.has(attachment.message_id) === true;
+    const sentLabel = attachment.captured === 'on_open' ? ' (the version I first saw)' : mine ? ' (the version I sent)' : ' (the version you sent)';
+    const label = `${exportFileLabel(attachment, projectRoot, attachments, mine)}${sent ? sentLabel : ''}`;
     let group = groups.get(label);
     if (!group) {
       const text = texts.get(`${attachment.id}\0${record.version}`) ?? '';
@@ -487,6 +547,6 @@ export function attachmentFeedback(
     }
   }
   const entries = new Map([...groups].map(([label, group]) => [label, { annotations: group.annotations, globalAttachments: [], blocks: group.blocks }]));
-  const files = records.some((record) => !record.guide) ? exportLinkedDocAnnotations(entries, ATTACHMENT_FEEDBACK_HEADING).trim() : '';
+  const files = records.some((record) => !record.guide) ? exportLinkedDocAnnotations(entries, inlineImages ? ATTACHMENT_AND_IMAGE_FEEDBACK_HEADING : ATTACHMENT_FEEDBACK_HEADING).trim() : '';
   return [files, guideFeedback(records)].filter(Boolean).join('\n\n');
 }

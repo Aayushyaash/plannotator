@@ -1432,6 +1432,38 @@ describe("the thread-state model", () => {
     expect(ties.sections).toBeGreaterThan(0);
   });
 
+  test("a message's images captured on first read (one more line for it) change nothing the model sees, and replay the same", () => {
+    fc.assert(
+      fc.property(fc.array(fc.tuple(stateOpArb, fc.nat(4)), { minLength: 15, maxLength: 40, size: "max" }), (steps) => {
+        const world = stateWorld();
+        let captures = 0;
+        for (const [op, roll] of steps) {
+          stateStep(world, op);
+          if (roll !== 0) continue;
+          // The first read of a thread whose agent message was sent before capture existed.
+          const message = world.ids.map((id) => world.store.message(id)!).find((m) => m.author.kind === "agent" && m.inline_images === undefined);
+          if (!message) continue;
+          const rows = JSON.stringify(world.store.listRows());
+          const cursor = world.store.messageCursor(message.id);
+          const image = { id: `att_${"0".repeat(25)}${captures % 10}`, path: "/p/a.png", named_path: null, name: "a.png", kind: "image" as const, sent_sha256: "a".repeat(64), size: 1, sent_at: message.created_at, sent_mtime: message.created_at, ref: "a.png", captured: "on_open" as const };
+          world.store.addCapturedImages(message.id, [image]);
+          captures += 1;
+          // Written once; the message keeps its place and every row reads the same.
+          expect(world.store.message(message.id)!.inline_images).toHaveLength(1);
+          world.store.addCapturedImages(message.id, []);
+          expect(world.store.message(message.id)!.inline_images).toHaveLength(1);
+          expect(world.store.messageCursor(message.id)).toBe(cursor);
+          expect(JSON.stringify(world.store.listRows())).toBe(rows);
+        }
+        // Read back from disk: the same view, the captures included.
+        const reopened = InboxStore.open(world.dir);
+        expect(JSON.stringify(reopened.listRows())).toBe(JSON.stringify(world.store.listRows()));
+        for (const id of world.ids) expect(reopened.message(id)).toEqual(world.store.message(id));
+      }),
+      { numRuns: 120, seed: 20261015 },
+    );
+  });
+
   test("the archived list breaks ties on the thread id: every open thread archived in one clock tick", () => {
     let ties = 0;
     fc.assert(

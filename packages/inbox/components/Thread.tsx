@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Viewer } from '@plannotator/ui/components/Viewer';
+import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
 import { parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 import type { InboxDecision, InboxDecisionDraft, InboxListRow, InboxMessageWire, InboxProjectRepo, InboxQuestion, InboxThread } from '@plannotator/core/inbox-types';
 import type { IndexedQuestion, QuestionAnswer, QuestionStatus } from '@plannotator/core/question-block';
 import { inboxDecisionWords } from '@plannotator/core/inbox-questions';
-import { isInboxNote, isInboxTextKind, readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachment, type InboxAttachmentState } from '@plannotator/core/inbox-types';
+import { isInboxNote, isInboxTextKind, readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachment, type InboxAttachmentState, type InboxInlineImage } from '@plannotator/core/inbox-types';
 import type { LocalLinkResolver } from '@plannotator/ui/components/LocalLinkContext';
 import { NOT_ATTACHED_TITLE, attachmentDeepLink, attachmentDisplayPath, attachmentForLink, openAttachmentTitle, useRefRepo } from '../links';
 import { InboxApiError, inboxApi, type AttachmentsModel } from '../api';
@@ -22,7 +24,7 @@ import { AuthorMark, DecisionDiamond, Icon } from '../icons';
 import { PILL_BAND_PX, atEnd, followBy, lookThrough, measureFirstLines, unseenArrivals, useSeenOnSight } from '../seenOnSight';
 import { DecisionCard } from './DecisionCard';
 import { GuideCard } from './GuideCard';
-import { inboxMessageImageBase, markTallImage } from '../images';
+import { inboxMessageImageBase, inlineImageRefFromSrc, markTallImage } from '../images';
 import { reportUnsentReply } from '../unsent';
 import { canToggleRead } from '../markRead';
 import { NewMessageButton, NewMessageComposer, NewMessagePopover, hostName, useLiveSessions, type NewMessageMode } from './NewMessage';
@@ -218,6 +220,7 @@ export function MessageBody({
   projectRoot,
   repo,
   onOpenAttachment,
+  onOpenInlineImage,
   readOnly,
   answers,
   onPick,
@@ -235,6 +238,8 @@ export function MessageBody({
   repo?: InboxProjectRepo | null;
   /** A link in the body to one of this message's attachments was followed. */
   onOpenAttachment: (attachment: InboxAttachment) => void;
+  /** An image the body shows was clicked (or pressed): its captured file (`inline_images`) opens in the viewer. */
+  onOpenInlineImage?: (image: InboxInlineImage) => void;
   readOnly: boolean;
   answers: ReadonlyMap<string, QuestionAnswer>;
   onPick: (key: string, answer: QuestionAnswer | null) => void;
@@ -269,6 +274,87 @@ export function MessageBody({
     body.addEventListener('load', onLoad, true);
     return () => body.removeEventListener('load', onLoad, true);
   }, []);
+  // Images the body shows open in the thread's one viewer (approval "inbox-image-viewer"): a
+  // click, or Enter / Space on one (every image the window loads from the message is a button).
+  // Until the store has captured it (a later read of the thread does, in the background), the
+  // plain lightbox shows it, so a click always opens something.
+  const inlineRef = useRef<readonly InboxInlineImage[]>(message.inline_images ?? []);
+  inlineRef.current = message.inline_images ?? [];
+  const openImageRef = useRef(onOpenInlineImage);
+  openImageRef.current = onOpenInlineImage;
+  const [fallback, setFallback] = useState<{ src: string; alt: string } | null>(null);
+  const imageOf = useCallback(
+    (src: string | null) => {
+      const ref = src ? inlineImageRefFromSrc(src, message.id) : null;
+      return ref === null ? null : (inlineRef.current.find((image) => image.ref === ref) ?? null);
+    },
+    [message.id],
+  );
+  /** Open one of the body's images: its captured file in the viewer, else the lightbox. False: not one of them. */
+  const openImage = useCallback(
+    (src: string | null, alt: string): boolean => {
+      if (!src || inlineImageRefFromSrc(src, message.id) === null) return false;
+      // An image that failed to load (outside the project, gone) opens nothing: an empty lightbox helps no one.
+      if ([...(bodyRef.current?.querySelectorAll<HTMLImageElement>('img[data-ib-broken]') ?? [])].some((img) => img.getAttribute('src') === src)) return true;
+      const image = imageOf(src);
+      if (image && openImageRef.current) openImageRef.current(image);
+      else setFallback({ src, alt });
+      return true;
+    },
+    [imageOf, message.id],
+  );
+  const onImageClick = useCallback((src: string, alt: string) => void openImage(src, alt), [openImage]);
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    for (const img of body.querySelectorAll<HTMLImageElement>('img')) {
+      const src = img.getAttribute('src');
+      const ref = src ? inlineImageRefFromSrc(src, message.id) : null;
+      if (ref === null || img.hasAttribute('data-ib-broken')) continue;
+      const image = imageOf(src);
+      const name = image?.name ?? ref.split(/[\\/]/).pop() ?? 'image';
+      img.setAttribute('role', 'button');
+      img.tabIndex = 0;
+      img.setAttribute('aria-label', `Open ${name}${img.alt ? `, ${img.alt}` : ''}`);
+      if (image) img.setAttribute('data-inline-image', image.id);
+      else img.removeAttribute('data-inline-image');
+      img.style.cursor = 'zoom-in';
+    }
+  });
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    // Markdown images reach openImage through Viewer's onImageClick; an image in a raw-HTML block has no handler of its own.
+    const onClick = (event: MouseEvent) => {
+      const img = event.target instanceof HTMLImageElement ? event.target : null;
+      if (!img || img.classList.contains('cursor-zoom-in')) return;
+      if (openImage(img.getAttribute('src'), img.alt)) event.preventDefault();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
+      const img = event.target instanceof HTMLImageElement ? event.target : null;
+      if (img && openImage(img.getAttribute('src'), img.alt)) event.preventDefault();
+    };
+    body.addEventListener('click', onClick);
+    body.addEventListener('keydown', onKey);
+    // An image that fails to load is not a button (error does not bubble: a capture listener hears it).
+    const onError = (event: Event) => {
+      const img = event.target instanceof HTMLImageElement ? event.target : null;
+      if (!img) return;
+      img.setAttribute('data-ib-broken', '');
+      img.removeAttribute('role');
+      img.removeAttribute('tabindex');
+      img.removeAttribute('aria-label');
+      img.style.cursor = '';
+    };
+    body.addEventListener('error', onError, true);
+    return () => {
+      body.removeEventListener('click', onClick);
+      body.removeEventListener('keydown', onKey);
+      body.removeEventListener('error', onError, true);
+    };
+  }, [openImage]);
   // The skills the block names are painted in the person's words, as the composer painted them.
   useEffect(() => {
     const body = bodyRef.current;
@@ -373,6 +459,7 @@ export function MessageBody({
         stickyActions={false}
         disableCodePathValidation
         imageBaseDir={inboxMessageImageBase(message.id)}
+        onImageClick={onImageClick}
         resolveLocalLink={resolveLocalLink}
         refRepo={refRepo}
         answerOnly
@@ -391,6 +478,7 @@ export function MessageBody({
         renderQuestionBelowPrompt={renderReplacesLine ? belowPrompt : undefined}
       />
       {skills && <SkillsLine split={skills} />}
+      {fallback && createPortal(<ImageLightbox src={fallback.src} alt={fallback.alt} onClose={() => setFallback(null)} />, document.body)}
     </div>
   );
 }
@@ -828,6 +916,10 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
   // Attachments (step 2): the files as they are now, and the annotations that ride the next Send.
   const { model: files, load: reloadFiles, patch: patchRecords } = useThreadAttachments(thread.thread_id, thread);
   const attachments: InboxAttachmentState[] = files?.attachments ?? [];
+  // The images the messages' text shows, captured as files (approval "inbox-image-viewer"): opened, stepped and commented like attachments.
+  const inlineImages: InboxAttachmentState[] = useMemo(() => files?.inline_images ?? [], [files]);
+  /** Every file the viewer opens: the attached files and the images in the text. */
+  const allFiles: InboxAttachmentState[] = useMemo(() => [...attachments, ...inlineImages], [attachments, inlineImages]);
   const records = files?.annotations ?? [];
 
   // The session that asked, and whether it is still there (only hosts whose
@@ -864,26 +956,27 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
 
   const fileRecords = useMemo(() => records.filter((r) => !r.guide), [records]);
   /** Something here takes annotations: an attached file, or a guided review's diffs. */
-  const takesAnnotations = attachments.length > 0 || records.length > 0 || thread.messages.some((m) => m.guide);
+  const takesAnnotations = allFiles.length > 0 || records.length > 0 || thread.messages.some((m) => m.guide);
   const [full, setFull] = useState(false);
   /** A narrow window (a phone): the open file is always full screen. */
   /** Bumped when the person opens a file, so focus moves into its pane. */
   const [paneFocus, setPaneFocus] = useState(0);
   const paneRef = useRef<AttachmentPaneHandle>(null);
   /** Every attachment of the thread in thread order: what the pane steps through. */
-  const steps = useMemo(() => attachmentSequence(thread.messages, attachments), [thread.messages, attachments]);
-  const openFile = (attachment: Pick<InboxAttachmentState, 'id' | 'kind'>, version: 'current' | 'sent' = 'current', focus: string | null = null) => {
-    setFull(attachment.kind === 'html');
+  const steps = useMemo(() => attachmentSequence(thread.messages, attachments, inlineImages), [thread.messages, attachments, inlineImages]);
+  const openFile = (attachment: Pick<InboxAttachmentState, 'id' | 'kind' | 'ref'>, version: 'current' | 'sent' = 'current', focus: string | null = null) => {
+    // HTML opens full screen; so does an image from a message's text (approval "inbox-image-viewer"). Documents open beside the thread.
+    setFull(attachment.kind === 'html' || attachment.ref !== undefined);
     onOpenFile({ id: attachment.id, version, focus });
   };
   /** A tile, or a link in a message: the file as it is now, focus in its pane (a typed comment in the open file asks first). */
-  const openFromMessage = (attachment: Pick<InboxAttachmentState, 'id' | 'kind'> & { name?: string }) => {
+  const openFromMessage = (attachment: Pick<InboxAttachmentState, 'id' | 'kind' | 'ref'> & { name?: string }) => {
     const go = () => {
       openFile(attachment);
       setPaneFocus((n) => n + 1);
     };
     const pane = paneRef.current;
-    if (pane && file && file.id !== attachment.id) pane.leave(attachment.name ?? attachments.find((a) => a.id === attachment.id)?.name ?? 'that file', go);
+    if (pane && file && file.id !== attachment.id) pane.leave(attachment.name ?? allFiles.find((a) => a.id === attachment.id)?.name ?? 'that file', go);
     else go();
   };
   const openRecord = (record: InboxAnnotationRecord) => {
@@ -892,7 +985,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
       onOpenGuide(record.message_id);
       return;
     }
-    const attachment = attachments.find((a) => a.id === record.attachment_id);
+    const attachment = allFiles.find((a) => a.id === record.attachment_id);
     if (!attachment) return;
     const go = () => openFile(attachment, record.version === 'current' ? 'current' : 'sent', record.id);
     // Another file than the one open: a typed comment in the open file asks first.
@@ -932,7 +1025,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
     for (const record of pending) {
       // A guided-review comment carries its own file and lines.
       if (record.guide) continue;
-      const attachment = attachments.find((a) => a.id === record.attachment_id) ?? attachments.find((a) => a.path === record.path);
+      const attachment = allFiles.find((a) => a.id === record.attachment_id) ?? allFiles.find((a) => a.path === record.path);
       if (!attachment) continue;
       const key = `${attachment.id}\0${record.version}`;
       if (texts.has(key)) continue;
@@ -945,7 +1038,9 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
         texts.set(key, '');
       }
     }
-    return attachmentFeedback(pending, attachments, texts, thread.project.root);
+    return attachmentFeedback(pending, allFiles, texts, thread.project.root, {
+      personMessageIds: new Set(thread.messages.filter((m) => m.author.kind === 'person').map((m) => m.id)),
+    });
   };
 
   useEffect(() => {
@@ -1562,7 +1657,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
   const markReadEnabled = markReadOffered && canToggleRead(row!);
   const closedByRead = thread.messages.flatMap((m) => (m.questions ?? []).filter((q) => q.state === 'closed' && q.set_aside_at));
 
-  const openAttachment = file ? attachments.find((a) => a.id === file.id) ?? null : null;
+  const openAttachment = file ? allFiles.find((a) => a.id === file.id) ?? null : null;
   const fileOpen = openAttachment !== null;
   // A file beside the thread hides the list (App.tsx `fileOpen`, from the route, so before the
   // attachments load too): the way back to it leads the header, as on an iPad (approved 2026-10-12).
@@ -1975,6 +2070,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                   projectRoot={thread.project.root}
                   repo={thread.project.repo ?? null}
                   onOpenAttachment={openFromMessage}
+                  onOpenInlineImage={(image) => openFromMessage(image)}
                   readOnly={!isAgent || !liveMessage(message) || questions.length === 0 || allSent}
                   answers={answersOf(message)}
                   onPick={(key, answer) => pick(message.id, key, answer)}
@@ -2158,7 +2254,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                     </span>
                   )}
                   {takesAnnotations && (
-                    <AnnotationsChip records={records} attachments={attachments} onEdit={editRecord} onRemove={removeRecord} onOpen={openRecord} />
+                    <AnnotationsChip records={records} attachments={allFiles} onEdit={editRecord} onRemove={removeRecord} onOpen={openRecord} />
                   )}
                 </div>
               )}
@@ -2243,7 +2339,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
       <AttachmentPane
         ref={paneRef}
         attachment={openAttachment}
-        attachments={attachments}
+        attachments={allFiles}
         // The files' annotations only: a guided-review comment is on the guide's diff, not on a file.
         records={fileRecords}
         agent={asker}
@@ -2262,6 +2358,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
         onToggleFull={() => setFull((v) => !v)}
         focusId={file!.focus}
         focusRequest={paneFocus}
+        fromPerson={thread.messages.find((m) => m.id === openAttachment.message_id)?.author.kind === 'person'}
         readOnly={(() => {
           const owner = thread.messages.find((m) => m.id === openAttachment.message_id) ?? root;
           // The person does not comment on their own upload.

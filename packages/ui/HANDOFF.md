@@ -2303,6 +2303,14 @@ For the Plannotator Inbox's composers (approval "inbox-skill-references"). Every
 - **`@plannotator/core/markdown-structure`** gains **`codeFenceFor(code)`** (three backticks, or one more than the longest backtick run in the code). Code review's feedback export fences Highlighted text, Replaces and Suggested code with it: byte-identical unless the quoted code holds a ``` run.
 - **`utils/skillCatalog`**: **`normalizeSkillContent`** is exported; **`setSkillCatalogExportRegistration(on)`** (host configuration: `resetSkillCatalogCache` leaves it alone), and **`configurePlannotatorUI({ skillReferenceExport })`** (default true): false keeps the fetched catalog out of the per-comment export, for a host that composes one block per message itself.
 
+## The image peek, a stepping lightbox, and `Viewer` image seams (ui, next publish; additive, no core change)
+
+For the Plannotator Inbox's one viewer (approval "inbox-image-viewer", 2026-10-15). A host that passes none of the new props sees no change.
+
+- **`components/ImagePeek`** (new): the picture list a stepper opens ("A · Peek"). Props `rows: ImagePeekRow[]` (`{ key, label, items: ImagePeekItem[] }`; an item is `{ key, name, thumb?, tile?, count?, attached?, detail? }`), `current`, `onPick(key)`, `onClose(reason: 'key' | 'outside')`, `variant: 'popover' | 'sheet'` (a phone's bottom sheet, three across, with a backdrop), `label`, `id`, `className`. An ARIA `grid` (rows with a `rowheader`, `gridcell` items, `aria-selected` on the open one); focus starts on the open item; ← → along the items, ↑ ↓ between rows, Home / End, Enter / Space pick, Esc / Tab close. A press outside a popover closes it, except on an element marked `data-peek-opener`. `forwardRef` exposes **`ImagePeekHandle.handleKey(event)`** for a modal that intercepts keys before they reach it. Images are only `<img src>`. Also exported: `peekMove` (the key rule, pure).
+- **`ImageLightbox`** gains **`images?: LightboxImage[]`** (`{ src, alt, section? }`): with two or more it is a full-screen stepping view ("2 of 4 · in “Options”", ← → and `]` `[`, the end note, Actual size, the pill and the peek); without it, the same single-image overlay byte for byte. Also exported: `collectDocumentImages(container)` and `lightboxImageName(image)`.
+- **`Viewer`** gains **`imageLightboxStepping?: boolean`** (the lightbox steps through every zoomable image of the rendered document; Plannotator's plan review and annotate pass it) and **`onImageClick?: (src, alt) => void`** (the host takes image clicks and no lightbox opens; the Inbox opens a message's captured image in its own viewer). Both absent: unchanged.
+
 ## The law (guardrails for anyone editing `@plannotator/ui`)
 
 These are enforced socially and, where possible, by CI. They exist because a prior from-scratch reimplementation of this UI broke the app and was reverted.

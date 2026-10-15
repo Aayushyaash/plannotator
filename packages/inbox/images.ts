@@ -29,6 +29,22 @@ export function inboxMessageImageUrl(messageId: string, src: string): string {
 }
 
 /**
+ * The src as the body wrote it, read back from an image URL the body drew
+ * (`inboxMessageImageUrl`), when the URL is that message's: what finds the
+ * image's captured file (`inline_images`, by `ref`). Null for anything else.
+ */
+export function inlineImageRefFromSrc(src: string, messageId: string): string | null {
+  try {
+    const base = typeof window !== 'undefined' && /^https?:/.test(window.location.href) ? window.location.href : 'http://localhost/';
+    const url = new URL(src, base);
+    if (url.pathname !== `/api/inbox/messages/${encodeURIComponent(messageId)}/image`) return null;
+    return url.searchParams.get('path');
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The window's image resolver. Outside a message body there is no image
  * route in the Inbox, so any other local path keeps ui's default URL, which
  * the Inbox answers with a 404 as it always has.

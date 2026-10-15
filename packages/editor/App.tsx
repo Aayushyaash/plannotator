@@ -7441,6 +7441,8 @@ const App: React.FC = () => {
                   <Viewer
                     key={viewerContentKey}
                     ref={viewerRef}
+                    // The light version of the Inbox's one viewer: the lightbox steps through the document's images (approval "inbox-image-viewer").
+                    imageLightboxStepping
                     onRestoreReport={handleRestoreReport}
                     blocks={blocks}
                     markdown={displayedMarkdown}

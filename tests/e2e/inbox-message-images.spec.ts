@@ -59,12 +59,13 @@ test('a relative image in a message loads from the message route; one outside th
 
     const route = `/api/inbox/messages/${id}/image?path=${encodeURIComponent('.walkthrough/shots/after.png')}`;
     for (const alt of ['after the fix', 'html image']) {
-      const img = body.getByRole('img', { name: alt });
+      // A captured image is a button that opens the viewer (approval "inbox-image-viewer"): found by its alt text.
+      const img = body.locator(`img[alt="${alt}"]`);
       await expect(img).toHaveAttribute('src', route);
       await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth)).toBe(1);
     }
 
-    const outside = body.getByRole('img', { name: 'outside' });
+    const outside = body.locator('img[alt="outside"]');
     await expect(outside).toHaveAttribute('src', `/api/inbox/messages/${id}/image?path=${encodeURIComponent('../outside.png')}`);
     await expect.poll(() => outside.evaluate((el: HTMLImageElement) => el.complete)).toBe(true);
     expect(await outside.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBe(0);

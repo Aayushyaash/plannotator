@@ -1,11 +1,12 @@
-import { useEffect, useId, useRef } from 'react';
-import { inboxAttachmentKindLabel, readInboxAttachmentKind } from '@plannotator/core/inbox-types';
+import { useEffect, useId, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { readInboxAttachmentKind, type InboxAttachmentState } from '@plannotator/core/inbox-types';
+import { ImagePeek, type ImagePeekRow } from '@plannotator/ui/components/ImagePeek';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
-import { attachmentImageUrl, imageFitsWithin, readableVersion } from '../attachments';
-import { plural } from '../format';
+import { attachmentImageUrl, readableVersion } from '../attachments';
 import { Icon } from '../icons';
 import type { AttachmentStep } from '../stepping';
-import { changedLine, iconOf } from './AttachmentTiles';
+import { changedLine } from './AttachmentTiles';
 import { FileName } from './FileName';
 
 /** Where a step came from: it decides where focus goes after it. */
@@ -15,18 +16,51 @@ export interface AttachmentStepperProps {
   steps: readonly AttachmentStep[];
   /** The open file's place in `steps`. */
   index: number;
-  /** Phones: Previous / "3 of 5" / Next as 44 px buttons, the name left to the header. */
+  /** Phones: Previous / "3 of 5" / Next as 44 px buttons; the count opens the peek as a bottom sheet. */
   phone: boolean;
+  /** The peek is open. */
   menuOpen: boolean;
   onMenuOpenChange: (open: boolean) => void;
   /** Step by one (1 next, -1 previous); at an end the pane shows the end note. */
   onStep: (dir: 1 | -1, source: StepSource) => void;
-  /** Open the file at this place in `steps` (from the list). */
+  /** Open the file at this place in `steps` (from the peek). */
   onGo: (index: number) => void;
-  /** "Last attachment in this thread", shown for a moment beside the stepper. */
+  /** "Last file in this thread", shown for a moment beside the stepper. */
   endNote: string | null;
-  /** Annotations waiting for a Send, by file path (the tiles' counts). */
+  /** Annotations waiting for a Send, by file path (the counts on the peek's thumbnails). */
   annotationCounts: ReadonlyMap<string, number>;
+}
+
+/** The short label a file without a thumbnail shows in the peek: its extension ("MD", "PDF"), else its kind. */
+export function peekTile(attachment: Pick<InboxAttachmentState, 'name' | 'kind'>): string {
+  const ext = /\.([A-Za-z0-9]{1,5})$/.exec(attachment.name)?.[1];
+  if (ext) return ext.toUpperCase();
+  return readInboxAttachmentKind(attachment.kind).toUpperCase().slice(0, 5);
+}
+
+/** The peek's rows: one per message (its time), each file of it in step order. */
+export function peekRows(steps: readonly AttachmentStep[], counts: ReadonlyMap<string, number>): ImagePeekRow[] {
+  const rows: ImagePeekRow[] = [];
+  for (const step of steps) {
+    const { attachment } = step;
+    let row = rows.at(-1);
+    if (!row || row.key !== step.messageId) {
+      row = { key: step.messageId, label: step.sentAt || step.sender, items: [] };
+      rows.push(row);
+    }
+    const isImage = readInboxAttachmentKind(attachment.kind) === 'image';
+    const changed = changedLine(attachment, true);
+    row.items.push({
+      key: attachment.id,
+      name: attachment.name,
+      thumb: isImage ? attachmentImageUrl(attachment, readableVersion(attachment)) : null,
+      tile: peekTile(attachment),
+      count: counts.get(attachment.path) ?? 0,
+      attached: !step.inline,
+      ...(changed ? { detail: changed.toLowerCase() } : {}),
+    });
+  }
+  return rows;
 }
 
 /** Two lines: where the button goes, then its keys. */
@@ -59,12 +93,14 @@ function StepTip({ text, keys, children }: { text: string; keys: string[]; child
 }
 
 /**
- * The stepper in the bar under the open file (design record
- * "inbox-attachment-stepping", v2): `‹ 3 of 5 · name ⌄ ›`. The arrows step
- * through every file of the thread in thread order and stop at the ends (the
- * button greys with `aria-disabled`, so focus stays on it); the label opens
- * the list of every file, grouped by message, upward from the bar. The words
- * follow the annotate bundle switcher ("2 of 3 · mock.html").
+ * The stepper in the bar under the open file: `‹ 3 of 9 · name ⌄ ›`. The
+ * arrows step through every file of the thread in reading order (the images
+ * a message's text shows, then its attached files) and stop at the ends (the
+ * button greys with `aria-disabled`, so focus stays on it). The label (Enter,
+ * Space or ↓ on it too) opens the peek (approval "inbox-image-viewer", "A ·
+ * Peek"): a picture list above the bar, one row per message, the open file
+ * ringed; on a phone the count opens it as a bottom sheet. It replaces the
+ * older ⌄ list.
  */
 export function AttachmentStepper(props: AttachmentStepperProps) {
   const { steps, index, phone, menuOpen } = props;
@@ -72,113 +108,53 @@ export function AttachmentStepper(props: AttachmentStepperProps) {
   const current = steps[index]!;
   const prev = index > 0 ? steps[index - 1]! : null;
   const next = index < total - 1 ? steps[index + 1]! : null;
-  const menuId = `ib-steplist-${useId().replace(/:/g, '')}`;
+  const peekId = `ib-peek-${useId().replace(/:/g, '')}`;
   const labelRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
   /** Closed from the keyboard or by a choice: focus goes back to the label (not after a click elsewhere). */
   const refocus = useRef(false);
+  const rows = useMemo(() => peekRows(steps, props.annotationCounts), [steps, props.annotationCounts]);
 
-  // The list opens on the open file (or the first); closing it hands focus back to the label.
   useEffect(() => {
-    const menu = menuRef.current;
-    if (menuOpen && menu) {
-      refocus.current = true;
-      (menu.querySelector<HTMLElement>('[aria-checked="true"]') ?? menu.querySelector<HTMLElement>('[role="menuitemradio"]'))?.focus();
-    } else if (!menuOpen && refocus.current) {
+    if (menuOpen) refocus.current = true;
+    else if (refocus.current) {
       refocus.current = false;
       labelRef.current?.focus();
     }
   }, [menuOpen]);
 
-  // A click outside the list or its label closes it.
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDown = (event: PointerEvent) => {
-      const target = event.target instanceof Node ? event.target : null;
-      if (target && (menuRef.current?.contains(target) || labelRef.current?.contains(target))) return;
-      refocus.current = false;
-      props.onMenuOpenChange(false);
-    };
-    document.addEventListener('pointerdown', onDown, true);
-    return () => document.removeEventListener('pointerdown', onDown, true);
-  }, [menuOpen, props.onMenuOpenChange]);
-
-  const onMenuKey = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    const items = [...(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? [])];
-    const at = items.indexOf(document.activeElement as HTMLElement);
-    let target: HTMLElement | undefined;
-    if (event.key === 'ArrowDown') target = items[(at + 1) % items.length];
-    else if (event.key === 'ArrowUp') target = items[(at - 1 + items.length) % items.length];
-    else if (event.key === 'Home') target = items[0];
-    else if (event.key === 'End') target = items[items.length - 1];
-    else if (event.key === 'Escape' || event.key === 'Tab') {
-      event.preventDefault();
-      event.stopPropagation();
-      props.onMenuOpenChange(false);
-      return;
-    } else return;
-    event.preventDefault();
-    event.stopPropagation();
-    target?.focus();
+  const close = (reason: 'key' | 'outside') => {
+    // A press elsewhere on a desktop leaves focus where it went; a phone's sheet backdrop covers everything, so focus goes back to the count.
+    if (reason === 'outside' && !phone) refocus.current = false;
+    props.onMenuOpenChange(false);
   };
 
-  const prevLabel = prev ? `Previous attachment: ${prev.attachment.name}` : 'Previous attachment';
-  const nextLabel = next ? `Next attachment: ${next.attachment.name}` : 'Next attachment';
-  const label = `${index + 1} of ${total}, ${current.attachment.name}. Show all attachments`;
+  const prevLabel = prev ? `Previous file: ${prev.attachment.name}` : 'Previous file';
+  const nextLabel = next ? `Next file: ${next.attachment.name}` : 'Next file';
+  const label = `${index + 1} of ${total}, ${current.attachment.name}. Show every file in this thread`;
+  const onLabelKey = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === 'ArrowDown' && !menuOpen) {
+      event.preventDefault();
+      props.onMenuOpenChange(true);
+    }
+  };
 
-  const list = menuOpen && (
-    <div className="ib-steplist" id={menuId} role="menu" aria-label="Attachments in this thread" ref={menuRef} onKeyDown={onMenuKey} data-step-list="">
-      {steps.map((step, i) => {
-        const group = i === 0 || steps[i - 1]!.messageId !== step.messageId;
-        const { attachment } = step;
-        const count = props.annotationCounts.get(attachment.path) ?? 0;
-        const changed = changedLine(attachment, true);
-        const isImage = readInboxAttachmentKind(attachment.kind) === 'image';
-        return (
-          <div key={attachment.id} role="none">
-            {group && (
-              <div className="ib-stepgroup" role="presentation">
-                {step.sender}
-                {step.sentAt ? `, ${step.sentAt}` : ''}
-              </div>
-            )}
-            <button
-              type="button"
-              className="ib-stepitem"
-              role="menuitemradio"
-              aria-checked={i === index}
-              tabIndex={-1}
-              onClick={() => props.onGo(i)}
-              data-step-item={attachment.id}
-            >
-              <span className="ib-steppn" aria-hidden="true">
-                {i + 1}
-              </span>
-              <span className="ib-fi">
-                {isImage ? <img src={attachmentImageUrl(attachment, readableVersion(attachment))} alt="" loading="lazy" decoding="async" draggable={false} data-small={imageFitsWithin(attachment, 26) ? '' : undefined} /> : <Icon name={iconOf(attachment)} size={14} />}
-              </span>
-              <span className="ib-stept">
-                <b>
-                  <FileName name={attachment.name} />
-                </b>
-                {changed ? (
-                  <span className="ib-ch">{changed}</span>
-                ) : (
-                  <span>
-                    {inboxAttachmentKindLabel(attachment.kind, attachment.name, attachment.media_type)}
-                    {count > 0 ? ` · ${plural(count, 'annotation')}` : ''}
-                  </span>
-                )}
-              </span>
-              <span className="ib-stepck" aria-hidden="true">
-                {i === index && <Icon name="check" size={15} />}
-              </span>
-            </button>
-          </div>
-        );
-      })}
-    </div>
+  const peek = menuOpen && (
+    <ImagePeek
+      id={peekId}
+      rows={rows}
+      current={current.attachment.id}
+      label="Files in this thread"
+      variant={phone ? 'sheet' : 'popover'}
+      onClose={close}
+      onPick={(key) => {
+        const at = steps.findIndex((s) => s.attachment.id === key);
+        if (at >= 0) props.onGo(at);
+      }}
+      className={phone ? 'ib-peek-sheet' : ''}
+    />
   );
+  // A phone's sheet covers the window: drawn in the Inbox's root, above the pane.
+  const sheetHost = phone && typeof document !== 'undefined' ? (labelRef.current?.closest('.pn-inbox') ?? document.body) : null;
 
   const endNote = (
     <span className={`ib-endnote${props.endNote ? ' ib-on' : ''}`} aria-hidden="true" data-step-end-note="">
@@ -188,7 +164,7 @@ export function AttachmentStepper(props: AttachmentStepperProps) {
 
   if (phone) {
     return (
-      <nav className="ib-stepper ib-stepphone" aria-label="Attachments in this thread" data-attachment-stepper="">
+      <nav className="ib-stepper ib-stepphone" aria-label="Files in this thread" data-attachment-stepper="">
         <button type="button" className="ib-stepbig" aria-label={prevLabel} aria-disabled={prev ? undefined : 'true'} onClick={() => props.onStep(-1, 'button')} data-step-prev="">
           <Icon name="chevL" size={16} />
           <span className="ib-stepbig-l">Previous</span>
@@ -197,12 +173,14 @@ export function AttachmentStepper(props: AttachmentStepperProps) {
           type="button"
           ref={labelRef}
           className="ib-steppos ib-stepmid"
-          aria-haspopup="menu"
+          aria-haspopup="grid"
           aria-expanded={menuOpen}
-          aria-controls={menuOpen ? menuId : undefined}
+          aria-controls={menuOpen ? peekId : undefined}
           aria-label={label}
           onClick={() => props.onMenuOpenChange(!menuOpen)}
+          onKeyDown={onLabelKey}
           data-step-label=""
+          data-peek-opener=""
         >
           {/* The end note takes the count's place for a moment: in the bar, never over the file. */}
           {props.endNote ? (
@@ -220,15 +198,15 @@ export function AttachmentStepper(props: AttachmentStepperProps) {
           <span className="ib-stepbig-l">Next</span>
           <Icon name="chevR" size={16} />
         </button>
-        {list}
+        {peek && sheetHost ? createPortal(<div className="pn-inbox-peek">{peek}</div>, sheetHost) : peek}
       </nav>
     );
   }
 
   return (
-    <nav className="ib-stepper" aria-label="Attachments in this thread" data-attachment-stepper="">
+    <nav className="ib-stepper" aria-label="Files in this thread" data-attachment-stepper="">
       <span className="ib-stepbox">
-        <StepTip text={prev ? `Previous: ${prev.attachment.name}` : 'This is the first attachment'} keys={['[', '←']}>
+        <StepTip text={prev ? `Previous: ${prev.attachment.name}` : 'This is the first file'} keys={['[', '←']}>
           <button type="button" className="ib-stepbtn" aria-label={prevLabel} aria-disabled={prev ? undefined : 'true'} onClick={() => props.onStep(-1, 'button')} data-step-prev="">
             <Icon name="chevL" size={15} />
           </button>
@@ -237,12 +215,14 @@ export function AttachmentStepper(props: AttachmentStepperProps) {
           type="button"
           ref={labelRef}
           className="ib-steppos"
-          aria-haspopup="menu"
+          aria-haspopup="grid"
           aria-expanded={menuOpen}
-          aria-controls={menuOpen ? menuId : undefined}
+          aria-controls={menuOpen ? peekId : undefined}
           aria-label={label}
           onClick={() => props.onMenuOpenChange(!menuOpen)}
+          onKeyDown={onLabelKey}
           data-step-label=""
+          data-peek-opener=""
         >
           <span className="ib-stepn">
             {index + 1} of {total}
@@ -253,16 +233,22 @@ export function AttachmentStepper(props: AttachmentStepperProps) {
           <span className="ib-stepnm" data-step-name="">
             <FileName name={current.attachment.name} />
           </span>
-          <Icon name="chevD" size={13} />
+          <span className={`ib-stepchev${menuOpen ? ' ib-on' : ''}`} aria-hidden="true">
+            <Icon name="chevD" size={13} />
+          </span>
         </button>
-        <StepTip text={next ? `Next: ${next.attachment.name}` : 'This is the last attachment'} keys={[']', '→']}>
+        <StepTip text={next ? `Next: ${next.attachment.name}` : 'This is the last file'} keys={[']', '→']}>
           <button type="button" className="ib-stepbtn" aria-label={nextLabel} aria-disabled={next ? undefined : 'true'} onClick={() => props.onStep(1, 'button')} data-step-next="">
             <Icon name="chevR" size={15} />
           </button>
         </StepTip>
       </span>
       {endNote}
-      {list}
+      {peek && (
+        <div className="ib-filepeek" data-step-list="">
+          {peek}
+        </div>
+      )}
     </nav>
   );
 }

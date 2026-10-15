@@ -15,7 +15,7 @@
  */
 
 import type { QuestionAnswer, QuestionKind } from "./question-block";
-import type { InboxAnnotationRecord, InboxAttachment, InboxAttachmentKind } from "./inbox-attachments";
+import type { InboxAnnotationRecord, InboxAttachment, InboxAttachmentKind, InboxInlineImage } from "./inbox-attachments";
 
 // The attachment shapes and file rules (step 2) live in their own module and
 // reach the Inbox through this published entry, so core's export map is unchanged.
@@ -248,6 +248,15 @@ export interface InboxMessage {
    * step 2: older records lack it.
    */
   attachments?: InboxAttachment[];
+  /**
+   * On an agent's message: the images its body shows, captured as files of
+   * the thread (`InboxInlineImage`), in the order the body shows them. Written
+   * when the message lands, or, for a message sent before images were
+   * captured, the first time its thread is read (each record then marked
+   * `captured: "on_open"`). Present (possibly empty) once capture ran; absent
+   * on a message whose body shows no local image, and on older records.
+   */
+  inline_images?: InboxInlineImage[];
   /**
    * On a person's reply: it reached the asking agent's session as a turn
    * through an agent connection (the Claude Code mod), and when. Absent until

@@ -45,7 +45,8 @@ export function changedLine(attachment: InboxAttachmentState, short = false): st
   }
   if (attachment.changed_since_sent && attachment.current) {
     // Short (a tile, a caption, the step list): the time today, else the day, so the count beside it keeps its room.
-    return short ? `Changed ${shortTime(attachment.current.mtime)}` : `Changed since it was sent, edited ${whenTime(attachment.current.mtime)}`;
+    if (short) return `Changed ${shortTime(attachment.current.mtime)}`;
+    return `${attachment.captured === 'on_open' ? 'Changed since you first opened it' : 'Changed since it was sent'}, edited ${whenTime(attachment.current.mtime)}`;
   }
   return null;
 }

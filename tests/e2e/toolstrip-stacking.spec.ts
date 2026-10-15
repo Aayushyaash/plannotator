@@ -190,7 +190,7 @@ async function checkTablePopoutCovers(page: Page, label: string, scroller: strin
 
 /** The stepping bar's list of files opens up over the document and stays above it. */
 async function checkStepListAbove(page: Page, label: string): Promise<void> {
-  await page.locator('[data-attachment-stepper] [aria-haspopup="menu"]').click();
+  await page.locator('[data-attachment-stepper] [aria-haspopup="grid"]').click();
   const list = page.locator('[data-step-list]');
   await expect(list).toBeVisible();
   const covered = await page.evaluate(() => {

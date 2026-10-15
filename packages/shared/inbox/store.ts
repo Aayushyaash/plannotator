@@ -79,6 +79,7 @@ import {
   readInboxVideoTime,
   type InboxAnnotationRecord,
   type InboxAttachment,
+  type InboxInlineImage,
 } from "@plannotator/core/inbox-types";
 import { isLineRangeInPatch, parseDiffToFiles, type DiffFile } from "@plannotator/core/diff-files";
 import { inboxBlobPath, inboxBlobSizes, removeUnusedInboxBlobs } from "./attachments";
@@ -118,6 +119,12 @@ export interface InboxSendInput {
   thread?: string | null;
   /** The files attached, already recorded (blobs written) by recordInboxAttachments. */
   attachments?: InboxAttachment[];
+  /**
+   * The images the body shows, already captured (blobs written) by
+   * captureInboxInlineImages. Absent: the body shows none (nothing is
+   * written); an empty list: it shows some but none could be read.
+   */
+  inline_images?: InboxInlineImage[];
   /** A guided review the message carries (submit_guide); its blob is written once the message lands. */
   guide?: InboxGuideRef | null;
   /** The folder inside the project the agent sent from, when not its root (`InboxMessage.base_path`). */
@@ -1352,6 +1359,7 @@ export class InboxStore {
       ...(input.attachments && input.attachments.length > 0
         ? { attachments: input.attachments.map((attachment) => ({ ...attachment, sent_at: at })) }
         : {}),
+      ...(input.inline_images !== undefined ? { inline_images: input.inline_images.map((image) => ({ ...image, sent_at: at })) } : {}),
       ...(input.guide ? { guide: input.guide } : {}),
       ...(input.base_path ? { base_path: input.base_path } : {}),
       ...(input.wakes === true ? { wakes: true } : {}),
@@ -1874,7 +1882,8 @@ export class InboxStore {
   /** An attachment by its id: the record and the message that carries it. */
   attachment(attachmentId: string): InboxAttachmentHit | null {
     for (const message of this.messages.values()) {
-      const attachment = message.attachments?.find((a) => a.id === attachmentId);
+      // An image the body shows is a file of the thread too, reached by the same id routes.
+      const attachment = message.attachments?.find((a) => a.id === attachmentId) ?? message.inline_images?.find((a) => a.id === attachmentId);
       if (attachment) return { attachment, message };
     }
     return null;
@@ -1883,6 +1892,55 @@ export class InboxStore {
   /** The thread's attachments, message by message, in thread order. */
   threadAttachments(threadId: string): InboxAttachmentHit[] {
     return this.threadMessages(threadId).flatMap((message) => (message.attachments ?? []).map((attachment) => ({ attachment, message })));
+  }
+
+  /** The images the thread's messages show, captured as files (`inline_images`), message by message, each in text order. */
+  threadInlineImages(threadId: string): { attachment: InboxInlineImage; message: InboxMessage }[] {
+    return this.threadMessages(threadId).flatMap((message) => (message.inline_images ?? []).map((attachment) => ({ attachment, message })));
+  }
+
+  /**
+   * The thread's messages (an agent's or the person's) with images their body
+   * shows that have no captured record yet, and the sources missing, in text
+   * order: a message sent before capture existed, an image written after the
+   * send, one past the send's 64, one a read refused for a moment. `refsOf`
+   * lists a body's images (inline-images.ts). A message with no local image
+   * is never listed.
+   */
+  imageCaptureGaps(threadId: string, refsOf: (body: string) => readonly string[]): { message: InboxMessage; refs: string[] }[] {
+    const out: { message: InboxMessage; refs: string[] }[] = [];
+    for (const message of this.threadMessages(threadId)) {
+      const refs = refsOf(message.body);
+      if (refs.length === 0) continue;
+      const have = new Set((message.inline_images ?? []).map((image) => image.ref));
+      const missing = refs.filter((ref) => !have.has(ref));
+      if (missing.length > 0) out.push({ message, refs: missing });
+    }
+    return out;
+  }
+
+  /**
+   * Keep images captured on a later read of the thread: one more line for the
+   * message, its latest snapshot with these records added after the ones it
+   * has (a source it already has is skipped), in `order` when given. Nothing is written when nothing
+   * is new, except that a message with no `inline_images` at all gets its
+   * (possibly empty) list once. Returns the message as it is now.
+   */
+  addCapturedImages(messageId: string, images: readonly InboxInlineImage[], order?: readonly string[]): InboxMessage {
+    const message = this.messages.get(messageId);
+    if (!message) throw new InboxError("message_not_found", `No message ${messageId}.`);
+    const have = new Set((message.inline_images ?? []).map((image) => image.ref));
+    const added = images.filter((image) => !have.has(image.ref) && have.add(image.ref));
+    if (added.length === 0 && message.inline_images !== undefined) return message;
+    const merged = [...(message.inline_images ?? []), ...added];
+    // In the order the body shows them (`order`: its sources in text order), when given.
+    if (order) {
+      const rank = new Map(order.map((ref, index) => [ref, index]));
+      merged.sort((a, b) => (rank.get(a.ref) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.ref) ?? Number.MAX_SAFE_INTEGER));
+    }
+    const next: InboxMessage = { ...message, inline_images: merged };
+    this.appendMessage(next, this.stamp());
+    return next;
   }
 
   /** The person's annotations in a thread still waiting for a Send (not removed, not sent). */
@@ -2101,9 +2159,11 @@ export class InboxStore {
   private threadBlobs(projectId: string): Map<string, Set<string>> {
     const out = new Map<string, Set<string>>();
     for (const message of this.messages.values()) {
-      if (message.project_id !== projectId || (!message.attachments?.length && !message.guide)) continue;
+      if (message.project_id !== projectId || (!message.attachments?.length && !message.inline_images?.length && !message.guide)) continue;
       const blobs = out.get(message.thread_id) ?? new Set<string>();
       for (const attachment of message.attachments ?? []) blobs.add(attachment.sent_sha256);
+      // The images its body shows, captured as files of the thread.
+      for (const image of message.inline_images ?? []) blobs.add(image.sent_sha256);
       // A guided review's snapshot is a blob too (step 5).
       if (message.guide) blobs.add(message.guide.sha256);
       out.set(message.thread_id, blobs);
@@ -2199,6 +2259,7 @@ export class InboxStore {
         used.add(attachment.sent_sha256);
         attachmentIds.add(attachment.id);
       }
+      for (const image of message.inline_images ?? []) used.add(image.sent_sha256);
       if (message.guide) used.add(message.guide.sha256);
     }
     removeUnusedInboxBlobs(this.dir, used);
@@ -2287,6 +2348,7 @@ export class InboxStore {
     const used = new Set<string>();
     for (const message of this.messages.values()) {
       for (const attachment of message.attachments ?? []) used.add(attachment.sent_sha256);
+      for (const image of message.inline_images ?? []) used.add(image.sent_sha256);
       if (message.guide) used.add(message.guide.sha256);
     }
     return used;

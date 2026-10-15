@@ -793,19 +793,11 @@ button.ib-drow:hover { background: color-mix(in oklch, var(--muted) 35%, transpa
 .ib-steppos .ib-ic { color: var(--muted-foreground); flex: none; }
 .ib-endnote { font-size: 12px; color: var(--muted-foreground); background: var(--muted); border-radius: 6px; padding: 3px 8px; white-space: nowrap; opacity: 0; transition: opacity 160ms ease; pointer-events: none; }
 .ib-endnote.ib-on { opacity: 1; }
-.ib-steplist { position: absolute; bottom: calc(100% + 6px); left: 8px; z-index: 30; width: 340px; max-width: calc(100vw - 24px); max-height: min(420px, 60vh); overflow-y: auto; background: var(--popover); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28); padding: 6px; }
-.ib-stepgroup { font-size: 11.5px; font-weight: 600; color: var(--muted-foreground); padding: 8px 8px 4px; }
-.pn-inbox .ib-stepitem { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 6px 8px; border-radius: 7px; font-size: 13px; }
-.pn-inbox .ib-stepitem:hover, .pn-inbox .ib-stepitem:focus-visible { background: color-mix(in oklch, var(--primary) 12%, transparent); outline: none; }
-.ib-stepitem[aria-checked="true"] { background: color-mix(in oklch, var(--primary) 8%, transparent); }
-.ib-stepitem .ib-fi { width: 26px; height: 26px; border-radius: 6px; background: var(--muted); display: flex; align-items: center; justify-content: center; color: var(--muted-foreground); flex: none; overflow: hidden; }
-.ib-stepitem .ib-fi img { width: 100%; height: 100%; object-fit: cover; object-position: top; display: block; }
-.ib-stepitem .ib-stept { display: flex; flex-direction: column; min-width: 0; }
-.ib-stepitem .ib-stept b { font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ib-stepitem .ib-stept span { font-size: 11.5px; color: var(--muted-foreground); }
-.ib-stepitem .ib-stept span.ib-ch { color: var(--warning); }
-.ib-stepitem .ib-stepck { margin-left: auto; color: var(--primary); width: 16px; flex: none; display: inline-flex; }
-.ib-stepitem .ib-steppn { font-size: 11.5px; color: var(--muted-foreground); width: 14px; text-align: right; font-variant-numeric: tabular-nums; flex: none; }
+/* The peek (approval "inbox-image-viewer", A · Peek): the picture list floats above the bar, over the file; nothing under it moves. */
+.ib-filepeek { position: absolute; bottom: calc(100% + 6px); left: 8px; z-index: 30; }
+.ib-stepchev { display: inline-flex; color: var(--muted-foreground); transition: transform 160ms ease; }
+.ib-stepchev.ib-on { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .ib-stepchev { transition: none; } }
 /* A typed comment that would be lost: the question row directly above the bar, part of the layout. */
 .ib-stepguard { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 9px 14px; font-size: 13px; background: color-mix(in oklab, var(--primary) 10%, var(--card)); border-top: 1px solid color-mix(in oklab, var(--primary) 30%, transparent); }
 .ib-stepguard > .ib-ic { color: var(--primary); flex: none; }
@@ -823,7 +815,6 @@ button.ib-drow:hover { background: color-mix(in oklch, var(--muted) 35%, transpa
 .pn-inbox .ib-stepbig { height: 44px; min-width: 44px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--border); display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: 14px; font-weight: 550; background: var(--card); }
 .pn-inbox .ib-stepbig[aria-disabled="true"] { opacity: 0.35; cursor: default; }
 .pn-inbox .ib-steppos.ib-stepmid { flex: 1; justify-content: center; height: 44px; max-width: none; }
-.ib-stepphone .ib-steplist { left: 8px; right: 8px; width: auto; max-width: none; }
 .ib-stepphone .ib-stepnote { white-space: normal; text-align: center; font-size: 12px; line-height: 1.25; min-width: 0; color: var(--foreground); }
 .ib-view.ib-phone .ib-vhead { padding: 0 6px 0 12px; gap: 6px; }
 .ib-view.ib-phone .ib-vhead .ib-fn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -1046,7 +1037,7 @@ pre code.pn-code[data-keep-layout] {
 .ib-att-t .ib-fi.ib-thumb { overflow: hidden; background: color-mix(in oklch, var(--muted) 70%, transparent); border: 1px solid color-mix(in oklch, var(--border) 70%, transparent); }
 .ib-att-t .ib-fi.ib-thumb img { width: 100%; height: 100%; object-fit: cover; object-position: top center; display: block; }
 /* an image no larger than its thumbnail is drawn at its own size, never blown up (data-small, imageFitsWithin) */
-.ib-att-t .ib-fi.ib-thumb img[data-small], .ib-stepitem .ib-fi img[data-small] { object-fit: none; object-position: center; }
+.ib-att-t .ib-fi.ib-thumb img[data-small] { object-fit: none; object-position: center; }
 .ib-att-t .ib-nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ib-gallery { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 12px; }
 .ib-gal-item { display: flex; flex-direction: column; gap: 6px; min-width: 0; text-align: left; color: inherit; }

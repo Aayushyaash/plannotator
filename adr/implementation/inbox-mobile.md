@@ -137,7 +137,7 @@ The allowlist. Each row is the window's handler as it is today, with the request
 | `POST messages/:id/resolve` | same | `{ idempotency_key, resolved? }` | `{ thread: summary }` | 7.12 |
 | `POST messages/:id/to` | same | `{ idempotency_key, to: { host?, session } }` | `{ message, row }`: Send to another session, for a person message no session took yet. `409 already_delivered`, `409 thread_resolved`, `422 not_addressed`, `409 session_not_live` pass through. Added 2026-10-15 | 7.41 |
 | `POST threads/:id/delete` | same | `{ idempotency_key }` | `{ ok, store }` | 7.13 |
-| `GET threads/:id/attachments` | same | | `{ serverSession, attachments: [state], annotations }` | 7.14 |
+| `GET threads/:id/attachments` | same | | `{ serverSession, attachments: [state], inline_images: [state], annotations }` (`inline_images` additive, 2026-10-15) | 7.14 |
 | `GET attachments/:id/view[?version=sent]` | same | | `{ serverSession, attachment, version, text, html }`; also Share (the "..." menu of section 4 of the record), which writes `text` to a file named `attachment.name` | 7.15 |
 | `GET html-assets/<token>/<path>` | `GET /api/html-assets/<token>/<path>` | | the asset's bytes, as annotate serves them | 7.16 |
 | `GET messages/:id/image?path=<src as written>` | `GET /api/inbox/messages/:id/image` | `If-None-Match` (optional) | an image the message's body shows, its bytes with the window's headers exactly: `Content-Type` sniffed from the bytes (never the name), `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'; style-src 'unsafe-inline'`, `Cross-Origin-Resource-Policy: same-origin`, `Cache-Control: private, no-cache`, `ETag` (the SHA-256 of the bytes served), `X-Image-Width`/`-Height` when the header parses; `304` with the same headers when `If-None-Match` names the current ETag. The body is the whole message, so an image in a `:::question` block's context counts. Refused as the window refuses: `403 image_not_referenced` (not in that message's body), `403 outside_project` (`../` or a symlink out of the project), `404 message_not_found` / `image_missing`, `409 image_changed`, `413 image_too_large` (10 MB or 50 megapixels), `415 not_an_image`. Remote `http(s)` sources are not served. Cache by message id plus `path`, and revalidate with `If-None-Match` (the file lives on disk and can change). Added 2026-10-14 | 7.38 |
@@ -734,9 +734,12 @@ curl -sS "$INBOX/api/inbox/device/threads/msg_01K70000000000000000000010/attachm
       "unavailable": null
     }
   ],
+  "inline_images": [],
   "annotations": []
 }
 ```
+
+`inline_images` (additive, 2026-10-15): the images the thread's messages show, captured as files of the thread (approval "inbox-image-viewer"): the same state shape as an attachment, plus `ref` (the src exactly as the body wrote it) and, for a message sent before images were captured, `captured: "on_open"` and `captured_at` (the copy was taken the first time the thread was read). They are reached by id through the same routes as attachments (`attachments/:id/image`, `download`, annotations), and the message record carries them as `inline_images` too. They are never in `attachments`, so an app that does not know the field draws nothing extra. An app that sends with `export_feedback` (section 5) should pass these states in its `attachments` list too, so comments the person left on them in the window ride the Send; an older app's feedback text leaves them out.
 
 ### 7.15 An attachment's view
 

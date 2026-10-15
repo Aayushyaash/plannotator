@@ -10,7 +10,7 @@
  * Proves: the bar under the file says "1 of 5 · SCOPE.md" and the header
  * drops the name; `]` and the › button step in thread order across the two
  * messages, keeping full screen and replacing the route; › greys at the end,
- * keeps focus, and says "Last attachment in this thread"; the list opens
+ * keeps focus, and says "Last file in this thread"; the list opens
  * upward, grouped by message, and jumps; inside the HTML page a plain `]`
  * steps while armed (Annotate) and does nothing in Interact or in the page's
  * text field; a typed image comment raises the question row, Keep writing
@@ -112,7 +112,7 @@ const htmlFrame = () => world.page.frameLocator('[data-attachment-pane] iframe')
 
 /** "2 of 5, checkout-flow.html": the open file as the stepper names it. */
 async function expectAt(position: number, name: string): Promise<void> {
-  await expect(label()).toHaveAttribute('aria-label', `${position} of 5, ${name}. Show all attachments`);
+  await expect(label()).toHaveAttribute('aria-label', `${position} of 5, ${name}. Show every file in this thread`);
   await expect(pane()).toHaveAttribute('data-attachment-pane', world.ids[name]!);
 }
 
@@ -210,9 +210,9 @@ test('beside the thread: "1 of 5 · SCOPE.md" in the bar, the name gone from the
   await expectAt(1, 'SCOPE.md');
   await expect(page.locator('[data-step-name]')).toHaveText('SCOPE.md');
   await expect(pane().locator('[data-header-name]')).toHaveCount(0);
-  await expect(pane()).toHaveAttribute('aria-label', 'SCOPE.md, attachment 1 of 5');
+  await expect(pane()).toHaveAttribute('aria-label', 'SCOPE.md, file 1 of 5');
   await expect(page.locator('[data-step-prev]')).toHaveAttribute('aria-disabled', 'true');
-  await expect(page.getByRole('navigation', { name: 'Attachments in this thread' })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Files in this thread' })).toBeVisible();
   const tile = page.locator(`.ib-att-t[data-attachment-id="${world.ids['SCOPE.md']}"]`);
   await expect(tile).toHaveAttribute('aria-current', 'true');
   await expect(tile).toContainText('Open beside');
@@ -279,26 +279,26 @@ test('] and › step in thread order, keep full screen, and replace the route; i
   await expectAt(5, 'refund-policy.pdf');
   await expect(pane().locator('[data-download-card]')).toBeVisible();
   await expect(nextButton()).toHaveAttribute('aria-disabled', 'true');
-  await expect(nextButton()).toHaveAttribute('aria-label', 'Next attachment');
+  await expect(nextButton()).toHaveAttribute('aria-label', 'Next file');
   // aria-disabled, not disabled: it keeps focus, and Enter on it says where you are.
   await nextButton().press('Enter');
-  await expect(page.locator('[data-step-end-note]')).toHaveText('Last attachment in this thread');
+  await expect(page.locator('[data-step-end-note]')).toHaveText('Last file in this thread');
   await expectAt(5, 'refund-policy.pdf');
   await expect(nextButton()).toBeFocused();
   await page.keyboard.press(']');
   await expectAt(5, 'refund-policy.pdf');
-  await expect(page.locator('[data-step-live]')).toContainText('Last attachment in this thread');
+  await expect(page.locator('[data-step-live]')).toContainText('Last file in this thread');
   await shot('03-end');
 });
 
-test('the list opens upward, grouped by message, and jumps; focus returns to the label', async () => {
+test('the peek opens upward, a picture list grouped by message, and jumps; focus returns to the pill', async () => {
   const page = world.page;
   await label().click();
-  const list = page.getByRole('menu', { name: 'Attachments in this thread' });
-  await expect(list).toBeVisible();
-  await expect(list.getByRole('menuitemradio')).toHaveCount(5);
-  await expect(list.locator('.ib-stepgroup')).toHaveCount(2);
-  await expect(list.getByRole('menuitemradio', { checked: true })).toContainText('refund-policy.pdf');
+  const peek = page.getByRole('grid', { name: 'Files in this thread' });
+  await expect(peek).toBeVisible();
+  await expect(peek.getByRole('gridcell')).toHaveCount(5);
+  await expect(peek.getByRole('row')).toHaveCount(2);
+  await expect(peek.locator('[aria-selected="true"]')).toContainText('refund-policy.pdf');
   const placement = await page.evaluate(() => {
     const menu = document.querySelector('[data-step-list]')!.getBoundingClientRect();
     const bar = document.querySelector('[data-view-foot]')!.getBoundingClientRect();
@@ -306,11 +306,11 @@ test('the list opens upward, grouped by message, and jumps; focus returns to the
   });
   expect(placement.menuBottom).toBeLessThanOrEqual(placement.barTop);
   await shot('04-list-open');
-  await list.getByRole('menuitemradio', { name: /SCOPE\.md/ }).click();
+  await peek.getByRole('gridcell', { name: /SCOPE\.md/ }).click();
   await expectAt(1, 'SCOPE.md');
-  await expect(list).toBeHidden();
+  await expect(peek).toBeHidden();
   await expect(label()).toBeFocused();
-  await expect(page.locator('[data-step-live]')).toHaveText(/^1 of 5, SCOPE\.md, Markdown, from Claude's \d{1,2}:\d{2} [AP]M message$/);
+  await expect(page.locator('[data-step-live]')).toHaveText(/^1 of 5, SCOPE\.md, Markdown, attached to Claude's \d{1,2}:\d{2} [AP]M message$/);
 });
 
 test('a file read before opens where it was left: scroll is kept per file until the pane closes', async () => {
@@ -331,7 +331,7 @@ test('a file read before opens where it was left: scroll is kept per file until 
 test('a typed image comment asks before stepping: Keep writing returns to it, Save it and go on saves it and steps', async () => {
   const page = world.page;
   await label().click();
-  await page.getByRole('menuitemradio', { name: /checkout-mobile\.png/ }).click();
+  await page.getByRole('gridcell', { name: /checkout-mobile\.png/ }).click();
   await expectAt(4, 'checkout-mobile.png');
   const box = pane().getByRole('textbox', { name: 'Comment on checkout-mobile.png' });
   await box.fill('The Pay button sits under the fold on an iPhone SE. Move it up?');
@@ -382,8 +382,8 @@ test('a phone: Previous / "1 of 5" / Next, the list across the width', async () 
   await page.goto(`${world.url}#thread=${world.threadId}`);
   await page.getByRole('button', { name: 'Open checkout-flow.html' }).click();
   await expect(pane()).toHaveClass(/ib-full/);
-  await expect(page.getByRole('button', { name: 'Next attachment: retry-states.mmd' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Previous attachment: SCOPE.md' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Next file: retry-states.mmd' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Previous file: SCOPE.md' })).toBeVisible();
   await shot('06-phone-html');
   await label().click();
   await shot('07-phone-list');
@@ -406,12 +406,12 @@ test('a phone at an end: the note shows in the bar in place of the count, and no
   await page.goto(`${world.url}#thread=${sent.thread_id}`);
   await page.getByRole('button', { name: 'Open checkout-flow.html' }).click();
   await expect(pane()).toHaveClass(/ib-full/);
-  await expect(label()).toHaveAttribute('aria-label', '1 of 2, checkout-flow.html. Show all attachments');
+  await expect(label()).toHaveAttribute('aria-label', '1 of 2, checkout-flow.html. Show every file in this thread');
   await expect(htmlFrame().locator('#pay')).toHaveText('Pay now');
   // Previous is greyed (aria-disabled) and keeps focus: pressing it says where you are.
   await page.locator('[data-step-prev]').press('Enter');
   const note = page.locator('[data-step-end-note]');
-  await expect(note).toHaveText('First attachment in this thread');
+  await expect(note).toHaveText('First file in this thread');
   await expect(label()).not.toContainText('1 of 2');
   const layout = await page.evaluate(() => {
     const iframe = document.querySelector('[data-attachment-pane] iframe')!;

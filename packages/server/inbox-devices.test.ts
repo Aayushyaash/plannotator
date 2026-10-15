@@ -428,7 +428,7 @@ describe("the device door, on the binary", () => {
 
   test("7.14 to 7.18: attachments, a view, an HTML asset, an annotation saved and removed", async () => {
     const listed = (await (await door(`threads/${threadId}/attachments`)).json()) as Json;
-    expect(Object.keys(listed).sort()).toEqual(["annotations", "attachments", "serverSession"]);
+    expect(Object.keys(listed).sort()).toEqual(["annotations", "attachments", "inline_images", "serverSession"]);
     expect(listed.attachments.map((a: Json) => a.name).sort()).toEqual(["retry-plan.md", "ticket.html"]);
     const md = listed.attachments.find((a: Json) => a.name === "retry-plan.md");
     const html = listed.attachments.find((a: Json) => a.name === "ticket.html");
@@ -533,6 +533,25 @@ describe("the device door, on the binary", () => {
     const gone = await img("shots/after.png", { token: spare.token });
     expect(gone.status).toBe(401);
     expect(((await gone.json()) as Json).code).toBe("device_revoked");
+  });
+
+  test("a message's images captured as files: the thread and its listing carry the additive inline_images, and the door serves them by id as the window does", async () => {
+    mkdirSync(join(w.project, "shots"), { recursive: true });
+    writeFileSync(join(w.project, "shots", "inline.png"), ONE_PIXEL_PNG);
+    const sent = await agent.send({ project_path: w.project, body: "The drawer:\n\n![drawer](shots/inline.png)", thread: "inline images" });
+    const thread = (await (await door(`threads/${sent.thread_id}`)).json()) as Json;
+    const record = thread.thread.messages[0].inline_images[0];
+    expect(record).toMatchObject({ ref: "shots/inline.png", kind: "image", media_type: "image/png" });
+    const listing = (await (await door(`threads/${sent.thread_id}/attachments`)).json()) as Json;
+    // An older app reads `attachments` only: the image is not one of them.
+    expect(listing.attachments).toEqual([]);
+    expect(listing.inline_images.map((i: Json) => i.id)).toEqual([record.id]);
+    const phone = await door(`attachments/${record.id}/image`);
+    const page = await fetch(`${base}/api/inbox/attachments/${record.id}/image`);
+    expect(phone.status).toBe(200);
+    expect(phone.headers.get("etag")).toBe(page.headers.get("etag"));
+    expect(phone.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.from(await phone.arrayBuffer()).equals(ONE_PIXEL_PNG)).toBe(true);
   });
 
   test("7.19 to 7.24: the guide and a tick, the decision switch, decisions, live sessions, New message", async () => {

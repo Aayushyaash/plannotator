@@ -491,7 +491,7 @@ for (const phone of [
       await pane.locator('.ib-att-t', { hasText: 'retry-policy.md' }).click();
       const view = page.locator('section.ib-view');
       await expect(view.getByText('Failed refunds are retried with exponential backoff')).toBeVisible();
-      await view.getByRole('button', { name: /^Next attachment/ }).click();
+      await view.getByRole('button', { name: /^Next file/ }).click();
       await expect(view.getByText('The on-call is paged once per refund')).toBeVisible();
       expect(await page.evaluate(() => (window.history.state as { ibFrom?: string } | null)?.ibFrom)).toBe(`#thread=${world.threads.attach}`);
       await view.getByRole('button', { name: 'Back to the thread' }).click();
@@ -721,7 +721,7 @@ for (const side of [
         expect(await overlaps(page, '[data-view-foot]', '.ib-stepbig, .ib-stepmid, .ib-rchip, .ib-vfoot-row .ib-sp, .ib-vfoot-row .ib-btn')).toEqual([]);
         expect(await smallTargets(page, '[data-view-foot] .ib-stepbig, [data-view-foot] .ib-stepmid, [data-view-foot] .ib-btn')).toEqual([]);
         // Previous and Next keep their names for a screen reader.
-        await expect(foot.getByRole('button', { name: /^Next attachment/ })).toBeVisible();
+        await expect(foot.getByRole('button', { name: /^Next file/ })).toBeVisible();
         await view.locator('[data-annotations-sheet]').click();
         const sheet = view.getByRole('region', { name: 'Comments' });
         await expect(sheet).toBeVisible();

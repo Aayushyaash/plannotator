@@ -640,6 +640,8 @@ export type InboxEvent =
 export interface AttachmentsModel {
   serverSession: string;
   attachments: InboxAttachmentState[];
+  /** The images the messages show, captured as files (additive; absent from an older Inbox). */
+  inline_images?: InboxAttachmentState[];
   annotations: InboxAnnotationRecord[];
 }
 

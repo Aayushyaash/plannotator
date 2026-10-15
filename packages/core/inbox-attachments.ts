@@ -95,6 +95,32 @@ export interface InboxAttachment {
   duration_ms?: number;
 }
 
+/**
+ * An image a message's body shows (`![alt](design/b.png)` or `<img src>`),
+ * captured as a file of the thread (approval "inbox-image-viewer", 2026-10-15):
+ * the store reads it under the message-image route's rules (referenced in the
+ * body, an image by extension and by its bytes, inside the message's project
+ * or the linked worktree it was sent from, at most 10 MB and 50 megapixels),
+ * copies its bytes into a blob and keeps this record on the message
+ * (`InboxMessage.inline_images`). It is an attachment record (an `att_` id, the
+ * realpath, the sent blob) plus `ref`, so every attachment route, comment and
+ * export path reaches it by id; the window steps through it with the
+ * attachments. Additive: a reader that does not know the field draws nothing
+ * extra.
+ */
+export interface InboxInlineImage extends InboxAttachment {
+  /** The src exactly as the body wrote it (`design/checkout-b.png`), what the body's image renders from. */
+  ref: string;
+  /**
+   * `"on_open"`: the message was sent before images were captured, and the
+   * store took this copy the first time the thread was read ("Changed since
+   * you first opened it"). Absent: captured when the message was sent.
+   */
+  captured?: "on_open";
+  /** When it was captured on open; absent when captured at send. */
+  captured_at?: string;
+}
+
 /** Why the current file cannot be opened (the sent version always can). */
 export type InboxAttachmentUnavailable =
   | { code: "attachment_missing"; message: string }
@@ -103,6 +129,11 @@ export type InboxAttachmentUnavailable =
 /** An attachment as the window reads it: the record plus the file as it is now. */
 export interface InboxAttachmentState extends InboxAttachment {
   message_id: string;
+  /** Set on an image the message's body shows (`InboxInlineImage.ref`): the src as written. Absent on an attached file. */
+  ref?: string;
+  /** `InboxInlineImage.captured`: "on_open" for a copy taken the first time the thread was read. */
+  captured?: "on_open";
+  captured_at?: string;
   /** The file on disk now, or null when it cannot be opened (`unavailable` says why). */
   current: { sha256: string; size: number; mtime: string } | null;
   /** The current bytes differ from the sent ones. */

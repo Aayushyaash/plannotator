@@ -19,6 +19,7 @@ import { QUESTION_AUTHORING_GUIDE } from "@plannotator/core/question-block";
 import { INBOX_SECTIONS, INBOX_THREAD_NAME_MAX, type InboxGuideRef, type InboxSectionId, type InboxLine, type InboxMessage, type InboxProject } from "@plannotator/core/inbox-types";
 import { INBOX_WAKES_META_KEY } from "@plannotator/shared/inbox/connection";
 import { inboxBodyForAgent } from "@plannotator/shared/inbox/uploads";
+import { bodyShowsLocalImages, captureInboxInlineImages } from "@plannotator/shared/inbox/inline-images";
 import { InboxError } from "@plannotator/shared/inbox/schema";
 import type { InboxStore } from "@plannotator/shared/inbox/store";
 import { recordAgentDecision } from "./inbox-decisions";
@@ -360,25 +361,48 @@ export async function sendAgentMessage(
     attachments = await context.recordAttachments(input.attachments, project, base);
   }
   const basePath = await sendBasePath(context, input.project_path, project);
-  const result = store.sendMessage({
-    project_id: project.id,
-    author: {
-      kind: "agent",
-      host: input.agent_host?.trim() || null,
-      session: input.agent_session?.trim() || null,
-      name: input.agent_name?.trim() || null,
-    },
-    body: input.body,
-    subject: input.subject ?? null,
-    reply_to: input.reply_to ?? null,
-    idempotency_key: input.idempotency_key ?? null,
-    thread: input.thread ?? null,
-    attachments,
-    guide: guide ?? null,
-    base_path: basePath,
-    supersedes: input.supersedes ?? null,
-    ...(wakes ? { wakes: true } : {}),
-  });
+  // The images the body shows, copied now under the message-image route's rules (inline-images.ts):
+  // files of the thread, with a sent version. One that cannot be read is captured on a later read.
+  // Asynchronous and yielding; the blobs stay staged until the store accepts the message.
+  const captured = bodyShowsLocalImages(input.body)
+    ? await captureInboxInlineImages(store.dir, {
+        body: input.body,
+        root: project.root,
+        base: basePath,
+        worktree: basePath && !isInsideFolder(basePath, project.root) ? basePath : null,
+        sentAt: new Date().toISOString(),
+        stage: true,
+      })
+    : null;
+  let result: ReturnType<InboxStore["sendMessage"]>;
+  try {
+    result = store.sendMessage({
+      project_id: project.id,
+      author: {
+        kind: "agent",
+        host: input.agent_host?.trim() || null,
+        session: input.agent_session?.trim() || null,
+        name: input.agent_name?.trim() || null,
+      },
+      body: input.body,
+      subject: input.subject ?? null,
+      reply_to: input.reply_to ?? null,
+      idempotency_key: input.idempotency_key ?? null,
+      thread: input.thread ?? null,
+      attachments,
+      inline_images: captured?.images,
+      guide: guide ?? null,
+      base_path: basePath,
+      supersedes: input.supersedes ?? null,
+      ...(wakes ? { wakes: true } : {}),
+    });
+  } catch (error) {
+    await captured?.discard();
+    throw error;
+  }
+  // A replay keeps the records the first send wrote; this send's copies are not used.
+  if (result.replayed) await captured?.discard();
+  else await captured?.commit();
   const message = result.message;
   const landed = store.project(message.project_id)!;
   const questions = (message.questions ?? []).map((q) => ({ key: q.key, kind: q.kind, prompt: q.prompt }));
