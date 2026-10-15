@@ -1266,6 +1266,36 @@ function Inbox() {
     });
   };
 
+  /**
+   * 👍 Looks good (design record "inbox-acknowledge", approved 2026-10-15),
+   * or take it back (the toast's Undo, `Z`, the pressed button). Silent:
+   * nothing is sent and no agent is woken; the ack is recorded on the
+   * agent's latest message and the thread is marked read. The held-order
+   * rules of Mark read apply: with the thread open its row changes in place.
+   */
+  const acknowledge = async (threadId: string, messageId: string, on: boolean, agent: string) => {
+    try {
+      await inboxApi.ack(messageId, on);
+    } catch (cause) {
+      showError(cause);
+      await afterWrite();
+      return;
+    }
+    await afterWrite();
+    if (!on) {
+      dismissToast();
+      say('Looks good taken back.');
+      return;
+    }
+    // Only the open thread's foot offers 👍, so the toast always speaks of that thread.
+    showToast({
+      icon: 'thumb',
+      lead: 'Looks good',
+      detail: `Moves to Quiet · not sent to ${agent}`,
+      onUndo: () => void acknowledge(threadId, messageId, false, agent),
+    });
+  };
+
   /** Archive (the MCP's resolve) or Unarchive, with Undo. */
   const archive = async (threadId: string, rootId: string, next: boolean) => {
     try {
@@ -1997,6 +2027,7 @@ function Inbox() {
             sent={openThreadRow?.sent ?? null}
             row={openThreadRow}
             onMarkRead={(read) => void markRead(thread.thread_id, read)}
+            onAck={(messageId, on, agent) => void acknowledge(thread.thread_id, messageId, on, agent)}
             onArchive={(next) => void archive(thread.thread_id, thread.messages[0]!.id, next)}
             replyRequest={replyFor}
             onReplyOpened={() => setReplyFor(null)}

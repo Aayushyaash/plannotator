@@ -18,7 +18,7 @@
  *   Closed after seeing it: Quiet.
  * - A phone (WebKit, iPhone 15): the same rule; Back shows the row unbolded in
  *   place when seen, and back unread in Waiting when not. An arrival under a
- *   bottom sheet (New message's "not running" sheet) is not seen until the
+ *   bottom sheet (the decision card's sheet) is not seen until the
  *   sheet closes.
  *
  * Build the binary first (see inbox.spec.ts), then `bun run test:e2e:inbox`.
@@ -74,7 +74,8 @@ test.beforeAll(async () => {
     seen: 'The refund webhook is wired.',
     phoneSeen: 'The refund webhook is wired.',
     phoneUnseen: LONG,
-    phoneSheet: LONG,
+    // A question at its end: its "Records a decision" words open the decision card, a bottom sheet on a phone.
+    phoneSheet: `${LONG}\n\n:::question\nShould retries go to the dead-letter queue?\n\n- [ ] Yes\n- [ ] No\n:::`,
     other: 'Unrelated.',
   };
   for (const key of ['end', 'up', 'pill', 'unseen', 'seen', 'phoneSeen', 'phoneUnseen', 'phoneSheet'] as const) {
@@ -119,7 +120,8 @@ async function openRow(page: Page, key: Key, tap = false): Promise<void> {
   if (tap) await row(page, id).tap();
   else await row(page, id).click();
   await expect(page.locator('section.ib-pane')).toBeVisible();
-  await expect.poll(() => isBold(page, id)).toBe(false);
+  // A thread with an open question (phoneSheet) stays bold while it waits on the person: only the look is checked there.
+  if (key !== 'phoneSheet') await expect.poll(() => isBold(page, id)).toBe(false);
   await expect.poll(async () => (await storeRow(id)).unseen).toBe(0);
 }
 
@@ -319,9 +321,10 @@ test('phone (WebKit, iPhone 15): seen on sight with the same rule; Back shows it
   }
 });
 
-// The failure this guards: a bottom sheet over the end of the thread (here New
-// message's "not running" sheet) hid the arrival, and it was marked seen anyway.
-test('phone (WebKit, iPhone 15): an arrival under New message\'s sheet is not seen until the sheet closes', async () => {
+// The failure this guards: a bottom sheet over the end of the thread (here the decision card, opened from a
+// question's "Records a decision" words; once New message's "not running" sheet) hid the arrival, and it was
+// marked seen anyway. The open question keeps the row bold whatever is seen, so this case reads `unseen`.
+test('phone (WebKit, iPhone 15): an arrival under the decision card\'s sheet is not seen until the sheet closes', async () => {
   let own: Browser | null = null;
   let context: BrowserContext | null = null;
   try {
@@ -337,14 +340,16 @@ test('phone (WebKit, iPhone 15): an arrival under New message\'s sheet is not se
     // At the end of the thread, then the sheet over it.
     const body = page.locator('section.ib-pane .ib-pbody');
     await body.evaluate((b) => (b.scrollTop = b.scrollHeight));
-    await page.locator('section.ib-pane [data-new-message]').tap();
-    const sheet = page.locator('[data-not-running]');
+    await page.locator('section.ib-pane').getByRole('button', { name: 'Records a decision', exact: true }).tap();
+    const sheet = page.locator('[data-decision-card]');
     await expect(sheet).toBeVisible();
+    // Back at the end of the thread, the sheet over it.
+    await body.evaluate((b) => (b.scrollTop = b.scrollHeight));
 
     const arrived = await reply('phoneSheet', 'Retries are on: three attempts, then the dead-letter queue.');
     const article = page.locator(`[data-message-article="${arrived.message_id}"]`);
     await expect(article).toHaveCount(1);
-    await expect.poll(() => isBold(page, id)).toBe(true);
+    await expect.poll(async () => (await storeRow(id)).unseen).toBe(1);
     // The view followed it to the end (a smooth scroll; wait until it stops). The follow brings the first lines
     // above the foot, not above the sheet, so with the phone's two-line head row (inbox-polish, item 5) the
     // top of the head can show above the sheet's edge; the rule's lower sample point is still under the sheet,
@@ -362,7 +367,7 @@ test('phone (WebKit, iPhone 15): an arrival under New message\'s sheet is not se
     expect((await storeRow(id)).unseen).toBe(1);
     await article.evaluate((a) => {
       const body = a.closest('.ib-pbody') as HTMLElement;
-      const sheetTop = document.querySelector('[data-not-running]')!.getBoundingClientRect().top;
+      const sheetTop = document.querySelector('[data-decision-card]')!.getBoundingClientRect().top;
       const headTop = (a.querySelector('.ib-fline') ?? a).getBoundingClientRect().top;
       if (headTop < sheetTop + 16) body.scrollTop -= sheetTop + 16 - headTop;
     });
@@ -370,13 +375,12 @@ test('phone (WebKit, iPhone 15): an arrival under New message\'s sheet is not se
       const view = a.closest('.ib-pbody')!.getBoundingClientRect();
       const r = (a.querySelector('.ib-fline') ?? a).getBoundingClientRect();
       const hit = document.elementFromPoint(r.left + r.width / 2, r.top + 8);
-      return { inView: r.top >= view.top && r.bottom <= view.bottom, covered: hit !== null && hit.closest('[data-not-running]') !== null };
+      return { inView: r.top >= view.top && r.bottom <= view.bottom, covered: hit !== null && hit.closest('[data-decision-card]') !== null };
     });
     expect(under).toEqual({ inView: true, covered: true });
     await shot(page, '10-phone-arrival-under-sheet');
     await page.waitForTimeout(DWELL_MS + 1200);
     expect((await storeRow(id)).unseen).toBe(1);
-    expect(await isBold(page, id)).toBe(true);
 
     // The sheet closes (a press outside it): now it is on screen, and seen a second later.
     await body.dispatchEvent('mousedown');
@@ -384,7 +388,6 @@ test('phone (WebKit, iPhone 15): an arrival under New message\'s sheet is not se
     // Back at the end of the thread, where the follow had put it.
     await body.evaluate((b) => (b.scrollTop = b.scrollHeight));
     await expect.poll(async () => (await storeRow(id)).unseen, { timeout: 6000 }).toBe(0);
-    await expect.poll(() => isBold(page, id)).toBe(false);
     await shot(page, '11-phone-sheet-closed-seen');
   } finally {
     await context?.close();

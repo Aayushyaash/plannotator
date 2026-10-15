@@ -262,6 +262,7 @@ describe("the device door, on the binary", () => {
       ["GET", "sessions"],
       ["POST", "messages"],
       ["POST", `messages/${threadId}/to`],
+      ["POST", `messages/${threadId}/ack`],
       ["GET", "search?q=retry"],
       ["POST", "projects/prj_x/read"],
       ["POST", "projects/prj_x/unread"],
@@ -1084,6 +1085,27 @@ describe("the door's parity routes, in process (7.39 to 7.49)", () => {
     expect(m.message.to).toEqual({ host: "pi", session: "ses-b" });
     const nowhere = await door(`messages/${first.message.id}/to`, { body: { idempotency_key: "to-2", to: { session: "ses-gone" } } });
     expect([nowhere.status, ((await nowhere.json()) as Json).code]).toEqual([409, "session_not_live"]);
+  });
+
+  test("7.56: 👍 Looks good and its Undo, replayed by the key; the window's refusals pass through; nothing is sent", async () => {
+    const { ledger, inbox, door } = await world();
+    const project = inbox.store.ensureProject({ name: "ledger", root: ledger });
+    const author = { kind: "agent" as const, host: "claude-code", session: "ses-a", name: null };
+    const news = inbox.store.sendMessage({ project_id: project.id, author, body: "Merged. CI is green." }).message;
+    const acked = await door(`messages/${news.id}/ack`, { body: { idempotency_key: "ack-1" } });
+    expect(acked.status).toBe(200);
+    const a = (await acked.json()) as Json;
+    expect(Object.keys(a).sort()).toEqual(["message", "thread"]);
+    expect(a.message.ack).toMatchObject({ label: "Looks good" });
+    expect(a.thread).toMatchObject({ section: "quiet", ack: { label: "Looks good" } });
+    const again = await door(`messages/${news.id}/ack`, { body: { idempotency_key: "ack-1" } });
+    expect(again.headers.get("idempotent-replayed")).toBe("true");
+    expect(inbox.store.thread(news.thread_id)!.messages).toHaveLength(1);
+    const undone = await door(`messages/${news.id}/ack`, { body: { idempotency_key: "ack-2", ack: false } });
+    expect(((await undone.json()) as Json).message.ack).toBeNull();
+    const asking = inbox.store.sendMessage({ project_id: project.id, author, body: ask("Ship it?"), reply_to: news.id }).message;
+    const open = await door(`messages/${asking.id}/ack`, { body: { idempotency_key: "ack-3" } });
+    expect([open.status, ((await open.json()) as Json).code]).toEqual([409, "question_open"]);
   });
 
   test("7.42: search, read only, with its query; a phone's fetch metadata never reaches the window's cross-site check", async () => {

@@ -301,26 +301,30 @@ test.skipIf(!hasDom)('Mod+Enter still sends with the picker open; a bare trigger
   expect(el.querySelector('[data-skills-line]')).toBeNull();
 });
 
-test.skipIf(!hasDom)('New message: a clicked row inserts; the session is woken with the block, "this message"', async () => {
+// Moved from the in-thread New message box (off since approval "inbox-acknowledge") to compose, which shares the field.
+test.skipIf(!hasDom)('compose: a clicked $ row inserts; the session is woken with the block, "this message"', async () => {
   const projectRoot = (await threadOf(world.stopped)).thread.project.root;
   await poll('ses_live', projectRoot);
   const el = await renderApp(`#thread=${world.stopped}`);
-  act(() => (el.querySelector('[data-new-message]') as HTMLButtonElement).click());
-  await until(() => el.querySelector('[data-new-message-to]') !== null, 'the New message box');
-  const box = textarea(el);
-  expect(box.getAttribute('aria-label')).toBe('New message to Claude Code');
-  await type(box, 'Before you post, ');
-  await type(box, 'Before you post, $w');
+  act(() => (el.querySelector('[data-open-compose]') as HTMLButtonElement).click());
+  const dialog = () => document.querySelector('dialog[data-compose]');
+  await until(() => !!dialog()?.querySelector('.ib-cp-tobtn:not([data-loading])'), 'compose');
+  act(() => (dialog()!.querySelector('.ib-cp-tobtn') as HTMLButtonElement).click());
+  await until(() => dialog()!.querySelector('[data-compose-session="ses_live"]') !== null, 'the To picker');
+  act(() => (dialog()!.querySelector('[data-compose-session="ses_live"]') as HTMLElement).click());
+  const field = () => dialog()!.querySelector('[data-compose-text] textarea.ib-rtext') as HTMLTextAreaElement;
+  await type(field(), 'Before you post, ');
+  await type(field(), 'Before you post, $w');
   await until(() => rows().join() === 'write-better', 'the picker');
   await act(async () => {
     document.querySelector('[data-skill-item="write-better"]')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
   });
-  expect(textarea(el).value).toBe('Before you post, $write-better ');
-  await type(textarea(el), 'Before you post, $write-better and /readback it.');
-  await until(() => el.querySelector('[data-skill-human-only-notice]') !== null, 'the human-only line');
-  expect(el.querySelector('[data-skill-human-only-notice]')!.textContent).toContain('included with your message');
-  act(() => button(el, 'Send').click());
-  await until(() => el.querySelector('[data-new-message-to]') === null, 'the Send');
+  expect(field().value).toBe('Before you post, $write-better ');
+  await type(field(), 'Before you post, $write-better and /readback it.');
+  await until(() => dialog()!.querySelector('[data-skill-human-only-notice]') !== null, 'the human-only line');
+  expect(dialog()!.querySelector('[data-skill-human-only-notice]')!.textContent).toContain('included with your message');
+  act(() => (dialog()!.querySelector('[data-compose-send]') as HTMLButtonElement).click());
+  await until(() => dialog() === null, 'the Send');
 
   const woken = await poll('ses_live', projectRoot);
   const command = woken.commands.find((c) => c.body.includes('Before you post'))!;

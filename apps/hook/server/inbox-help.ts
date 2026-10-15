@@ -108,7 +108,7 @@ export const TOOL_GUIDE: Record<InboxMcpToolName, InboxToolGuide> = {
   read_thread: {
     args: ["thread_id", "message_id", "asked_by", "include_resolved", "limit"],
     lines: [
-      "Read one thread (`thread_id` or `message_id`): every message, its questions and the person's answers. Without an id, list this project's threads, newest activity first: only the ones you sent in unless `asked_by` is `\"anyone\"`, only open ones unless `include_resolved`, up to `limit` (default 20).",
+      "Read one thread (`thread_id` or `message_id`): every message, its questions and the person's answers, and `ack: { label, at }` on a message the person marked 👍 Looks good (see \"Where replies go\"). Without an id, list this project's threads, newest activity first: only the ones you sent in unless `asked_by` is `\"anyone\"`, only open ones unless `include_resolved`, up to `limit` (default 20).",
     ],
   },
   resolve_message: {
@@ -120,7 +120,7 @@ export const TOOL_GUIDE: Record<InboxMcpToolName, InboxToolGuide> = {
   wait_for_reply: {
     args: ["thread_id", "message_id", "cursor", "timeout_seconds"],
     lines: [
-      `Wait for the person's reply in a thread (\`thread_id\` or \`message_id\`), or in any open thread you asked when neither is given. It returns the reply as soon as it lands. Otherwise, after about ${Math.round(INBOX_WAIT_DEFAULT_MS / 1000)} seconds (\`timeout_seconds\`, at most ${INBOX_WAIT_MAX_SECONDS}), it returns \`{ status: "waiting", cursor }\`: call it again with that \`cursor\` to keep waiting. A resolved thread answers \`status: "resolved"\` at once.`,
+      `Wait for the person's reply in a thread (\`thread_id\` or \`message_id\`), or in any open thread you asked when neither is given. It returns the reply as soon as it lands. Otherwise, after about ${Math.round(INBOX_WAIT_DEFAULT_MS / 1000)} seconds (\`timeout_seconds\`, at most ${INBOX_WAIT_MAX_SECONDS}), it returns \`{ status: "waiting", cursor }\`: call it again with that \`cursor\` to keep waiting. A resolved thread answers \`status: "resolved"\` at once. When the person marks your latest message in the thread 👍 Looks good instead of replying, it returns \`{ status: "acknowledged", acks: [{ message_id, label, at }], cursor }\`: no reply is coming for it.`,
       "Without a cursor, any reply after your last message in the thread counts.",
     ],
   },
@@ -312,6 +312,7 @@ export function formatInboxHelp(options: InboxHelpOptions): string {
     "- The reply is the person's answer to you: their words, then an \"Answers to your questions\" section, then their annotations on any attached files.",
     "- A reply that answers some of your questions usually skips the ones the person left unanswered: they come back as `Skipped (not answered in this reply)`. Treat them as skipped, and ask again if you still need them.",
     "- A reply that answers none of them (the person only wrote back, or sent annotations) leaves them all open and says so after their words: `No questions answered yet; all N are still open. Don't re-ask them; the person will answer in the Inbox.` Do not ask them again: the answers come in a later reply.",
+    "- The person may mark your latest message 👍 Looks good: they read it and need nothing more. Nothing is sent and your session is not woken. read_thread shows `ack: { label, at }` on that message, and wait_for_reply returns `status: \"acknowledged\"` (both about ten seconds later, after the person's Undo window). Do not answer it; go on, and use `reply_to` only if you have something new for them. Only a message with no open question takes it, so it never answers a question. A wait on every thread you asked (no `thread_id`, no `cursor`) is not answered again by a 👍 you were already given.",
     `- The person may mark a thread read without answering: its waiting questions close unanswered, and you get one message from them that starts \`${INBOX_SET_ASIDE_HEADING}\` and lists them. Do not wait on those; ask again if you must.`,
     "",
     QUESTION_AUTHORING_GUIDE.trimEnd(),

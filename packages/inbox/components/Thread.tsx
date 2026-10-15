@@ -539,6 +539,12 @@ export interface ThreadPaneProps {
   row?: InboxListRow | null;
   /** Mark read, or move it back (the pressed button). Absent: no Mark read button. */
   onMarkRead?: (read: boolean) => void;
+  /**
+   * 👍 Looks good on the agent's latest message (`on`), or take it back:
+   * silent, nothing is sent; the thread is marked read. `agent` names the
+   * agent for the toast. Absent: no Looks good button.
+   */
+  onAck?: (messageId: string, on: boolean, agent: string) => void;
   /** Archive (`true`) or Unarchive. Absent: the pane calls the resolve route itself. */
   onArchive?: (archived: boolean) => void;
   /** The thread whose reply box should open (the warning toast's Reply); the pane calls `onReplyOpened` once it has. */
@@ -610,7 +616,39 @@ function useThreadAttachments(threadId: string, revision: unknown) {
   return { model, load, patch };
 }
 
-export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, decisions, onOpenDecisionPage, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
+/**
+ * The in-thread New message button (record 5.1 to 5.3) is off since 👍 Looks
+ * good (approval "inbox-acknowledge", 2026-10-15). Its route, phone door row
+ * and code paths stay, so it comes back by turning this on.
+ */
+const SHOW_NEW_MESSAGE_BUTTON = false;
+
+/**
+ * Under a message the person marked 👍 Looks good: when, that nothing was
+ * sent, and later that the agent saw it (it read the thread, or its wait
+ * returned the ack). Never "Delivered": nothing was delivered.
+ */
+export function AckPill({ ack, agent }: { ack: NonNullable<InboxMessageWire['ack']>; agent: string }) {
+  return (
+    <p className="ib-ackpill" data-ack-pill={ack.seen_at ? 'seen' : 'not-sent'}>
+      <span className="ib-ackchip">
+        <span aria-hidden="true">👍</span> {ack.label}
+      </span>
+      <span className="ib-ackwhen" title={fullTime(ack.at)}>
+        You, {whenTime(ack.at)} ·{' '}
+        {ack.seen_at ? (
+          <span title={fullTime(ack.seen_at)}>
+            {agent} saw it, {whenTime(ack.seen_at)}
+          </span>
+        ) : (
+          <>not sent; {agent} sees it when it next reads this thread</>
+        )}
+      </span>
+    </p>
+  );
+}
+
+export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, decisions, onOpenDecisionPage, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
   // "Open in" (OpenIn.tsx): apps on this computer; a new tab only through the tailnet or on a phone.
   const openIn: OpenInSurface | undefined = phone || remote === true ? 'tab' : remote === null ? undefined : 'apps';
   const root = thread.messages[0]!;
@@ -629,6 +667,15 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
   const resolved = archived && !cameBack;
   const agentMessages = thread.messages.filter((m) => m.author.kind === 'agent');
   const lastAgent = agentMessages[agentMessages.length - 1] ?? root;
+  // 👍 Looks good (design record "inbox-acknowledge"): on the agent's latest
+  // message, offered only while no question in the thread waits on the person
+  // (open or picked) and the thread is not archived.
+  const ackTarget = agentMessages.at(-1) ?? null;
+  const questionWaits = agentMessages.some((m) => (m.questions ?? []).some((q) => q.state === 'open' || q.state === 'picked'));
+  // Nor once the person wrote back after it (their reply is the answer; its Sent / Delivered line stays).
+  const personWroteLast = lastNonNote(thread.messages)?.author.kind === 'person';
+  const ackOffered = onAck !== undefined && ackTarget !== null && !archived && !questionWaits && !personWroteLast;
+  const ackOn = ackTarget?.ack != null;
 
   // Picks saved at once; shown before the server answers, then from the server.
   const [pending, setPending] = useState<ReadonlyMap<string, QuestionAnswer | null>>(new Map());
@@ -2112,6 +2159,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                   />
                 )}
                 {message.guide && <GuideCard guide={message.guide} onOpen={() => onOpenGuide(message.id)} />}
+                {isAgent && message.ack && <AckPill ack={message.ack} agent={name} />}
                 {message === lastAgent && liveMessage(lastAgent) && waitingHoldsUp.length > 0 && (
                   <div className="ib-waitfoot">
                     <b>Waiting on this answer</b>
@@ -2273,7 +2321,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                   Cancel
                 </button>
                 <span className="ib-sp" />
-                {!archived && <NewMessageButton live={live} mode={newMessage} onClick={() => void pressNewMessage()} />}
+                {/* The in-thread New message button is off (approval "inbox-acknowledge"); its route and code stay. */}
+                {SHOW_NEW_MESSAGE_BUTTON && !archived && <NewMessageButton live={live} mode={newMessage} onClick={() => void pressNewMessage()} />}
               </div>
             )}
           </>
@@ -2293,7 +2342,29 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
               <Icon name="reply" size={15} />
               {waiting ? 'Edit the reply' : 'Reply'}
             </button>
-            {!archived && <NewMessageButton live={live} mode={newMessage} onClick={() => void pressNewMessage()} />}
+            {/* 👍 Looks good beside Reply: silent, nothing sent; hidden while a question waits. */}
+            {ackOffered && !waiting && (
+              <button
+                type="button"
+                className="ib-btn ib-ack"
+                data-ack=""
+                aria-pressed={ackOn}
+                onClick={() => onAck!(ackTarget!.id, !ackOn, agentName(ackTarget!.author))}
+                title={
+                  ackOn
+                    ? 'Take back Looks good'
+                    : `Not sent to ${agentName(ackTarget!.author)}: it sees it when it next reads this thread. Moves to Quiet until it writes again.`
+                }
+              >
+                <span className="ib-ack-emoji" aria-hidden="true">
+                  👍
+                </span>
+                Looks good
+              </button>
+            )}
+            {/* The in-thread New message button is off (approval "inbox-acknowledge", 2026-10-15): Reply and compose cover it.
+                Its route, door row and code stay; turn SHOW_NEW_MESSAGE_BUTTON on to bring it back. */}
+            {SHOW_NEW_MESSAGE_BUTTON && !archived && <NewMessageButton live={live} mode={newMessage} onClick={() => void pressNewMessage()} />}
             {waiting && unanswered.length > 0 && (
               <>
                 <span className="ib-sp" />

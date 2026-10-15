@@ -116,7 +116,9 @@ type Op =
   // The person starts a thread addressed to a live session (compose, POST /api/inbox/messages).
   | { op: "personStart"; root: number; key: string; session: string; body: string }
   // The addressed session's connection delivered what the person sent it in the thread (bridge `delivered`).
-  | { op: "deliver"; target: number };
+  | { op: "deliver"; target: number }
+  // 👍 Looks good on a message, or its Undo (POST /api/inbox/messages/:id/ack): silent, and a Mark read.
+  | { op: "ack"; target: number; on: boolean };
 
 /** What the person writes when they start a thread (compose). */
 const PERSON_BODIES = ["Idea: group the list by session.", "Add a retry budget to the relay."] as const;
@@ -141,6 +143,7 @@ const opArb: fc.Arbitrary<Op> = fc.oneof(
     body: fc.constantFrom(...PERSON_BODIES),
   }),
   fc.record({ op: fc.constant("deliver" as const), target: fc.nat() }),
+  fc.record({ op: fc.constant("ack" as const), target: fc.nat(), on: fc.boolean() }),
 );
 
 /** What one op did: wrote, wrote nothing (no target, or no question to pick), replayed a key, or was refused with a code. */
@@ -263,6 +266,10 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
         for (const message of waiting) store.recordDelivery(message.id, message.to!);
         return waiting.length > 0 ? "ok" : "noop";
       }
+      case "ack":
+        if (!target) return "noop";
+        store.ackMessage(target, op.on);
+        return "ok";
     }
   } catch (error) {
     if (!(error instanceof InboxError)) throw error;
@@ -715,6 +722,8 @@ function stateOpArbOf(body: fc.Arbitrary<string>, agentKeys: boolean): fc.Arbitr
             weight: 1,
           },
           { arbitrary: fc.record({ op: fc.constant("deliver" as const), target: fc.nat() }), weight: 1 },
+          // 👍 Looks good and its Undo, in the property runs only (the trace fixtures were drawn without it).
+          { arbitrary: fc.record({ op: fc.constant("ack" as const), target: fc.nat(), on: fc.boolean() }), weight: 2 },
         ]
       : []),
   );
@@ -756,6 +765,8 @@ interface ModelMessage {
   replyKeys: Set<string>;
   /** A thread the person started: addressed to a session, until that session's connection delivers it. */
   addressed?: { delivered: boolean };
+  /** The person's 👍 on this agent message: the step of the Mark read it stands on, and whether the 👍 made it. */
+  ack?: { readTick: number | null; made: boolean } | null;
 }
 
 interface ModelThread {
@@ -1125,6 +1136,8 @@ class ThreadStateModel {
         const own = (q: ModelQuestion) => q.setAside !== null && q.setAside.by === ownRead;
         const closed = live.flatMap((m) => m.questions).filter(own);
         if (ownRead === null && closed.length === 0) return "ok";
+        // Move back withdraws a 👍 standing on this Mark read.
+        if (ownRead !== null) for (const m of thread.messages) if (m.ack && m.ack.readTick === ownRead) m.ack = null;
         if (ownRead !== null) {
           if (this.readHolds(thread) && thread.seenBeforeRead !== undefined) thread.seen = thread.seenBeforeRead;
           thread.read = null;
@@ -1172,6 +1185,37 @@ class ThreadStateModel {
         }
         return waiting.length > 0 ? "ok" : "noop";
       }
+      case "ack": {
+        if (!op.on) {
+          const ack = message.ack;
+          if (!ack) return "ok";
+          message.ack = null;
+          // Undo the Mark read the ack made, while it is still the thread's.
+          if (ack.made && ack.readTick !== null && thread.read === ack.readTick && !thread.resolved) {
+            this.event({ op: "read", target: op.target, read: false }, target, store, tick);
+          }
+          return "ok";
+        }
+        if (message.author !== "agent") return "refused:ack_not_allowed";
+        if (thread.resolved) return "refused:thread_resolved";
+        const latest = [...thread.messages].reverse().find((m) => m.author === "agent");
+        if (latest !== message) return "refused:ack_stale";
+        // The person already wrote back after it (the Inbox's own notes aside).
+        if (thread.messages.some((m) => m.tick > message.tick && m.author === "person" && m.note === null)) return "refused:ack_after_reply";
+        const waiting = thread.messages
+          .filter((m) => m.author === "agent")
+          .flatMap((m) => m.questions)
+          .some((q) => {
+            const s = this.recordState(q);
+            return s === "open" || s === "picked";
+          });
+        if (waiting) return "refused:question_open";
+        if (message.ack) return "ok";
+        const before = thread.read;
+        this.event({ op: "read", target: op.target, read: true }, target, store, tick);
+        message.ack = { readTick: thread.read, made: thread.read !== before };
+        return "ok";
+      }
       case "personStart":
       case "send":
         return "noop";
@@ -1210,6 +1254,8 @@ interface StateWorld {
   timeOf: Map<number, number>;
   /** The last successful Mark read, for the Mark read then Undo check. */
   lastRead: { threadId: string; before: ReturnType<typeof readSnapshot> } | null;
+  /** The last successful 👍 that made a Mark read, for the 👍 then Undo check. */
+  lastAck?: { threadId: string; before: ReturnType<typeof readSnapshot> } | null;
   /** Rows the tie-break ordered: equal `last_at` in a section, equal `resolved_at` in the archived list. */
   ties: { sections: number; archived: number };
 }
@@ -1292,6 +1338,7 @@ function checkThreadState(world: StateWorld): void {
       last_agent_at: row.last_agent_at ?? null,
       waiting_on_person: row.waiting_on_person,
       messages: row.message_count,
+      ack: (row.ack ?? null) !== null,
     }).toEqual({
       section: model.section(t),
       archived: model.archived(t),
@@ -1303,6 +1350,7 @@ function checkThreadState(world: StateWorld): void {
       last_agent_at: lastAgent ? new Date(world.timeOf.get(lastAgent.tick)!).toISOString() : null,
       waiting_on_person: model.waitingOnPerson(t),
       messages: t.messages.length,
+      ack: model.readHolds(t) && (lastAgent?.ack ?? null) !== null,
     });
     // ...on where each message landed and on every question's state.
     for (const m of t.messages) {
@@ -1371,6 +1419,8 @@ function stateStep(world: StateWorld, op: Op, sameTick = false): StepResult {
 
   const lastRead = world.lastRead;
   world.lastRead = null;
+  const lastAck = world.lastAck ?? null;
+  world.lastAck = null;
   if (outcome !== "ok" || !thread) return { outcome, target, created };
   const row = world.store.listRow(thread.id)!;
   const inList = () => placedIds(listViews(world.store.listRows()).exclude).includes(thread.id);
@@ -1403,6 +1453,14 @@ function stateStep(world: StateWorld, op: Op, sameTick = false): StepResult {
     }
     // Mark read then Undo, back to back, gives the thread back exactly as it was.
     if (lastRead?.threadId === thread.id) expect(readSnapshot(world, thread.id)).toEqual(lastRead.before);
+  }
+  if (op.op === "ack" && op.on && readBefore && readBefore.read_at === null) {
+    // 👍 then its Undo, back to back, gives the thread back exactly as it was (as Mark read's does).
+    world.lastAck = { threadId: thread.id, before: readBefore };
+  }
+  if (op.op === "ack" && !op.on) {
+    expect(world.store.message(target!)!.ack ?? null).toBeNull();
+    if (lastAck?.threadId === thread.id) expect(readSnapshot(world, thread.id)).toEqual(lastAck.before);
   }
   if (op.op === "resolve" && !op.resolved && readAfterArchive) {
     // Unarchive clears a read made while archived, in the same root line.
@@ -1840,6 +1898,8 @@ function traceEventOf(op: Op, world: StateWorld, labels: TraceLabels): TraceEven
       return { type: "set_aside_note", thread };
     case "deliver":
       return { type: "delivered", thread };
+    case "ack":
+      return { type: op.on ? "ack" : "unack", message: labels.label(target) };
   }
 }
 

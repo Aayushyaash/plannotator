@@ -339,6 +339,11 @@ const ERROR_STATUS: Record<string, number> = {
   // A pick on a question a Mark read closed: Move back first.
   question_set_aside: 409,
   thread_resolved: 409,
+  // 👍 Looks good: refused on a person's message, on an older agent message, and while a question is open.
+  ack_not_allowed: 422,
+  ack_stale: 409,
+  ack_after_reply: 409,
+  question_open: 409,
   idempotency_key_reused: 409,
   // The project menu: a batch_id already answered another project or action.
   batch_id_reused: 409,
@@ -493,6 +498,22 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     const timer = setTimeout(() => {
       setAsideTimers.delete(timer);
       tellSetAside(threadId);
+    }, setAsideDelayMs + 50);
+    (timer as { unref?: () => void }).unref?.();
+    setAsideTimers.add(timer);
+  };
+  // 👍 Looks good: agents see an ack once the same Undo window has passed with it standing.
+  const settleAcks = () => {
+    try {
+      store.settleAcks(setAsideDelayMs);
+    } catch (error) {
+      process.stderr.write(`Inbox: an acknowledgment was not settled: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+  };
+  const scheduleAckSettle = () => {
+    const timer = setTimeout(() => {
+      setAsideTimers.delete(timer);
+      settleAcks();
     }, setAsideDelayMs + 50);
     (timer as { unref?: () => void }).unref?.();
     setAsideTimers.add(timer);
@@ -1666,6 +1687,21 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         return json({ thread: row });
       }
 
+      // 👍 Looks good (design record "inbox-acknowledge"): silent, nothing sent and no
+      // session woken; an ack on the agent's latest message and a Mark read.
+      // `{ ack: false }` takes it back (the toast's Undo, the pressed button).
+      const ackMatch = /^\/api\/inbox\/messages\/([A-Za-z0-9_]+)\/ack$/.exec(path);
+      if (ackMatch) {
+        if (req.method !== "POST") return json({ error: "Use POST." }, 405);
+        const body = await readBody(req);
+        if (checkServerSession(body, serverSession) === "mismatch") return json(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409);
+        if (body.ack !== undefined && typeof body.ack !== "boolean") throw new InboxError("validation_error", "ack: must be a boolean.", { field: "ack" });
+        const on = body.ack !== false;
+        const result = store.ackMessage(ackMatch[1]!, on);
+        if (on) scheduleAckSettle();
+        return json(result);
+      }
+
       // The project menu (design record "inbox-project-menu"): Mark all as
       // read and Archive all on one project, and their Undo. Loops over the
       // single actions (packages/shared/inbox/project-batch.ts); the same
@@ -1960,6 +1996,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     // A set-aside note a stop interrupted (marked read, then the Inbox went away within the Undo window).
     for (const threadId of store.setAsideDue(setAsideDelayMs)) tellSetAside(threadId);
     for (const threadId of store.setAsideDue(0)) scheduleSetAside(threadId);
+    // An ack a stop interrupted inside its Undo window.
+    settleAcks();
+    if (store.acksPending() > 0) scheduleAckSettle();
   }, 0);
 
   let stopped = false;

@@ -124,8 +124,8 @@ const ALLOWLIST: readonly DoorRoute[] = [
   // Mark read and its Undo.
   { method: "POST", route: /^threads\/([^/]+)\/(read|unread)$/, window: (m) => `/api/inbox/threads/${m[1]}/${m[2]}` },
   { method: "GET", route: /^events$/, window: () => "/api/inbox/events" },
-  // `to`: Send to another session (7.41), a person message no session took yet.
-  { method: "POST", route: /^messages\/([^/]+)\/(picks|reply|resolve|to)$/, window: (m) => `/api/inbox/messages/${m[1]}/${m[2]}` },
+  // `to`: Send to another session (7.41), a person message no session took yet. `ack`: 👍 Looks good and its Undo (7.56).
+  { method: "POST", route: /^messages\/([^/]+)\/(picks|reply|resolve|to|ack)$/, window: (m) => `/api/inbox/messages/${m[1]}/${m[2]}` },
   { method: "POST", route: /^threads\/([^/]+)\/delete$/, window: (m) => `/api/inbox/threads/${m[1]}/delete` },
   { method: "GET", route: /^threads\/([^/]+)\/attachments$/, window: (m) => `/api/inbox/threads/${m[1]}/attachments` },
   { method: "GET", route: /^attachments\/([^/]+)\/view$/, window: (m) => `/api/inbox/attachments/${m[1]}/view` },

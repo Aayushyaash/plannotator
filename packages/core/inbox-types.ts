@@ -327,6 +327,39 @@ export interface InboxMessage {
    * agent's answer lands in it by `reply_to`. Absent on every other message.
    */
   started_by_person?: true;
+  /**
+   * On an agent's message: the person's 👍 Looks good (design record
+   * "inbox-acknowledge", approved 2026-10-15). Silent: nothing is sent, no
+   * session is woken; the thread is marked read. Null after Undo. Absent on
+   * every other message and on older records.
+   */
+  ack?: InboxAck | null;
+}
+
+/** The one acknowledgment the window offers (plan review's 👍 says the same words). */
+export const INBOX_ACK_LABEL = "Looks good";
+
+/**
+ * The person's 👍 on an agent message (`InboxMessage.ack`). The last line
+ * wins, as for every record: settling and the agent's read are new snapshot
+ * lines of the same message.
+ */
+export interface InboxAck {
+  label: string;
+  at: string;
+  /** The Mark read this ack stands on (the root's `person_read_seq`): Move back on that read withdraws the ack. */
+  read_seq: number | null;
+  /** This ack made that Mark read (the thread was not read before), so its Undo undoes the read too. */
+  made_read?: boolean;
+  /**
+   * Set once the Undo window passed with the ack standing (the seq of that
+   * line, and when): agents see it from then on (read_thread, and
+   * wait_for_reply's `acknowledged`). Null before.
+   */
+  settled_seq?: number | null;
+  settled_at?: string | null;
+  /** When an agent read it (read_thread, or wait_for_reply returned it). Null until then. */
+  seen_at?: string | null;
 }
 
 /**
@@ -632,6 +665,12 @@ export interface InboxListRow extends InboxThreadSummary {
    * Absent from an older Inbox.
    */
   read_at?: string | null;
+  /**
+   * The person's 👍 on the latest agent message, while the Mark read it made
+   * still holds: the row says "👍 Looks good" in place of "Read". Null
+   * otherwise. Absent from an older Inbox.
+   */
+  ack?: { label: string; at: string } | null;
   /**
    * The thread is archived (resolved) and an agent wrote in it after the
    * archive line (a reply_to reply). Those later messages behave as an open

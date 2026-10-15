@@ -269,6 +269,28 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string): Tool
   };
 }
 
+/**
+ * wait_for_reply's answer to the person's 👍 Looks good on the caller's
+ * latest message: no reply is coming for it. Not a person reply (nothing was
+ * sent); the ack is marked seen, so the window says the agent saw it.
+ */
+function ackResult(store: InboxStore, message: InboxMessage, base: string): ToolResult {
+  const ack = message.ack!;
+  const cursor = ack.settled_seq ?? store.cursor();
+  store.markAcksSeen(message.thread_id, cursor);
+  const subject = store.threadSubject(message.thread_id);
+  return ok(
+    `The person marked your message in thread ${message.thread_id}${subject ? ` (${subject})` : ""} 👍 ${ack.label}: they read it and need nothing more. No reply is coming for it; go on.`,
+    {
+      status: "acknowledged",
+      thread_id: message.thread_id,
+      acks: [{ message_id: message.id, label: ack.label, at: ack.at }],
+      cursor,
+      url: threadUrl(base, message.thread_id),
+    },
+  );
+}
+
 export type AgentSendInput = {
   body: string;
   project_path?: string;
@@ -476,7 +498,7 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
     {
       title: "Read a thread, or list your threads",
       description:
-        "Read one Inbox thread (thread_id or message_id): every message with its questions and the person's answers. Without an id, list this project's threads, newest activity first, each with its section in the person's list: only the ones you sent in unless asked_by is \"anyone\", and only open ones unless include_resolved.",
+        "Read one Inbox thread (thread_id or message_id): every message with its questions and the person's answers. A message the person marked 👍 Looks good carries `ack` (they read it and need nothing more; nothing was sent). Without an id, list this project's threads, newest activity first, each with its section in the person's list: only the ones you sent in unless asked_by is \"anyone\", and only open ones unless include_resolved.",
       inputSchema: z
         .object({
           thread_id: z.string().optional(),
@@ -495,7 +517,9 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
         const threadId = threadOf(store, input);
         if (threadId) {
           store.markAgentChecked(threadId);
-          const thread = store.thread(threadId)!;
+          // The person's 👍 (settled acks) are read now too: the window says the agent saw it.
+          store.markAcksSeen(threadId);
+          const thread = store.agentThread(threadId)!;
           const replies = thread.messages.filter((m) => m.author.kind === "person").length;
           return ok(
             `Thread ${threadId}${thread.subject ? ` (${thread.subject})` : ""}: ${thread.messages.length} message${thread.messages.length === 1 ? "" : "s"}, ${replies} from the person${thread.resolved_at ? ", resolved" : ""}.`,
@@ -512,7 +536,8 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
         if (!input.include_resolved) threads = threads.filter((t) => t.resolved_at === null || t.agent_after_archive === true);
         const limit = input.limit ?? 20;
         const total = threads.length;
-        threads = threads.slice(0, limit);
+        // The row's `ack` is the window's: an agent sees a 👍 only once settled, in the thread itself.
+        threads = threads.slice(0, limit).map(({ ack: _ack, ...row }) => row);
         return ok(`${total} thread${total === 1 ? "" : "s"} in ${project.name}${total > limit ? `, showing ${limit}` : ""}.`, {
           project: { id: project.id, name: project.name, root: project.root },
           threads,
@@ -547,7 +572,7 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
     {
       title: "Wait for the person's reply",
       description:
-        "Wait for the person's reply in a thread (thread_id or message_id), or in any open thread you asked when neither is given. Returns the reply as soon as it lands, or { status: \"waiting\", cursor } after about 50 seconds: call again with that cursor to keep waiting. Without a cursor, any reply after your last message in the thread counts.",
+        "Wait for the person's reply in a thread (thread_id or message_id), or in any open thread you asked when neither is given. Returns the reply as soon as it lands, { status: \"acknowledged\" } when the person marked your latest message 👍 Looks good instead (no reply is coming for it; go on), or { status: \"waiting\", cursor } after about 50 seconds: call again with that cursor to keep waiting. Without a cursor, any reply after your last message in the thread counts.",
       inputSchema: z
         .object({
           thread_id: z.string().optional(),
@@ -596,8 +621,34 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
             return best?.message ?? null;
           };
 
+          // The person's 👍 on the caller's latest message in a thread, once settled
+          // (the Undo window passed): no reply, but the agent need not wait.
+          const ackCounts = (message: InboxMessage, settledSeq: number): boolean => {
+            const threshold = thresholds.get(message.thread_id);
+            if (threshold === undefined || settledSeq <= threshold || !message.ack) return false;
+            if (message.author.kind !== "agent") return false;
+            if (caller && message.author.session !== caller) return false;
+            return store.messageCursor(message.id) === lastAgentCursor(store, message.thread_id, caller);
+          };
+          // A wait across every thread the caller asked, with no cursor, is not answered by a 👍
+          // it was already given (seen): the agent never writes in a finished thread again, so that
+          // old 👍 would answer every such wait. A wait on one named thread keeps answering it.
+          const acrossThreads = !single && input.cursor === undefined;
+          const findAck = (): InboxMessage | null => {
+            for (const threadId of thresholds.keys()) {
+              for (const message of store.thread(threadId)?.messages ?? []) {
+                const settled = message.ack?.settled_seq;
+                if (acrossThreads && message.ack?.seen_at) continue;
+                if (settled != null && ackCounts(message, settled)) return message;
+              }
+            }
+            return null;
+          };
+
           const existing = findExisting();
           if (existing) return replyResult(store, existing, context.baseUrl());
+          const acked = findAck();
+          if (acked) return ackResult(store, acked, context.baseUrl());
           // A resolved thread takes no reply: say so now instead of holding the call.
           // (An agent that wrote after the archive line can still get a reply there.)
           if (single && store.message(single)?.resolved_at != null && !store.agentAfterArchive(single)) {
@@ -606,7 +657,9 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
 
           const waitMs = input.timeout_seconds ? input.timeout_seconds * 1000 : (context.waitDefaultMs ?? INBOX_WAIT_DEFAULT_MS);
           const signal: AbortSignal | undefined = ctx?.mcpReq?.signal;
-          const outcome = await new Promise<{ kind: "reply"; message: InboxMessage } | { kind: "resolved"; threadId: string } | { kind: "timeout" }>(
+          const outcome = await new Promise<
+            { kind: "reply"; message: InboxMessage } | { kind: "ack"; message: InboxMessage } | { kind: "resolved"; threadId: string } | { kind: "timeout" }
+          >(
             (resolve) => {
               let done = false;
               const finish = (value: Parameters<typeof resolve>[0]) => {
@@ -626,6 +679,8 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
                 if (threshold === undefined) return;
                 if (message.author.kind === "person" && forCaller(message) && line.seq > threshold && store.messageCursor(message.id) === line.seq) {
                   finish({ kind: "reply", message });
+                } else if (message.ack?.settled_seq === line.seq && ackCounts(message, line.seq)) {
+                  finish({ kind: "ack", message });
                 } else if (message.id === message.thread_id && message.resolved_at !== null && threadIds.length === 1 && !store.agentAfterArchive(message.id)) {
                   finish({ kind: "resolved", threadId: message.id });
                 }
@@ -634,6 +689,7 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
             },
           );
           if (outcome.kind === "reply") return replyResult(store, outcome.message, context.baseUrl());
+          if (outcome.kind === "ack") return ackResult(store, outcome.message, context.baseUrl());
           const cursor = store.cursor();
           if (outcome.kind === "resolved") {
             return ok(`The person resolved thread ${outcome.threadId} without a reply.`, { status: "resolved", thread_id: outcome.threadId, cursor });

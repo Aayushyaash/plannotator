@@ -2407,3 +2407,13 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 .pn-inbox .ib-att-more:hover, .pn-inbox .ib-att-more[data-popup-open] { background: var(--muted); color: var(--foreground); }
 @media (hover: none) { .pn-inbox .ib-att-more { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .pn-inbox .ib-att-more { transition: none; } }
+
+/* 👍 Looks good (design record "inbox-acknowledge", approved 2026-10-15): beside Reply in the
+   thread's foot, a normal gap; pressed it takes a quiet success tint. The pill under the
+   acknowledged message says it was not sent, and later that the agent saw it. */
+.pn-inbox .ib-btn.ib-ack .ib-ack-emoji { font-size: 15px; line-height: 1; }
+.pn-inbox .ib-btn.ib-ack[aria-pressed="true"] { border-color: color-mix(in srgb, var(--success) 55%, transparent); background: color-mix(in srgb, var(--success) 14%, var(--card)); }
+.ib-ackpill { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin: 12px 0 0; font-size: 12.5px; color: var(--muted-foreground); }
+.ib-ackchip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--success) 50%, transparent); background: color-mix(in srgb, var(--success) 12%, var(--card)); color: var(--foreground); font-weight: 500; white-space: nowrap; }
+.ib-ackwhen { min-width: 0; }
+.ib-toast > .ib-temoji { flex: none; font-size: 15px; line-height: 1; }

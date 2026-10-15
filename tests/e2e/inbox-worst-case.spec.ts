@@ -246,7 +246,7 @@ test('the names: real folder names, a parent folder for two "api", days and year
   }
 });
 
-test('things that grow: the reply chooser with 50 sessions, the New message list, a long draft', async ({ browser }) => {
+test('things that grow: the reply chooser with 50 sessions, the compose To picker, a long draft', async ({ browser }) => {
   // The session that asked counts as live for a minute after the Inbox starts.
   await new Promise((r) => setTimeout(r, Math.max(0, world.startedAt + 70_000 - Date.now())));
   for (const [w, thread] of [
@@ -271,16 +271,23 @@ test('things that grow: the reply chooser with 50 sessions, the New message list
       await context.close();
     }
   }
-  // New message with 50 live sessions: the list starts inside the window (row 35).
+  // Compose's To picker over the 50 live sessions (row 35, once New message's list; the in-thread
+  // button is off since approval "inbox-acknowledge"): the list starts inside the window and scrolls.
   const { context, page } = await open(browser, WIDTHS[2]!, `thread=${world.seed.threads.kitchen}`);
   try {
-    await page.waitForSelector('[data-new-message]');
-    await expect(page.locator('[data-new-message]')).not.toHaveClass(/ib-dis/, { timeout: 20_000 });
-    await page.locator('[data-new-message]').click();
-    const picker = page.locator('[data-session-picker]');
+    await page.locator('.ib-side [data-open-compose]').click();
+    const dialog = page.locator('dialog[data-compose]');
+    const to = dialog.locator('.ib-cp-tobtn');
+    await expect(to).not.toHaveAttribute('data-loading', '', { timeout: 20_000 });
+    await to.click();
+    const picker = dialog.locator('[data-compose-picker]');
     await expect(picker).toBeVisible();
-    expect((await picker.boundingBox())!.y).toBeGreaterThanOrEqual(0);
-    await shot(page, 'new-message-1024');
+    await expect.poll(() => dialog.locator('[role="listbox"] [role="option"]').count(), { timeout: 20_000 }).toBeGreaterThanOrEqual(50);
+    const box = (await picker.boundingBox())!;
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height).toBeLessThanOrEqual(WIDTHS[2]!.height);
+    expect(await shapes(page)).toEqual([]);
+    await shot(page, 'compose-to-picker-1024');
   } finally {
     await context.close();
   }

@@ -1,7 +1,8 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { Icon, type IconName } from '../icons';
 
-export type InboxToastIcon = 'check' | 'warn' | 'archive' | 'mute';
+/** `thumb`: 👍 Looks good (the emoji itself, as plan review's button draws it). */
+export type InboxToastIcon = 'check' | 'warn' | 'archive' | 'mute' | 'thumb';
 
 export interface InboxToastModel {
   /** Bumped per toast, so a new one replays its entrance. */
@@ -23,7 +24,7 @@ export interface InboxToastModel {
   action?: { label: string; onPress: () => void };
 }
 
-const ICONS: Record<InboxToastIcon, IconName> = { check: 'checkCircle', warn: 'warn', archive: 'archive', mute: 'mute' };
+const ICONS: Record<Exclude<InboxToastIcon, 'thumb'>, IconName> = { check: 'checkCircle', warn: 'warn', archive: 'archive', mute: 'mute' };
 
 /**
  * What the window's live region says for a toast, as sentences, and how to
@@ -67,7 +68,13 @@ function ToastBody({ toast, phone }: { toast: InboxToastModel; phone: boolean })
   const reply = !phone && toast.onReply;
   return (
     <>
-      <Icon name={ICONS[toast.icon]} size={16} />
+      {toast.icon === 'thumb' ? (
+        <span className="ib-temoji" aria-hidden="true">
+          👍
+        </span>
+      ) : (
+        <Icon name={ICONS[toast.icon]} size={16} />
+      )}
       <span className="ib-tsay">
         <span className="ib-tlead">{phone ? (toast.phoneLead ?? toast.lead) : toast.lead}</span>
         {toast.detail && <span className="ib-tdetail">{toast.detail}</span>}

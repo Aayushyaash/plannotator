@@ -72,6 +72,8 @@ function subjectOf(row: InboxListRow): string {
 function countOf(row: InboxListRow): string {
   // A Quiet row says why it is there: archived (resolved), or marked read.
   if (row.section === 'quiet' && row.resolved_at !== null && row.back_from_archive !== true) return 'Archived';
+  // Marked read with 👍 Looks good: the row says so in place of "Read".
+  if (row.section === 'quiet' && (row.read_at ?? null) !== null && row.ack) return `👍 ${row.ack.label}`;
   if (row.section === 'quiet' && (row.read_at ?? null) !== null) return 'Read';
   if (row.answered_not_sent) return 'Answered, not sent';
   if (row.section === 'sent' && row.addressee) return `To ${agentName(rowAgent(row))}`;

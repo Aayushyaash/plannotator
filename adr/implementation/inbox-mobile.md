@@ -135,6 +135,7 @@ The allowlist. Each row is the window's handler as it is today, with the request
 | `POST messages/:id/picks` | same | `{ idempotency_key, questions: [{ key, revision, answer or null }] }` | `{ message_id, questions, reply: null }` | 7.10 |
 | `POST messages/:id/reply` | same | `{ idempotency_key, words?, questions?, feedback?, annotation_ids?, skip_unanswered? }` (`skip_unanswered: true` skips the message's questions left without a pick; a phone sends it only as the window does, see 7.11) | `{ message_id, questions, reply, replayed, decisions, decisions_refused }` | 7.11 |
 | `POST messages/:id/resolve` | same | `{ idempotency_key, resolved? }` | `{ thread: summary }` | 7.12 |
+| `POST messages/:id/ack` | same | `{ idempotency_key, ack? }` (`ack: false` takes it back) | `{ message, thread: row }`: 👍 Looks good (design record "inbox-acknowledge", 2026-10-15). Silent: nothing is sent, no session is woken, no push. The message gains `ack: { label, at, read_seq, made_read, settled_seq, settled_at, seen_at }` and the thread is marked read (Quiet until an agent writes again); the row gains the additive `ack: { label, at }` while that read holds (draw "👍 Looks good" in place of "Read"). `ack: false` removes it and undoes the Mark read when the 👍 made it (`made_read`); `threads/:id/unread` on that read withdraws the ack too. Only the thread's latest agent message, only while no question in the thread is open or picked and the person has not replied after it: `422 ack_not_allowed` (a person's message), `409 ack_stale` (a newer agent message), `409 ack_after_reply`, `409 question_open`, `409 thread_resolved`. An Inbox before it answers `404 device_route_not_found`. Added 2026-10-15 | 7.56 |
 | `POST messages/:id/to` | same | `{ idempotency_key, to: { host?, session } }` | `{ message, row }`: Send to another session, for a person message no session took yet. `409 already_delivered`, `409 thread_resolved`, `422 not_addressed`, `409 session_not_live` pass through. Added 2026-10-15 | 7.41 |
 | `POST threads/:id/delete` | same | `{ idempotency_key }` | `{ ok, store }` | 7.13 |
 | `GET threads/:id/attachments` | same | | `{ serverSession, attachments: [state], inline_images: [state], annotations }` (`inline_images` additive, 2026-10-15) | 7.14 |
@@ -1156,7 +1157,7 @@ curl -sS -X POST "$INBOX/api/inbox/device/markups?idempotency_key=00000000-0000-
 
 ### 7.53 A comment on a guided review's diff
 
-7.50 to 7.52 (shared drafts) and 7.54, 7.55 (decision retire and replace) are held and not built.
+7.50 to 7.52 (shared drafts) and 7.54, 7.55 (decision retire and replace) are held and not built. 7.56 is 👍 Looks good (below).
 
 ```sh
 curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/guide/annotations" \
@@ -1165,6 +1166,16 @@ curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K7000000000000000000002
 ```
 
 `{ "annotation": { "id": "ann-guide-1", "message_id": "msg_01K70000000000000000000020", "attachment_id": "", "path": "src/auth.ts", "version": "<the guide snapshot's sha256>", "guide": { "title": "Token refresh", "file": "src/auth.ts", "side": "new", "line_start": 1, "line_end": 1 }, "sent_reply_id": null, "...": "" } }`. Rides the next Send like the window's (`annotation_ids` on 7.11, the feedback text built as the window builds it). Remove with 7.18. A file not in the patch or lines outside one hunk: `422 validation_error`; no guide on the message: `404 guide_not_found`; removed or sent: `409 annotation_closed`.
+
+### 7.56 👍 Looks good, and its Undo
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/ack" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000056"}'
+```
+
+`{ "message": { "id": "msg_01K70000000000000000000020", "ack": { "label": "Looks good", "at": "2026-10-15T11:00:00.000Z", "read_seq": 41, "made_read": true, "settled_seq": null, "settled_at": null, "seen_at": null }, "...": "" }, "thread": { "section": "quiet", "read_at": "2026-10-15T11:00:00.000Z", "ack": { "label": "Looks good", "at": "2026-10-15T11:00:00.000Z" }, "...": "" } }`. Undo: `{ "idempotency_key": "…057", "ack": false }` answers the same shape with `ack: null`. Ten seconds after it stands, the Inbox writes `settled_seq` (agents see it from then on: `read_thread` carries `ack: { label, at }`, and `wait_for_reply` answers `{ status: "acknowledged" }`), and once an agent reads it, `seen_at` (the window draws "<agent> saw it"). Nothing is pushed for it, ever.
 
 ## 8. What this contract leaves out
 
