@@ -44,10 +44,14 @@ import { ImageAttachmentView } from './ImageAttachmentView';
 import { VideoAttachmentView, type VideoAttachmentViewHandle } from './VideoAttachmentView';
 import { OpenInControl, type OpenInSurface } from './OpenIn';
 import { AttachmentStepper, type StepSource } from './AttachmentStepper';
-import { FIRST_NOTE, LAST_NOTE, stepAnnouncement, stepKeyIntent, type AttachmentStep } from '../stepping';
+import { FIRST_NOTE, LAST_NOTE, isEditableTarget, stepAnnouncement, stepKeyIntent, type AttachmentStep } from '../stepping';
 import { Icon } from '../icons';
 import { FileName } from './FileName';
 import { useNarrowerThan } from '../narrower';
+import { FullViewBar } from './FullViewBar';
+import { FilePeek, peekSheetHost } from './AttachmentStepper';
+import { createPortal } from 'react-dom';
+import { formatShortcutBindingText, htmlAnnotateShortcuts, useHtmlAnnotateShortcuts } from '@plannotator/ui/shortcuts';
 
 /**
  * The pane width below which the 300 px comments panel folds into the
@@ -56,6 +60,12 @@ import { useNarrowerThan } from '../narrower';
  * 1280 px and wider, and a full-screen file, keep the panel docked.
  */
 export const FOLD_PANEL_BELOW = 780;
+
+/** How long full view's step chip names the new file (approval "inbox-full-view"). */
+export const FULL_VIEW_CHIP_MS = 1600;
+
+/** Show / Hide tools: the html-annotate scope's existing chord (⌘⇧X), HTML files only. */
+const TOOLS_CHORD = htmlAnnotateShortcuts.shortcuts.toggleTools.bindings[0]!;
 
 export interface AttachmentPaneProps {
   attachment: InboxAttachmentState;
@@ -115,6 +125,19 @@ export interface AttachmentPaneProps {
    * new-tab icon through the tailnet or on a phone (`tab`). Absent: neither.
    */
   openIn?: OpenInSurface;
+  /**
+   * Full view (approval "inbox-full-view", A · Pill): Plannotator's "hide
+   * tools" for a full-screen file. The header, the docked comments and the
+   * bottom bar go; one floating bar is left (FullViewBar). Only while `full`;
+   * the pane beside the thread never hides its own chrome.
+   */
+  fullView?: boolean;
+  /**
+   * The eye (in the header, in the floating bar) and ⌘⇧X on an HTML file.
+   * Beside the thread, turning it on also takes the file full screen. Absent:
+   * no eye.
+   */
+  onFullView?: (on: boolean) => void;
 }
 
 /**
@@ -242,8 +265,10 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
   const multi = steps.length > 1 && index >= 0;
   const phone = props.phone === true;
   const [menuOpen, setMenuOpen] = useState(false);
-  /** The panel folded (a phone, or a narrow pane): the header's button opens it as a sheet (inbox.css; a phone draws the panel's touch presentation inside it). */
-  const folded = phone || narrowPane;
+  /** Full view: the tools hidden over a full-screen file. */
+  const fullView = props.fullView === true && props.full;
+  /** The panel folded (a phone, a narrow pane, or full view): the header's button (the floating bar's count in full view) opens it as a sheet (inbox.css; a phone draws the panel's touch presentation inside it). */
+  const folded = phone || narrowPane || fullView;
   const [sheet, setSheet] = useState(false);
   useEffect(() => {
     if (!folded) setSheet(false);
@@ -254,6 +279,8 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
   const closeSheet = () => {
     setSheet(false);
     sheetButtonRef.current?.focus({ preventScroll: true });
+    // A phone's full-view bar is hidden under its open sheet: focus lands once it shows again.
+    if (phone) requestAnimationFrame(() => sheetButtonRef.current?.focus({ preventScroll: true }));
   };
   const [endNote, setEndNote] = useState<string | null>(null);
   const endTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -311,7 +338,94 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
     announce(text);
     if (endTimer.current) clearTimeout(endTimer.current);
     endTimer.current = setTimeout(() => setEndNote(null), 1800);
+    if (fullViewRef.current) showChip(text);
   };
+
+  // ── Full view (approval "inbox-full-view", A · Pill) ──────────────────────
+  const fullViewRef = useRef(fullView);
+  fullViewRef.current = fullView;
+  /** The step chip: names the file for a moment after a step in full view (the bottom bar is gone), with the end note at the ends. */
+  const [chip, setChip] = useState<{ note: string | null; at: number } | null>(null);
+  const chipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showChip = (note: string | null) => {
+    setChip({ note, at: Date.now() });
+    if (chipTimer.current) clearTimeout(chipTimer.current);
+    chipTimer.current = setTimeout(() => setChip(null), FULL_VIEW_CHIP_MS);
+  };
+  const showChipRef = useRef(showChip);
+  showChipRef.current = showChip;
+  useEffect(
+    () => () => {
+      if (chipTimer.current) clearTimeout(chipTimer.current);
+    },
+    [],
+  );
+  useEffect(() => {
+    if (!fullView) setChip(null);
+  }, [fullView]);
+  /** The person pressed the eye (or ⌘⇧X): focus follows the change once the frame is drawn. */
+  const toggledFullView = useRef(false);
+  const eyeRef = useRef<HTMLButtonElement>(null);
+  // An image's or a film's comment row stays at the file's foot in full view: the chip (and a phone's bar) sit above it.
+  useEffect(() => {
+    const section = sectionRef.current;
+    if (!fullView || !section || (kind !== 'image' && kind !== 'video')) return;
+    const place = () => {
+      const row = section.querySelector<HTMLElement>('[data-image-composer]');
+      section.style.setProperty('--ib-fvfoot', `${row ? Math.round(row.getBoundingClientRect().height) : 0}px`);
+    };
+    place();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
+    const mutations = new MutationObserver(() => {
+      place();
+      const row = section.querySelector('[data-image-composer]');
+      if (row && observer) observer.observe(row);
+    });
+    mutations.observe(section, { childList: true, subtree: true });
+    const row = section.querySelector('[data-image-composer]');
+    if (row && observer) observer.observe(row);
+    return () => {
+      observer?.disconnect();
+      mutations.disconnect();
+      section.style.removeProperty('--ib-fvfoot');
+    };
+  }, [fullView, attachment.id, kind]);
+  const fullViewPeekId =`ib-fvpeek-${useId().replace(/:/g, '')}`;
+  /** A phone's position in the Comments sheet's foot (full view): its peek is the bottom sheet, drawn in the Inbox's root. */
+  const phonePosRef = useRef<HTMLButtonElement>(null);
+  const phonePeekHost = phone && menuOpen ? peekSheetHost(sectionRef.current) : null;
+  const toggleFullView = () => {
+    if (!props.onFullView) return;
+    toggledFullView.current = true;
+    setMenuOpen(false);
+    setSheet(false);
+    props.onFullView(!fullView);
+  };
+  const toggleFullViewRef = useRef(toggleFullView);
+  toggleFullViewRef.current = toggleFullView;
+  const wasFullView = useRef(false);
+  useEffect(() => {
+    const was = wasFullView.current;
+    wasFullView.current = fullView;
+    const toggled = toggledFullView.current;
+    toggledFullView.current = false;
+    if (fullView === was) return;
+    const chord = kind === 'html' ? formatShortcutBindingText(TOOLS_CHORD) : null;
+    if (fullView) {
+      if (toggled) {
+        eyeRef.current?.focus({ preventScroll: true });
+        announce(chord ? `Tools hidden. Press ${chord} or the eye to bring them back.` : 'Tools hidden. Press the eye to bring them back.');
+      } else {
+        // The file OPENED in full view (an HTML file, the shared hidden-tools choice): say once how the tools come back.
+        announce(chord ? `Tools hidden. Press the eye or ${chord} to show them.` : 'Tools hidden. Press the eye to show them.');
+      }
+      // A one-file thread has no step to name the file: the chip names it once as full view starts.
+      if (stepsRef.current.length < 2) showChipRef.current(null);
+    } else if (toggled) {
+      sectionRef.current?.querySelector<HTMLElement>('.ib-vhead [data-html-tools-toggle]')?.focus({ preventScroll: true });
+      announce('Tools shown.');
+    }
+  }, [fullView, announce]);
   const goTo = (target: number, source: StepSource) => {
     const next = steps[target];
     if (!next || target === index) {
@@ -349,6 +463,8 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
     if (!source) return;
     const at = stepsRef.current.findIndex((s) => s.attachment.id === attachment.id);
     if (at >= 0) announce(stepAnnouncement(stepsRef.current, at));
+    // Full view keeps on through a step; with no bar under the file, a chip names the file for a moment.
+    if (fullViewRef.current) showChipRef.current(null);
     // A key pressed in the document (or the HTML page) leaves focus on the pane; a bar button keeps it.
     if (source === 'key') sectionRef.current?.focus({ preventScroll: true });
   }, [attachment.id, announce]);
@@ -458,6 +574,16 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
 
   const annotationVersion = view?.version ?? (effectiveVersion === 'sent' ? attachment.sent_sha256 : 'current');
   const isHtml = kind === 'html';
+  // ⌘⇧X: the html-annotate scope's Show / Hide tools, on an HTML file only (the page forwards it from inside the frame through onToolsToggle).
+  useHtmlAnnotateShortcuts({
+    handlers: {
+      toggleTools: {
+        // Never while typing (the reply box beside the file, a comment), nor under a modal dialog.
+        when: (event) => isHtml && props.onFullView !== undefined && !document.querySelector('dialog[open]') && !isEditableTarget(event.composedPath()[0] ?? event.target),
+        handle: () => toggleFullViewRef.current(),
+      },
+    },
+  });
   const isText = kind === 'markdown' || kind === 'text';
   const isCode = kind === 'code';
   const isImage = kind === 'image';
@@ -611,6 +737,31 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
       </>
     );
   }
+  /**
+   * The changed line, compact, for full view (which drops the line): the same
+   * facts and actions as a persistent chip at the file's top left, so a file
+   * that opens in full view still says it changed, or which version is shown.
+   */
+  let versionChip: { text: string; action: { label: string; to: 'current' | 'sent' } | null; full: string } | null = null;
+  if (currentUnavailable) {
+    versionChip = {
+      text: attachment.unavailable!.code === 'attachment_missing' ? 'The file is gone; showing the sent copy' : 'The file is not that kind any more; showing the sent copy',
+      action: null,
+      full: `${attachment.unavailable!.message} ${onOpen ? `This is the copy taken when you first opened it, ${firstOpened}.` : `This is the version ${sender} sent at ${sentAt}.`}`,
+    };
+  } else if (effectiveVersion === 'sent') {
+    versionChip = {
+      text: onOpen ? 'Showing the copy from when you first opened it' : 'Showing the sent version',
+      action: { label: 'Open the file as it is now', to: 'current' },
+      full: onOpen ? `The copy taken when you first opened it, ${firstOpened}.` : `The version ${sender} sent at ${sentAt}.`,
+    };
+  } else if ((view?.attachment ?? attachment).changed_since_sent) {
+    versionChip = {
+      text: onOpen ? 'Changed since you first opened it' : 'Changed since sent',
+      action: { label: onOpen ? 'Open the version you first saw' : props.fromPerson ? 'Open the version you sent' : 'Open the version it sent', to: 'sent' },
+      full: onOpen ? 'Changed since you first opened it.' : `Changed since ${sender} sent it at ${sentAt}.`,
+    };
+  }
 
   const annotationCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -630,11 +781,63 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
       ref={sectionRef}
       onPointerOver={titleIfClipped}
       tabIndex={-1}
-      className={`ib-view${full ? ' ib-full' : ''}${phone ? ' ib-phone' : ''}${folded && !phone ? ' ib-fold' : ''}${hasPanel ? '' : ' ib-nopanel'}${folded && sheet ? ' ib-panel-open' : ''}`}
+      className={`ib-view${full ? ' ib-full' : ''}${fullView ? ' ib-fullview' : ''}${phone ? ' ib-phone' : ''}${folded && !phone ? ' ib-fold' : ''}${hasPanel ? '' : ' ib-nopanel'}${folded && sheet ? ' ib-panel-open' : ''}`}
       aria-label={multi ? `${attachment.name}, file ${index + 1} of ${steps.length}` : attachment.name}
       data-attachment-pane={attachment.id}
       data-version={effectiveVersion}
+      data-full-view={fullView ? '' : undefined}
     >
+      {fullView ? (
+        <FullViewBar
+          phone={phone}
+          armed={armed}
+          onToggleArmed={isHtml && !props.readOnly ? () => setArmed((v) => !v) : undefined}
+          comments={
+            hasPanel
+              ? {
+                  count: annotations.length,
+                  open: sheet,
+                  controls: sheetId,
+                  onToggle: () => {
+                    setMenuOpen(false);
+                    setSheet((v) => !v);
+                  },
+                  buttonRef: sheetButtonRef,
+                }
+              : null
+          }
+          position={
+            multi && !phone
+              ? {
+                  index,
+                  total: steps.length,
+                  name: attachment.name,
+                  open: menuOpen,
+                  peekId: fullViewPeekId,
+                  onOpenChange: (open) => {
+                    if (open) setSheet(false);
+                    setMenuOpen(open);
+                  },
+                  renderPeek: (closePeek) => (
+                    <FilePeek
+                      id={fullViewPeekId}
+                      steps={steps}
+                      index={index}
+                      phone={false}
+                      annotationCounts={annotationCounts}
+                      onClose={closePeek}
+                      onGo={(target) => goTo(target, 'menu')}
+                    />
+                  ),
+                }
+              : null
+          }
+          chord={isHtml ? TOOLS_CHORD : null}
+          onEye={toggleFullView}
+          eyeRef={eyeRef}
+          shifted={sheet && hasPanel && !phone}
+        />
+      ) : (
       <div className="ib-vhead">
         {/* A phone's way back to the thread (through the unsaved-comment guard, as the desktop's close). */}
         {phone && (
@@ -657,7 +860,16 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
               : `from ${props.agent} in ${props.projectName}`}
         </span>
         <span className="ib-sp" />
-        {isHtml && <HtmlSurfaceControls armed={armed} onToggleArmed={props.readOnly ? undefined : () => setArmed((v) => !v)} />}
+        {/* ui's eye before the pen (approval "inbox-full-view"): every kind gets the eye, ⌘⇧X only on HTML, where the chord exists. */}
+        {(isHtml || props.onFullView) && (
+          <HtmlSurfaceControls
+            armed={armed}
+            onToggleArmed={isHtml && !props.readOnly ? () => setArmed((v) => !v) : undefined}
+            toolsHidden={false}
+            onToggleTools={props.onFullView ? toggleFullView : undefined}
+            shortcuts={isHtml ? undefined : { tools: null }}
+          />
+        )}
         {props.openIn && <OpenInControl attachment={attachment} version={effectiveVersion} surface={props.openIn} label={!folded} big={phone} />}
         <a
           className="ib-btn ib-sm ib-ghost"
@@ -706,7 +918,20 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
           </>
         )}
       </div>
-      {line ? (
+      )}
+      {fullView ? (
+        versionChip && (
+          <div className="ib-fvver" role="status" title={versionChip.full} data-full-view-changed="">
+            <Icon name="info" size={13} />
+            <span className="ib-fvver-t">{versionChip.text}</span>
+            {versionChip.action && (
+              <button type="button" className="ib-vlink" onClick={() => chooseVersion(versionChip!.action!.to)}>
+                {versionChip.action.label}
+              </button>
+            )}
+          </div>
+        )
+      ) : line ? (
         <div className="ib-changed" data-changed-line="">
           <Icon name="info" size={14} />
           {line}
@@ -736,6 +961,8 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
               annotateModeActive={armed}
               onAnnotateModeExit={() => setArmed(false)}
               onAnnotateModeToggle={() => setArmed((v) => !v)}
+              // ⌘⇧X pressed inside the page: the bridge forwards it (Show / Hide tools, full view).
+              onToolsToggle={props.onFullView ? () => toggleFullViewRef.current() : undefined}
               // A plain ] or [ pressed in the page while armed (the bridge forwards nothing in Interact).
               onStep={multi ? (dir) => !blockedRef.current && armed && stepRef.current(dir, 'key') : undefined}
               onOpenLink={(href) => {
@@ -966,6 +1193,46 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
             onDeleteInDocument={(_path, id) => void remove(id)}
             onEditInDocument={(_path, id, updates) => edit(id, updates)}
           />
+          {/* Full view has no bottom bar: the sheet's foot says where the comments go, and the way to the reply (a phone's position lives here too). */}
+          {fullView && (
+            <div className="ib-fvfoot" data-full-view-foot="">
+              {phone && multi && (
+                <button
+                  type="button"
+                  ref={phonePosRef}
+                  className="ib-btn ib-fvfoot-pos"
+                  aria-haspopup="grid"
+                  aria-expanded={menuOpen}
+                  aria-controls={menuOpen ? fullViewPeekId : undefined}
+                  aria-label={`${index + 1} of ${steps.length}, ${attachment.name}. Show every file in this thread`}
+                  onClick={() => setMenuOpen((v) => !v)}
+                  data-full-view-position=""
+                  data-peek-opener=""
+                >
+                  <span className="ib-stepn">
+                    {index + 1} of {steps.length}
+                  </span>
+                  <span className="ib-fvfoot-nm">
+                    <FileName name={attachment.name} />
+                  </span>
+                  <Icon name="chevD" size={13} />
+                </button>
+              )}
+              <p className="ib-fvsend" data-strip-chip="">
+                <b>{chipText}</b> {props.strip.picks === 0 && props.strip.annotations === 1 ? 'rides' : 'ride'} your next Send to {props.agent}.
+              </p>
+              <div className="ib-fvacts">
+                <button type="button" className="ib-btn ib-sm" onClick={() => leave(null, props.strip.onBack)}>
+                  <Icon name="back" size={14} />
+                  Back to the thread
+                </button>
+                <button type="button" className="ib-btn ib-sm ib-pri" onClick={() => leave(null, props.strip.onWriteReply)}>
+                  <Icon name="reply" size={14} />
+                  Write the reply
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
       {guard ? (
@@ -996,10 +1263,10 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
             Keep writing
           </button>
         </div>
-      ) : (
+      ) : fullView ? null : (
         <div />
       )}
-      {props.full || multi || phone ? (
+      {!fullView && (props.full || multi || phone) ? (
         <div className={`ib-vfoot${phone ? ' ib-vfoot-phone' : ''}`} data-view-foot="">
           {multi && (
             <AttachmentStepper
@@ -1048,9 +1315,37 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
             </>
           )}
         </div>
-      ) : (
+      ) : fullView ? null : (
         <div />
       )}
+      {fullView && (
+        // The step chip (full view only): names the new file for a moment, the end note at the ends (a one-file thread: its name once, as full view starts). The live region says it.
+        <div className={`ib-fvchip${chip ? ' ib-on' : ''}`} aria-hidden="true" data-full-view-chip={chip ? 'shown' : 'hidden'}>
+          {multi && (
+            <span className="ib-stepn">
+              {index + 1} of {steps.length}
+            </span>
+          )}
+          <b className="ib-fvchip-nm">
+            <FileName name={attachment.name} />
+          </b>
+          {chip?.note && <span className="ib-fvchip-note">{chip.note}</span>}
+          {multi && !phone && (
+            <span className="ib-fvchip-keys">
+              <kbd>[</kbd>
+              <kbd>]</kbd>
+            </span>
+          )}
+        </div>
+      )}
+      {fullView && phone && menuOpen && phonePeekHost
+        ? createPortal(
+            <div className="pn-inbox-peek">
+              <FilePeek id={fullViewPeekId} steps={steps} index={index} phone annotationCounts={annotationCounts} onClose={() => setMenuOpen(false)} onGo={(target) => goTo(target, 'menu')} />
+            </div>,
+            phonePeekHost,
+          )
+        : null}
       <div className="ib-sr" aria-live="polite" data-step-live="">
         {announced}
       </div>

@@ -63,6 +63,46 @@ export function peekRows(steps: readonly AttachmentStep[], counts: ReadonlyMap<s
   return rows;
 }
 
+/** Where a phone's peek sheet is drawn: the Inbox's root, above the pane. */
+export function peekSheetHost(near: Element | null): Element | null {
+  if (typeof document === 'undefined') return null;
+  return near?.closest('.pn-inbox') ?? document.querySelector('.pn-inbox') ?? document.body;
+}
+
+/**
+ * The peek itself (approval "inbox-image-viewer"): the picture list of every
+ * file in the thread, the open one ringed. The stepper opens it from its
+ * label; full view (approval "inbox-full-view") opens the same list from its
+ * floating bar's `N/M ⌄`.
+ */
+export function FilePeek(props: {
+  id: string;
+  steps: readonly AttachmentStep[];
+  index: number;
+  phone: boolean;
+  annotationCounts: ReadonlyMap<string, number>;
+  onClose: (reason: 'key' | 'outside') => void;
+  onGo: (index: number) => void;
+}) {
+  const { steps, phone } = props;
+  const rows = useMemo(() => peekRows(steps, props.annotationCounts), [steps, props.annotationCounts]);
+  return (
+    <ImagePeek
+      id={props.id}
+      rows={rows}
+      current={steps[props.index]?.attachment.id ?? null}
+      label="Files in this thread"
+      variant={phone ? 'sheet' : 'popover'}
+      onClose={props.onClose}
+      onPick={(key) => {
+        const at = steps.findIndex((s) => s.attachment.id === key);
+        if (at >= 0) props.onGo(at);
+      }}
+      className={phone ? 'ib-peek-sheet' : ''}
+    />
+  );
+}
+
 /** Two lines: where the button goes, then its keys. */
 function StepTip({ text, keys, children }: { text: string; keys: string[]; children: React.ReactElement }) {
   return (
@@ -112,7 +152,6 @@ export function AttachmentStepper(props: AttachmentStepperProps) {
   const labelRef = useRef<HTMLButtonElement>(null);
   /** Closed from the keyboard or by a choice: focus goes back to the label (not after a click elsewhere). */
   const refocus = useRef(false);
-  const rows = useMemo(() => peekRows(steps, props.annotationCounts), [steps, props.annotationCounts]);
 
   useEffect(() => {
     if (menuOpen) refocus.current = true;
@@ -138,23 +177,9 @@ export function AttachmentStepper(props: AttachmentStepperProps) {
     }
   };
 
-  const peek = menuOpen && (
-    <ImagePeek
-      id={peekId}
-      rows={rows}
-      current={current.attachment.id}
-      label="Files in this thread"
-      variant={phone ? 'sheet' : 'popover'}
-      onClose={close}
-      onPick={(key) => {
-        const at = steps.findIndex((s) => s.attachment.id === key);
-        if (at >= 0) props.onGo(at);
-      }}
-      className={phone ? 'ib-peek-sheet' : ''}
-    />
-  );
+  const peek = menuOpen && <FilePeek id={peekId} steps={steps} index={index} phone={phone} annotationCounts={props.annotationCounts} onClose={close} onGo={props.onGo} />;
   // A phone's sheet covers the window: drawn in the Inbox's root, above the pane.
-  const sheetHost = phone && typeof document !== 'undefined' ? (labelRef.current?.closest('.pn-inbox') ?? document.body) : null;
+  const sheetHost = phone ? peekSheetHost(labelRef.current) : null;
 
   const endNote = (
     <span className={`ib-endnote${props.endNote ? ' ib-on' : ''}`} aria-hidden="true" data-step-end-note="">

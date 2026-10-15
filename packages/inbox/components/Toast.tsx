@@ -161,7 +161,9 @@ function placeOver(host: HTMLElement, threadRouted: boolean): Placement {
   if (view && viewBox && (view.classList.contains('ib-full') || !pane)) {
     const foot = view.querySelector('[data-view-foot]');
     const footBox = shown(foot);
-    return { anchor: at(viewBox, footBox?.top ?? viewBox.bottom, footBox ? TOAST_FOOT_GAP : TOAST_LIST_GAP), watch: footBox ? [view, foot!] : [view], overFile: true };
+    // Full view has no foot strip: an image's or a film's comment row (`--ib-fvfoot`, AttachmentPane) is the foot.
+    const fvfoot = footBox ? 0 : parseFloat(getComputedStyle(view).getPropertyValue('--ib-fvfoot')) || 0;
+    return { anchor: at(viewBox, footBox?.top ?? viewBox.bottom - fvfoot, footBox ? TOAST_FOOT_GAP : TOAST_LIST_GAP), watch: footBox ? [view, foot!] : [view], overFile: true };
   }
   if (pane) return { anchor: at(pane.box, pane.footBox.top, TOAST_FOOT_GAP), watch: [pane.el, pane.foot] };
   if (threadRouted) return { anchor: null, watch: [], pending: true };

@@ -88,7 +88,10 @@ test('a link to an attached file opens it beside the thread; an unattached one i
     // Focus moved into the pane.
     expect(await pane.evaluate((el) => el === document.activeElement)).toBe(true);
 
-    // Close it, then Enter on the focused link opens it again.
+    // HTML opens full screen straight into full view (approval "inbox-full-view"): the eye brings the header back.
+    await expect(pane).toHaveAttribute('data-full-view', '');
+    await page.locator('[data-full-view-eye]').click();
+    // Close it, then Enter on the focused link opens it again (with the tools now: the eye's choice is remembered).
     await page.getByRole('button', { name: 'Close mock.html' }).click();
     await expect(pane).toHaveCount(0);
     await mock.focus();

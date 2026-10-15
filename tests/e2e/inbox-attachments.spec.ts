@@ -217,6 +217,10 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   writeFileSync(join(docs, 'install-flow.mmd'), FLOW);
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'light' });
   const page = await context.newPage();
+  // This spec proves full screen WITH the tools (header, panel, bar). An HTML file opens straight into full view
+  // while the shared hidden-tools choice says so (approval "inbox-full-view"); this person chose to keep the tools.
+  // Full view itself: inbox-full-view.spec.ts.
+  await context.addCookies([{ name: 'plannotator-html-chrome', value: encodeURIComponent(JSON.stringify({ sidebarOpen: false, panelOpen: false, toolsHidden: false, savedAt: Date.now() })), url }]);
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('console', (message) => {
