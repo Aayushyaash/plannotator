@@ -4,12 +4,14 @@
  * the window installs `inboxImageSrcResolver` (configurePlannotatorUI), which
  * turns that marker plus the src as written into the Inbox's own route:
  * `/api/inbox/messages/<id>/image?path=<src>`. The server reads the image
- * from the message's project only when the message's body shows it
+ * only when the message's body shows it: for an agent's message from
+ * anywhere the user can read, for the person's own from its project, never
+ * from a hidden folder outside those or a dotenv file
  * (packages/shared/inbox/message-images.ts). There is no route that takes a
  * bare path.
  *
- * Remote `http(s)` images are left as written: the window's CSP (`img-src
- * 'self' data: blob:`) does not load them.
+ * Remote images (`http(s)`, protocol-relative `//host/…`) are left as
+ * written: the window's CSP (`img-src 'self' data: blob:`) does not load them.
  */
 import type { ImageSrcResolver } from '@plannotator/ui/configure';
 
@@ -50,7 +52,7 @@ export function inlineImageRefFromSrc(src: string, messageId: string): string | 
  * the Inbox answers with a 404 as it always has.
  */
 export const inboxImageSrcResolver: ImageSrcResolver = (path, base) => {
-  if (/^https?:\/\//i.test(path)) return path;
+  if (/^(https?:)?\/\//i.test(path)) return path;
   // A marked-up image the person drew on an image attachment: kept in the
   // Inbox's data dir, shown back by its file name only.
   const markup = INBOX_MARKUP_PATH_RE.exec(path);

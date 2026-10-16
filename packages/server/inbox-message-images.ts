@@ -5,11 +5,12 @@
  * no CORS headers.
  *
  * Every decision is in packages/shared/inbox/message-images.ts: the path
- * must be an image the message's own body references, inside the message's
- * project or the linked worktree it was sent from (realpath, so `../` and
- * symlink escapes are refused; the worktree is checked again here through
- * the project-root cache, packages/server/inbox-project-root.ts), an image by
- * extension and by its magic bytes, at most 10 MB. This file adds the
+ * must be an image the message's own body references; for an agent's message
+ * anywhere the person's user can read, for a person's own message inside its
+ * project or the folder it was sent from; never a hidden folder outside those
+ * (nor under a home folder or above) or a dotenv file (judged as named and by
+ * realpath); an image by extension and by its magic bytes, at
+ * most 10 MB and 50 megapixels. This file adds the
  * transport: a cross-site request is refused before anything is read, and
  * every answer carries nosniff, a sandbox CSP and a same-origin CORP, so
  * another site can neither embed nor read an image, and an SVG opened
@@ -19,12 +20,10 @@
  */
 
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
 import { isInboxId } from "@plannotator/core/inbox-types";
 import { INBOX_MESSAGE_IMAGE_CSP, inboxMessageImageRefsInOrder, readInboxMessageImageAsync } from "@plannotator/shared/inbox/message-images";
 import { captureInboxInlineImages, yieldToLoop } from "@plannotator/shared/inbox/inline-images";
 import type { InboxStore } from "@plannotator/shared/inbox/store";
-import { isInsideFolder, type InboxProjectRoots } from "./inbox-project-root";
 
 export const INBOX_MESSAGE_IMAGE_ROUTE = /^\/api\/inbox\/messages\/([A-Za-z0-9_]+)\/image$/;
 
@@ -41,25 +40,8 @@ function refuse(status: number, code: string, error: string): Response {
   });
 }
 
-/**
- * The linked worktree a message was sent from, when its `base_path` lies
- * outside the project's root: checked again now (the folder still folds into
- * this project), never taken from the record alone. Null otherwise.
- */
-export async function sentFromWorktree(base: string | null | undefined, root: string, projectRoots: InboxProjectRoots | undefined): Promise<string | null> {
-  if (!base || !projectRoots) return null;
-  try {
-    if (isInsideFolder(realpathSync(base), root)) return null;
-    const resolved = await projectRoots.resolve(base);
-    return resolved.worktree !== null && resolved.root === root ? resolved.worktree : null;
-  } catch {
-    // Gone, or no longer a folder: the project root is all there is.
-    return null;
-  }
-}
-
 /** Answers the image route, or null when the path is not it. */
-export async function inboxMessageImageRoute(req: Request, url: URL, store: InboxStore, projectRoots?: InboxProjectRoots): Promise<Response | null> {
+export async function inboxMessageImageRoute(req: Request, url: URL, store: InboxStore): Promise<Response | null> {
   const match = INBOX_MESSAGE_IMAGE_ROUTE.exec(url.pathname);
   if (!match) return null;
   if (req.method !== "GET" && req.method !== "HEAD") return refuse(405, "method_not_allowed", "Use GET.");
@@ -77,8 +59,9 @@ export async function inboxMessageImageRoute(req: Request, url: URL, store: Inbo
     body: message.body,
     root: project.root,
     base: message.base_path ?? null,
-    worktree: await sentFromWorktree(message.base_path, project.root, projectRoots),
     path: url.searchParams.get("path"),
+    // An agent's images come from anywhere; a person's own message (a phone, the relay, a tailnet login) from its project.
+    anywhere: message.author.kind === "agent",
   });
   if (!result.ok) return refuse(result.status, result.code, result.error);
   // The validator is the SHA-256 of the bytes served (read once, at most the
@@ -120,8 +103,8 @@ export const INBOX_IMAGE_CAPTURE_RETRY_MS = 60_000;
 const MESSAGE_BATCH = 64;
 /** Messages the retry table remembers (least recently tried dropped first). */
 const ATTEMPTS_MAX_MESSAGES = 10_000;
-/** Refusals that cost a read of the file: not tried again until the retry window passes. */
-const COSTLY_REFUSALS = new Set(["not_an_image", "image_changed", "image_too_large", "write_failed"]);
+/** Refusals that cost a read of the file (or will fail the same way at once): not tried again until the retry window passes. */
+const COSTLY_REFUSALS = new Set(["not_an_image", "image_changed", "image_too_large", "write_failed", "image_unreadable", "image_read_failed"]);
 
 export interface InboxImageCapture {
   /** Capture the thread's uncaptured images in the background (a read never waits for it). */
@@ -152,7 +135,6 @@ export interface InboxImageCapture {
  */
 export function createInboxImageCapture(
   store: InboxStore,
-  projectRoots?: InboxProjectRoots,
   options: { passBytes?: number; pauseMs?: number; retryMs?: number } = {},
 ): InboxImageCapture {
   const passBytes = options.passBytes ?? INBOX_IMAGE_CAPTURE_PASS_BYTES;
@@ -183,21 +165,20 @@ export function createInboxImageCapture(
       try {
         const project = store.project(message.project_id);
         if (!project) continue;
-        const worktree = await sentFromWorktree(message.base_path, project.root, projectRoots);
         const latest = store.message(message.id);
         if (!latest || stopped) continue;
         const captured = await captureInboxInlineImages(store.dir, {
           body: latest.body,
           root: project.root,
           base: latest.base_path ?? null,
-          worktree,
+          anywhere: latest.author.kind === "agent",
           sentAt: latest.created_at,
           capturedOnOpenAt: new Date().toISOString(),
           refs: due,
           max: MESSAGE_BATCH,
           stage: true,
         });
-        // A refusal decided before any read (missing, outside the project, too large by its size) is tried again on
+        // A refusal decided before any read (missing, hidden, too large by its size) is tried again on
         // the next read; one that cost a read (not an image, changed while read) waits INBOX_IMAGE_CAPTURE_RETRY_MS.
         for (const failure of captured.failures) if (COSTLY_REFUSALS.has(failure.code)) tried(message.id, failure.ref);
         // Still there (a deletion may have run meanwhile) and the server still running: the records go on

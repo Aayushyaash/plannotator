@@ -19,7 +19,8 @@ import { QUESTION_AUTHORING_GUIDE } from "@plannotator/core/question-block";
 import { INBOX_SECTIONS, INBOX_THREAD_NAME_MAX, type InboxGuideRef, type InboxSectionId, type InboxLine, type InboxMessage, type InboxProject } from "@plannotator/core/inbox-types";
 import { INBOX_WAKES_META_KEY } from "@plannotator/shared/inbox/connection";
 import { inboxBodyForAgent } from "@plannotator/shared/inbox/uploads";
-import { bodyShowsLocalImages, captureInboxInlineImages } from "@plannotator/shared/inbox/inline-images";
+import { bodyShowsLocalImages, captureInboxInlineImages, type InlineImageFailure } from "@plannotator/shared/inbox/inline-images";
+import { inboxMessageRemoteImageRefsInOrder } from "@plannotator/shared/inbox/message-images";
 import { InboxError } from "@plannotator/shared/inbox/schema";
 import type { InboxStore } from "@plannotator/shared/inbox/store";
 import { recordAgentDecision } from "./inbox-decisions";
@@ -367,6 +368,68 @@ async function sendBasePath(context: InboxMcpContext, projectPath: string | unde
   return resolved && resolved.worktree !== null && resolved.root === project.root ? real : null;
 }
 
+/**
+ * Why an image the body shows will not show in the window, by the code the
+ * send-time capture's read refused it with (the message-image route's own
+ * rules, message-images.ts). A code not listed (a read that raced a change,
+ * a blob that could not be written) still shows through the route: no warning.
+ */
+const IMAGE_NOT_SHOWN_REASONS: Record<string, string> = {
+  image_missing: "not a readable file (a folder, a pipe or a device)",
+  image_unreadable: "Plannotator can't read this file; on macOS the app running it may need to be allowed",
+  image_read_failed: "could not be read",
+  not_an_image: "not an image (png, jpg, gif, webp, svg, avif, bmp, ico)",
+  image_too_large: "over 10 MB or 50 megapixels",
+  image_hidden: "in a hidden folder, or a hidden or .env file",
+  validation_error: "not a file path",
+};
+const IMAGE_NOT_YET_REASON = "does not exist yet; it will show if it is written there later";
+const IMAGE_REMOTE_REASON = "remote images never load in the Inbox";
+/** The most images the warning names (the structured list and the text alike); the rest are counted. */
+export const IMAGES_NOT_SHOWN_MAX = 10;
+
+export interface ImageNotShown {
+  ref: string;
+  reason: string;
+  /** Nothing is at the path yet: it shows once the file is written there. */
+  not_yet?: true;
+}
+
+/** The images a sent body shows that the window will not (or not yet): the capture's refusals, then the remote ones. */
+function imagesNotShown(body: string, failures: readonly InlineImageFailure[]): ImageNotShown[] {
+  const out: ImageNotShown[] = [];
+  for (const { ref, code, notYet } of failures) {
+    if (code === "image_missing" && notYet) {
+      out.push({ ref, reason: IMAGE_NOT_YET_REASON, not_yet: true });
+      continue;
+    }
+    const reason = IMAGE_NOT_SHOWN_REASONS[code];
+    if (reason) out.push({ ref, reason });
+  }
+  for (const ref of inboxMessageRemoteImageRefsInOrder(body)) out.push({ ref, reason: IMAGE_REMOTE_REASON });
+  return out;
+}
+
+/** `a (why); b (why)`, at most `max` named, then `…and N more`. */
+function namedImages(list: readonly ImageNotShown[], max: number): string {
+  const named = list.slice(0, max).map(({ ref, reason }) => `${ref} (${reason})`).join("; ");
+  return list.length > max ? `${named}; …and ${list.length - max} more` : named;
+}
+
+/** The send tools' warning sentences, or "" when every image shows. Appended to the result text. */
+export function imagesNotShownText(list: readonly ImageNotShown[]): string {
+  const never = list.filter((image) => !image.not_yet);
+  const later = list.filter((image) => image.not_yet);
+  let text = "";
+  if (never.length > 0) {
+    text += ` The message was sent, but ${never.length === 1 ? "this image will not show" : `${never.length} images will not show`}: ${namedImages(never, IMAGES_NOT_SHOWN_MAX)}. Save the image as a local file outside hidden folders and link that path, or attach it with attachments.`;
+  }
+  if (later.length > 0) {
+    text += ` ${later.length === 1 ? "This image does not exist yet" : `${later.length} images do not exist yet`}: ${namedImages(later, IMAGES_NOT_SHOWN_MAX)}; ${later.length === 1 ? "it shows" : "they show"} once written there.`;
+  }
+  return text;
+}
+
 /** An agent's message into `project`, routed by the store (send_message, submit_guide). */
 export async function sendAgentMessage(
   context: InboxMcpContext,
@@ -374,7 +437,7 @@ export async function sendAgentMessage(
   input: AgentSendInput,
   guide?: InboxGuideRef,
   wakes = false,
-): Promise<{ structured: Record<string, unknown>; replayed: boolean; questions: number; attachments: number; superseded: number }> {
+): Promise<{ structured: Record<string, unknown>; replayed: boolean; questions: number; attachments: number; superseded: number; imagesNotShown: ImageNotShown[] }> {
   const { store } = context;
   let attachments: InboxAttachment[] | undefined;
   if (input.attachments && input.attachments.length > 0) {
@@ -391,7 +454,7 @@ export async function sendAgentMessage(
         body: input.body,
         root: project.root,
         base: basePath,
-        worktree: basePath && !isInsideFolder(basePath, project.root) ? basePath : null,
+        anywhere: true,
         sentAt: new Date().toISOString(),
         stage: true,
       })
@@ -429,7 +492,9 @@ export async function sendAgentMessage(
   const landed = store.project(message.project_id)!;
   const questions = (message.questions ?? []).map((q) => ({ key: q.key, kind: q.kind, prompt: q.prompt }));
   const superseded = store.supersededBy(message.id);
+  const notShown = imagesNotShown(input.body, captured?.failures ?? []);
   return {
+    imagesNotShown: notShown,
     superseded: superseded.length,
     replayed: result.replayed,
     questions: questions.length,
@@ -448,6 +513,9 @@ export async function sendAgentMessage(
       replayed: result.replayed,
       cursor: store.messageCursor(message.id) ?? store.cursor(),
       url: threadUrl(context.baseUrl(), message.thread_id),
+      /** Images the body shows that the window will not (missing, not an image, too large, hidden, remote). */
+      ...(notShown.length > 0 ? { images_not_shown: notShown.slice(0, IMAGES_NOT_SHOWN_MAX) } : {}),
+      ...(notShown.length > IMAGES_NOT_SHOWN_MAX ? { images_not_shown_more: notShown.length - IMAGES_NOT_SHOWN_MAX } : {}),
     },
   };
 }
@@ -487,7 +555,7 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
           (sent.attachments > 0 ? ` with ${sent.attachments} attachment${sent.attachments === 1 ? "" : "s"}` : "") +
           (sent.superseded > 0 ? `, superseding ${sent.superseded} earlier question${sent.superseded === 1 ? "" : "s"}` : "");
         return ok(
-          `${sent.replayed ? "Already sent" : "Sent"} to the Plannotator Inbox${asked} (thread ${sent.structured.thread_id}, ${sent.structured.url}). ${callerWakes(ctx) ? INBOX_REPLY_ARRIVES_TEXT : "Call wait_for_reply with this thread_id for the answer, or go on and read_thread later."}`,
+          `${sent.replayed ? "Already sent" : "Sent"} to the Plannotator Inbox${asked} (thread ${sent.structured.thread_id}, ${sent.structured.url}). ${callerWakes(ctx) ? INBOX_REPLY_ARRIVES_TEXT : "Call wait_for_reply with this thread_id for the answer, or go on and read_thread later."}${imagesNotShownText(sent.imagesNotShown)}`,
           sent.structured,
         );
       }),

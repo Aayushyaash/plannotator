@@ -35,7 +35,7 @@ import { inboxBlobPath, writeBlob } from "@plannotator/shared/inbox/attachments"
 import { InboxError } from "@plannotator/shared/inbox/schema";
 import type { InboxStore } from "@plannotator/shared/inbox/store";
 import { buildAuthoredGuideSnapshot } from "./guide/guide-cli";
-import { INBOX_REPLY_ARRIVES_TEXT, SEND_ROUTING_FIELDS, callerWakes, guarded, ok, sendAgentMessage, sendProject, type InboxMcpContext } from "./inbox-mcp";
+import { INBOX_REPLY_ARRIVES_TEXT, SEND_ROUTING_FIELDS, callerWakes, guarded, imagesNotShownText, ok, sendAgentMessage, sendProject, type InboxMcpContext } from "./inbox-mcp";
 
 /** How to read the diff to send as `patch` (Workspaces' local-diff steps, for this machine). */
 export const GUIDE_DIFF_STEPS =
@@ -245,7 +245,7 @@ export function registerInboxGuideTools(server: McpServer, context: InboxMcpCont
         if (!sent.replayed) writeBlob(context.store.dir, described.ref.sha256, Buffer.from(described.text, "utf8"));
         const guide = context.store.message(String(sent.structured.message_id))?.guide ?? described.ref;
         return ok(
-          `${sent.replayed ? "Already sent" : "Sent"} the guided review "${guide.title}" (${guide.sections} section${guide.sections === 1 ? "" : "s"}, ${guide.files} file${guide.files === 1 ? "" : "s"}) to the Plannotator Inbox (thread ${sent.structured.thread_id}, ${sent.structured.url}). ${callerWakes(ctx) ? INBOX_REPLY_ARRIVES_TEXT : "Call wait_for_reply with this thread_id for the person's answer."}`,
+          `${sent.replayed ? "Already sent" : "Sent"} the guided review "${guide.title}" (${guide.sections} section${guide.sections === 1 ? "" : "s"}, ${guide.files} file${guide.files === 1 ? "" : "s"}) to the Plannotator Inbox (thread ${sent.structured.thread_id}, ${sent.structured.url}). ${callerWakes(ctx) ? INBOX_REPLY_ARRIVES_TEXT : "Call wait_for_reply with this thread_id for the person's answer."}${imagesNotShownText(sent.imagesNotShown)}`,
           { ...sent.structured, guide },
         );
       }),

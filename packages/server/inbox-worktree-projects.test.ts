@@ -130,7 +130,7 @@ test("a message from a linked worktree lands in the main repository's project an
   expect(server.store.message(fromMain.message_id)?.base_path).toBeUndefined();
 });
 
-test("images relative to the worktree resolve there; anything outside the project and the worktree is refused", async () => {
+test("images relative to the worktree resolve there, and from anywhere else on this computer", async () => {
   const { main, worktree, dataDir } = world();
   const server = await start(dataDir);
   const sent = await send(await agent(server), {
@@ -144,14 +144,41 @@ test("images relative to the worktree resolve there; anything outside the projec
   expect(new Uint8Array(await after.arrayBuffer())).toEqual(png());
   // An image in the main repository still serves (the project root).
   expect((await image(server, sent.message_id, join(main, "docs", "main-shot.png"))).status).toBe(200);
-  // `../secret.png` from the worktree leaves both the worktree and the project.
-  const escaped = await image(server, sent.message_id, "../secret.png");
-  expect(escaped.status).toBe(403);
-  expect(((await escaped.json()) as { code: string }).code).toBe("outside_project");
+  // `../secret.png` from the worktree leaves both the worktree and the project, and still serves.
+  expect((await image(server, sent.message_id, "../secret.png")).status).toBe(200);
 
   // Once the worktree is removed, its folder is no longer the message's: the image is just gone.
   git(main, "worktree", "remove", "--force", worktree);
   expect((await image(server, sent.message_id, "shots/after.png")).status).toBe(404);
+});
+
+test("a worktree inside a hidden folder (as Codex and Claude Code keep theirs) still shows the images sent from it", async () => {
+  const { root, main, dataDir } = world();
+  // Outside the project's root, under a hidden folder: `.codex/worktrees/<id>`.
+  const hidden = join(root, ".codex", "worktrees", "wt1");
+  mkdirSync(join(root, ".codex", "worktrees"), { recursive: true });
+  git(main, "worktree", "add", "-q", hidden, "-b", "codex-wt");
+  mkdirSync(join(hidden, "shots", ".cache"), { recursive: true });
+  writeFileSync(join(hidden, "shots", "after.png"), png());
+  // A hidden folder inside the folder sent from is the agent's own, as in its project.
+  writeFileSync(join(hidden, "shots", ".cache", "frame.png"), png());
+  // The same hidden parent, outside the worktree: not the folder sent from, so refused.
+  mkdirSync(join(root, ".codex", "other"), { recursive: true });
+  writeFileSync(join(root, ".codex", "other", "x.png"), png());
+  const server = await start(dataDir);
+  const sent = await send(await agent(server), {
+    project_path: hidden,
+    body: "![after](shots/after.png) ![frame](shots/.cache/frame.png) ![other](../../other/x.png)",
+    agent_session: "ses_codex",
+  });
+  expect(sent.project.root).toBe(main);
+  expect(server.store.message(sent.message_id)?.base_path).toBe(hidden);
+  expect((await image(server, sent.message_id, "shots/after.png")).status).toBe(200);
+  expect((await image(server, sent.message_id, "shots/.cache/frame.png")).status).toBe(200);
+  const other = await image(server, sent.message_id, "../../other/x.png");
+  expect(other.status).toBe(403);
+  expect(((await other.json()) as { code: string }).code).toBe("image_hidden");
+  expect(sent.images_not_shown).toEqual([{ ref: "../../other/x.png", reason: "in a hidden folder, or a hidden or .env file" }]);
 });
 
 test("relative attachments resolve in the worktree and are recorded by their realpath", async () => {

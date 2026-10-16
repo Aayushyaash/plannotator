@@ -459,14 +459,15 @@ describe("the device door, on the binary", () => {
     writeFileSync(join(w.project, "shots", "after.png"), ONE_PIXEL_PNG);
     writeFileSync(join(w.project, "shots", "mock.png"), ONE_PIXEL_PNG);
     writeFileSync(join(w.project, "shots", "not-shown.png"), ONE_PIXEL_PNG);
-    // Outside the project, referenced by `../`.
-    writeFileSync(join(w.project, "..", "outside.png"), ONE_PIXEL_PNG);
+    // Outside the project, in a hidden folder, referenced by `../`.
+    mkdirSync(join(w.project, "..", ".private"), { recursive: true });
+    writeFileSync(join(w.project, "..", ".private", "outside.png"), ONE_PIXEL_PNG);
     const body = [
       "The page after the fix:",
       "",
       "![after](shots/after.png)",
       "",
-      "![up](../outside.png)",
+      "![up](../.private/outside.png)",
       "",
       ":::question",
       "Keep the new header?",
@@ -513,10 +514,24 @@ describe("the device door, on the binary", () => {
     expect(unshown.status).toBe(403);
     expect(((await unshown.json()) as Json).code).toBe("image_not_referenced");
     expect(unshown.headers.get("content-security-policy")).toBe("sandbox; default-src 'none'; style-src 'unsafe-inline'");
-    // Referenced, but outside the project.
-    const escaped = await img("../outside.png");
-    expect(escaped.status).toBe(403);
-    expect(((await escaped.json()) as Json).code).toBe("outside_project");
+    // Referenced, but in a hidden folder outside the project: the window's refusal.
+    const hidden = await img("../.private/outside.png");
+    expect(hidden.status).toBe(403);
+    expect(((await hidden.json()) as Json).code).toBe("image_hidden");
+    // A person's reply posted from the phone keeps the project boundary: an image of the
+    // project shows, one elsewhere on the machine (a photo library, say) is refused, by the door and the window alike.
+    mkdirSync(join(w.project, "..", "Photos"), { recursive: true });
+    const photo = join(realpathSync(join(w.project, "..")), "Photos", "IMG_0001.png");
+    writeFileSync(photo, ONE_PIXEL_PNG);
+    const replied = await door(`messages/${id}/reply`, { body: { idempotency_key: keys(), words: `Like this: ![p](${photo}) ![a](shots/after.png)` } });
+    expect(replied.status).toBe(200);
+    const replyId = ((await replied.json()) as Json).reply.id as string;
+    const personImg = (path: string) => door(`messages/${replyId}/image?path=${encodeURIComponent(path)}`);
+    expect((await personImg("shots/after.png")).status).toBe(200);
+    const outsidePhone = await personImg(photo);
+    expect([outsidePhone.status, ((await outsidePhone.json()) as Json).code]).toEqual([403, "outside_project"]);
+    const outsideWindow = await fetch(`${base}/api/inbox/messages/${replyId}/image?path=${encodeURIComponent(photo)}`);
+    expect([outsideWindow.status, ((await outsideWindow.json()) as Json).code]).toEqual([403, "outside_project"]);
     // Another message's id does not lend its body.
     const other = await door(`messages/${threadId}/image?path=${encodeURIComponent("shots/after.png")}`);
     expect(other.status).toBe(403);

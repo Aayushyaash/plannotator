@@ -548,11 +548,11 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
 
   // Where a path an agent named files its messages: its repository (a linked
   // worktree folds into its main repository's project) or the folder, cached
-  // per folder (packages/server/inbox-project-root.ts). One cache for sends,
-  // live sessions and the message-image route, so they always agree.
+  // per folder (packages/server/inbox-project-root.ts). One cache for sends
+  // and live sessions, so they always agree.
   const projectRoots = createInboxProjectRoots(options.projectRootGit ? { git: options.projectRootGit } : {});
   // Images messages show that have no captured file yet: copied in the background after a read of their thread (inbox-message-images.ts).
-  const imageCapture = createInboxImageCapture(store, projectRoots);
+  const imageCapture = createInboxImageCapture(store);
   const projectLocks = new Map<string, Promise<InboxProject>>();
   const resolveProject = async (path: string): Promise<InboxProject> => {
     const { root, name, folder, settled } = await projectRoots.resolve(path);
@@ -1875,9 +1875,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       const newMessage = await live.route(req, path);
       if (newMessage) return newMessage;
 
-      // #1813: an image a message's body shows, read from its project
-      // (packages/server/inbox-message-images.ts).
-      const image = await inboxMessageImageRoute(req, url, store, projectRoots);
+      // #1813: an image a message's body shows, read from wherever it is on this
+      // computer outside hidden folders (packages/server/inbox-message-images.ts).
+      const image = await inboxMessageImageRoute(req, url, store);
       if (image) return image;
 
       // "Open in": an attachment in its own app, by id only (packages/server/inbox-open-in.ts).

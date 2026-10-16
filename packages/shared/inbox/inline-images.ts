@@ -7,14 +7,15 @@
  * (`inboxMessageImageRefsInOrder`: markdown `![alt](src)` and `<img src>`,
  * outside code, in text order, each once) is read under the message-image
  * route's own rules (`readInboxMessageImageAsync`: referenced in the body, an
- * image by extension and by its magic bytes, inside the message's project or
- * the linked worktree it was sent from, at most 10 MB and 50 megapixels, one
+ * image by extension and by its magic bytes, anywhere but a hidden folder or
+ * a hidden or dotenv file, at most 10 MB and 50 megapixels, one
  * `O_NOFOLLOW | O_NONBLOCK` descriptor checked by dev and ino). Its bytes go
  * to `inbox/blobs/<sha256>` and the message keeps an attachment record for it
  * plus `ref`, the src as written (`InboxInlineImage`). An image that cannot be
- * read (remote, outside the project, missing, too large) is left out: the
- * body still shows it through the message-image route, and the window opens
- * it in the plain lightbox until a later read captures it. It never refuses
+ * read (remote, hidden, missing, too large) is left out (its refusal is in
+ * `failures`, which send_message turns into its `images_not_shown` warning):
+ * an image written later shows through the message-image route, and the
+ * window opens it in the plain lightbox until a later read captures it. It never refuses
  * the send.
  *
  * Every read and write is asynchronous and the capture yields to the event
@@ -46,8 +47,8 @@ export interface CaptureInlineImagesInput {
   root: string;
   /** The folder the agent sent from (`base_path`), when not the root. */
   base?: string | null;
-  /** The linked worktree the message was sent from, when the caller checked it is one (outside the root). */
-  worktree?: string | null;
+  /** The message's author is an agent: images from anywhere (`InboxMessageImageInput.anywhere`). */
+  anywhere?: boolean;
   /** The message's time: each record's `sent_at`. */
   sentAt: string;
   /** Set when capturing on a later read: the records are marked `captured: "on_open"` at this time. */
@@ -60,10 +61,16 @@ export interface CaptureInlineImagesInput {
   stage?: boolean;
 }
 
+export interface InlineImageFailure {
+  ref: string;
+  code: string;
+  notYet?: true;
+}
+
 export interface CapturedInlineImages {
   images: InboxInlineImage[];
-  /** The sources not captured, with the refusal's code (`image_missing`, `not_an_image`, ...). */
-  failures: { ref: string; code: string }[];
+  /** The sources not captured, with the refusal's code (`image_missing`, `not_an_image`, ...); `notYet` when nothing is at the path yet. */
+  failures: InlineImageFailure[];
   /** The bytes read. */
   bytes: number;
   /** Move staged blobs into place (a no-op unless `stage`). */
@@ -100,16 +107,17 @@ async function place(temp: string, path: string): Promise<void> {
  */
 export async function captureInboxInlineImages(inboxDirPath: string, input: CaptureInlineImagesInput): Promise<CapturedInlineImages> {
   const images: InboxInlineImage[] = [];
-  const failures: { ref: string; code: string }[] = [];
+  const failures: InlineImageFailure[] = [];
   const staged: { temp: string; path: string }[] = [];
   let bytes = 0;
   const dir = inboxBlobsDir(inboxDirPath);
   const refs = (input.refs ?? inboxMessageImageRefsInOrder(input.body)).slice(0, input.max ?? INBOX_INLINE_IMAGES_MAX);
   for (const [index, ref] of refs.entries()) {
     if (index > 0) await yieldToLoop();
-    const read = await readInboxMessageImageAsync({ body: input.body, root: input.root, base: input.base ?? null, worktree: input.worktree ?? null, path: ref }).catch(() => null);
+    const read = await readInboxMessageImageAsync({ body: input.body, root: input.root, base: input.base ?? null, path: ref, anywhere: input.anywhere === true }).catch(() => null);
     if (!read || !read.ok) {
-      failures.push({ ref, code: read && !read.ok ? read.code : "image_missing" });
+      if (!read) failures.push({ ref, code: "image_read_failed" });
+      else failures.push({ ref, code: read.code, ...(read.notYet ? { notYet: true as const } : {}) });
       continue;
     }
     const sha256 = createHash("sha256").update(read.bytes).digest("hex");

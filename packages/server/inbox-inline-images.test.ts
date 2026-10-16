@@ -56,6 +56,8 @@ function world() {
   writeFileSync(join(project, "design", "b.png"), png(4, 3, 2));
   writeFileSync(join(project, "design", "fake.png"), "not an image");
   writeFileSync(join(root, "outside.png"), png(4, 3, 9));
+  mkdirSync(join(root, ".private"), { recursive: true });
+  writeFileSync(join(root, ".private", "hidden.png"), png(4, 3, 8));
   const dataDir = join(root, "data");
   process.env.PLANNOTATOR_DATA_DIR = dataDir;
   return { root, project, dataDir };
@@ -95,13 +97,13 @@ const BODY = [
   "![fenced](design/a.png)",
   "```",
   "",
-  "![A](design/a.png) ![fake](design/fake.png) ![up](../outside.png) ![gone](design/missing.png) ![remote](https://example.com/x.png)",
+  "![A](design/a.png) ![fake](design/fake.png) ![up](../.private/hidden.png) ![gone](design/missing.png) ![remote](https://example.com/x.png)",
   "",
   '<img src="design/b.png" alt="again">',
 ].join("\n");
 
 test("the body's image references in text order, each once, outside code", () => {
-  expect(inboxMessageImageRefsInOrder(BODY)).toEqual(["design/b.png", "design/a.png", "design/fake.png", "../outside.png", "design/missing.png"]);
+  expect(inboxMessageImageRefsInOrder(BODY)).toEqual(["design/b.png", "design/a.png", "design/fake.png", "../.private/hidden.png", "design/missing.png"]);
   expect(inboxMessageImageRefsInOrder('<img src="z.png"> then ![y](y.png)')).toEqual(["z.png", "y.png"]);
   expect(inboxMessageImageRefsInOrder("no images")).toEqual([]);
 });
@@ -113,7 +115,7 @@ test("a message's images are captured at send under the image route's rules, ser
 
   const thread = (await (await get(server, `/api/inbox/threads/${sent.thread_id}`)).json()) as any;
   const message = thread.thread.messages[0];
-  // b then a: text order, each once; fake (not an image), outside the project, missing and remote are left out.
+  // b then a: text order, each once; fake (not an image), a hidden folder outside the project, missing and remote are left out.
   expect(message.inline_images.map((i: any) => i.ref)).toEqual(["design/b.png", "design/a.png"]);
   const [b, a] = message.inline_images;
   expect(b.id).toMatch(/^att_[0-9A-Z]{26}$/);
@@ -163,7 +165,7 @@ test("a body with no local image gets no field; one whose images cannot be read 
   const server = await start(dataDir);
   const client = await agent(server);
   const plain = await send(client, { project_path: project, body: "Just words.", thread: "a" });
-  const unreadable = await send(client, { project_path: project, body: "![x](design/missing.png) ![y](../outside.png)", thread: "b" });
+  const unreadable = await send(client, { project_path: project, body: "![x](design/missing.png) ![y](../.private/hidden.png)", thread: "b" });
   const read = async (threadId: string) => ((await (await get(server, `/api/inbox/threads/${threadId}`)).json()) as any).thread.messages[0];
   expect((await read(plain.thread_id)).inline_images).toBeUndefined();
   expect((await read(unreadable.thread_id)).inline_images).toEqual([]);
@@ -224,14 +226,20 @@ test("a message sent before capture gets its copies on the thread's first read, 
   expect(listing.inline_images[0]).toMatchObject({ captured: "on_open", changed_since_sent: true });
 });
 
-test("the capture follows the worktree a message was sent from and never reads outside the project", async () => {
-  const { project, dataDir } = world();
+test("the capture starts at the folder a message was sent from, takes images outside the project, never a hidden folder outside it", async () => {
+  const { root, project, dataDir } = world();
   mkdirSync(join(project, "packages", "web", "shots"), { recursive: true });
   writeFileSync(join(project, "packages", "web", "shots", "home.png"), png(5, 5, 3));
   const server = await start(dataDir);
-  const sent = await send(await agent(server), { project_path: join(project, "packages", "web"), body: "![home](shots/home.png) ![esc](../../../outside.png)" });
+  const sent = await send(await agent(server), {
+    project_path: join(project, "packages", "web"),
+    body: "![home](shots/home.png) ![esc](../../../outside.png) ![hidden](../../../.private/hidden.png)",
+  });
   const thread = (await (await get(server, `/api/inbox/threads/${sent.thread_id}`)).json()) as any;
-  expect(thread.thread.messages[0].inline_images.map((i: any) => [i.ref, i.path])).toEqual([["shots/home.png", join(project, "packages", "web", "shots", "home.png")]]);
+  expect(thread.thread.messages[0].inline_images.map((i: any) => [i.ref, i.path])).toEqual([
+    ["shots/home.png", join(project, "packages", "web", "shots", "home.png")],
+    ["../../../outside.png", join(root, "outside.png")],
+  ]);
 });
 
 test("images with no record are captured on a later read, in the background: written after the send, past the send's 64, the person's own", async () => {
