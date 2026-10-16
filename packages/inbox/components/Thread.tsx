@@ -1824,7 +1824,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
       data-thread-id={thread.thread_id}
     >
       <div className="ib-phead">
-        {/* A phone leads with the way back to the list; Mark read and Archive move to the right, where the close was. */}
+        {/* A phone leads with the way back to the list; Archive sits at the right, where the close was. */}
         {phone ? (
           <button type="button" className="ib-pback" onClick={onClose} aria-label={`Back to ${backLabel}`} data-phone-back="">
             <Icon name="chevL" size={18} />
@@ -1859,15 +1859,11 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                 <span className="ib-vsep" aria-hidden="true" />
               </>
             )}
-            {archiveButton}
-            {markReadOffered && (
-              <>
-                <span className="ib-vsep" aria-hidden="true" />
-                {markReadButton}
-              </>
-            )}
           </>
         )}
+        {/* Mark read leads, furthest from the close; Archive sits beside the close at the right
+            (owner, 2026-10-16). A phone keeps the same order after its way back. */}
+        {markReadButton}
         {one ? (
           <span className="ib-sp" />
         ) : (
@@ -1889,12 +1885,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
             </button>
           </>
         )}
-        {phone ? (
-          <>
-            {markReadButton}
-            {archiveButton}
-          </>
-        ) : stacked || backBesideFile ? null : (
+        {archiveButton}
+        {phone || stacked || backBesideFile ? null : (
           <button type="button" className="ib-iconbtn" onClick={onClose} title="Close" aria-label="Close the thread">
             <Icon name="x" />
           </button>

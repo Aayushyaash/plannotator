@@ -82,7 +82,7 @@ async function serverSection(threadId: string): Promise<string | undefined> {
   return model.sections.find((s) => s.threads.some((t) => t.thread_id === threadId))?.id;
 }
 
-const TESTS = 14;
+const TESTS = 15;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -314,6 +314,27 @@ test.skipIf(!hasDom)('E marks the open thread read; a stopped thread warns with 
   expect(head().getAttribute('aria-pressed')).toBe('false');
   expect(document.querySelector('[data-inbox-toast]')).toBeNull();
   expect((await questionStates(ids.stopped)).map((q) => q.state)).toEqual(['open', 'open']);
+});
+
+test.skipIf(!hasDom)('the header leads with Mark read; Archive sits beside the close at the right, with nothing between them', async () => {
+  // Owner, 2026-10-16: "the archive button needs to move next to the close button. Mark read should be the furthest."
+  const el = await renderApp(`#thread=${ids.stopped}`);
+  await until(() => el.querySelector('section.ib-pane .ib-phead [data-mark-read]') !== null, 'the header');
+  const head = el.querySelector('section.ib-pane .ib-phead')!;
+  const buttons = [...head.querySelectorAll('button')];
+  const markRead = head.querySelector('[data-mark-read]')!;
+  const archive = head.querySelector('[data-archive]')!;
+  const close = head.querySelector('button[aria-label="Close the thread"]');
+  // DOM order is the tab order: Mark read first, Archive then the close last.
+  expect(buttons[0]).toBe(markRead as HTMLButtonElement);
+  if (close) {
+    expect(buttons.at(-1)).toBe(close as HTMLButtonElement);
+    expect(archive.nextElementSibling).toBe(close);
+  } else {
+    expect(buttons.at(-1)).toBe(archive as HTMLButtonElement);
+  }
+  expect(archive.getAttribute('aria-label')).toBe('Archive the thread');
+  expect(head.querySelectorAll('.ib-vsep').length).toBe(0);
 });
 
 test.skipIf(!hasDom)('the pressed button moves it back; the toast Undo does the same', async () => {

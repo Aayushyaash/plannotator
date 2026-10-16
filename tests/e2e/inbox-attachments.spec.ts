@@ -659,12 +659,13 @@ test('leaving full screen keeps the file beside the thread with ‹ Inbox leadin
   await exit.focus();
   await page.keyboard.press('Enter');
   await expect(pane).not.toHaveClass(/ib-full/);
-  // Focus stays on the toggle, now Full screen; the way back is in view at the top left, ahead of Archive.
+  // Focus stays on the toggle, now Full screen; the way back is in view at the top left, ahead of Mark read; Archive ends the header.
   await expect(pane.getByRole('button', { name: 'Full screen' })).toBeFocused();
   await expect(back).toBeVisible();
   await expect(back).toHaveAccessibleName('Back to Inbox');
   await expect(back).toHaveText('Inbox');
   await expect(thread.locator('.ib-phead > *').first()).toHaveAttribute('data-file-back', '');
+  await expect(thread.locator('.ib-phead > *').last()).toHaveAttribute('data-archive', '');
   await expect(thread.getByRole('button', { name: 'Close the thread' })).toHaveCount(0);
   await expect(nav).toBeHidden();
   await expect(page.locator('.ib-listcol')).toHaveCount(0);
