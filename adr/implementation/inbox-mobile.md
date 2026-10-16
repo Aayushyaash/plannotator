@@ -133,7 +133,7 @@ The allowlist. Each row is the window's handler as it is today, with the request
 | `POST threads/:id/read`, `POST threads/:id/unread` | same | `{ idempotency_key }` | `{ thread: row }`: Mark read (the row goes to Quiet, its waiting questions close unanswered; on a thread that came back from the archive it goes back to Archived at once, even while the person's earlier reply there waits on the agent) and its Undo (it reopens only the questions that Mark read closed; one an earlier Mark read closed stays closed); added after section 7, no exchange of its own. Row semantics since 2026-10-12, the wire unchanged: the Inbox's own notes to the agent (person messages carrying `set_aside` or `reopened`) are neither the person's reply nor a look, so a row's `sent`, `unseen`, `waiting_on_person` and `back_from_archive` read past them (and `waiting_on_person` is false while a Mark read stands), and the row gains the additive `last_agent_at` (the latest agent message's time; `last_at` and `last_author` still count the notes). The thread-state model (`adr/implementation/inbox-thread-state.md`) and its trace fixtures say the same | |
 | `GET events[?cursor=n]` | `GET /api/inbox/events` | `Last-Event-ID` or `?cursor=` | SSE: `hello`, `record` per store line (`id:` = seq), `status`, a heartbeat every 15 s | 7.9 |
 | `POST messages/:id/picks` | same | `{ idempotency_key, questions: [{ key, revision, answer or null }] }` | `{ message_id, questions, reply: null }` | 7.10 |
-| `POST messages/:id/reply` | same | `{ idempotency_key, words?, questions?, feedback?, annotation_ids?, skip_unanswered? }` (`skip_unanswered: true` skips the message's questions left without a pick; a phone sends it only as the window does, see 7.11) | `{ message_id, questions, reply, replayed, decisions, decisions_refused }` | 7.11 |
+| `POST messages/:id/reply` | same | `{ idempotency_key, words?, questions?, feedback?, annotation_ids?, skip_unanswered?, uploads? }` (`skip_unanswered: true` skips the message's questions left without a pick; a phone sends it only as the window does, see 7.11; `uploads`: `upl_` ids from 7.48, which become attachments on the reply, see 7.57) | `{ message_id, questions, reply, replayed, decisions, decisions_refused }` | 7.11 |
 | `POST messages/:id/resolve` | same | `{ idempotency_key, resolved? }` | `{ thread: summary }` | 7.12 |
 | `POST messages/:id/ack` | same | `{ idempotency_key, ack? }` (`ack: false` takes it back) | `{ message, thread: row }`: 👍 Looks good (design record "inbox-acknowledge", 2026-10-15). Silent: nothing is sent, no session is woken, no push. The message gains `ack: { label, at, read_seq, made_read, settled_seq, settled_at, seen_at }` and the thread is marked read (Quiet until an agent writes again); the row gains the additive `ack: { label, at }` while that read holds (draw "👍 Looks good" in place of "Read"). `ack: false` removes it and undoes the Mark read when the 👍 made it (`made_read`); `threads/:id/unread` on that read withdraws the ack too. Only the thread's latest agent message, only while no question in the thread is open or picked and the person has not replied after it: `422 ack_not_allowed` (a person's message), `409 ack_stale` (a newer agent message), `409 ack_after_reply`, `409 question_open`, `409 thread_resolved`. An Inbox before it answers `404 device_route_not_found`. Added 2026-10-15 | 7.56 |
 | `POST messages/:id/to` | same | `{ idempotency_key, to: { host?, session } }` | `{ message, row }`: Send to another session, for a person message no session took yet. `409 already_delivered`, `409 thread_resolved`, `422 not_addressed`, `409 session_not_live` pass through. Added 2026-10-15 | 7.41 |
@@ -1157,7 +1157,7 @@ curl -sS -X POST "$INBOX/api/inbox/device/markups?idempotency_key=00000000-0000-
 
 ### 7.53 A comment on a guided review's diff
 
-7.50 to 7.52 (shared drafts) and 7.54, 7.55 (decision retire and replace) are held and not built. 7.56 is 👍 Looks good (below).
+7.50 to 7.52 (shared drafts) and 7.54, 7.55 (decision retire and replace) are held and not built. 7.56 is 👍 Looks good, 7.57 a reply carrying files (below).
 
 ```sh
 curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/guide/annotations" \
@@ -1176,6 +1176,18 @@ curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K7000000000000000000002
 ```
 
 `{ "message": { "id": "msg_01K70000000000000000000020", "ack": { "label": "Looks good", "at": "2026-10-15T11:00:00.000Z", "read_seq": 41, "made_read": true, "settled_seq": null, "settled_at": null, "seen_at": null }, "...": "" }, "thread": { "section": "quiet", "read_at": "2026-10-15T11:00:00.000Z", "ack": { "label": "Looks good", "at": "2026-10-15T11:00:00.000Z" }, "...": "" } }`. Undo: `{ "idempotency_key": "…057", "ack": false }` answers the same shape with `ack: null`. Ten seconds after it stands, the Inbox writes `settled_seq` (agents see it from then on: `read_thread` carries `ack: { label, at }`, and `wait_for_reply` answers `{ status: "acknowledged" }`), and once an agent reads it, `seen_at` (the window draws "<agent> saw it"). Nothing is pushed for it, ever.
+
+### 7.57 A reply carrying files
+
+The window's reply box takes pasted images (2026-10-16); the door carries the same field. Upload each file first (7.48), then name the ids on the Send:
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/reply" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000057","words":"This is what I see.","questions":[],"uploads":["upl_01K70000000000000000000057"]}'
+```
+
+7.11's answer, with `reply.attachments` holding each file as an ordinary attachment record (the same as 7.40's thread). The agent reads them as `Attached: <name> (<path>)` lines under the words, on its wake and from `wait_for_reply`. A Send of files alone (no words, no answers) is a reply, read as a words-only one. Replaying the key answers the reply it wrote and copies nothing; an id that is gone: `404 upload_not_found`, nothing written. On a Send that answers several messages, name the files on the reply that carries the words (the last), as the window does.
 
 ## 8. What this contract leaves out
 

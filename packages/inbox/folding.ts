@@ -170,8 +170,8 @@ export function replyWords(body: string): string {
  * sent shows the answers: what the person decided is the reason to look
  * back. Otherwise its first words; a message that is only a question block,
  * its first live question's prompt. A person's reply shows its own words;
- * with none, the answers it sent (from `messages`, the thread); else its
- * first words.
+ * with none, the answers it sent (from `messages`, the thread); else the
+ * names of the files it carries; else its first words.
  */
 export function foldSnippet(message: InboxMessageWire, messages: readonly InboxMessageWire[] = [message]): FoldSnippet {
   if (message.author.kind === 'person') {
@@ -179,6 +179,9 @@ export function foldSnippet(message: InboxMessageWire, messages: readonly InboxM
     if (words) return { kind: 'words', text: words };
     const sent = messages.flatMap((m) => (m.questions ?? []).filter((q) => q.sent_reply_id === message.id && q.answer !== null));
     if (sent.length > 0) return { kind: 'answers', parts: answeredParts(sent) };
+    // Files pasted in with no words: name them, not the still-open line the agent reads.
+    const files = message.attachments ?? [];
+    if (files.length > 0) return { kind: 'words', text: files.map((file) => file.name).join(', ') };
     return { kind: 'words', text: firstWords(withoutInboxSkillsBlock(message.body)) };
   }
   const questions = (message.questions ?? []).filter(live);

@@ -1,17 +1,18 @@
 /**
  * Plannotator Inbox: files the person uploads from the window for a thread
- * they start (compose, "send a new message to a connected agent").
+ * they start (compose, "send a new message to a connected agent") or a reply
+ * (pasted into the reply box).
  *
  *   inbox/uploads/pending/<upl_id>.json   an upload not sent yet; a draft may name it
- *   inbox/uploads/<att_id>/<name>         a sent upload: a read-only hard link of its blob
+ *   inbox/uploads/<att_id>/<name>         a sent upload: a read-only copy of its blob
  *   inbox/blobs/<sha256>                  the bytes, in the store agents' files use
  *
  * Agents attach paths; the person uploads bytes. Both end as the same
  * `InboxAttachment` record, so the window's tiles, viewers, download route and
  * the phone door carry an upload unchanged. At send each upload becomes a
- * real file with its real name (a hard link of the blob, a copy where links
- * fail), so the agent can open it; that file never changes, so it never reads
- * as "changed since sent".
+ * real file with its real name (a copy of the blob, a clone where the
+ * filesystem has them, never a hard link), so the agent can open it; it is
+ * read-only, so it reads as the version sent.
  *
  * Rules: the name is a plain file name (no path separator, no control
  * character, at most 255 bytes) outside the dotenv family; the body is
@@ -66,7 +67,9 @@ export function inboxAttachedLines(message: { attachments?: readonly InboxAttach
 /** The words an agent reads for a person's message: its body, then `inboxAttachedLines`. */
 export function inboxBodyForAgent(message: { body: string; attachments?: readonly InboxAttachment[] | null }): string {
   const attached = inboxAttachedLines(message);
-  return attached ? `${message.body}\n\n${attached}` : message.body;
+  if (!attached) return message.body;
+  // A reply of pasted files alone may have no words.
+  return message.body.trim() ? `${message.body}\n\n${attached}` : attached;
 }
 const PENDING_DIR = "pending";
 /** The most one uploaded file may hold (decision 1a: under the Inbox's 128 MiB request bound). */

@@ -17,7 +17,7 @@
  *    route there, and the mapping goes with the switch and a clean stop.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -1216,6 +1216,37 @@ describe("the door's parity routes, in process (7.39 to 7.49)", () => {
     const read = await door(`markups/${markup.name}`);
     expect(Buffer.from(await read.arrayBuffer()).equals(ONE_PIXEL_PNG)).toBe(true);
     expect((await door("markups?idempotency_key=mk-2", { raw: "<svg/>" })).status).toBe(422);
+  });
+
+  test("7.57: a reply carries uploads through the door unchanged: they become the reply's attachments, a replay copies nothing, a gone id is the window's 404", async () => {
+    const { ledger, inbox, door } = await world();
+    const { store } = inbox;
+    const project = store.ensureProject({ name: "ledger", root: ledger });
+    const asked = store.sendMessage({ project_id: project.id, author: { kind: "agent", host: "claude-code", session: "ses-a", name: null }, body: "The chart is rendered." }).message;
+
+    const uploaded = await door("uploads?name=pasted-image-2026-10-16-0912.png&idempotency_key=paste-up-1", { raw: ONE_PIXEL_PNG, headers: { "Content-Type": "image/png" } });
+    const upload = ((await uploaded.json()) as Json).upload;
+    const body = { idempotency_key: "paste-reply-1", words: "This is what I see.", questions: [], uploads: [upload.upload_id] };
+    const sent = await door(`messages/${asked.id}/reply`, { body });
+    expect(sent.status).toBe(200);
+    const reply = ((await sent.json()) as Json).reply;
+    expect(reply.attachments.map((a: Json) => [a.name, a.kind])).toEqual([["pasted-image-2026-10-16-0912.png", "image"]]);
+    expect(store.message(reply.id)!.attachments!.map((a) => a.id)).toEqual(reply.attachments.map((a: Json) => a.id));
+
+    const again = await door(`messages/${asked.id}/reply`, { body });
+    expect(again.headers.get("idempotent-replayed")).toBe("true");
+    expect(((await again.json()) as Json).reply.id).toBe(reply.id);
+    // The window's own replay (another key on the door, the store's key the same) copies nothing either.
+    const replayed = await fetch(`http://127.0.0.1:${inbox.port}/api/inbox/messages/${asked.id}/reply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect(((await replayed.json()) as Json).replayed).toBe(true);
+    expect(readdirSync(join(inbox.store.dir, "uploads")).filter((name) => name.startsWith("att_"))).toHaveLength(1);
+
+    const gone = await door(`messages/${asked.id}/reply`, { body: { ...body, idempotency_key: "paste-reply-2" } });
+    expect([gone.status, ((await gone.json()) as Json).code]).toEqual([404, "upload_not_found"]);
   });
 
   test("a raw body past its bound is refused promptly and never buffered whole: a chunked drawing past the door's 32 MB, an upload declaring more than 100 MB; neither is recorded under its key; the window's drawing route keeps the 128 MiB request bound", async () => {

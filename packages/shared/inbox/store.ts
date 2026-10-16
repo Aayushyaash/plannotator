@@ -186,6 +186,12 @@ export interface InboxReplyInput {
    * MCP) keeps them open.
    */
   skip_unanswered?: boolean;
+  /**
+   * Files the person pasted into the reply box, already copied out of their
+   * uploads (`inboxUploadAttachments`): the reply carries them as compose's
+   * thread carries its files, and a reply of files alone is a reply.
+   */
+  attachments?: InboxAttachment[];
 }
 
 export interface InboxReplyResult {
@@ -1759,17 +1765,20 @@ export class InboxStore {
    * written as ONE reply in the thread. Replaying the same idempotency key on
    * the same message answers the reply it wrote, and writes nothing.
    */
+  /** The person's reply to this message written under this idempotency key, for a replayed Send. */
+  replyByKey(messageId: string, key: string): InboxMessage | null {
+    if (!this.messages.has(messageId) || !key) return null;
+    for (const message of this.messages.values()) {
+      if (message.reply_to === messageId && message.author.kind === "person" && message.idempotency_key === key) return message;
+    }
+    return null;
+  }
+
   sendReply(messageId: string, input: InboxReplyInput): InboxReplyResult {
     const key = typeof input.idempotency_key === "string" ? input.idempotency_key.trim() : "";
     if (!key) throw new InboxError("validation_error", "idempotency_key: required on a Send.", { field: "idempotency_key" });
-    const existingMessage = this.messages.get(messageId);
-    if (existingMessage) {
-      for (const message of this.messages.values()) {
-        if (message.reply_to === messageId && message.author.kind === "person" && message.idempotency_key === key) {
-          return { reply: message, questions: this.questionsOf(messageId), replayed: true };
-        }
-      }
-    }
+    const replayed = this.replyByKey(messageId, key);
+    if (replayed) return { reply: replayed, questions: this.questionsOf(messageId), replayed: true };
     const message = this.targetMessage(messageId);
     // After the message's own refusals (not found, resolved), so a gone
     // session is only ever the reason when it is the reason.
@@ -1789,7 +1798,8 @@ export class InboxStore {
       input.skip_unanswered === true
         ? this.questionRecords(message.id).filter((r) => !planned.has(r.key) && inboxQuestionState(r, false) === "open")
         : [];
-    if (plan.length === 0 && skips.length === 0 && words.trim() === "" && feedback === "") {
+    const attachments = input.attachments ?? [];
+    if (plan.length === 0 && skips.length === 0 && words.trim() === "" && feedback === "" && attachments.length === 0) {
       // A target a Send meant only to skip, whose questions closed meanwhile
       // (answered, replaced, a Mark read): nothing to write, not a refusal.
       if (input.skip_unanswered === true) throw new InboxError("nothing_to_send", "Nothing is left to send on this message.");
@@ -1879,6 +1889,7 @@ export class InboxStore {
       resolved_at: null,
       idempotency_key: key,
       ...(to ? { to: { host: to.host, session: to.session } } : {}),
+      ...(attachments.length > 0 ? { attachments: attachments.map((attachment) => ({ ...attachment, sent_at: at })) } : {}),
     };
     try {
       for (const record of updated) this.appendQuestion(record, at);

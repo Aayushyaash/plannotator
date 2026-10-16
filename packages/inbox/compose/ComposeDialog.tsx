@@ -11,7 +11,7 @@
  *   back to writing. Nothing is saved without the person's choice.
  * - A reopened draft keeps the session it was for, struck through when that
  *   session has ended: it is never re-addressed on its own.
- * - Files: the paperclip or a drop, uploaded at once (ComposeFiles.tsx).
+ * - Files: the paperclip, a drop or a paste (paste.ts), uploaded at once (ComposeFiles.tsx).
  */
 
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
@@ -19,7 +19,7 @@ import { inboxId, type InboxDraftTo } from '@plannotator/core/inbox-types';
 import { InboxApiError, inboxApi, type DraftView } from '../api';
 import { whenTime } from '../format';
 import { HostMark, Icon } from '../icons';
-import { ComposeFileTiles, useComposeFiles } from './ComposeFiles';
+import { ComposeFileTiles, attachedAnnouncement, useComposeFiles } from './ComposeFiles';
 import { ToPicker } from './ToPicker';
 import { useComposeSessions } from './useComposeSessions';
 import { InboxComposerField } from '../components/ComposerField';
@@ -82,7 +82,14 @@ export function ComposeDialog(props: ComposeDialogProps) {
   const [draft, setDraft] = useState<DraftView | null>(request.draft ?? null);
   const [body, setBody] = useState(request.draft?.body ?? '');
   const [chosen, setChosen] = useState<string | null>(request.draft ? (request.draft.to?.session ?? null) : (request.session ?? null));
-  const files = useComposeFiles(request.draft?.files ?? []);
+  // A paste is said in the dialog's own polite region (the window's is outside the modal dialog).
+  const [pasteSaid, setPasteSaid] = useState('');
+  const files = useComposeFiles(request.draft?.files ?? [], {
+    onPasted: (names) => {
+      setPasteSaid('');
+      setTimeout(() => setPasteSaid(attachedAnnouncement(names)), 30);
+    },
+  });
   const { model, load } = useComposeSessions(true);
   const projects = model?.projects ?? [];
   const target = findTarget(projects, chosen);
@@ -379,6 +386,10 @@ export function ComposeDialog(props: ComposeDialogProps) {
         if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
         setDropping(false);
       }}
+      // A paste anywhere in the dialog that carries files attaches them; text pastes as text.
+      onPaste={(event) => {
+        if (files.paste(event)) setError(null);
+      }}
       onDrop={(event) => {
         if (event.dataTransfer.files.length === 0) return;
         event.preventDefault();
@@ -576,6 +587,9 @@ export function ComposeDialog(props: ComposeDialogProps) {
           )}
         </div>
       )}
+      <div className="ib-sr" aria-live="polite" data-compose-paste-live="">
+        {pasteSaid}
+      </div>
       {dropping && (
         <div className="ib-cp-drop" aria-hidden="true">
           <Icon name="clip" size={20} />

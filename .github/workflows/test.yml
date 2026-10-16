@@ -153,6 +153,7 @@ jobs:
           packages/inbox/endedSession.test.tsx
           packages/inbox/compose.test.tsx
           packages/inbox/composeThread.test.tsx
+          packages/inbox/pasteFiles.test.tsx
           packages/inbox/markRead.test.tsx
           packages/inbox/ack.test.tsx
           packages/inbox/wordsOnlyTwoAsks.test.tsx

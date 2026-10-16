@@ -4,7 +4,7 @@ import { Viewer } from '@plannotator/ui/components/Viewer';
 import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
 import { parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 import { getHtmlChromeState, saveHtmlChromeState } from '@plannotator/ui/utils/htmlChrome';
-import type { InboxDecision, InboxDecisionDraft, InboxListRow, InboxMessageWire, InboxProjectRepo, InboxQuestion, InboxThread } from '@plannotator/core/inbox-types';
+import type { InboxDecision, InboxDecisionDraft, InboxListRow, InboxMessageWire, InboxProjectRepo, InboxQuestion, InboxThread, InboxUpload } from '@plannotator/core/inbox-types';
 import type { IndexedQuestion, QuestionAnswer, QuestionStatus } from '@plannotator/core/question-block';
 import { inboxDecisionWords } from '@plannotator/core/inbox-questions';
 import { isInboxNote, isInboxTextKind, readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachment, type InboxAttachmentState, type InboxInlineImage } from '@plannotator/core/inbox-types';
@@ -30,6 +30,7 @@ import { reportUnsentReply } from '../unsent';
 import { canToggleRead } from '../markRead';
 import { NewMessageButton, NewMessageComposer, NewMessagePopover, hostName, useLiveSessions, type NewMessageMode } from './NewMessage';
 import { SendToAnotherSession } from '../compose/SendToAnotherSession';
+import { ComposeFileTiles, attachedAnnouncement, useComposeFiles } from '../compose/ComposeFiles';
 import {
   AskerEndedNote,
   CLOSED_ROUTE,
@@ -60,6 +61,8 @@ const NO_ANNOTATIONS: never[] = [];
 /** An unsent pick's tag on its card (MessageBody's statusLabel). */
 const NOT_SENT_STATUS = { label: 'Not sent', tone: 'open' } as const;
 const NO_IDS: ReadonlySet<string> = new Set();
+/** The reply box starts with no files: they come only from a paste (compose's tiles and upload path). */
+const NO_UPLOADS: InboxUpload[] = [];
 
 /** The fold state of one open thread: in memory only, decided once when the thread opens. */
 interface FoldState {
@@ -692,6 +695,18 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
   const [refused, setRefused] = useState<{ key: string; message: string }[]>([]);
   const [box, setBox] = useState<{ open: boolean; text: string }>({ open: false, text: '' });
   /**
+   * Files pasted into the reply box (the owner: "paste in images … if I'm
+   * focused in a reply"): compose's tiles and upload path. They live with the
+   * box: Cancel, Escape, a Send and another thread forget them.
+   */
+  // A paste is said in the thread's polite live region ("Attached pasted-image-….png").
+  const replyFiles = useComposeFiles(NO_UPLOADS, { onPasted: (names) => announce(attachedAnnouncement(names)) });
+  const replyUploads = replyFiles.uploaded.map((upload) => upload.upload_id);
+  const closeBox = () => {
+    setBox({ open: false, text: '' });
+    replyFiles.reset();
+  };
+  /**
    * What this Send does with the questions it leaves unanswered: `auto` skips
    * them once the Send answers at least one question and keeps them open
    * otherwise (a reply of words alone leaves every question open, approval
@@ -704,6 +719,13 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const sendKeys = useRef<Map<string, string> | null>(null);
+  /**
+   * What the last Send that did not finish carried (words, pasted files,
+   * annotations). A retry with other contents takes a new key for the reply
+   * that carries them, so it is never answered as the earlier reply (which
+   * may have gone through) and silently dropped.
+   */
+  const sendContents = useRef<string | null>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const sendRef = useRef<HTMLButtonElement>(null);
@@ -981,7 +1003,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
   // sessions poll the Inbox can be known to have ended). It is the session
   // the Send actually reaches: the latest agent message's when words or
   // annotations ride on it, else the last message a pick or a skip answers.
-  const asking = askingSessionOf(thread, { skip: !keepOpen, carries: (box.open && box.text.trim() !== '') || records.length > 0 });
+  // Only finished uploads count: a tile still uploading or refused is not what Send carries.
+  const asking = askingSessionOf(thread, { skip: !keepOpen, carries: (box.open && box.text.trim() !== '') || records.length > 0 || replyUploads.length > 0 });
   const askerToWatch = asking && askerCanEnd(asking) ? asking.session : null;
   // New message (record 5.x): the project's live sessions, and what the button opened.
   const { model: live, load: loadLive } = useLiveSessions(thread.thread_id, askerToWatch);
@@ -1004,7 +1027,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
     }
     const now = await loadLive();
     const sessions = now?.sessions ?? [];
-    setBox({ open: false, text: '' });
+    closeBox();
     setRoute(CLOSED_ROUTE);
     setNewMessage(sessions.length === 0 ? { kind: 'none' } : sessions.length === 1 ? { kind: 'compose', target: sessions[0]! } : { kind: 'pick' });
   };
@@ -1110,6 +1133,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
     // Another thread: nothing of the last one carries over.
     setPending(new Map());
     setBox({ open: false, text: '' });
+    replyFiles.reset();
     setError(null);
     setSwitching(new Map());
     setCard(null);
@@ -1120,6 +1144,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
     setRoute(CLOSED_ROUTE);
     setSkipChoice('auto');
     sendKeys.current = null;
+    sendContents.current = null;
     revisions.current.clear();
   }, [thread.thread_id]);
 
@@ -1333,7 +1358,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
 
   // The update control's restart guard: an unsent reply is the one thing a
   // restart (a page reload) would lose.
-  const unsentSubject = box.open && box.text.trim() ? (thread.subject ?? 'this thread') : null;
+  const unsentSubject = box.open && (box.text.trim() || replyFiles.files.length > 0) ? (thread.subject ?? 'this thread') : null;
   useEffect(() => {
     reportUnsentReply(unsentSubject ? { subject: unsentSubject } : null);
     return () => reportUnsentReply(null);
@@ -1515,10 +1540,15 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
       setGuard(true);
       return;
     }
+    // Pasted files still uploading: nothing goes until they are in.
+    if (replyFiles.uploading) {
+      setError('Wait for the files to finish uploading.');
+      return;
+    }
     // The session that asked has ended and another is live: Send asks where
     // the reply goes first (the choice), and sends nothing yet.
     if (askerEnded && anyOtherLive && asking && !options.routed) {
-      const empty = picksCount === 0 && records.length === 0 && !(box.open && box.text.trim()) && !skipping;
+      const empty = picksCount === 0 && records.length === 0 && !(box.open && box.text.trim()) && replyUploads.length === 0 && !skipping;
       if (empty) {
         setError('Write a reply or pick an answer first.');
         return;
@@ -1546,9 +1576,12 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
       // A pick saved just now, or still being saved when Send was pressed, counts as an answer.
       const skip = skipsUnanswered(skipChoice, sendAnswersAny(current) || sendAnswersAny(thread, pending));
       const pendingAnnotations = records;
-      const carries = words !== '' || pendingAnnotations.length > 0;
-      // The latest agent message rides last only to carry the words and the
-      // annotations; with neither, a target with nothing to send is left out.
+      const uploads = box.open ? replyUploads : [];
+      // The tiles this Send carries: a file pasted while it is in flight stays for the next one.
+      const sentFiles = new Set(box.open ? replyFiles.files.filter((f) => f.state === 'done' && f.upload).map((f) => f.key) : []);
+      const carries = words !== '' || pendingAnnotations.length > 0 || uploads.length > 0;
+      // The latest agent message rides last only to carry the words, the
+      // annotations and the pasted files; with none, a target with nothing to send is left out.
       const targets = sendTargetsOf(current, skip).filter((t, index, all) => t.questions.length > 0 || t.skips || (carries && index === all.length - 1));
       total = targets.length;
       if (targets.length === 0) {
@@ -1556,6 +1589,10 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
         return;
       }
       if (!sendKeys.current) sendKeys.current = new Map(targets.map((t) => [t.message.id, crypto.randomUUID()]));
+      // A retry whose words, files or annotations changed: the reply carrying them is a new one.
+      const contents = JSON.stringify([words, uploads, pendingAnnotations.map((r) => [r.id, r.updated_at])]);
+      if (sendContents.current !== null && sendContents.current !== contents) sendKeys.current.set(targets.at(-1)!.message.id, crypto.randomUUID());
+      sendContents.current = contents;
       const notRecorded: { key: string; message: string }[] = [];
       // The words and the annotations ride the last reply, after its picks;
       // the skills they reference ride it too, as one block at its end
@@ -1571,6 +1608,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
           questions: target.questions,
           skip_unanswered: skip,
           ...(last && feedback ? { feedback, annotation_ids: pendingAnnotations.map((r) => r.id) } : {}),
+          // The pasted files ride the reply that carries the words, as attachments.
+          ...(last && uploads.length > 0 ? { uploads } : {}),
           // Only a message the ended session asked goes to the session picked;
           // an answer to another session's message still goes to that session.
           ...(to && target.message.author.kind === 'agent' && target.message.author.session === asking?.session ? { to } : {}),
@@ -1580,9 +1619,13 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
       }
       setRefused(notRecorded);
       sendKeys.current = null;
+      sendContents.current = null;
       setRoute(CLOSED_ROUTE);
       setSkipChoice('auto');
-      setBox({ open: false, text: '' });
+      // Only the files this Send carried go; one pasted while it was in flight keeps the box open.
+      const later = replyFiles.current().some((f) => !sentFiles.has(f.key));
+      replyFiles.forget(sentFiles);
+      setBox({ open: later, text: '' });
       setFull(false);
       setFullView(false);
       await onChanged();
@@ -2263,7 +2306,13 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
               Reply to {asker} in {thread.project.name}
             </div>
             {staleQuestions.length > 0 && <ChangedNotice questions={staleQuestions} thread={thread} onJump={jumpTo} />}
-            <div className="ib-rbox">
+            <div
+              className="ib-rbox"
+              // A paste that carries files (a screenshot, a copied image) attaches them; text pastes as text.
+              onPaste={(event) => {
+                if (replyFiles.paste(event)) setError(null);
+              }}
+            >
               <InboxComposerField
                 textareaRef={textRef}
                 ariaLabel={`Reply to ${asker}`}
@@ -2282,10 +2331,22 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                     event.preventDefault();
                     event.stopPropagation();
                     if (route.open) routeBack();
-                    else setBox({ open: false, text: '' });
+                    else closeBox();
                   }
                 }}
               />
+              {replyFiles.files.length > 0 && (
+                <div className="ib-rfiles" data-reply-files="">
+                  <ComposeFileTiles
+                    files={replyFiles.files}
+                    onRemove={(key) => {
+                      replyFiles.remove(key);
+                      // The × goes with its tile: focus stays in the reply.
+                      textRef.current?.focus();
+                    }}
+                  />
+                </div>
+              )}
               {(picksCount > 0 || dropped.length > 0 || takesAnnotations || unanswered.length > 0) && (
                 <div className={`ib-rfoot${keepOpen ? ' ib-keep' : ''}`}>
                   {picksCount > 0 && (
@@ -2317,7 +2378,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                   <Icon name="send" size={15} />
                   Send
                 </button>
-                <button type="button" className="ib-btn ib-ghost" onClick={() => setBox({ open: false, text: '' })}>
+                <button type="button" className="ib-btn ib-ghost" onClick={closeBox}>
                   Cancel
                 </button>
                 <span className="ib-sp" />

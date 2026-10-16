@@ -535,6 +535,8 @@ export const inboxApi = {
       to?: { host: string; session: string };
       /** Skip this message's questions the Send leaves unanswered (false: Keep open). */
       skip_unanswered?: boolean;
+      /** Files pasted into the reply box (upload ids): attachments on this reply. */
+      uploads?: string[];
     },
   ) => post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reply`, input),
   /** The card's switch and its words on one question: `recording`, and `draft` on Done. */
