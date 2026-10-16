@@ -248,6 +248,52 @@ describe("Remind me tomorrow, Settings, What's new", () => {
     const again = await start();
     expect((await (await fetch(`http://127.0.0.1:${again.port}/api/inbox/threads`)).json()).updated).toBeNull();
   });
+
+  test("the releases skipped before an update are still listed after it, across restarts", async () => {
+    // The Inbox ran 0.28.7; this run is 0.28.10. The notes for 0.28.10 list 0.28.8 and 0.28.9.
+    writeUpdateState({ inboxVersion: "0.28.7" }, dataDir);
+    writeReleaseNotes(
+      {
+        version: "0.28.10",
+        notes: "Notes for 0.28.10.",
+        highlights: [
+          { version: "0.28.9", text: "Nine" },
+          { version: "0.28.8", text: "Eight" },
+          { version: "0.28.7", text: "Seven" },
+        ],
+      },
+      dataDir,
+    );
+    const whatsNew = async (server: InboxServer, version: string) =>
+      (await (await fetch(`http://127.0.0.1:${server.port}/api/inbox/whats-new?version=${version}`)).json()) as {
+        current: string;
+        since: string | null;
+        skipped: { version: string }[];
+      };
+    const first = await start();
+    const page = await whatsNew(first, "0.28.10");
+    expect(page.current).toBe("0.28.10");
+    expect(page.since).toBe("0.28.7");
+    expect(page.skipped.map((h) => h.version)).toEqual(["0.28.9", "0.28.8"]);
+    const state = readUpdateState(dataDir);
+    expect(state.inboxVersion).toBe("0.28.10");
+    expect(state.inboxPreviousVersion).toBe("0.28.7");
+    // A newer release still counts from the version this Inbox runs.
+    expect((await whatsNew(first, "0.28.12")).since).toBe("0.28.10");
+    first.stop();
+
+    // A restart on the same version keeps it.
+    const again = await start();
+    const kept = await whatsNew(again, "0.28.10");
+    expect(kept.since).toBe("0.28.7");
+    expect(kept.skipped.map((h) => h.version)).toEqual(["0.28.9", "0.28.8"]);
+    again.stop();
+
+    // A downgrade forgets it: there is no update to count from.
+    const older = await start({ version: "0.28.9" });
+    expect(readUpdateState(dataDir).inboxPreviousVersion).toBeUndefined();
+    expect((await whatsNew(older, "0.28.10")).since).toBe("0.28.9");
+  });
 });
 
 describe("What's new for a version installed outside the Inbox (no notes saved)", () => {

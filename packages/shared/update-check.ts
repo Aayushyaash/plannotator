@@ -118,6 +118,13 @@ export interface UpdateState {
   /** The version the Inbox last ran, to tell "just updated" on its first start after. */
   inboxVersion?: string;
   /**
+   * The version the Inbox ran before `inboxVersion`, written when a start
+   * finds a newer version than the one recorded, and kept until the next
+   * update (removed on a downgrade). What's new counts the releases a person
+   * skipped from it, so "Also in the releases since X" survives the update.
+   */
+  inboxPreviousVersion?: string;
+  /**
    * One release's notes fetched by its tag (fetchReleaseNotesFor), per
    * version: claimed before the request, so concurrent processes ask once.
    */

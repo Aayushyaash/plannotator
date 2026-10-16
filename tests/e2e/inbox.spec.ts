@@ -607,12 +607,12 @@ test('the Update button follows health ("ready"), and pressing it brings the new
   // The health tick (60 s) stats the file, sees it changed, and asks it.
   const button = page.locator('.ib-upd[data-update-state="ready"]');
   await expect(button).toBeVisible({ timeout: 90_000 });
-  await expect(button.getByRole('button', { name: 'Update to Plannotator 9.9.9' })).toBeVisible();
+  await expect(button.getByRole('button', { name: 'Update to 9.9.9', exact: true })).toBeVisible();
   await shot('1.6-restart-to-update');
 
   // The real binary goes back on disk, then Restart starts it in this one's place.
   renameSync(real, world.binary);
-  await button.getByRole('button', { name: 'Update to Plannotator 9.9.9' }).click();
+  await button.getByRole('button', { name: 'Update to 9.9.9', exact: true }).click();
   await expect.poll(() => registry().serverSession, { timeout: 60_000 }).not.toBe(before.serverSession);
   const after = registry();
   expect(after.pid).not.toBe(before.pid);

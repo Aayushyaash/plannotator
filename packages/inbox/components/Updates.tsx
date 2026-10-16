@@ -85,10 +85,17 @@ export function UpdateButton({ update, restarting, updated, onPress, onWhatsNew 
     ) : null;
   }
   const busy = restarting || update.state === 'updating';
-  const label = restarting ? 'Restarting…' : LABEL[update.state];
+  // Available and Ready name their version ("Update to 0.28.22"), so the sidebar's
+  // Update and the What's new page's are not two bare "Update"s.
+  const label = restarting
+    ? 'Restarting…'
+    : update.state === 'available' || update.state === 'ready'
+      ? `Update to ${update.version}`
+      : LABEL[update.state];
   const tip = tipFor(update, restarting);
-  const aria =
-    update.state === 'failed' ? `Update failed: Plannotator ${update.version} didn't install` : busy ? label : `Update to Plannotator ${update.version}`;
+  // The name contains the visible words (WCAG 2.5.3 Label in Name: "click Update to 0.28.22" works by voice);
+  // "Plannotator X" stays in the tooltip.
+  const aria = update.state === 'failed' && !restarting ? `Update failed: Plannotator ${update.version} didn't install` : label;
   return (
     <div className="ib-upd" data-update-state={restarting ? 'restarting' : update.state}>
       <button
@@ -100,7 +107,7 @@ export function UpdateButton({ update, restarting, updated, onPress, onWhatsNew 
         onClick={onPress}
       >
         {busy && <span className="ib-spin" aria-hidden="true" />}
-        {label}
+        <span className="ib-upd-l">{label}</span>
       </button>
       <span className="ib-upd-tip" id="ib-upd-tip" role="tooltip">
         {tip}
@@ -418,6 +425,86 @@ export function FailedDialog({
 
 // ───────────────────────────── What's new ─────────────────────────────
 
+/** "October 15, 2026", from an ISO date. */
+function releasedLong(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? null : new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(date);
+}
+
+const STABLE = /^\d+\.\d+\.\d+$/;
+
+/**
+ * Where the person stands relative to the release the page shows (the
+ * header's one chip): on it, on a development build, behind it (with the
+ * releases in between, which the chip jumps to), or past it.
+ */
+export type WhatsNewStanding =
+  | { kind: 'current' }
+  | { kind: 'dev' }
+  | { kind: 'behind'; current: string; between: number }
+  | { kind: 'ahead'; current: string };
+
+export function whatsNewStanding(model: Pick<WhatsNewModel, 'version' | 'current' | 'skipped'>): WhatsNewStanding {
+  if (!STABLE.test(model.current)) return { kind: 'dev' };
+  if (model.current === model.version) return { kind: 'current' };
+  if (newerThan(model.version, model.current)) return { kind: 'behind', current: model.current, between: model.skipped.length };
+  return { kind: 'ahead', current: model.current };
+}
+
+/** The page's Update: only for the release it shows, and only while that release can be installed today. */
+export function whatsNewCanUpdate(model: Pick<WhatsNewModel, 'version'> | null, update: InboxHealth['update']): boolean {
+  return !!model && !!update && update.version === model.version && (update.state === 'available' || update.state === 'ready');
+}
+
+const SKIPPED_ID = 'ib-wn-since';
+
+function StandingChip({ standing, onJump }: { standing: WhatsNewStanding; onJump: () => void }) {
+  switch (standing.kind) {
+    case 'current':
+      return (
+        <span className="ib-wn-chip ib-good" data-whats-new-standing="current">
+          <Icon name="check" />
+          You&apos;re on this version
+        </span>
+      );
+    case 'dev':
+      return (
+        <span className="ib-wn-chip" data-whats-new-standing="dev">
+          Development build
+        </span>
+      );
+    case 'ahead':
+      return (
+        <span className="ib-wn-chip" data-whats-new-standing="ahead">
+          You have {standing.current}
+        </span>
+      );
+    case 'behind':
+      // Nothing listed in between (the notes name none): the version alone, with nowhere to jump.
+      if (standing.between === 0) {
+        return (
+          <span className="ib-wn-chip" data-whats-new-standing="behind">
+            You have {standing.current}
+          </span>
+        );
+      }
+      return (
+        <button type="button" className="ib-wn-chip ib-lk" data-whats-new-standing="behind" aria-controls={SKIPPED_ID} onClick={onJump}>
+          You have {standing.current} · {formatCount(standing.between)} {standing.between === 1 ? 'release' : 'releases'} in between
+          <Icon name="arrowDown" />
+        </button>
+      );
+  }
+}
+
+/**
+ * The What's new page (design of record `.product/approved/inbox-whats-new-header/`,
+ * variant Toolbar): a sticky bar with the way back on the left (`‹ Inbox |
+ * What's new`) and the release link and Update on the right, then the
+ * release itself under it, aligned to the notes: the version large, the date,
+ * and one chip saying where the person stands.
+ */
 export function WhatsNewPage({
   model,
   error,
@@ -432,39 +519,55 @@ export function WhatsNewPage({
   onUpdate: () => void;
 }) {
   const blocks = useMemo(() => parseMarkdownToBlocks(model?.notes ?? '', { frontmatter: false }), [model?.notes]);
-  const released = releasedOn(model?.published_at);
-  const canUpdate = !!model && !!update && update.version === model.version && (update.state === 'available' || update.state === 'ready');
+  const released = releasedLong(model?.published_at);
+  const canUpdate = whatsNewCanUpdate(model, update);
+  const standing = model ? whatsNewStanding(model) : null;
+  const jumpToSkipped = () => {
+    const section = document.getElementById(SKIPPED_ID);
+    if (!section) return;
+    if (section instanceof HTMLDetailsElement) section.open = true;
+    const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    section.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+    section.focus({ preventScroll: true });
+  };
   return (
     <div className="ib-wn" aria-label="What's new" tabIndex={-1} data-whats-new-page={model?.version ?? ''}>
-      <div className="ib-wn-in">
-        <div className="ib-wn-head">
-          <SidebarTrigger />
-          <div>
-            <h1>What&apos;s new in {model?.version ?? '…'}</h1>
-            {model && (
-              <div className="ib-meta">
-                {released ? `Released ${released} · ` : ''}You have {model.current}
-              </div>
-            )}
-          </div>
-          <div className="ib-acts">
-            <button type="button" className="ib-btn ib-ghost" onClick={onBack}>
-              <Icon name="back" />
-              Inbox
+      <div className="ib-wn-bar">
+        <SidebarTrigger />
+        <button type="button" className="ib-pback" onClick={onBack} data-whats-new-back="">
+          <Icon name="chevL" size={16} />
+          <span className="ib-pback-l">Inbox</span>
+        </button>
+        <span className="ib-wn-div" aria-hidden="true" />
+        <span className="ib-wn-title">What&apos;s new</span>
+        <div className="ib-wn-acts">
+          {model && (
+            <a className="ib-wn-gh" href={model.release_url} target="_blank" rel="noopener noreferrer" data-whats-new-github="">
+              <Icon name="github" />
+              <span className="ib-wn-gh-l">GitHub</span>
+              <span className="ib-sr"> release (opens in a new tab)</span>
+            </a>
+          )}
+          {model && canUpdate && (
+            <button type="button" className="ib-btn ib-pri" onClick={onUpdate} aria-label={`Update to ${model.version}`} data-whats-new-update="">
+              <span>Update</span>
+              {/* Dropped on the narrowest phones; the button's name keeps the version. */}
+              <span className="ib-wn-to">to {model.version}</span>
             </button>
-            {model && (
-              <a className="ib-btn" href={model.release_url} target="_blank" rel="noopener noreferrer">
-                <Icon name="external" />
-                View on GitHub
-              </a>
-            )}
-            {canUpdate && (
-              <button type="button" className="ib-btn ib-pri" onClick={onUpdate}>
-                Update
-              </button>
-            )}
-          </div>
+          )}
         </div>
+      </div>
+      <div className="ib-wn-in">
+        <header className="ib-wn-hero">
+          <p className="ib-wn-pre">What&apos;s new in Plannotator</p>
+          <h1>{model?.version ?? '…'}</h1>
+          {model && (
+            <p className="ib-wn-line">
+              {released && <span>Released {released}</span>}
+              {standing && <StandingChip standing={standing} onJump={jumpToSkipped} />}
+            </p>
+          )}
+        </header>
         {error && <div className="ib-error">{error}</div>}
         {model && model.notes ? (
           <div className="ib-body ib-wn-body">
@@ -488,7 +591,7 @@ export function WhatsNewPage({
           model && <p className="ib-sum">The release has no notes. They are on GitHub.</p>
         )}
         {/* The skipped releases come after this release's notes, folded when there are more than a few (decision 7). */}
-        {model && model.skipped.length > 0 && <SkippedReleases current={model.current} skipped={model.skipped} />}
+        {model && model.skipped.length > 0 && <SkippedReleases since={model.since ?? model.current} skipped={model.skipped} />}
       </div>
     </div>
   );
@@ -497,7 +600,7 @@ export function WhatsNewPage({
 /** More skipped releases than this are folded under their heading. */
 const SKIPPED_SHOWN = 3;
 
-function SkippedReleases({ current, skipped }: { current: string; skipped: WhatsNewModel['skipped'] }) {
+function SkippedReleases({ since, skipped }: { since: string; skipped: WhatsNewModel['skipped'] }) {
   const items = (
     <ul>
       {skipped.map((h) => (
@@ -507,17 +610,17 @@ function SkippedReleases({ current, skipped }: { current: string; skipped: Whats
       ))}
     </ul>
   );
-  const heading = `Also in the releases since ${current}`;
+  const heading = `Also in the releases since ${since}`;
   if (skipped.length <= SKIPPED_SHOWN) {
     return (
-      <div className="ib-wn-skipped" data-skipped-releases="">
+      <section className="ib-wn-skipped" id={SKIPPED_ID} tabIndex={-1} aria-label={heading} data-skipped-releases="">
         <h2>{heading}</h2>
         {items}
-      </div>
+      </section>
     );
   }
   return (
-    <details className="ib-wn-skipped" data-skipped-releases="">
+    <details className="ib-wn-skipped" id={SKIPPED_ID} tabIndex={-1} data-skipped-releases="">
       <summary>
         <h2>
           {heading} <span className="ib-n">· {skipped.length}</span>

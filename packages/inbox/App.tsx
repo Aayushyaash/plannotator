@@ -872,6 +872,10 @@ function Inbox() {
   // so moving between sections never changes where Back goes (Workspaces' BackLink).
   const settingsReturn = useRef('');
   if (route.page !== 'settings') settingsReturn.current = hashOf(route);
+  // What's new's "‹ Inbox" returns to the last Inbox screen (not Settings, not another What's new page):
+  // the browser's Back when the page was opened from there (history.ts), a new entry otherwise.
+  const whatsNewReturn = useRef('');
+  if (route.page !== 'settings' && route.page !== 'whats-new') whatsNewReturn.current = hashOf(route);
 
   // Settings is a focused page (design of record inbox-settings-tabs): the sidebar slides away while it
   // is open and comes back on leaving, without writing the person's stored choice. ⌘B there opens it
@@ -1931,7 +1935,10 @@ function Inbox() {
         model={whatsNew}
         error={whatsNewError}
         update={update}
-        onBack={() => go({ page: 'inbox', project: null, thread: null })}
+        onBack={() => {
+          const hash = whatsNewReturn.current;
+          if (!backTo(hash)) go(routeOf(hash));
+        }}
         onUpdate={pressUpdate}
       />
     );

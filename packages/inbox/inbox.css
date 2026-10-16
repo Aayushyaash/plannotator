@@ -157,7 +157,9 @@ button.ib-mut { border-radius: 6px; }
 /* The update control (.product/approved/plannotator-updates): one full-width filled primary button above
    Settings, 32 px, no motion, never a percentage, never the error colour. */
 .ib-upd { position: relative; margin: 0 2px 2px; }
-.pn-inbox .ib-upd-btn { width: 100%; height: 32px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 13px; font-weight: 550; background: var(--primary); color: var(--primary-foreground); border: 1px solid var(--primary); }
+.pn-inbox .ib-upd-btn { width: 100%; min-width: 0; height: 32px; padding: 0 10px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 13px; font-weight: 550; background: var(--primary); color: var(--primary-foreground); border: 1px solid var(--primary); white-space: nowrap; overflow: hidden; }
+.ib-upd-l { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ib-upd-btn .ib-spin { flex: none; }
 .pn-inbox .ib-upd-btn:hover:not(:disabled) { background: color-mix(in oklch, var(--primary) 88%, var(--foreground)); }
 .pn-inbox .ib-upd-btn:disabled { opacity: 0.55; cursor: default; }
 .pn-inbox .ib-upd-btn.ib-outline { background: transparent; color: var(--foreground); border-color: color-mix(in oklch, var(--foreground) 35%, transparent); }
@@ -226,20 +228,34 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-acts-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; flex-wrap: wrap; }
 .ib-acts-row .ib-left { margin-right: auto; }
 
-/* What's new: the release notes in the main pane, read-only. */
-.ib-wn { flex: 1; min-width: 0; overflow-y: auto; padding: 4px 40px 48px; outline: none; }
-.ib-wn-in { max-width: 760px; margin: 0 auto; }
-.ib-wn-head { display: flex; align-items: flex-start; gap: 12px; padding: 22px 0 18px; border-bottom: 1px solid var(--border); margin-bottom: 8px; }
-.ib-wn-head h1 { margin: 0 0 4px; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
-.ib-wn-head .ib-meta { color: var(--muted-foreground); font-size: 13px; }
-.ib-wn-head .ib-acts { margin-left: auto; display: flex; gap: 8px; flex: none; }
-.ib-wn-skipped { margin: 14px 0 6px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
+/* What's new: the release notes in the main pane, read-only (design of record
+   .product/approved/inbox-whats-new-header/, variant Toolbar): a sticky bar with
+   the way back and the actions, then the release, aligned to the notes. */
+.ib-wn { flex: 1; min-width: 0; overflow-y: auto; padding: 0 0 48px; outline: none; }
+/* Its own stacking context: the notes' Viewer lifts a layer (z-index 50) that must stay under the sticky bar. */
+.ib-wn-in { max-width: 760px; margin: 0 auto; padding: 0 40px; box-sizing: content-box; position: relative; z-index: 0; }
+.ib-wn-bar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 6px; height: 52px; padding: 0 16px 0 12px; background: color-mix(in oklch, var(--card) 92%, transparent); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); border-bottom: 1px solid var(--border); }
+.ib-wn-bar .ib-pback { max-width: none; flex: none; }
+.ib-wn-div { width: 1px; height: 18px; background: var(--border); margin: 0 6px; flex: none; }
+.ib-wn-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.ib-wn-acts { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
+.pn-inbox .ib-wn-gh { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px; border-radius: 7px; font-size: 13.5px; font-weight: 500; color: var(--muted-foreground); text-decoration: none; }
+.pn-inbox .ib-wn-gh:hover { color: var(--foreground); background: color-mix(in oklch, var(--muted) 55%, transparent); }
+.pn-inbox .ib-wn-acts .ib-btn { height: 30px; gap: 4px; }
+.ib-wn-hero { padding: 40px 0 24px; border-bottom: 1px solid var(--border); margin-bottom: 22px; }
+.ib-wn-pre { margin: 0 0 8px; font-size: 13.5px; font-weight: 500; color: var(--muted-foreground); }
+.ib-wn-hero h1 { margin: 0; font-size: 34px; font-weight: 680; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1.1; overflow-wrap: anywhere; }
+.ib-wn-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 12px 0 0; font-size: 13.5px; color: var(--muted-foreground); }
+.pn-inbox .ib-wn-chip { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 9px; border-radius: 999px; font-size: 12.5px; font-weight: 550; border: 1px solid var(--border); color: var(--foreground); background: var(--background); max-width: 100%; text-align: left; }
+.pn-inbox .ib-wn-chip.ib-good { border-color: color-mix(in oklch, var(--success) 35%, var(--border)); color: var(--success); background: color-mix(in oklch, var(--success) 8%, var(--card)); }
+.pn-inbox .ib-wn-chip.ib-lk { cursor: pointer; }
+.pn-inbox .ib-wn-chip.ib-lk:hover { border-color: var(--muted-foreground); }
+.ib-wn-chip .ib-ic { width: 13px; height: 13px; stroke-width: 2.2; flex: none; }
+.ib-wn-skipped { margin: 14px 0 6px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); scroll-margin-top: 68px; }
 .ib-wn-skipped h2 { font-size: 12px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted-foreground); margin: 0 0 6px; }
 .ib-wn-skipped ul { margin: 0; padding-left: 18px; font-size: 13.5px; line-height: 1.6; }
 @media (max-width: 720px) {
-  .ib-wn { padding: 4px 18px 40px; }
-  .ib-wn-head { flex-wrap: wrap; }
-  .ib-wn-head .ib-acts { margin-left: 0; }
+  .ib-wn-in { padding: 0 18px; }
 }
 
 /* main list */
@@ -1774,7 +1790,23 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   .pn-inbox .ib-sframe .ib-lnk { min-height: 0; }
   .ib-ctab, .ib-connect.ib-compact .ib-ctab { height: 44px; }
   .pn-inbox .ib-copy { height: 36px; }
-  .ib-wn { padding: 4px 16px calc(40px + env(safe-area-inset-bottom)); }
+  /* What's new on a phone: the bar is one row of 44 px targets (no title, the GitHub mark alone). */
+  .ib-wn { padding: 0 0 calc(40px + env(safe-area-inset-bottom)); }
+  .ib-wn-in { padding: 0 16px; }
+  .ib-wn-bar { height: calc(60px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) 12px 0 2px; gap: 0; }
+  .ib-wn-div, .ib-wn-title { display: none; }
+  .pn-inbox .ib-wn-gh { width: 44px; height: 44px; padding: 0; justify-content: center; }
+  .ib-wn-gh .ib-ic { width: 20px; height: 20px; }
+  .ib-wn-gh-l { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .pn-inbox .ib-wn-acts .ib-btn { height: 44px; padding: 0 13px; }
+  .ib-wn-hero { padding: 24px 0 20px; }
+  /* The jump to the skipped releases lands below the phone's taller bar and the safe area above it. */
+  .ib-wn-skipped { scroll-margin-top: calc(68px + env(safe-area-inset-top)); }
+  .ib-wn-hero h1 { font-size: 32px; }
+  .ib-wn-line { font-size: 14.5px; }
+  /* The chip keeps its look (one line at 320 px) and takes a 44 px tall hit area. */
+  .pn-inbox .ib-wn-chip { position: relative; min-height: 28px; }
+  .pn-inbox .ib-wn-chip.ib-lk::after { content: ""; position: absolute; inset: -8px 0; }
   .ib-empty { --ib-rhythm: 20px; padding: 0 16px calc(32px + env(safe-area-inset-bottom)); max-width: none; }
   .ib-hcards { grid-template-columns: minmax(0, 1fr); }
 
@@ -2048,6 +2080,7 @@ label.ib-anote-r:hover { background: color-mix(in oklch, var(--muted) 40%, trans
 .ib-logins > span { overflow-wrap: anywhere; }
 
 /* The skipped releases on What's new, folded under their heading when there are many. */
+@media (max-width: 379px) { .ib-wn-to { display: none; } }
 details.ib-wn-skipped { margin-top: 18px; }
 details.ib-wn-skipped > summary { cursor: pointer; list-style-position: inside; }
 details.ib-wn-skipped > summary h2 { display: inline; }

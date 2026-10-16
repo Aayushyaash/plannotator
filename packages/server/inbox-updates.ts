@@ -97,7 +97,13 @@ export interface WhatsNew {
   published_at: string | null;
   release_url: string;
   notes: string;
-  /** One-line highlights of the releases between the running version and this one, newest first. */
+  /**
+   * The version `skipped` counts from: the one this Inbox runs, or, for a
+   * release it already runs, the one it ran before the update. Null for a
+   * development build. Added after `current`, which stays the running version.
+   */
+  since: string | null;
+  /** One-line highlights of the releases between `since` and this one, newest first. */
   skipped: ReleaseHighlight[];
 }
 
@@ -227,11 +233,27 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
   // before it. Shown as a quiet link for the life of this process, while its
   // notes are saved or can be fetched (computeUpdatedLink).
   let updated: string | null = null;
+  // The version the Inbox ran before this one (inboxPreviousVersion), kept
+  // across restarts until the next update: What's new counts the releases a
+  // person skipped from it, not from the version they now run.
+  let previous: string | null = null;
   if (release) {
     try {
-      const before = readUpdateState(options.dataDir).inboxVersion;
-      if (before && compareStableVersions(options.version, before) === 1) updated = normalizeStableVersion(options.version);
-      if (before !== options.version) patchUpdateState((s) => ({ ...s, inboxVersion: options.version }), options.dataDir);
+      const state = readUpdateState(options.dataDir);
+      const before = state.inboxVersion;
+      const newer = !!before && compareStableVersions(options.version, before) === 1;
+      if (newer) updated = normalizeStableVersion(options.version);
+      if (before !== options.version) {
+        patchUpdateState((s) => {
+          const next: typeof s = { ...s, inboxVersion: options.version };
+          if (newer) next.inboxPreviousVersion = before;
+          else if (before) delete next.inboxPreviousVersion;
+          return next;
+        }, options.dataDir);
+      }
+      const kept = newer ? before : before === options.version ? state.inboxPreviousVersion : undefined;
+      const keptVersion = normalizeStableVersion(kept);
+      if (keptVersion && isNewerStableVersion(options.version, keptVersion)) previous = keptVersion;
     } catch {}
   }
 
@@ -487,16 +509,21 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
       const notes = readReleaseNotes(v, options.dataDir);
       if (!hasReleaseNotesContent(notes) && notesInFlight.has(v)) return { kind: "loading" };
       if (!notes) return { kind: "missing" };
-      const from = normalizeStableVersion(options.version);
+      // The releases in between count from the version this Inbox ran before
+      // an update when the page shows a release it already runs (or an older
+      // one); for a newer release, from the version it runs now.
+      const running = normalizeStableVersion(options.version);
+      const from = previous && running && !isNewerStableVersion(v, running) ? previous : running;
       return {
         kind: "notes",
         notes: {
           version: v,
           current: options.version,
+          since: from,
           published_at: notes.publishedAt ?? null,
           release_url: releaseUrlFor(v),
           notes: notes.notes,
-          // The releases a person skipped: newer than the one they run, older than this one.
+          // The releases a person skipped: newer than `since`, older than this one.
           skipped: from
             ? notes.highlights.filter((h) => isNewerStableVersion(h.version, from) && isNewerStableVersion(v, h.version))
             : [],

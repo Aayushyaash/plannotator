@@ -129,6 +129,12 @@ test.skipIf(!hasDom)("the link shows after an update installed by hand, and open
   act(() => link.click());
   await until(() => el.querySelector('[data-whats-new-page="0.28.19"]')?.textContent?.includes('What 0.28.19 brings to the Inbox.') ?? false, 'the notes');
   expect(el.querySelector('.ib-error')).toBeNull();
+  // Opened from the Inbox, "‹ Inbox" is the browser's Back: it adds no history entry.
+  const entries = window.history.length;
+  act(() => (el.querySelector('[data-whats-new-back]') as HTMLButtonElement).click());
+  await until(() => !el.querySelector('[data-whats-new-page]'), 'the Inbox again');
+  expect(window.history.length).toBe(entries);
+  expect(window.location.hash).toBe('');
 });
 
 test.skipIf(!hasDom)('update checks off and no notes saved: no link', async () => {

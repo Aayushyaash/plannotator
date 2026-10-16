@@ -94,7 +94,7 @@ test.afterAll(async () => {
 
 test('an available release shows Update; the dialog runs the install script once with Update now', async ({ page }) => {
   await page.goto(url);
-  const button = page.locator('.ib-upd[data-update-state="available"]').getByRole('button', { name: 'Update to Plannotator 0.28.12' });
+  const button = page.locator('.ib-upd[data-update-state="available"]').getByRole('button', { name: 'Update to 0.28.12', exact: true });
   await expect(button).toBeVisible();
   await page.screenshot({ path: join(proofDir, '1-available.png') });
 

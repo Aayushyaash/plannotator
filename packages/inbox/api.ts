@@ -159,7 +159,14 @@ export interface UpdateDetails {
 
 export interface WhatsNewModel {
   version: string;
+  /** The version this Inbox runs (`dev` for a development build). */
   current: string;
+  /**
+   * The version `skipped` counts from: `current`, or, on the page of a release
+   * this Inbox already runs, the one it ran before the update. Absent from an
+   * older Inbox (read as `current`).
+   */
+  since?: string | null;
   published_at: string | null;
   release_url: string;
   notes: string;
