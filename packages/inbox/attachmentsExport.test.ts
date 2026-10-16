@@ -52,7 +52,7 @@ test('an image in a message is named by its path and the message; the same path 
   const c = inline('att_c', 'msg_c', '2026-10-15T15:22:41.000Z');
   const lone = inline('att_l', 'msg_l', '2026-10-15T15:22:05.000Z', 'design/lone.png');
   const all = [a, b, c, lone];
-  expect(exportFileLabel(lone, '/work/shop', all)).toMatch(/^design\/lone\.png \(image in your (?:\w{3} \d+, )?\d{1,2}:\d{2} [AP]M message\)$/);
+  expect(exportFileLabel(lone, '/work/shop', all)).toMatch(/^design\/lone\.png \(image in your (?:\w{3} \d+, (?:\d{4}, )?)?\d{1,2}:\d{2} [AP]M message\)$/);
   expect(exportFileLabel(a, '/work/shop', all)).toMatch(/^design\/b\.png \(image in your \d{1,2}:\d{2}:05 [AP]M message\)$/);
   const labelB = exportFileLabel(b, '/work/shop', all);
   const labelC = exportFileLabel(c, '/work/shop', all);
@@ -66,7 +66,7 @@ test('an image in a message is named by its path and the message; the same path 
 test('an image in the person\'s own message speaks as the person: "image in my … message"', () => {
   const mine = inline('att_m', 'msg_mine', '2026-10-15T15:22:05.000Z');
   const text = attachmentFeedback([comment('c1', mine, 'Like this.', 'msg_mine')], [mine], new Map(), '/work/shop', { personMessageIds: new Set(['msg_mine']) });
-  expect(text).toMatch(/## design\/b\.png \(image in my \d{1,2}:\d{2} [AP]M message\)/);
+  expect(text).toMatch(/## design\/b\.png \(image in my (?:\w{3} \d+, (?:\d{4}, )?)?\d{1,2}:\d{2} [AP]M message\)/);
   expect(text).not.toContain('image in your');
 });
 
