@@ -21,10 +21,12 @@
  * keydown), now into the field.
  *
  * Nothing changes when focus is already in a text field or inside a frame (an
- * attached HTML page), when text is selected on the page (the person is about
- * to comment on it), or when no remembered field is on screen: gone, hidden,
- * disabled, read-only, scrolled out of view, behind a modal dialog, under a
- * full-screen file or a guided review, or with something else drawn over it.
+ * attached HTML page), when text is selected in an attached file's viewer or
+ * a guided review, or a selection toolbar shows (the person is about to comment on it), or when
+ * no remembered field is on screen: gone, hidden, disabled, read-only,
+ * scrolled out of view (out of the window, or clipped by its pane), behind a
+ * modal dialog, under a full-screen file or a guided review, or with
+ * something else drawn over it.
  */
 
 import { isModKeyHeld } from '@plannotator/ui/utils/platform';
@@ -96,12 +98,30 @@ function sight(field: TextField): Sight {
   const x = rect.left + rect.width / 2;
   const y = rect.top + Math.min(rect.height / 2, 12);
   if (x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight) return 'offscreen';
+  // Scrolled out of its pane while still inside the window: the pane clips it.
+  if (clippedOut(field, x, y)) return 'offscreen';
   if (typeof doc.elementFromPoint !== 'function') return 'unknown';
   const hit = doc.elementFromPoint(x, y);
   if (!hit) return 'unknown';
-  // Scrolled out of its pane while still inside the window: the pane's own edge, or what lies
-  // beside it, is hit, which is "covered" like anything drawn over it.
-  return hit === field || field.contains(hit) || hit.contains(field) ? 'top' : 'covered';
+  // Only the field or something inside it counts as the field on top. An element that merely holds
+  // the field (its pane, the page) is what a clipped field's point lands on, so it does not count.
+  return hit === field || field.contains(hit) ? 'top' : 'covered';
+}
+
+/** The point lies outside a box that clips the field (an ancestor whose overflow is not visible). */
+function clippedOut(field: TextField, x: number, y: number): boolean {
+  const view = field.ownerDocument.defaultView;
+  if (!view) return false;
+  for (let el = field.parentElement; el && el !== field.ownerDocument.documentElement; el = el.parentElement) {
+    const style = view.getComputedStyle(el);
+    const clipsX = style.overflowX !== 'visible';
+    const clipsY = style.overflowY !== 'visible';
+    if (!clipsX && !clipsY) continue;
+    const box = el.getBoundingClientRect();
+    if (box.width === 0 && box.height === 0) continue; // not laid out (a test DOM): nothing to compare
+    if ((clipsX && (x < box.left || x >= box.right)) || (clipsY && (y < box.top || y >= box.bottom))) return true;
+  }
+  return false;
 }
 
 function usable(field: TextField): boolean {
@@ -125,25 +145,38 @@ function usable(field: TextField): boolean {
 }
 
 /**
- * Text the person selected on the page (outside any text field): a ⌘V is not
- * aimed at a field then. A document's selection toolbar counts too: ui's
- * viewer draws the selected words as a pending highlight and clears the
- * browser's own selection while its toolbar (Delete, Comment, labels) shows.
+ * The person is commenting on text they selected in a file: a ⌘V is not aimed
+ * at a field then. A selection toolbar showing counts (ui's viewer draws the
+ * selected words as a pending highlight and clears the browser's own
+ * selection while its toolbar, Delete, Comment and labels, shows), and so
+ * does a browser selection inside an attached file's viewer or a guided
+ * review (code selected in its diff opens a comment there). A selection
+ * anywhere else (a word double-clicked in a thread message, a choice's label)
+ * comments on nothing, so it never turns the paste off.
  */
 function pageSelection(doc: Document): boolean {
-  const toolbar = doc.querySelector('[data-pn-annotation-toolbar-row]');
-  if (toolbar && toolbar.getClientRects().length > 0) return true;
-  return nativeSelection(doc);
+  for (const toolbar of doc.querySelectorAll('[data-pn-annotation-toolbar-row]')) {
+    if (toolbar.getClientRects().length > 0) return true;
+  }
+  return fileViewSelection(doc);
 }
 
-function nativeSelection(doc: Document): boolean {
+/** Where text can be selected to comment on it: an attached file's viewer, and a guided review. */
+const ANNOTATABLE_VIEW = '.ib-view, .ib-viewer';
+
+function fileViewSelection(doc: Document): boolean {
   const selection = doc.getSelection?.();
-  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+  if (!selection || selection.rangeCount === 0) return false;
+  // The words decide, not isCollapsed: code selected in a guided review's diff lives in Pierre's
+  // shadow root, and Chromium and WebKit report that selection on the document as collapsed at the
+  // shadow host's parent (anchorNode retargeted there), while toString() still holds the words.
   if (!selection.toString().trim()) return false;
   const node = selection.anchorNode;
   const el = node instanceof Element ? node : (node?.parentElement ?? null);
+  if (!el) return false;
   // A selection inside a text field is that field's own, not a selection on the page.
-  return !(el && (isTextField(el) || el.closest('textarea, input, [contenteditable="true"], [contenteditable=""]')));
+  if (isTextField(el) || el.closest('textarea, input, [contenteditable="true"], [contenteditable=""]')) return false;
+  return el.closest(ANNOTATABLE_VIEW) !== null;
 }
 
 /**

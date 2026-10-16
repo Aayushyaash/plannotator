@@ -6,7 +6,8 @@
  * clipboard and posting a synthetic ⌘V. In the Inbox, focus often leaves the
  * field the person is writing in without them noticing: a click on a question
  * card's choice moves it to that radio, a click on the message text or on a
- * chip in the reply box moves it to the page, and the reply box stays open.
+ * chip in the reply box moves it to the page, a double-click selects a word of
+ * the message, and the reply box stays open.
  * Before the fix the ⌘V then pasted into nothing. Each case below writes the
  * clipboard, moves focus the way a person does, presses ⌘V, and expects the
  * words in the field: the reply box, a question card's note, compose, and a
@@ -93,6 +94,29 @@ async function dictate(on: Page, words: string): Promise<void> {
   await on.keyboard.press('ControlOrMeta+v');
 }
 
+/** The middle of one word inside the element holding `text`, for a double-click on that word. */
+async function wordRect(on: Page, text: string, word: string): Promise<{ x: number; y: number }> {
+  const point = await on.evaluate(
+    ([text, word]) => {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const value = node.textContent ?? '';
+        if (!value.includes(text)) continue;
+        const start = value.indexOf(text) + text.indexOf(word);
+        const range = document.createRange();
+        range.setStart(node, start);
+        range.setEnd(node, start + word.length);
+        const box = range.getBoundingClientRect();
+        return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+      }
+      return null;
+    },
+    [text, word],
+  );
+  if (!point) throw new Error(`no text node holds ${text}`);
+  return point;
+}
+
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 async function expectLanded(field: Locator, words: string): Promise<void> {
@@ -129,6 +153,26 @@ test('the reply box: after a pick, after a click on the message, after a chip', 
   await dictate(page, 'After a chip. ');
   await expectLanded(box, 'After a chip.');
   expect(await box.inputValue()).toBe('Focused dictation. After a pick. After reading. After a chip. ');
+});
+
+test('a word double-clicked in the message (selected, nothing to comment on) does not keep the dictation out of the reply box', async () => {
+  const p = await context.newPage();
+  try {
+    await p.goto(`${url}#thread=${threadId}`);
+    await p.locator('.ib-pfoot').getByRole('button', { name: 'Reply' }).click();
+    const box = p.locator('section.ib-pane .ib-rbox textarea');
+    await box.fill('Reading first. ');
+    // A double-click on a word of the agent's message selects it, as people do while reading.
+    const word = await wordRect(p, 'I checked the 409 row.', 'checked');
+    await p.mouse.dblclick(word.x, word.y);
+    expect(await p.evaluate(() => document.getSelection()?.toString().trim() ?? '')).not.toBe('');
+    await expect(box).not.toBeFocused();
+    await dictate(p, 'Then this.');
+    await expect(box).toHaveValue('Reading first. Then this.');
+    await expect(box).toBeFocused();
+  } finally {
+    await p.close();
+  }
 });
 
 test('a range selected in the reply box before a pick is not replaced: the dictation goes after it', async () => {
