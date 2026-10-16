@@ -173,7 +173,7 @@ test('Copy connect prompt copies the prompt naming this binary, says Copied, and
   const { page, context, url } = world;
   await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(url).origin });
   const foot = side(page).locator('.ib-side-foot');
-  // Just above Settings: an outlined pill with the four agents' marks, inside the sidebar.
+  // Above Settings (and above the Update button or "What's new", when shown): an outlined pill with the four agents' marks, inside the sidebar.
   const row = foot.getByRole('button', { name: 'Copy prompt to connect an agent' });
   await expect(row).toBeVisible();
   const marks = row.locator('.ib-cpill-ag');

@@ -242,6 +242,8 @@ export function Sidebar(props: SidebarProps) {
         )}
       </div>
       <div className="ib-side-foot">
+        {/* Copy prompt first, then the Update button or "What's new in X", then the Settings row. */}
+        <CopyConnectPrompt mcpCommand={props.mcpCommand ?? null} />
         <UpdateButton
           update={props.update}
           restarting={props.restarting}
@@ -249,7 +251,6 @@ export function Sidebar(props: SidebarProps) {
           onPress={pick(props.onUpdate)}
           onWhatsNew={(version) => pick(() => props.onWhatsNew(version))()}
         />
-        <CopyConnectPrompt mcpCommand={props.mcpCommand ?? null} />
         {/* Two controls side by side, never one inside the other: the row opens Settings, the icon flips light and dark. */}
         <div className="ib-setrow">
           <button
@@ -278,9 +279,10 @@ export const CONNECT_COPY_FAILED_ANNOUNCEMENT = "Couldn't copy the connect promp
 /**
  * "Copy connect prompt" (owner approval 2026-10-13, design record
  * `inbox-sidebar-connect-prompt`; its look amended 2026-10-15 by
- * `inbox-connect-row`, option 1b): an outlined pill above Settings with the
- * four agent marks and "Copy prompt", which copies the prompt an agent on
- * this computer needs to connect itself (connectPrompt.ts). Only a copy
+ * `inbox-connect-row`, option 1b): an outlined pill above the Update button
+ * (or "What's new in X") and Settings, with the four agent marks and "Copy
+ * prompt", which copies the prompt an agent on this computer needs to
+ * connect itself (connectPrompt.ts). Only a copy
  * button: no preview, no tooltip, no shortcut. The label says "Copied" for
  * 2 s (or "Couldn't copy"), the marks stay, focus stays on it, and a polite
  * live region says the same. Its name reads "Copy prompt to connect an

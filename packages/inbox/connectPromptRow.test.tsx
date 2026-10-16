@@ -43,7 +43,7 @@ afterEach(() => {
   while (restorers.length > 0) restorers.pop()!();
 });
 
-function render(mcpCommand: readonly string[] | null) {
+function render(mcpCommand: readonly string[] | null, foot: { updated?: string | null } = {}) {
   const host = document.createElement('div');
   host.className = 'pn-inbox';
   document.body.appendChild(host);
@@ -62,7 +62,7 @@ function render(mcpCommand: readonly string[] | null) {
             projectCounts={new Map()}
             update={null}
             restarting={false}
-            updated={null}
+            updated={foot.updated ?? null}
             onInbox={noop}
             onProject={noop}
             onSettings={noop}
@@ -93,7 +93,7 @@ test.skipIf(!hasDom)('a click copies the prompt naming this binary, says Copied,
   jest.useFakeTimers();
   const { host, row, live } = render([BIN, 'inbox', 'mcp']);
 
-  // The pill sits just above Settings, in the foot.
+  // The pill sits above Settings, in the foot (nothing between them without an update).
   const foot = host.querySelector('.ib-side-foot')!;
   expect(row().parentElement === foot).toBe(true);
   expect(row().nextElementSibling?.nextElementSibling?.querySelector('.ib-nav')?.textContent).toBe('Settings');
@@ -124,6 +124,21 @@ test.skipIf(!hasDom)('a click copies the prompt naming this binary, says Copied,
   expect(written).toHaveLength(2);
   expect(live().textContent?.trim()).toBe('Connect prompt copied.');
   expect(live().textContent).not.toBe('Connect prompt copied.');
+});
+
+test.skipIf(!hasDom)("the pill sits above What's new, which sits above Settings", () => {
+  const { host, row } = render([BIN, 'inbox', 'mcp'], { updated: '0.28.19' });
+  const foot = host.querySelector<HTMLElement>('.ib-side-foot')!;
+  const order = [...foot.children]
+    .map((el) =>
+      el.matches('button[data-connect-prompt]') ? 'pill'
+      : el.matches('[data-whats-new-link]') ? 'whats-new'
+      : el.matches('.ib-setrow') ? 'settings'
+      : null,
+    )
+    .filter(Boolean);
+  expect(order).toEqual(['pill', 'whats-new', 'settings']);
+  expect(row().parentElement).toBe(foot);
 });
 
 test.skipIf(!hasDom)('before the settings load it copies bare plannotator, and the path once they arrive', async () => {
