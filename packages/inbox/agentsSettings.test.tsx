@@ -11,7 +11,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { InboxAgentRow, InboxAgentsModel } from '@plannotator/core/inbox-types';
+import { inboxToolCostText, type InboxAgentRow, type InboxAgentsModel } from '@plannotator/core/inbox-types';
 
 const hasDom = typeof document !== 'undefined';
 const { AgentsSettings } = (hasDom ? await import('./components/AgentsSettings') : {}) as typeof import('./components/AgentsSettings');
@@ -115,6 +115,9 @@ test.skipIf(!hasDom)('one group per agent found, with its switches and the state
     { k: 'Note in its instructions', v: '~/.codex/AGENTS.md · marked sectionShow', sw: 'true', sub: null },
   ]);
   expect(rows(group(el, 'pi'))[2]!.sub).toBe("You edited this note, so Plannotator won't update it. Turning it off removes it as you left it.");
+  // Pi and OpenCode send the tool with every request: the measured cost sits under the switch (INBOX_TOOL_COST).
+  expect(rows(group(el, 'pi'))[0]!.sub).toBe(`Adds the tool to every Pi request: ${inboxToolCostText('pi')}.`);
+  expect(rows(group(el, 'opencode'))[0]!.sub).toBe(`Adds the tool to every OpenCode request: ${inboxToolCostText('opencode')}.`);
   const opencode = rows(group(el, 'opencode'))[2]!;
   expect(opencode.sw).toBeNull();
   expect(opencode.sub).toContain('OpenCode 1');

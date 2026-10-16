@@ -37,6 +37,7 @@ import {
   worldEnv,
   type InboxWorld,
 } from "../../tests/helpers/inbox-world";
+import { expectMeasuredCost } from "../../tests/helpers/inbox-tool-cost";
 import { lastMessage, messageText, startScriptedModel, type ScriptedModel, type ScriptedRequest, type ScriptedTurn } from "../../tests/helpers/scripted-model";
 
 const opencodeBin = process.env.OPENCODE2_BIN;
@@ -321,6 +322,33 @@ describe.skipIf(!opencodeBin || !tarball)("OpenCode 2 ↔ Plannotator Inbox (the
     await idle(host, session);
     expect(systemOf(m.requests.filter((request) => request.tools.length > 0).at(-1)!)).toBe(systemOf(sent));
     w.proof("the reminder rides the system prompt once, identical on the session's next request");
+  }, 900_000);
+
+  test("the tool's cost per request, measured on what OpenCode 2 sends: the same prompt with the tool off and on (no reminder) differs by the tool alone, and that is the number the window shows", async () => {
+    const w = createInboxWorld("plannotator-inbox-oc2-", "01a-tool-cost", "opencode2");
+    worlds.push(w);
+    const m = model(() => null);
+    startInbox(w);
+    const turn = async (): Promise<ScriptedRequest> => {
+      const from = m.requests.length;
+      const host = await openOpenCode(w, m);
+      const session = await newSession(host);
+      await type(host, session, "hello");
+      await waitFor("the model turn", () => m.requests.slice(from).some((request) => request.tools.length > 0), 60_000);
+      await idle(host, session);
+      await host.stop();
+      return m.requests.slice(from).filter((request) => request.tools.length > 0).at(-1)!;
+    };
+    knob(w, false);
+    const without = await turn();
+    writeFileSync(path.join(w.dataDir, "config.json"), JSON.stringify({ inboxTool: { opencode: true }, inboxReminder: { opencode: false } }));
+    const withTool = await turn();
+    expect(withTool.tools).toContain("plannotator_inbox");
+    const entry = withTool.toolBytes.plannotator_inbox!;
+    // The request grows by the tool's entry and the comma before it, nothing else.
+    expect(withTool.bodyBytes - without.bodyBytes).toBe(entry + 1);
+    expectMeasuredCost("opencode", withTool.toolJson.plannotator_inbox!);
+    w.proof(`OpenCode 2 request without the tool: ${without.bodyBytes} bytes; with it: ${withTool.bodyBytes} bytes; the plannotator_inbox entry: ${entry} bytes`);
   }, 900_000);
 
   test("send_message lands a thread; the person's Send is queued into the idle session once (never steer), Delivered to OpenCode; a typed prompt goes first and takes the wake's turn over", async () => {

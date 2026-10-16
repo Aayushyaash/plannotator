@@ -318,6 +318,10 @@ function focusFirst(selectors: readonly string[]): void {
   }
 }
 
+/** How often the first-run screen reads the agents again while it shows, and the least gap between two reads (focus and the timer). */
+const FIRST_RUN_AGENTS_REFRESH_MS = 8_000;
+const FIRST_RUN_AGENTS_MIN_GAP_MS = 2_000;
+
 function platformOf(): ConnectContext['platform'] {
   const p = `${navigator.platform} ${navigator.userAgent}`.toLowerCase();
   if (p.includes('win')) return 'windows';
@@ -363,7 +367,14 @@ function Inbox() {
   const [decisionsError, setDecisionsError] = useState<string | null>(null);
   const [settings, setSettings] = useState<SettingsModel | null>(null);
   /** The agents on this computer (GET /api/inbox/agents): the agent-note dialog and Settings → Agents. Null on an older Inbox. */
-  const [agents, setAgents] = useState<InboxAgentsModel | null>(null);
+  const [agents, setAgentsState] = useState<InboxAgentsModel | null>(null);
+  // Every read and every save of the agents takes a number; a read answered after a newer read or save
+  // started (a re-read in flight while Turn on saved) never replaces the newer model.
+  const agentsSeq = useRef(0);
+  const setAgents = useCallback((next: InboxAgentsModel) => {
+    agentsSeq.current += 1;
+    setAgentsState(next);
+  }, []);
   const agentsRef = useRef(agents);
   agentsRef.current = agents;
   /** The first read of the agents is done (a run that opened the window has finished connecting): the agent-note dialog may decide. */
@@ -698,8 +709,9 @@ function Inbox() {
   /** Read the agents; while `plannotator inbox` is still connecting them, read again until it is done. */
   const refreshAgents = useCallback(async () => {
     try {
+      const mine = ++agentsSeq.current;
       const next = await inboxApi.agents();
-      setAgents(next);
+      if (mine === agentsSeq.current) setAgentsState(next);
       return next;
     } catch {
       return null;
@@ -1701,6 +1713,29 @@ function Inbox() {
   const filterProject = route.page === 'inbox' && route.project ? projects.find((p) => p.id === route.project) ?? null : null;
   const notice = shown && latest ? heldNotice(filterSections(shown, route.project), filterSections(latest.sections, route.project), openedHere.current, heldOpen()).text : null;
   const firstRun = latest !== null && projects.length === 0;
+  // The first-run screen shows who is running now ("Message Claude Code") and moves on by itself
+  // once an agent is installed or turned on: it reads the agents again when the window comes back
+  // into focus (the person ran the install command in a terminal) and every few seconds while shown.
+  const { model: firstRunSessions } = useComposeSessions(firstRun);
+  // Over the tailnet the agents route is local only: nothing to read again.
+  const overTailnet = settings?.via === 'tailnet';
+  useEffect(() => {
+    if (!firstRun || overTailnet) return;
+    let last = Date.now();
+    const again = () => {
+      if (document.visibilityState !== 'visible' || Date.now() - last < FIRST_RUN_AGENTS_MIN_GAP_MS) return;
+      last = Date.now();
+      void refreshAgents();
+    };
+    const timer = setInterval(again, FIRST_RUN_AGENTS_REFRESH_MS);
+    window.addEventListener('focus', again);
+    document.addEventListener('visibilitychange', again);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', again);
+      document.removeEventListener('visibilitychange', again);
+    };
+  }, [firstRun, overTailnet, refreshAgents]);
   // A file beside the thread takes the list's and the sidebar's room (record 2.2).
   const fileOpen = route.page === 'inbox' && !!route.thread && !!route.file;
   const guideMessage =
@@ -1982,7 +2017,15 @@ function Inbox() {
     main = <div className="ib-listcol">{loadError && <div className="ib-error" style={{ padding: 22 }}>{loadError}</div>}</div>;
   } else if (firstRun) {
     main = (
-      <EmptyState context={context} />
+      <EmptyState
+        context={context}
+        agents={agents}
+        agentsUnavailable={overTailnet ? 'tailnet' : agentsSettled && agents === null ? 'failed' : null}
+        onRetry={() => void refreshAgents()}
+        sessions={firstRunSessions}
+        onAgents={setAgents}
+        onMessage={(session, opener) => openCompose({ session }, opener)}
+      />
     );
   } else {
     main = (

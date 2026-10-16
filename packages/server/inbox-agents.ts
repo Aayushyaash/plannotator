@@ -511,16 +511,60 @@ export function openCodePluginInstalled(e: AgentEnvironment): boolean {
   return false;
 }
 
-/** Whether Plannotator's Claude Code plugin is enabled (`enabledPlugins` in Claude Code's settings). */
-export function claudeCodePluginEnabled(e: AgentEnvironment): boolean {
-  const read = readAgentFile(join(claudeConfigDir(e), "settings.json"));
+const CLAUDE_PLUGIN_ID = /^plannotator@/;
+
+/** `enabledPlugins` in one Claude Code settings file: true or false when it names Plannotator's plugin, else undefined. */
+function claudeSettingsPluginState(path: string): boolean | undefined {
+  const read = readAgentFile(path);
+  if (read.kind !== "file") return undefined;
+  try {
+    const enabled = (JSON.parse(stripJsonComments(read.text)) as { enabledPlugins?: Record<string, unknown> }).enabledPlugins;
+    if (!enabled || typeof enabled !== "object") return undefined;
+    const ours = Object.entries(enabled).filter(([id, on]) => CLAUDE_PLUGIN_ID.test(id) && typeof on === "boolean");
+    if (ours.some(([, on]) => on === true)) return true;
+    return ours.length > 0 ? false : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Claude Code's managed (enterprise) settings file, per platform. */
+function claudeManagedSettingsPath(e: AgentEnvironment): string | null {
+  // A test's agents never read the machine's own managed settings.
+  if (process.env.PLANNOTATOR_TEST_SANDBOX) return null;
+  if (e.platform === "darwin") return "/Library/Application Support/ClaudeCode/managed-settings.json";
+  if (e.platform === "linux") return "/etc/claude-code/managed-settings.json";
+  if (e.platform === "win32") return "C:\\Program Files\\ClaudeCode\\managed-settings.json";
+  return null;
+}
+
+/** Whether Claude Code's plugin registry (`plugins/installed_plugins.json`, v2 `{ plugins: { id: [...] } }` or the v1 object) records Plannotator's plugin. */
+function claudePluginRegistered(e: AgentEnvironment): boolean {
+  const read = readAgentFile(join(claudeConfigDir(e), "plugins", "installed_plugins.json"));
   if (read.kind !== "file") return false;
   try {
-    const enabled = (JSON.parse(read.text) as { enabledPlugins?: Record<string, unknown> }).enabledPlugins;
-    return !!enabled && Object.entries(enabled).some(([id, on]) => on === true && /^plannotator@/.test(id));
+    const parsed = JSON.parse(read.text) as { plugins?: Record<string, unknown> } & Record<string, unknown>;
+    const table = parsed.plugins && typeof parsed.plugins === "object" ? parsed.plugins : parsed;
+    return Object.entries(table).some(([id, value]) => CLAUDE_PLUGIN_ID.test(id) && (Array.isArray(value) ? value.length > 0 : !!value && typeof value === "object"));
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether Plannotator's Claude Code plugin is enabled for this user: a
+ * settings scope the Inbox can see (user `settings.json` and
+ * `settings.local.json`, managed settings) enables it, or Claude Code's plugin
+ * registry records it and no scope turns it off. A project's own
+ * `.claude/settings.json` and `claude --plugin-dir` are not visible here; the
+ * window counts a live Claude Code session as connected for those.
+ */
+export function claudeCodePluginEnabled(e: AgentEnvironment): boolean {
+  const managed = claudeManagedSettingsPath(e);
+  const scopes = [join(claudeConfigDir(e), "settings.json"), join(claudeConfigDir(e), "settings.local.json"), ...(managed ? [managed] : [])].map(claudeSettingsPluginState);
+  if (scopes.includes(true)) return true;
+  if (scopes.includes(false)) return false;
+  return claudePluginRegistered(e);
 }
 
 /**
@@ -583,7 +627,8 @@ async function cliWay(
 export const AGENT_SPECS: readonly AgentSpec[] = [
   {
     id: "claude-code",
-    detect: (e) => claudeCodePluginEnabled(e),
+    // The plugin, or `claude` on PATH without it (the first-run screen offers the plugin's install command).
+    detect: (e) => claudeCodePluginEnabled(e) || !!e.which("claude"),
     way: async () => ({ kind: "none" }),
     file: () => null,
     raw: () => null,
@@ -1227,11 +1272,24 @@ export interface InboxAgentReachState {
   reason: string | null;
 }
 
+/** Claude Code reaches the Inbox through Plannotator's plugin (its mod registers the tool); without the plugin only a person can connect it. */
+function claudeCodeWay(e: AgentEnvironment): ConnectWay {
+  return claudeCodePluginEnabled(e) ? { kind: "tool", host: "claude-code" } : { kind: "manual", why: "install Plannotator's Claude Code plugin" };
+}
+
+/** Whether Plannotator's own connection is installed for one of its three hosts (null for every other agent). */
+export function inboxPluginInstalled(id: InboxAgentId, e: AgentEnvironment): boolean | null {
+  if (id === "claude-code") return claudeCodePluginEnabled(e);
+  if (id === "pi") return piExtensionInstalled(e);
+  if (id === "opencode") return openCodePluginInstalled(e);
+  return null;
+}
+
 /** How one agent reaches the Inbox now (read only; may ask a CLI its version). */
 export async function inboxAgentReach(id: InboxAgentId, options: ConnectOptions): Promise<InboxAgentReachState> {
   const e = options.environment;
   const spec = agentSpec(id);
-  const way: ConnectWay = id === "claude-code" ? { kind: "tool", host: "claude-code" } : await spec.way(e);
+  const way: ConnectWay = id === "claude-code" ? claudeCodeWay(e) : await spec.way(e);
   const path = displayPath(spec.file(e), e);
   const record = readInboxAgents(options.dataDir).agents[id];
   if (way.kind === "tool") {
@@ -1279,7 +1337,7 @@ export async function setInboxAgentReach(id: InboxAgentId, on: boolean, options:
   if (!agentHomeAllowed(e)) return "not in a test's scratch home";
   const at = (options.now ?? (() => new Date()))().toISOString();
   const spec = agentSpec(id);
-  const way: ConnectWay = id === "claude-code" ? { kind: "tool", host: "claude-code" } : await spec.way(e, true);
+  const way: ConnectWay = id === "claude-code" ? claudeCodeWay(e) : await spec.way(e, true);
   const file = readInboxAgents(options.dataDir);
   if (way.kind === "manual") return `${INBOX_AGENT_LABELS[id]} is connected by hand: ${way.why}`;
   if (way.kind === "none") return `${INBOX_AGENT_LABELS[id]} is connected by hand`;

@@ -136,6 +136,7 @@ import {
   displayPath,
   inboxAgentReach,
   inboxConnectDisabled,
+  inboxPluginInstalled,
   readInboxAgents,
   setInboxAgentReach,
   setInboxTool,
@@ -770,12 +771,16 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         const reach = await inboxAgentReach(id, options);
         const host = (INBOX_TOOL_HOSTS as readonly string[]).includes(id) ? (id as InboxToolHost) : null;
         // The Inbox tool switch of the three Plannotator hosts stays reachable whether or not the agent was found.
-        const tool = host ? { on: resolveInboxTool(config, env, host), locked: toolEnv !== undefined } : null;
+        // chosen_off: config.json turns it off by name (the person's choice, e.g. Settings' switch), not the host default.
+        const tool = host
+          ? { on: resolveInboxTool(config, env, host), locked: toolEnv !== undefined, chosen_off: toolEnv === undefined && configuredInboxTool(config, host) === false }
+          : null;
         const reminder = host ? { on: resolveInboxReminder(config, env, host), locked: toolEnv !== undefined, needs_tool: !resolveInboxTool(config, env, host) } : null;
         // With PLANNOTATOR_INBOX_NOTES=0 only a note already written is listed, so it can still be turned off.
         const status = (INBOX_NOTE_AGENT_IDS as readonly string[]).includes(id) ? noteStatus(id as InboxNoteAgentId, dataDir, agentEnvironment) : null;
         const note = status && (!notesOff || status.state === "added" || status.state === "edited") ? status : null;
-        return { id, label: INBOX_AGENT_LABELS[id], detected, reach, tool, reminder, note };
+        const installed = inboxPluginInstalled(id, agentEnvironment);
+        return { id, label: INBOX_AGENT_LABELS[id], detected, reach, tool, reminder, note, plugin: installed === null ? null : { installed } };
       }),
     );
     return {

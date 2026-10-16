@@ -441,7 +441,7 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-qfoot-st { font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
 
 /* empty state and the connect picker: one vertical rhythm between the heading, the cards, Other agents and the tabs */
-.ib-empty { --ib-rhythm: 28px; display: flex; flex-direction: column; gap: var(--ib-rhythm); padding: 34px 0 40px 100px; max-width: 850px; }
+.ib-empty { --ib-rhythm: 26px; display: flex; flex-direction: column; gap: var(--ib-rhythm); padding: 34px 40px 60px 100px; max-width: 900px; }
 .ib-empty h2 { font-size: 22px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
 .ib-empty h3 { font-size: 14px; font-weight: 600; margin: 0; }
 .ib-hcards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
@@ -1982,9 +1982,69 @@ label.ib-anote-r:hover { background: color-mix(in oklch, var(--muted) 40%, trans
   /* A long primary ("Add to Codex, Gemini CLI and Claude Code") wraps rather than being cut. */
   .pn-inbox .ib-anote-foot .ib-btn { height: auto; min-height: 44px; padding: 8px 10px; justify-content: center; white-space: normal; text-align: center; font-size: 13.5px; }
 }
-.ib-try { display: flex; flex-direction: column; gap: 8px; }
+.ib-try { display: flex; flex-direction: column; gap: 10px; }
 .ib-try p { margin: 0; color: var(--muted-foreground); line-height: 1.5; font-size: 14px; }
-.ib-try-quote { font-size: 14px; padding: 9px 12px; border-left: 3px solid color-mix(in oklch, var(--primary) 60%, transparent); background: color-mix(in oklch, var(--muted) 40%, transparent); border-radius: 0 7px 7px 0; }
+.ib-try-row + p { margin-top: 6px; }
+.ib-try-quote { display: flex; align-items: center; gap: 12px; max-width: 640px; font-size: 15px; padding: 10px 10px 10px 16px; border-left: 3px solid var(--primary); background: color-mix(in oklch, var(--muted) 40%, transparent); border-radius: 0 8px 8px 0; }
+.ib-try-quote > span { flex: 1; min-width: 0; }
+.ib-try-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.ib-try-where { font-size: 13px; color: var(--muted-foreground); }
+.ib-try-where b { color: var(--foreground); font-weight: 550; }
+
+/* First run, "One next step" (the approved design inbox-connect-next-step, variant C): one card with the next step, then what is done and what is left. */
+.ib-cn { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 4px 16px; padding: 20px 22px; border: 1px solid color-mix(in oklch, var(--primary) 50%, var(--border)); border-radius: 12px; background: var(--card); box-shadow: var(--card-shadow); }
+.ib-cn > * { grid-column: 2; min-width: 0; }
+.ib-cn > .ib-cn-mark { grid-column: 1; grid-row: 1 / span 3; }
+.ib-cn-mark .ib-mk.ib-big { width: 44px; height: 44px; border-radius: 10px; }
+.ib-cn-mark .ib-mk.ib-big > svg, .ib-cn-mark .ib-mk.ib-big > img { width: 24px; height: 24px; }
+.ib-cn-eb { font-size: 12px; font-weight: 600; color: var(--primary); letter-spacing: 0.02em; }
+.ib-cn-eb .ib-cn-ebl { text-transform: uppercase; }
+.ib-empty .ib-cn h3 { font-size: 18px; font-weight: 650; letter-spacing: -0.01em; }
+.ib-cn p { margin: 4px 0 0; color: var(--muted-foreground); line-height: 1.55; max-width: 620px; }
+.ib-cn p b { color: var(--foreground); font-weight: 650; }
+.ib-cn .ib-cn-err { color: var(--destructive); font-size: 13px; }
+.ib-cn-acts { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+.ib-cn-blk { display: flex; flex-direction: column; gap: 8px; max-width: 640px; min-width: 0; }
+.ib-cn-body { margin-top: 12px; }
+.ib-cn .ib-cn-hint { margin: 0; color: var(--foreground); font-size: 14px; line-height: 1.45; max-width: none; }
+.ib-cn-foldw { display: flex; flex-direction: column; gap: 6px; }
+.ib-cn-foldh { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: 13.5px; }
+.ib-cn-foldh > .ib-mut { color: var(--muted-foreground); }
+.ib-cn-foldb { display: flex; flex-direction: column; gap: 6px; }
+.ib-empty > .ib-cn-foldw > .ib-cn-foldb { margin-top: 6px; }
+.ib-cn-seg { display: inline-flex; border: 1px solid var(--ib-line); border-radius: 7px; padding: 2px; gap: 2px; }
+.ib-cn-sego { position: relative; display: inline-flex; align-items: center; height: 24px; padding: 0 9px; border-radius: 5px; font-size: 12.5px; font-weight: 500; color: var(--muted-foreground); cursor: pointer; white-space: nowrap; }
+.ib-cn-sego:hover { color: var(--foreground); }
+.ib-cn-sego[data-on] { background: var(--muted); color: var(--foreground); }
+.ib-cn-sego input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.ib-cn-sego:has(input:focus-visible) { outline: 2px solid var(--ring); outline-offset: 1px; }
+.pn-inbox .ib-cn-sego input:focus-visible { outline: none; }
+.ib-cl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.ib-cl h4 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--muted-foreground); }
+.ib-cl ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.ib-cl li { display: flex; align-items: center; gap: 9px; font-size: 13.5px; min-width: 0; }
+.ib-cl li > .ib-mut { font-size: 12.5px; color: var(--muted-foreground); min-width: 0; overflow-wrap: anywhere; }
+.ib-cl li.ib-mut { color: var(--muted-foreground); }
+.pn-inbox .ib-cl svg.ib-cl-tick { width: 14px; height: 14px; flex: none; color: var(--success); stroke-width: 2.2; }
+.ib-cl-ring { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--muted-foreground); flex: none; }
+.ib-cl-ring.ib-cl-dash { border-style: dashed; }
+.ib-cl li.ib-cl-now { font-weight: 550; }
+.ib-cl li.ib-cl-now .ib-cl-ring { border-color: var(--primary); background: color-mix(in oklch, var(--primary) 25%, transparent); }
+.ib-cn-smark { display: inline-flex; flex: none; }
+.ib-cn-smark .ib-mk.ib-big { width: 22px; height: 22px; border-radius: 6px; }
+.ib-cn-smark .ib-mk.ib-big > svg, .ib-cn-smark .ib-mk.ib-big > img { width: 13px; height: 13px; }
+/* A phone (PHONE_QUERY): one column, the mark above the eyebrow, full-width 44 px buttons. */
+@media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
+  .ib-empty { padding-top: 14px; }
+  .ib-cn { grid-template-columns: minmax(0, 1fr); padding: 16px; }
+  .ib-cn > *, .ib-cn > .ib-cn-mark { grid-column: 1; grid-row: auto; }
+  .ib-cn-mark .ib-mk.ib-big { width: 36px; height: 36px; }
+  .ib-cn-acts .ib-btn { flex: 1; justify-content: center; }
+  .ib-cl { grid-template-columns: minmax(0, 1fr); }
+  .ib-try-quote { font-size: 14px; }
+  .ib-try-row .ib-btn { flex: 1; justify-content: center; }
+  .ib-cn-sego { height: 44px; padding: 0 12px; font-size: 14px; }
+}
 .ib-byhand { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 500; background: none; border: 0; padding: 0; color: inherit; cursor: pointer; align-self: flex-start; }
 .pn-inbox .ib-byhand svg.ib-ic { width: 14px; height: 14px; color: var(--muted-foreground); transition: transform 120ms ease-out; }
 .ib-byhand[aria-expanded="true"] svg.ib-ic { transform: rotate(90deg); }

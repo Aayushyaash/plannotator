@@ -5,8 +5,10 @@
  *  - The `plannotator_inbox` agent tool: ONE tool whose `action` is one of the
  *    Inbox's MCP tools. It is built from the tool list the running Inbox
  *    serves on `/mcp` (`tools/list`), read once at session start, so an older
- *    Inbox registers only what it offers and the descriptions stay the
- *    Inbox's own. It is never an action on the `plannotator` tool, whose
+ *    Inbox registers only what it offers. The descriptions are the Inbox's
+ *    own, except the few long ones the tool words shortly
+ *    (INBOX_AGENT_FIELD_DESCRIPTIONS), since Pi and OpenCode send the tool
+ *    whole with every request. It is never an action on the `plannotator` tool, whose
  *    contract is about reviews and shared across hosts.
  *  - The bridge: the connection long-polls `INBOX_BRIDGE_POLL_PATH` with the
  *    registry's bearer token (loopback Host, no Origin, the pull-bridge
@@ -144,7 +146,7 @@ function leadOf(description: string): string {
 
 /** What the agent tool says, before the per-action lines. Fixed text. */
 export const INBOX_TOOL_LEAD =
-  "The Plannotator Inbox on this machine: message the person and get their answer later, without holding this session open. Use it when the person may not be watching this chat: a decision only they can make (ask it as a :::question block, then go on with work that does not depend on it), finished long work to hand over (a short summary, files to look at in `attachments`), or when they ask you to. Ask in the chat when they are there; never send routine progress. If another agent started you, report to it instead. Set `action` to a tool below and pass its fields; the project and this session are filled in."
+  "The Plannotator Inbox on this machine: message the person and get their answer later, without holding this session open. Use it when the person may not be watching this chat: a decision only they can make (ask it as a :::question block, then go on with other work), finished long work to hand over (a short summary, files in `attachments`), or when they ask you to. Ask in the chat when they are there; never send routine progress. If another agent started you, report to it instead. Set `action` to a tool below and pass its fields; the project and this session are filled in."
 
 /**
  * Fixed text: how a reply comes back. The connection delivers the person's
@@ -154,6 +156,62 @@ export const INBOX_TOOL_LEAD =
  */
 export const INBOX_TOOL_WAKE_NOTE =
   "When the person replies to a message you sent, their reply arrives in this session by itself once it is idle, as a message headed `Plannotator Inbox: <subject> (<reply id>)`: end your turn, or go on with other work; do not call wait_for_reply. When they need to hear back, answer with send_message reply_to."
+
+/**
+ * Fixed text, the description's last line: where everything the tool's short
+ * field descriptions leave out lives (the full question guide, every field,
+ * examples), so an agent that needs more reads it once instead of every
+ * request carrying it.
+ */
+export const INBOX_TOOL_HELP_NOTE = "Every field and the full question syntax: `plannotator inbox --help`."
+
+/**
+ * The agent tool's own line for an action whose Inbox lead is long (the
+ * description must stay under Claude Code's 2,048 characters, and every Pi and
+ * OpenCode request carries it).
+ */
+export const INBOX_AGENT_ACTION_LEADS: Readonly<Record<string, string>> = {
+  list_decisions: 'List the decisions that hold in this project (`state`: current, the default, replaced, retired or all).',
+  get_guide_brief: "Get Plannotator's method, the guide's JSON shape and the rules for writing a guided review, with a worked submit_guide call.",
+}
+
+/**
+ * The agent tool's own words for the fields whose Inbox description is long
+ * (the MCP server's are written for a raw MCP client, which has no other
+ * guide): every Pi and OpenCode request carries the tool whole, so these keep
+ * only what an agent needs to call it well, and `plannotator inbox --help`
+ * keeps the rest. Keyed by action, then field: applied only to a field that
+ * action of the running Inbox offers (a field several actions share is
+ * described once, from the first action that has it, `send_message` for `body`).
+ */
+export const INBOX_AGENT_FIELD_DESCRIPTIONS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  send_message: {
+    body: [
+      'The message, markdown. Ask what only the person can decide as a question block, which renders as an answerable card:',
+      '',
+      ':::question',
+      'Where should the edit that loses a sync conflict go?',
+      '',
+      'Context in one to three plain sentences: what it affects, what you know, why you recommend one. The person switches in cold.',
+      '',
+      '- [ ] Local only, purged after 30 days — cheap',
+      '- [ ] Server-side per user — needs a retention policy',
+      '',
+      'Recommended: Local only, purged after 30 days',
+      'Holds up: sync release',
+      ':::',
+      '',
+      '`:::question-multi` takes several choices, `:::question-text` free text. The person can always answer Other, add a note or skip, so never add an Other choice yourself. `Stopped: <why>` only when you cannot go on until it is answered (never `Stopped: no`); `Holds up: <work>` names work that waits while you go on. Ask only what you cannot decide alone, about 8 a round at most. Answers come back in the reply under "Answers to your questions".',
+    ].join('\n'),
+    thread: "A short thread name, one line, to keep separate work apart: the same name in this project is the same open thread, across sessions. Without it, your messages join your session's open thread. Ignored with reply_to.",
+    supersedes: 'Your own questions in this thread that are still open (read_thread state open or picked) and no longer apply: a newer message replaces them, or the reply settled them in words. "<message id>/<key>" for one, "<message id>" for all of that message\'s; send with reply_to into their thread. With one question in this message it replaces them, otherwise they read "No longer applies".',
+    attachments: 'Files to show the person beside the message, absolute or relative to project_path: a plan, a screenshot, an HTML mock, code, a video, any file. Link one from the body (`[the mock](mock.html)`) to open it beside the thread. Their comments on the files come back in the reply. Folders and .env files are refused.',
+  },
+  submit_guide: {
+    guide: "The guide in get_guide_brief's output_schema, as an object or its JSON.",
+    snapshot: 'Instead of guide and patch: a complete Plannotator guide snapshot, as an object or its JSON.',
+  },
+}
 
 /**
  * The one-line reminder a session that has `plannotator_inbox` gets once, at
@@ -198,8 +256,10 @@ export function inboxAgentTool(
   const description = [
     INBOX_TOOL_LEAD,
     '',
-    ...tools.map((tool) => `- ${tool.name}: ${leadOf(tool.description)}`),
+    ...tools.map((tool) => `- ${tool.name}: ${INBOX_AGENT_ACTION_LEADS[tool.name] ?? leadOf(tool.description)}`),
     ...(options.wakes === false ? [] : ['', INBOX_TOOL_WAKE_NOTE]),
+    '',
+    INBOX_TOOL_HELP_NOTE,
   ].join('\n')
   const properties: Record<string, Record<string, unknown>> = {
     action: { type: 'string', enum: tools.map((tool) => tool.name), description: 'Which Inbox tool to call.' },
@@ -219,10 +279,9 @@ export function inboxAgentTool(
         properties[name] = { type: 'string', description: INBOX_AGENT_PROJECT_PATH_DESCRIPTION }
         continue
       }
-      // send_message's description carries the question-block guide: it rides
-      // the body field, so the tool's own description stays short.
-      const extra = tool.name === 'send_message' && name === 'body' ? `\n\n${tool.description}` : ''
-      properties[name] = { ...schema, description: `${typeof schema.description === 'string' ? schema.description : ''}${extra}`.trim() }
+      // The agent tool's own short words where the Inbox's are long; the rest is the Inbox's.
+      const own = INBOX_AGENT_FIELD_DESCRIPTIONS[tool.name]?.[name]
+      properties[name] = { ...schema, description: (own ?? (typeof schema.description === 'string' ? schema.description : '')).trim() }
     }
   }
   for (const [name, users] of usedBy) {

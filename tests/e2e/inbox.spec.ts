@@ -97,7 +97,9 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   const dataDir = join(root, 'data');
   const home = join(root, 'home');
   mkdirSync(home);
-  const env = { PATH: process.env.PATH ?? '', HOME: home, PLANNOTATOR_DATA_DIR: dataDir };
+  // PATH: this world's own bin and the system's tools, never the agents installed on the machine running the
+  // spec (the first-run screen speaks about the agents it finds: none here).
+  const env = { PATH: `${binDir}:/usr/bin:/bin`, HOME: home, PLANNOTATOR_DATA_DIR: dataDir };
   const started = spawnSync(binary, ['inbox', '--background'], { env, encoding: 'utf8', timeout: 60_000 });
   expect(started.status, started.stderr).toBe(0);
   const url = started.stdout.trim();
@@ -164,7 +166,7 @@ async function firstRunLabels(page: Page): Promise<string[]> {
     .evaluateAll((els) => els.map((el) => (el.textContent ?? '').trim()));
 }
 
-test('first run: Try it, the harness picker folded behind Connect another agent by hand, Copy copies the command', async () => {
+test('first run, nothing found: the first step offers Claude Code, Pi or OpenCode (install command to copy, MCP folded), then Try it, then every other agent folded', async () => {
   const { page, url } = world;
   await page.goto(url);
   const empty = page.locator('[data-inbox-empty]');
@@ -186,15 +188,46 @@ test('first run: Try it, the harness picker folded behind Connect another agent 
   expect((await motion()).startsWith('none ')).toBe(true);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
 
-  const byHand = empty.getByRole('button', { name: 'Connect another agent by hand', exact: true });
+  // One next step (inbox-connect-next-step, variant C): Plannotator's own connections first.
+  const step = empty.locator('.ib-cn');
+  await expect(step.getByRole('heading', { name: 'Connect your first agent', exact: true })).toBeVisible();
+  await expect(step.getByRole('radiogroup', { name: 'Your agent' }).getByRole('radio')).toHaveCount(3);
+  const install = 'claude plugin marketplace add backnotprop/plannotator\nclaude plugin install plannotator@plannotator';
+  await expect(step.locator('pre').first()).toHaveText(install);
+  await step.getByRole('button', { name: 'Copy' }).first().click();
+  await expect(step.getByRole('button', { name: 'Copied' })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(install);
+  // MCP stays one fold away, with Claude Code's user-scope command naming the binary by its absolute path.
+  const binary = realpathSync(world.binary);
+  const mcp = step.getByRole('button', { name: 'Use MCP instead', exact: true });
+  await expect(mcp).toHaveAttribute('aria-expanded', 'false');
+  await mcp.click();
+  await expect(step.locator('pre').nth(1)).toHaveText(`claude mcp add --scope user plannotator-inbox -- ${binary} inbox mcp`);
+  expect(binary.startsWith('/') && binary.endsWith('/a-long-install-directory-name-so-every-connect-command-has-to-wrap/bin/plannotator')).toBe(true);
+  await expectCodeUnclipped(page);
+  await page.mouse.move(0, 0);
+  await shot('1.2-first-run-first-step');
+
+  // One rhythm: the same gap between the heading, the step, Try it and the fold.
+  const boxes = await empty.evaluate((el) =>
+    [...el.children].filter((child) => !child.classList.contains('ib-sr')).map((child) => child.getBoundingClientRect()).map((r) => ({ top: r.top, bottom: r.bottom })),
+  );
+  const gaps = boxes.slice(1).map((box, i) => Math.round(box.top - boxes[i]!.bottom));
+  expect(gaps.length).toBe(3);
+  expect(new Set(gaps).size).toBe(1);
+
+  // Every other agent or editor, folded at the end: the picker without Plannotator's three hosts.
+  const byHand = empty.getByRole('button', { name: 'Another agent or editor', exact: true });
   await expect(byHand).toHaveAttribute('aria-expanded', 'false');
   await expect(page.getByRole('tab', { name: 'Codex' })).toHaveCount(0);
   await byHand.click();
   await expect(byHand).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByRole('tab', { name: 'Claude Code' })).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: 'VS Code' })).toHaveAttribute('aria-selected', 'true');
 
-  // Codex is selected: the command with Copy, one note, the folded Another way, no eyebrow repeating the name.
-  const binary = realpathSync(world.binary);
+  // Codex: the command with Copy, one note, the folded Another way, no eyebrow repeating the name.
   const codex = page.getByRole('tab', { name: 'Codex' });
+  await codex.click();
   await expect(codex).toHaveAttribute('aria-selected', 'true');
   const command = `codex mcp add plannotator-inbox -- ${binary} inbox mcp`;
   const panel = page.getByRole('tabpanel', { name: 'Codex' });
@@ -206,21 +239,6 @@ test('first run: Try it, the harness picker folded behind Connect another agent 
   await panel.getByRole('button', { name: 'Copy' }).click();
   await expect(panel.getByRole('button', { name: 'Copied' })).toBeVisible();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(command);
-
-  // One rhythm: the same gap between the heading, Try it, the fold and the picker.
-  const boxes = await empty.evaluate((el) => [...el.children].map((child) => child.getBoundingClientRect()).map((r) => ({ top: r.top, bottom: r.bottom })));
-  const gaps = boxes.slice(1).map((box, i) => Math.round(box.top - boxes[i]!.bottom));
-  expect(gaps.length).toBe(3);
-  expect(new Set(gaps).size).toBe(1);
-
-  // Claude Code is in the picker too, with its user-scope command, the binary named by its absolute path.
-  await page.getByRole('tab', { name: 'Claude Code' }).click();
-  await expect(page.getByRole('tabpanel', { name: 'Claude Code' }).locator('pre').first()).toHaveText(`claude mcp add --scope user plannotator-inbox -- ${binary} inbox mcp`);
-  expect(binary.startsWith('/') && binary.endsWith('/a-long-install-directory-name-so-every-connect-command-has-to-wrap/bin/plannotator')).toBe(true);
-  await expectCodeUnclipped(page);
-  await page.mouse.move(0, 0);
-  await shot('1.3-first-run-claude-code');
-  await page.getByRole('tab', { name: 'Codex' }).click();
 
   // Headers carry no comma: every heading and label, on every tab.
   for (const tab of await page.getByRole('tab').all()) {

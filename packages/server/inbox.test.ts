@@ -14,7 +14,7 @@ import type { InboxQuestion } from "@plannotator/core/inbox-types";
 import { inboxStatus, readInboxRegistry } from "@plannotator/shared/inbox/registry";
 import { INBOX_SERVER_SESSION_MISMATCH_ERROR } from "@plannotator/core/server-session";
 import { parseInboxQuestionBlocks } from "@plannotator/core/inbox-questions";
-import { inboxAgentTool, parseInboxToolList } from "@plannotator/shared/inbox/connection";
+import { INBOX_AGENT_FIELD_DESCRIPTIONS, inboxAgentTool, parseInboxToolList } from "@plannotator/shared/inbox/connection";
 import { INBOX_MCP_INSTRUCTIONS, INBOX_MCP_TOOLS, INBOX_STOP_EXAMPLE, SEND_BODY_DESCRIPTION } from "./inbox-mcp";
 import { INBOX_FORBIDDEN_PORT, startInboxServer, type InboxServer } from "./inbox";
 
@@ -406,13 +406,20 @@ describe("questions end to end: MCP send, window picks and Send, agent reads", (
       expect(tools.tools.find((t) => t.name === name)!.description!.length).toBeLessThan(2048);
     }
     // The Inbox-only `Stopped:` / `Holds up:` lines ride send_message's `body`
-    // field (a field description reaches the model whole), and from there the
-    // `plannotator_inbox` tool's `body` too.
+    // field (a field description reaches the model whole).
     const bodySchema = (tools.tools.find((t) => t.name === "send_message")!.inputSchema.properties as Record<string, { description?: string }>).body!;
     expect(bodySchema.description).toBe(SEND_BODY_DESCRIPTION);
+    // The `plannotator_inbox` tool words `body` shortly (Pi and OpenCode send it with every request): a
+    // question block the store reads, the Inbox-only lines, and `plannotator inbox --help` for the rest.
     const agentTool = inboxAgentTool(parseInboxToolList({ tools: tools.tools }))!;
     const agentBody = (agentTool.inputSchema.properties as Record<string, { description: string }>).body!.description;
-    expect(agentBody).toContain(SEND_BODY_DESCRIPTION);
+    expect(agentBody).toContain(INBOX_AGENT_FIELD_DESCRIPTIONS.send_message!.body!);
+    for (const part of [":::question-multi", ":::question-text", "never add an Other choice", "`Stopped: <why>`", "never `Stopped: no`", "`Holds up: <work>`", "Recommended:"]) expect(agentBody).toContain(part);
+    const [example] = parseInboxQuestionBlocks(agentBody);
+    expect(example).toMatchObject({ stopped: null, holds_up: ["sync release"] });
+    expect(example!.parsed.choices.map((choice) => choice.recommended)).toEqual([true, false]);
+    expect(agentTool.description).toContain("plannotator inbox --help");
+    expect(agentTool.description.length).toBeLessThan(2048);
 
     const sendResult = await client.callTool({
       name: "send_message",

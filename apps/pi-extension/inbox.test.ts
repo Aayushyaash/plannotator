@@ -38,6 +38,7 @@ import {
 	worldEnv,
 	type InboxWorld,
 } from "../../tests/helpers/inbox-world.ts";
+import { expectMeasuredCost } from "../../tests/helpers/inbox-tool-cost.ts";
 import { messageText, startScriptedModel, type ScriptedModel, type ScriptedRequest, type ScriptedTurn } from "../../tests/helpers/scripted-model.ts";
 
 /**
@@ -252,6 +253,28 @@ describe.skipIf(!piRuns)("Pi ↔ Plannotator Inbox (the real Pi in RPC mode, a r
 		expect(properties).toContain("project_path");
 		expect((tool.parameters as { required?: string[] }).required).toEqual(["action"]);
 		w.proof(`Inbox running, switch on for pi: plannotator_inbox sent to the model with actions ${JSON.stringify(actions)}\n\n${tool.description}`);
+	}, 120_000);
+
+	test("the tool's cost per request, measured on what Pi sends: the same prompt with the tool off and on (no reminder) differs by the tool alone, and that is the number the window shows", async () => {
+		const w = world("01a-tool-cost");
+		const m = model(askingScript());
+		startInbox(w);
+		knob(w, false);
+		const off = await openPi(w, m);
+		await ask(off, "hello");
+		const without = m.requests.at(-1)!;
+		await off.client.stop();
+		writeFileSync(join(w.dataDir, "config.json"), JSON.stringify({ inboxTool: { pi: true }, inboxReminder: { pi: false } }));
+		const on = await openPi(w, m);
+		await ask(on, "hello");
+		const withTool = m.requests.at(-1)!;
+		expect(withTool.tools).toContain("plannotator_inbox");
+		const added = withTool.bodyBytes - without.bodyBytes;
+		const entry = withTool.toolBytes.plannotator_inbox!;
+		// The request grows by the tool's entry and the comma before it, nothing else.
+		expect(added).toBe(entry + 1);
+		expectMeasuredCost("pi", withTool.toolJson.plannotator_inbox!);
+		w.proof(`Pi request without the tool: ${without.bodyBytes} bytes; with it: ${withTool.bodyBytes} bytes; the plannotator_inbox entry: ${entry} bytes`);
 	}, 120_000);
 
 	test("the reminder: one hidden line at the session's first prompt, only with the tool; later requests keep it in place and add none; reopening the session adds none; inboxReminder off sends none", async () => {

@@ -127,6 +127,8 @@ Agents are told to write `Stopped:` only when they truly cannot continue. A nega
 
 ## Connecting your agent
 
+Before any agent has written, the Inbox window shows one next step for this computer: Plannotator's own connections first (Claude Code, Pi and OpenCode, whose replies come back into the session by themselves), then agents that reach it through MCP. A tool that is off turns on with one click. A plugin that is missing shows its install command to copy; the window never installs anything, and it moves on by itself once you have. Below the step, a short list says which agents are already connected and what is left.
+
 ### Claude Code
 
 With the Plannotator plugin and [the Plannotator mod](/docs/guides/claude-code/#the-plannotator-mod) (Claude Code 2.1.287 or newer), Claude Code gets a `plannotator_inbox` tool. The tool is on by default for Claude Code, also before you ever ran the Inbox: the first time Claude uses it, it starts the Inbox in the background. The tool is added when Claude Code starts, not when you start a new conversation in a running one, so restart Claude Code after you change the setting. When you send a reply, it arrives in that session as a new turn after Claude finishes what it is doing. The thread then shows "Delivered to Claude Code".
@@ -135,7 +137,7 @@ The mod is off in `claude -p`, in SDK runs and on Windows. There the tool is not
 
 ### Pi
 
-Install the [Pi extension](/docs/getting-started/installation/#pi), then run `plannotator inbox`: it turns the inbox tool on for Pi when it finds the extension. The tool is off by default on Pi, because Pi sends every tool's full definition with each request. To turn it on yourself:
+Install the [Pi extension](/docs/getting-started/installation/#pi), then run `plannotator inbox`: it turns the inbox tool on for Pi when it finds the extension. The tool is off by default on Pi, because Pi sends every tool's full definition with each request: the inbox tool adds about 7 KB to every request, roughly 2,000 tokens depending on the model. To turn it on yourself:
 
 ```bash
 export PLANNOTATOR_INBOX_TOOL=1
@@ -145,7 +147,7 @@ Start a new Pi session (or `/reload`). A reply arrives as a follow-up message on
 
 ### OpenCode
 
-Add the [OpenCode plugin](/docs/getting-started/installation/#opencode), then run `plannotator inbox`: it turns the inbox tool on for OpenCode when it finds the plugin in your global opencode config. The tool is off by default on OpenCode, for the same reason as Pi. To turn it on yourself:
+Add the [OpenCode plugin](/docs/getting-started/installation/#opencode), then run `plannotator inbox`: it turns the inbox tool on for OpenCode when it finds the plugin in your global opencode config. The tool is off by default on OpenCode, for the same reason as Pi (about 7 KB per request, roughly 2,000 tokens). To turn it on yourself:
 
 ```bash
 export PLANNOTATOR_INBOX_TOOL=1

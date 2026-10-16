@@ -21,7 +21,7 @@
  * the platform.
  */
 
-import { INBOX_SECTIONS, INBOX_THREAD_NAME_MAX, type InboxSectionId } from "@plannotator/core/inbox-types";
+import { INBOX_SECTIONS, INBOX_THREAD_NAME_MAX, inboxToolCostText, type InboxSectionId } from "@plannotator/core/inbox-types";
 import { QUESTION_AUTHORING_GUIDE } from "@plannotator/core/question-block";
 import { INBOX_SET_ASIDE_HEADING } from "@plannotator/core/inbox-questions";
 import { HARNESSES, harnessPanel, shellLine, type ConnectContext, type Harness } from "@plannotator/inbox/harnesses";
@@ -282,7 +282,7 @@ export function formatInboxHelp(options: InboxHelpOptions): string {
     "Set up the connection for the host you run in:",
     "",
     `- **Claude Code** with the Plannotator plugin: nothing else to do. Check \`claude plugin list\` for \`plannotator@plannotator\`; if it is missing, run \`claude plugin marketplace add backnotprop/plannotator\` and \`claude plugin install plannotator@plannotator\`. The \`${INBOX_TOOL_NAME}\` tool appears after Claude Code restarts (\`claude --continue\` returns to this conversation). It needs Claude Code 2.1.287 or later, on macOS or Linux, in an interactive session (not \`claude -p\`).`,
-    `- **Pi** with the Plannotator extension (\`pi install npm:@plannotator/pi-extension\` if it is missing), or **OpenCode** with the Plannotator plugin (\`@plannotator/opencode@latest\` in opencode.json: \`"plugin": [...]\` on OpenCode 1, \`"plugins": [{ "package": ... }]\` on OpenCode 2): the inbox tool is off by default there. Turn it on for your host by merging ${code(`{ "inboxTool": { "pi": true } }`)} (or \`"opencode"\`) into ${code(configPath)}, keeping its other keys, or with the switch in the Inbox's Settings. Then start a new Pi session (or \`/reload\`), or restart OpenCode.`,
+    `- **Pi** with the Plannotator extension (\`pi install npm:@plannotator/pi-extension\` if it is missing), or **OpenCode** with the Plannotator plugin (\`@plannotator/opencode@latest\` in opencode.json: \`"plugin": [...]\` on OpenCode 1, \`"plugins": [{ "package": ... }]\` on OpenCode 2): the inbox tool is off by default there. Turn it on for your host by merging ${code(`{ "inboxTool": { "pi": true } }`)} (or \`"opencode"\`) into ${code(configPath)}, keeping its other keys, or with the switch in the Inbox's Settings. Then start a new Pi session (or \`/reload\`), or restart OpenCode. Pi and OpenCode send the tool with every request: ${inboxToolCostText("pi")} each (the size measured on both; the token count depends on the model), so tell the person before you turn it on.`,
     "- **Anything else**: register the stdio server; \"Connecting other agents\" below has the line for your host.",
     "",
     "When the person runs `plannotator inbox` themselves, it already connects the terminal agents it finds (Codex, Gemini CLI, Cursor, Windsurf/Devin, Amp, Kiro, Pi 0.99+, OpenCode with its plugin) and the Claude app, so check before adding a second entry: a `plannotator-inbox` server that runs this binary is already the connection.",

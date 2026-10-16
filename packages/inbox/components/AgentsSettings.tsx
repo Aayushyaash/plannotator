@@ -1,5 +1,5 @@
 import { useId, useState, type ReactNode } from 'react';
-import { INBOX_AGENT_LABELS, type InboxAgentId, type InboxAgentRow, type InboxAgentsModel } from '@plannotator/core/inbox-types';
+import { INBOX_AGENT_LABELS, inboxToolCostText, type InboxAgentId, type InboxAgentRow, type InboxAgentsModel } from '@plannotator/core/inbox-types';
 import { inboxApi } from '../api';
 import { HARNESSES, type ConnectContext } from '../harnesses';
 import { HostMark, Icon } from '../icons';
@@ -121,6 +121,8 @@ function AgentGroup({
     ) : (
       'Add it by hand: "Not found on this computer" below has its command.'
     );
+  // Pi and OpenCode send the tool whole with every request (Claude Code defers it behind tool search): the measured cost.
+  const cost = row.id === 'pi' || row.id === 'opencode' ? `Adds the tool to every ${row.label} request: ${inboxToolCostText(row.id)}.` : null;
   const reachSwitchable = (reach.kind === 'tool' || reach.kind === 'mcp') && reach.state !== 'foreign' && reach.state !== 'unreadable';
   const note = row.note;
   const noteOn = note?.state === 'added' || note?.state === 'edited';
@@ -164,6 +166,7 @@ function AgentGroup({
       <Row
         k="Reaches the Inbox"
         v={reachValue}
+        sub={reach.kind === 'tool' ? cost : null}
         r={
           reachSwitchable ? (
             <>
@@ -176,6 +179,7 @@ function AgentGroup({
       {row.tool && reach.kind !== 'tool' && (
         <Row
           k="The Inbox tool"
+          sub={cost}
           v={
             <>
               the <code>plannotator_inbox</code> tool, with Plannotator&apos;s {row.id === 'pi' ? 'extension' : 'plugin'}
