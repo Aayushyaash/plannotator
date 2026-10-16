@@ -72,6 +72,7 @@ import { newBatchId, projectAllArchived, projectBatchToast, projectsWithReadable
 import { lookBoundary } from './folding';
 import { latestAgentSeq } from './seenOnSight';
 import { isPhone, trackKeyboard, usePhone } from './phone';
+import { installPasteFollowsField } from './pasteTarget';
 import { LIST_MIN_WIDTH, THREAD_BESIDE_FILE_WIDTH, useStack } from './stack';
 import { backTo, pushScreen } from './history';
 import { adoptSavedTheme, inboxThemeSync } from './theme';
@@ -1146,6 +1147,9 @@ function Inbox() {
   // A phone shows one screen at a time (phone.ts, inbox.css), and its keyboard shrinks the window.
   const phone = usePhone();
   useEffect(() => (phone ? trackKeyboard() : undefined), [phone]);
+  // A ⌘V with focus on something that takes no text (a question's choice, the page) goes to the text
+  // field the person was writing in: dictation apps paste with a synthetic ⌘V (pasteTarget.ts).
+  useEffect(() => installPasteFollowsField(), []);
   // A window too narrow for two panes (an iPad in portrait, a narrow desktop window): the pane on top covers the one under it (stack.ts).
   // `‹ Inbox` from a file beside the thread in a window with room for the list and the thread but not for
   // the sidebar too (about 920 to 1050 px): the sidebar stays closed on screen so the list shows beside the
