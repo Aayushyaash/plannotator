@@ -116,6 +116,7 @@ jobs:
           packages/ui/utils/inputMethod.test.ts
           packages/ui/utils/vimNavigation.test.ts
           packages/ui/utils/clipboard.test.ts
+          packages/ui/utils/pasteInsert.test.ts
           apps/vscode-extension/src/vscode-theme.test.ts
           packages/ui/utils/vimScroll.test.ts
           packages/ui/components/InlineMarkdown.resolveLinkedDoc.test.tsx

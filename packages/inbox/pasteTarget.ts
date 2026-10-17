@@ -18,7 +18,9 @@
  * selected collapses to its end, so the dictation replaces nothing), before
  * the browser runs the paste. The keydown is never cancelled, so the
  * browser's own paste runs (Chrome runs it after the page has handled the
- * keydown), now into the field.
+ * keydown), now into the field. (On Chrome 155-156 on macOS, which drops a
+ * synthetic ⌘V's text, the page then inserts a plain-text paste itself:
+ * `@plannotator/ui/utils/pasteInsert`.)
  *
  * Nothing changes when focus is already in a text field or inside a frame (an
  * attached HTML page), when text is selected in an attached file's viewer or

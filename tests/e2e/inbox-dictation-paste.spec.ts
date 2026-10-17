@@ -17,7 +17,11 @@
  * shown full screen over the thread keeps it out of the reply box hidden under
  * it, and words selected in a file to comment on keep their toolbar. With
  * image paste (#1953, `compose/paste.ts`): an image pasted after a pick
- * attaches once to the reply box, and text is still inserted once.
+ * attaches once to the reply box, and text is still inserted once. And
+ * Chrome 155-156's dropped paste (pasteInsert.ts, forced on here): with the
+ * browser's own insertion cancelled, the page still inserts each dictation
+ * once, as an undo step, into the reply box, search and compose; on an engine
+ * without the bug the browser's own paste is kept.
  *
  * Build the binary first (see inbox.spec.ts), then `bun run test:e2e:inbox`.
  */
@@ -29,6 +33,7 @@ import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, rememberInboxOf, removeInboxScratch } from './inbox-scratch';
 import { NO_BROWSER } from '../helpers/no-browser';
+import { FORCE_PLAIN_TEXT_PASTE_FLAG } from '../../packages/ui/utils/pasteInsert';
 
 const repo = resolve(__dirname, '../..');
 const binary = resolve(process.env.PLANNOTATOR_E2E_BINARY ?? join(repo, '.local/plannotator'));
@@ -344,6 +349,135 @@ test('text selected in a file to comment on: the paste is not taken to the reply
     await expect(box).not.toBeFocused();
     // The toolbar is still there: the person can still comment on the words they chose.
     await expect(toolbar).toBeVisible();
+  } finally {
+    await p.close();
+  }
+});
+
+/**
+ * Chrome 155-156 on macOS (pasteInsert.ts): after a dictation app's synthetic ⌘V the `paste` event
+ * carries the words, but the browser's own insertion is skipped. Simulated here by cancelling the
+ * browser's `insertFromPaste` beforeinput (`drop`), which is exactly the insertion Chrome drops. The
+ * workaround runs only on Chromium 155 and 156 on macOS, so `force` turns it on in this Chromium
+ * (the window flag pasteInsert.ts reads). The page's own insertion (execCommand's `insertText`,
+ * which fires `input` and no `beforeinput`) is what lands. Every `beforeinput` and `input` is
+ * recorded as `<type>:<inputType>`.
+ */
+async function recordPasteInputs(on: Page, { drop, force }: { drop: boolean; force: boolean }): Promise<void> {
+  await on.addInitScript(
+    ({ dropIt, forceIt, flag }) => {
+      if (forceIt) (window as unknown as Record<string, unknown>)[flag] = true;
+      const seen: string[] = [];
+      (window as unknown as { __pasteInputs: string[] }).__pasteInputs = seen;
+      const record = (event: Event) => {
+        const input = event as InputEvent;
+        seen.push(`${input.type}:${input.inputType}`);
+        if (dropIt && input.type === 'beforeinput' && input.inputType === 'insertFromPaste') input.preventDefault();
+      };
+      window.addEventListener('beforeinput', record, true);
+      window.addEventListener('input', record, true);
+    },
+    { dropIt: drop, forceIt: force, flag: FORCE_PLAIN_TEXT_PASTE_FLAG },
+  );
+}
+const pasteInputs = (on: Page) => on.evaluate(() => (window as unknown as { __pasteInputs: string[] }).__pasteInputs.splice(0));
+
+test('Chrome 155-156 dropping the paste: the reply box, search and compose still get every dictation, once', async () => {
+  const p = await context.newPage();
+  try {
+    await recordPasteInputs(p, { drop: true, force: true });
+    await p.goto(`${url}#thread=${threadId}`);
+    // The simulation is real: a field the page leaves native gets nothing.
+    await p.evaluate(() => {
+      const control = document.createElement('textarea');
+      control.id = 'native-control';
+      control.setAttribute('data-native-paste', '');
+      document.body.append(control);
+    });
+    await p.locator('#native-control').focus();
+    await dictate(p, 'Dropped by the browser.');
+    await p.waitForTimeout(200);
+    await expect(p.locator('#native-control')).toHaveValue('');
+    expect(await pasteInputs(p)).toEqual(['beforeinput:insertFromPaste']);
+    await p.evaluate(() => document.getElementById('native-control')?.remove());
+
+    // The reply box (a React-controlled textarea under the skill-reference mirror).
+    await p.locator('.ib-pfoot').getByRole('button', { name: 'Reply' }).click();
+    const box = p.locator('section.ib-pane .ib-rbox textarea');
+    await expect(box).toBeFocused();
+    await box.fill(''); // a pick saved by an earlier test seeds the box
+    await pasteInputs(p);
+    await dictate(p, 'First dictation. ');
+    await expect(box).toHaveValue('First dictation. ');
+    await dictate(p, 'Second dictation. ');
+    await expect(box).toHaveValue('First dictation. Second dictation. ');
+    expect(await pasteInputs(p)).toEqual(['input:insertText', 'input:insertText']);
+    // After a pick, the dictation follows the field (pasteTarget.ts) and is inserted by the page.
+    await p.getByText('Retry with the same idempotency key').click();
+    await expect(box).not.toBeFocused();
+    await dictate(p, 'After a pick.');
+    await expect(box).toHaveValue('First dictation. Second dictation. After a pick.');
+    // React holds the words: typing after them keeps them.
+    await p.keyboard.type(' Typed.');
+    await expect(box).toHaveValue('First dictation. Second dictation. After a pick. Typed.');
+    // The insertion is an undo step.
+    await dictate(p, ' Undo me.');
+    await expect(box).toHaveValue('First dictation. Second dictation. After a pick. Typed. Undo me.');
+    await p.keyboard.press('ControlOrMeta+z');
+    await expect(box).toHaveValue('First dictation. Second dictation. After a pick. Typed.');
+
+    // Search (a text input).
+    await p.locator('[data-open-search]').first().click();
+    const search = p.locator('dialog[data-search-palette][open] input').first();
+    await expect(search).toBeFocused();
+    await dictate(p, 'retry');
+    await expect(search).toHaveValue('retry');
+    await p.keyboard.press('Escape');
+
+    // Compose's message.
+    await p.locator('[data-open-compose]').first().click();
+    const message = p.getByRole('dialog').getByRole('textbox', { name: 'Message' });
+    await message.click();
+    await dictate(p, 'An idea, dictated.');
+    await expect(message).toHaveValue('An idea, dictated.');
+  } finally {
+    await p.close();
+  }
+});
+
+test('the workaround on, the bug not hit: a dictation is inserted exactly once (the page inserts, the browser does not too)', async () => {
+  const p = await context.newPage();
+  try {
+    await recordPasteInputs(p, { drop: false, force: true });
+    await p.goto(`${url}#thread=${threadId}`);
+    await p.locator('.ib-pfoot').getByRole('button', { name: 'Reply' }).click();
+    const box = p.locator('section.ib-pane .ib-rbox textarea');
+    await expect(box).toBeFocused();
+    await box.fill('');
+    await pasteInputs(p);
+    await dictate(p, 'Once.');
+    await expect(box).toHaveValue('Once.');
+    await p.waitForTimeout(200);
+    await expect(box).toHaveValue('Once.');
+    expect(await pasteInputs(p)).toEqual(['input:insertText']);
+  } finally {
+    await p.close();
+  }
+});
+
+test('an engine without the bug (this Chromium is neither 155 nor 156): the browser pastes, the page does not', async () => {
+  const p = await context.newPage();
+  try {
+    await recordPasteInputs(p, { drop: false, force: false });
+    await p.goto(`${url}#thread=${threadId}`);
+    await p.locator('.ib-pfoot').getByRole('button', { name: 'Reply' }).click();
+    const box = p.locator('section.ib-pane .ib-rbox textarea');
+    await expect(box).toBeFocused();
+    await box.fill('');
+    await pasteInputs(p);
+    await dictate(p, 'Native.');
+    await expect(box).toHaveValue('Native.');
+    expect(await pasteInputs(p)).toEqual(['beforeinput:insertFromPaste', 'input:insertFromPaste']);
   } finally {
     await p.close();
   }

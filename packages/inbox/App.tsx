@@ -73,6 +73,7 @@ import { lookBoundary } from './folding';
 import { latestAgentSeq } from './seenOnSight';
 import { isPhone, trackKeyboard, usePhone } from './phone';
 import { installPasteFollowsField } from './pasteTarget';
+import { installPlainTextPaste } from '@plannotator/ui/utils/pasteInsert';
 import { LIST_MIN_WIDTH, THREAD_BESIDE_FILE_WIDTH, useStack } from './stack';
 import { backTo, pushScreen } from './history';
 import { adoptSavedTheme, inboxThemeSync } from './theme';
@@ -1162,6 +1163,9 @@ function Inbox() {
   // A ⌘V with focus on something that takes no text (a question's choice, the page) goes to the text
   // field the person was writing in: dictation apps paste with a synthetic ⌘V (pasteTarget.ts).
   useEffect(() => installPasteFollowsField(), []);
+  // ...and the page inserts that plain-text paste itself: Chrome 155-156 on macOS drops dictated
+  // (synthetic ⌘V) text otherwise. Remove once Chrome 157 is stable (pasteInsert.ts).
+  useEffect(() => installPlainTextPaste(), []);
   // A window too narrow for two panes (an iPad in portrait, a narrow desktop window): the pane on top covers the one under it (stack.ts).
   // `‹ Inbox` from a file beside the thread in a window with room for the list and the thread but not for
   // the sidebar too (about 920 to 1050 px): the sidebar stays closed on screen so the list shows beside the
