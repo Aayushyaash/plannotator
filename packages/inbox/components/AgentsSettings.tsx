@@ -123,7 +123,11 @@ function AgentGroup({
     );
   // Pi and OpenCode send the tool whole with every request (Claude Code defers it behind tool search): the measured cost.
   const cost = row.id === 'pi' || row.id === 'opencode' ? `Adds the tool to every ${row.label} request: ${inboxToolCostText(row.id)}.` : null;
-  const reachSwitchable = (reach.kind === 'tool' || reach.kind === 'mcp') && reach.state !== 'foreign' && reach.state !== 'unreadable';
+  // Claude Code's mod off: its plugin gives no tool, so there is nothing to switch (the reason shows instead).
+  const modOff = row.tool?.mod_off === true;
+  // Claude Code's MCP entry is one the person added by hand (`claude mcp add`): Plannotator never writes or removes it.
+  const handMcp = row.id === 'claude-code' && reach.kind === 'mcp';
+  const reachSwitchable = (reach.kind === 'tool' || reach.kind === 'mcp') && reach.state !== 'foreign' && reach.state !== 'unreadable' && !modOff && !handMcp;
   const note = row.note;
   const noteOn = note?.state === 'added' || note?.state === 'edited';
   const noteState = note
@@ -166,7 +170,8 @@ function AgentGroup({
       <Row
         k="Reaches the Inbox"
         v={reachValue}
-        sub={reach.kind === 'tool' ? cost : null}
+        sub={modOff && reach.kind === 'tool' ? reach.reason : reach.kind === 'tool' ? cost : null}
+        warn={modOff && reach.kind === 'tool'}
         r={
           reachSwitchable ? (
             <>
@@ -188,7 +193,7 @@ function AgentGroup({
           r={
             <>
               {pending.has(`${row.id}:tool`) && <span className="ib-agpending">{next}</span>}
-              <Switch on={row.tool.on} label={`The Inbox tool: ${row.label}`} disabled={row.tool.locked} busy={busy} onClick={() => onChange({ tool: !row.tool!.on })} />
+              <Switch on={row.tool.on} label={`The Inbox tool: ${row.label}`} disabled={row.tool.locked || modOff} busy={busy} onClick={() => onChange({ tool: !row.tool!.on })} />
             </>
           }
         />

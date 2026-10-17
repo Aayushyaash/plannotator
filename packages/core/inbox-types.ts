@@ -1074,8 +1074,9 @@ export interface InboxAgentRow {
   /**
    * Claude Code, Pi and OpenCode only: their `plannotator_inbox` tool switch (`inboxTool`), shown whether or not the agent was found.
    * `chosen_off`: config.json turns it off by name (not the host's default), so the first-run screen never offers turning it on.
+   * `mod_off` (Claude Code): Plannotator's Claude Code mod is off (PLANNOTATOR_CLAUDE_MOD / claudeCodeMod), so there is no tool whatever inboxTool says.
    */
-  tool?: { on: boolean; locked: boolean; chosen_off?: boolean } | null;
+  tool?: { on: boolean; locked: boolean; chosen_off?: boolean; mod_off?: boolean } | null;
   /** Claude Code, Pi and OpenCode only. `needs_tool`: the tool is off, so there is no reminder. */
   reminder: { on: boolean; locked: boolean; needs_tool: boolean } | null;
   note: InboxAgentNoteStatus | null;
@@ -1083,9 +1084,13 @@ export interface InboxAgentRow {
    * Claude Code, Pi and OpenCode only: whether Plannotator's own plugin or
    * extension is installed (Claude Code's plugin enabled, Pi's settings
    * `packages`, OpenCode's global `plugin`/`plugins`). Absent from an older
-   * Inbox; null for every other agent.
+   * Inbox; null for every other agent. `disabled` (Claude Code): installed and
+   * turned off by name (`claude plugin disable`), the person's choice;
+   * `managed`, turned off by managed (enterprise) settings.
+   * `generation` (OpenCode): the version on PATH (`opencode2`: 2, `opencode`
+   * alone: 1), for the plugin line that version reads.
    */
-  plugin?: { installed: boolean } | null;
+  plugin?: { installed: boolean; disabled?: boolean; managed?: boolean; generation?: "1" | "2" } | null;
 }
 
 export interface InboxAgentsModel {

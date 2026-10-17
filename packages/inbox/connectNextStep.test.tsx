@@ -14,7 +14,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { inboxToolCostText, type InboxAgentsModel } from '@plannotator/core/inbox-types';
 import type { ComposeSessionsModel } from './api';
-import { SCENARIOS, ready, toolOff } from './connectSteps.fixtures';
+import { SCENARIOS, agentsModel, missing, ready, toolOff } from './connectSteps.fixtures';
 
 const hasDom = typeof document !== 'undefined';
 const { EmptyState } = (hasDom ? await import('./components/EmptyState') : {}) as typeof import('./components/EmptyState');
@@ -323,4 +323,77 @@ test.skipIf(!hasDom)('a tool the person turned off by name (config.json false) i
 test.skipIf(!hasDom)('the cost on the card: the measured size, and the tokens said as roughly', () => {
   const m = mount(SCENARIOS.typical());
   expect(text(card(m.el).querySelector('p b'))).toMatch(/^about \d+ KB, roughly [\d,]+ tokens$/);
+});
+
+// Found by the first-run scenario matrix (a person's `plannotator inbox` on scratch computers).
+
+test.skipIf(!hasDom)('every tool locked off (PLANNOTATOR_INBOX_TOOL=0): never "All set"; the card says no agent reaches the Inbox, and why', () => {
+  const m = mount(agentsModel({ 'claude-code': toolOff(true), pi: toolOff(true), opencode: toolOff(true) }, { tool_env: false }));
+  const hero = card(m.el);
+  expect(hero.getAttribute('data-connect-step')).toBe('blocked');
+  expect(text(hero.querySelector('h3'))).toBe('No agent reaches the Inbox yet');
+  expect(text(hero.querySelector('p'))).toBe('PLANNOTATOR_INBOX_TOOL=0 keeps the Inbox tool off for Claude Code, Pi and OpenCode.');
+  expect(text(m.el)).not.toContain('All set');
+  expect([...listOf(m.el, 'Already connected')].map(text)).toEqual(['None yet']);
+});
+
+test.skipIf(!hasDom)('the only agent\'s tool turned off by name: blocked, with the way back in Settings → Agents', () => {
+  const m = mount(agentsModel({ pi: { ...toolOff(), tool: { on: false, locked: false, chosen_off: true } } }));
+  expect(card(m.el).getAttribute('data-connect-step')).toBe('blocked');
+  expect(text(card(m.el).querySelector('p'))).toBe('You turned the Inbox tool off for Pi. Turn it back on in Settings → Agents.');
+  expect(card(m.el).querySelector('a')?.getAttribute('href')).toBe('#settings/agents');
+});
+
+test.skipIf(!hasDom)('putting off every step is not "All set" either', async () => {
+  const m = mount(agentsModel({ 'claude-code': missing('claude-code') }));
+  await click(button(card(m.el), 'Not now')!);
+  expect(card(m.el).getAttribute('data-connect-step')).toBe('blocked');
+  expect(text(card(m.el).querySelector('p'))).toBe('You put Claude Code off for later.');
+});
+
+test.skipIf(!hasDom)('Claude Code\'s plugin disabled (claude plugin disable): no install step, Left to do says it is turned off', () => {
+  const m = mount(agentsModel({ 'claude-code': { ...missing('claude-code'), plugin: { installed: false, disabled: true } }, pi: missing('pi') }));
+  expect(card(m.el).getAttribute('data-connect-step')).toBe('pi');
+  expect(m.el.textContent).not.toContain('claude plugin install');
+  expect([...listOf(m.el, 'Left to do')].map(text)).toEqual(['Pi now', 'Claude Code plugin turned off', 'OpenCode: not on this computer']);
+});
+
+test.skipIf(!hasDom)('Claude Code\'s mod off: not connected, never offered; the card says why', () => {
+  const m = mount(agentsModel({ 'claude-code': { ...toolOff(), tool: { on: false, locked: false, mod_off: true } } }));
+  expect(card(m.el).getAttribute('data-connect-step')).toBe('blocked');
+  expect(text(card(m.el).querySelector('p'))).toContain("Plannotator's Claude Code mod is turned off");
+  expect([...listOf(m.el, 'Left to do')].map(text)[0]).toBe('Claude Code Plannotator mod turned off');
+});
+
+test.skipIf(!hasDom)('only OpenCode 1 on PATH: its plugin line ("plugin", not V2\'s "plugins") shows first', () => {
+  const m = mount(agentsModel({ opencode: { ...missing('opencode'), plugin: { installed: false, generation: '1' } } }));
+  const hero = card(m.el);
+  expect(text(hero.querySelector('pre'))).toBe('"plugin": ["@plannotator/opencode@latest"]');
+  expect([...hero.querySelectorAll<HTMLInputElement>('input[type="radio"]')].find((input) => input.checked)?.value).toBe('1');
+  // OpenCode 2 on PATH (or not known): V2's line, as before.
+  act(() => root?.unmount());
+  host?.remove();
+  const v2 = mount(agentsModel({ opencode: { ...missing('opencode'), plugin: { installed: false, generation: '2' } } }));
+  expect(text(card(v2.el).querySelector('pre'))).toBe('"plugins": [{ "package": "@plannotator/opencode@latest" }]');
+});
+
+test.skipIf(!hasDom)('the OpenCode plugin line follows a later read that learns the version', () => {
+  let current = agentsModel({ opencode: { ...missing('opencode'), plugin: { installed: false } } });
+  host = document.createElement('div');
+  host.className = 'pn-inbox';
+  document.body.appendChild(host);
+  const render = () =>
+    root!.render(
+      <SidebarProvider>
+        <EmptyState context={context} agents={current} agentsUnavailable={null} sessions={null} onAgents={() => {}} onMessage={() => {}} />
+      </SidebarProvider>,
+    );
+  act(() => {
+    root = createRoot(host!);
+    render();
+  });
+  expect(text(card(host).querySelector('pre'))).toBe('"plugins": [{ "package": "@plannotator/opencode@latest" }]');
+  current = agentsModel({ opencode: { ...missing('opencode'), plugin: { installed: false, generation: '1' } } });
+  act(() => render());
+  expect(text(card(host).querySelector('pre'))).toBe('"plugin": ["@plannotator/opencode@latest"]');
 });

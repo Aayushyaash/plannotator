@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { InboxAgentId, InboxAgentsModel } from '@plannotator/core/inbox-types';
 import { inboxApi, type ComposeSessionsModel } from '../api';
 import { OTHER_HARNESSES, harnessPanel, hostMcpSnippet, type ConnectContext } from '../harnesses';
@@ -10,6 +10,7 @@ import {
   PI_EXTENSION_INSTALL,
   PLUGIN_HOSTS,
   TRY_PROMPT,
+  blockedText,
   connectPlan,
   doneNote,
   harnessOf,
@@ -79,8 +80,13 @@ function Choice<T extends string>({ label, value, options, onChange }: { label: 
 }
 
 /** The command that installs Plannotator's own connection on a host, with what to do after. */
-function InstallBlock({ host }: { host: PluginHost }) {
-  const [version, setVersion] = useState<'2' | '1'>('2');
+function InstallBlock({ host, generation }: { host: PluginHost; generation?: '1' | '2' }) {
+  // The OpenCode on PATH decides which plugin line shows first: OpenCode 1 does not read `plugins`.
+  const [version, setVersion] = useState<'2' | '1'>(generation ?? '2');
+  // The agents are read again every few seconds: follow what they say about the OpenCode on this computer.
+  useEffect(() => {
+    if (generation) setVersion(generation);
+  }, [generation]);
   if (host === 'claude-code') {
     return (
       <div className="ib-cn-blk" data-install="claude-code">
@@ -216,7 +222,7 @@ export function EmptyState({ context, agents, agentsUnavailable, onRetry, sessio
   const plan = agents ? connectPlan(agents, skipped, new Set(live.keys())) : null;
   // The agents are read once more before anything shows, so the screen never opens on a guess.
   const loading = !agents && !agentsUnavailable;
-  const allSet = !!plan && plan.found.length > 0 && !plan.next;
+  const allSet = !!plan && plan.found.length > 0 && !plan.next && !plan.blocked;
 
   useLayoutEffect(() => {
     if (focusTick === 0) return;
@@ -344,7 +350,7 @@ export function EmptyState({ context, agents, agentsUnavailable, onRetry, sessio
             <div className="ib-cn-blk ib-cn-body">
               {isPluginHost(next.id) ? (
                 <>
-                  <InstallBlock host={next.id} />
+                  <InstallBlock host={next.id} generation={next.generation} />
                   {next.state === 'missing' && context && <McpFold host={next.id} context={context} />}
                 </>
               ) : (
@@ -354,6 +360,28 @@ export function EmptyState({ context, agents, agentsUnavailable, onRetry, sessio
             <div className="ib-cn-acts">{skip}</div>
           </>
         )}
+      </div>
+    );
+  } else if (plan?.blocked) {
+    const why = blockedText(plan, { skipped, toolEnv: agents?.tool_env ?? null });
+    hero = (
+      <div className="ib-cn" data-connect-step="blocked">
+        <Mark id={plan.found[0]!.id} size="hero" />
+        <div className="ib-cn-eb">
+          <span className="ib-cn-ebl">Nothing connected</span>
+        </div>
+        <h3 ref={stepHeading} tabIndex={-1}>
+          No agent reaches the Inbox yet
+        </h3>
+        <p>
+          {why.text}
+          {why.settings && (
+            <>
+              {' '}
+              Turn it back on in <a href="#settings/agents">Settings → Agents</a>.
+            </>
+          )}
+        </p>
       </div>
     );
   } else if (plan) {

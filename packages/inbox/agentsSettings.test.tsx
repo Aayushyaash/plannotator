@@ -216,3 +216,25 @@ test.skipIf(!hasDom)('OpenCode with no AGENTS.md says "no file yet", never "woul
   expect(rows(group(el, 'opencode'))[2]!.v).toBe('~/.config/opencode/AGENTS.md · no file yetShow');
   expect([...el.querySelectorAll('[role="note"]')].map((n) => n.textContent).join(' ')).toContain('PLANNOTATOR_INBOX_NOTES=0 is set');
 });
+
+test.skipIf(!hasDom)('Claude Code\'s mod off: "Reaches the Inbox" says why in place of a switch that would do nothing; the reminder needs the tool', () => {
+  const reason = "Plannotator's Claude Code mod is off (PLANNOTATOR_CLAUDE_MOD or claudeCodeMod), so Claude Code has no Inbox tool";
+  const base = model();
+  base.agents[0] = tool('claude-code', 'Claude Code', {
+    reach: { kind: 'tool', on: false, state: 'off', path: null, locked: false, reason },
+    tool: { on: false, locked: false, mod_off: true },
+    reminder: { on: false, locked: false, needs_tool: true },
+  });
+  const el = mount(base);
+  const [reach, reminder] = rows(group(el, 'claude-code'));
+  expect(reach).toEqual({ k: 'Reaches the Inbox', v: 'the plannotator_inbox tool', sw: null, sub: reason });
+  expect(reminder!.v).toBe('Needs the tool');
+  expect((group(el, 'claude-code').querySelectorAll('[role="switch"]')[0] as HTMLButtonElement).disabled).toBe(true);
+});
+
+test.skipIf(!hasDom)('Claude Code connected by hand through MCP: shown, never switched (Plannotator does not own that entry)', () => {
+  const base = model();
+  base.agents[0] = mcp('claude-code', 'Claude Code', '~/.claude.json');
+  const el = mount(base);
+  expect(rows(group(el, 'claude-code'))[0]).toEqual({ k: 'Reaches the Inbox', v: 'plannotator-inbox in ~/.claude.json', sw: null, sub: null });
+});

@@ -6,8 +6,8 @@
  */
 import { expect, test } from 'bun:test';
 import { INBOX_TOOL_COST, inboxToolCostText } from '@plannotator/core/inbox-types';
-import { connectPlan, connectRowOf, doneNote, laterNote, stepEyebrow, stepText, stepTitle } from './connectSteps';
-import { SCENARIOS, agentsModel, missing, toolOff, viaMcp } from './connectSteps.fixtures';
+import { blockedText, connectPlan, connectRowOf, doneNote, laterNote, stepEyebrow, stepText, stepTitle } from './connectSteps';
+import { SCENARIOS, agentsModel, missing, ready, toolOff, viaMcp } from './connectSteps.fixtures';
 
 const ids = (rows: { id: string }[]) => rows.map((row) => row.id);
 
@@ -99,4 +99,70 @@ test('a live session of a Plannotator host counts as connected; a tool turned of
   expect(off.next).toBeNull();
   expect(ids(off.later)).toEqual(['pi']);
   expect(laterNote(off.later[0]!, { skipped: false, toolEnv: null })).toBe('off');
+});
+
+// Found by the first-run scenario matrix (a person's `plannotator inbox` on scratch computers).
+
+test('every tool locked off: not "All set" (blocked), and the screen says why', () => {
+  const model = agentsModel({ 'claude-code': toolOff(true), pi: toolOff(true), opencode: toolOff(true) }, { tool_env: false });
+  const plan = connectPlan(model);
+  expect(plan.next).toBeNull();
+  expect(plan.done).toEqual([]);
+  expect(plan.blocked).toBe(true);
+  expect(blockedText(plan, { skipped: [], toolEnv: false })).toEqual({
+    text: 'PLANNOTATOR_INBOX_TOOL=0 keeps the Inbox tool off for Claude Code, Pi and OpenCode.',
+    settings: false,
+  });
+});
+
+test('the only agent turned off by name, or every step put off: blocked, never "All set"', () => {
+  const off = connectPlan(agentsModel({ pi: { ...toolOff(), tool: { on: false, locked: false, chosen_off: true } } }));
+  expect(off.blocked).toBe(true);
+  expect(blockedText(off, { skipped: [], toolEnv: null })).toEqual({ text: 'You turned the Inbox tool off for Pi.', settings: true });
+  const putOff = connectPlan(agentsModel({ 'claude-code': missing('claude-code') }), ['claude-code']);
+  expect(putOff.blocked).toBe(true);
+  expect(blockedText(putOff, { skipped: ['claude-code'], toolEnv: null }).text).toBe('You put Claude Code off for later.');
+  // One agent reaching the Inbox is enough for All set.
+  expect(connectPlan(agentsModel({ 'claude-code': ready(), pi: { ...toolOff(), tool: { on: false, locked: false, chosen_off: true } } })).blocked).toBe(false);
+});
+
+test('Claude Code plugin disabled (claude plugin disable): the person\'s choice, never the install step', () => {
+  const plan = connectPlan(agentsModel({ 'claude-code': { ...missing('claude-code'), plugin: { installed: false, disabled: true } }, pi: missing('pi') }));
+  expect(plan.next?.id).toBe('pi');
+  const claude = plan.later.find((row) => row.id === 'claude-code')!;
+  expect(laterNote(claude, { skipped: false, toolEnv: null })).toBe('plugin turned off');
+  expect(plan.steps.some((row) => row.id === 'claude-code')).toBe(false);
+});
+
+test('Claude Code mod off: the plugin gives no tool, so it is not connected and not offered', () => {
+  const row = connectRowOf({ ...agentsModel({}).agents[0]!, ...toolOff(), tool: { on: false, locked: false, mod_off: true } });
+  expect(row?.state).toBe('tool-off');
+  expect(row?.chosenOff).toBe(true);
+  expect(laterNote(row!, { skipped: false, toolEnv: null })).toBe('Plannotator mod turned off');
+  const plan = connectPlan(agentsModel({ 'claude-code': { ...toolOff(), tool: { on: false, locked: false, mod_off: true } } }));
+  expect(plan.blocked).toBe(true);
+  expect(blockedText(plan, { skipped: [], toolEnv: null }).text).toContain('mod is turned off');
+});
+
+test('OpenCode 1 on PATH: the step names the version, and the row carries it for the plugin line', () => {
+  const plan = connectPlan(agentsModel({ opencode: { ...missing('opencode'), plugin: { installed: false, generation: '1' } } }));
+  expect(plan.next?.generation).toBe('1');
+  expect(stepText(plan.next!).text).toContain('OpenCode 1 checks for your replies itself');
+});
+
+test('a hand-added MCP entry still counts when the plugin is disabled or its mod off: connected (MCP), never a step', () => {
+  for (const over of [{ plugin: { installed: false, disabled: true } }, { tool: { on: false, locked: false, mod_off: true }, plugin: { installed: true } }]) {
+    const plan = connectPlan(agentsModel({ 'claude-code': { ...viaMcp('claude-code'), ...over } }));
+    expect(plan.done.map((row) => [row.id, row.state])).toEqual([['claude-code', 'mcp']]);
+    expect(plan.next).toBeNull();
+    expect(plan.blocked).toBe(false);
+  }
+});
+
+test('the plugin turned off by managed settings: said so, and claude plugin enable is never suggested', () => {
+  const plan = connectPlan(agentsModel({ 'claude-code': { ...missing('claude-code'), plugin: { installed: false, disabled: true, managed: true } } }));
+  expect(laterNote(plan.later[0]!, { skipped: false, toolEnv: null })).toBe('plugin turned off by managed settings');
+  const why = blockedText(plan, { skipped: [], toolEnv: null }).text;
+  expect(why).toContain("managed settings turn Plannotator's plugin off");
+  expect(why).not.toContain('claude plugin enable');
 });

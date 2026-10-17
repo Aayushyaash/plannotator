@@ -130,13 +130,14 @@ import { createInboxTailscale, PHONES_TAILNET_HTTPS_PORT, type InboxTailscale } 
 import { createInboxUpdates, type InboxUpdatesOptions } from "./inbox-updates";
 import {
   agentSpec,
+  claudeCodeModOn,
   connectInboxAgents,
   createAgentEnvironment,
   createAgentEnvironmentFor,
   displayPath,
   inboxAgentReach,
   inboxConnectDisabled,
-  inboxPluginInstalled,
+  inboxPluginStatus,
   readInboxAgents,
   setInboxAgentReach,
   setInboxTool,
@@ -774,15 +775,24 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         const host = (INBOX_TOOL_HOSTS as readonly string[]).includes(id) ? (id as InboxToolHost) : null;
         // The Inbox tool switch of the three Plannotator hosts stays reachable whether or not the agent was found.
         // chosen_off: config.json turns it off by name (the person's choice, e.g. Settings' switch), not the host default.
+        // Claude Code's tool comes from its plugin's mod: with the mod off (PLANNOTATOR_CLAUDE_MOD / claudeCodeMod) there is none.
+        const modOff = id === "claude-code" && !claudeCodeModOn(agentEnvironment);
         const tool = host
-          ? { on: resolveInboxTool(config, env, host), locked: toolEnv !== undefined, chosen_off: toolEnv === undefined && configuredInboxTool(config, host) === false }
+          ? {
+              on: !modOff && resolveInboxTool(config, env, host),
+              locked: toolEnv !== undefined,
+              chosen_off: toolEnv === undefined && configuredInboxTool(config, host) === false,
+              ...(modOff ? { mod_off: true } : {}),
+            }
           : null;
-        const reminder = host ? { on: resolveInboxReminder(config, env, host), locked: toolEnv !== undefined, needs_tool: !resolveInboxTool(config, env, host) } : null;
+        // No tool (the inboxTool switch, or Claude Code's mod off): no reminder.
+        const reminder = host
+          ? { on: !modOff && resolveInboxReminder(config, env, host), locked: toolEnv !== undefined, needs_tool: modOff || !resolveInboxTool(config, env, host) }
+          : null;
         // With PLANNOTATOR_INBOX_NOTES=0 only a note already written is listed, so it can still be turned off.
         const status = (INBOX_NOTE_AGENT_IDS as readonly string[]).includes(id) ? noteStatus(id as InboxNoteAgentId, dataDir, agentEnvironment) : null;
         const note = status && (!notesOff || status.state === "added" || status.state === "edited") ? status : null;
-        const installed = inboxPluginInstalled(id, agentEnvironment);
-        return { id, label: INBOX_AGENT_LABELS[id], detected, reach, tool, reminder, note, plugin: installed === null ? null : { installed } };
+        return { id, label: INBOX_AGENT_LABELS[id], detected, reach, tool, reminder, note, plugin: inboxPluginStatus(id, agentEnvironment) };
       }),
     );
     return {

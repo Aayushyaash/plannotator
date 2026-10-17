@@ -53,7 +53,7 @@ export function resolveAgentFileTarget(path: string): string {
 }
 
 /** Read an agent's file under the rules above. */
-export function readAgentFile(path: string): AgentFileRead {
+export function readAgentFile(path: string, maxBytes: number = AGENT_FILE_MAX_BYTES): AgentFileRead {
   const target = resolveAgentFileTarget(path);
   let linked = false;
   try {
@@ -69,7 +69,7 @@ export function readAgentFile(path: string): AgentFileRead {
     return { kind: "refused", path, target, reason: describeFsError(error) };
   }
   if (!stat.isFile()) return { kind: "refused", path, target, reason: "it is not a regular file" };
-  if (stat.size > AGENT_FILE_MAX_BYTES) return { kind: "refused", path, target, reason: "it is larger than 1 MiB" };
+  if (stat.size > maxBytes) return { kind: "refused", path, target, reason: `it is larger than ${Math.round(maxBytes / (1024 * 1024))} MiB` };
   let bytes: Buffer;
   try {
     bytes = readFileSync(target);
