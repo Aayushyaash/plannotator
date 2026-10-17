@@ -21,6 +21,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { NO_BROWSER } from '../../tests/helpers/no-browser';
+import { tooltipOf } from './testing/tooltip';
 
 const hasDom = typeof document !== 'undefined';
 const { InboxApp } = (hasDom ? await import('./App') : {}) as typeof import('./App');
@@ -251,7 +252,8 @@ test.skipIf(!hasDom)('a file no longer on disk: the apps are disabled and say Mi
   await until(() => pane(el).querySelector('[data-open-in-primary]') !== null, 'the split button');
   const primary = pane(el).querySelector<HTMLButtonElement>('[data-open-in-primary]')!;
   expect(primary.disabled).toBe(true);
-  expect(primary.title).toBe('Missing');
+  // A disabled control takes no pointer: the pointer reaches its wrapper, which holds the tooltip.
+  expect(await tooltipOf(primary.closest('[data-tip-wrap]')!)).toBe('Missing');
   const menu = await openMenu(pane(el), '[data-open-in-caret]', id);
   const disabled = [...menu.querySelectorAll<HTMLElement>('[data-open-in-item]')].map((item) => [item.getAttribute('data-open-in-item'), item.hasAttribute('data-disabled')]);
   expect(disabled).toEqual([

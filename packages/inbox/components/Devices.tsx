@@ -3,6 +3,7 @@ import { inboxApi, type LanState, type PairedDevice, type TailnetState, type Tai
 import { shortTime } from '../format';
 import { Icon, TailscaleMark } from '../icons';
 import { PairFlow } from './PairFlow';
+import { Tip } from './Tip';
 
 const PLATFORM: Record<string, string> = { ios: 'iPhone', android: 'Android' };
 
@@ -287,7 +288,7 @@ function WayRow({ kind, state, busy, onSwitch }: { kind: 'wifi' | 'tailscale'; s
                 {lan?.fingerprint && (
                   <span data-lan-fingerprint={lan.fingerprint}>
                     {' '}
-                    · certificate <span className="ib-sfp" title={grouped(lan.fingerprint)}>{grouped(lan.fingerprint).slice(0, 19)}…</span>
+                    · certificate <Tip content={<span className="ib-tip-fp">{grouped(lan.fingerprint)}</span>}><span className="ib-sfp" data-fingerprint={grouped(lan.fingerprint)}>{grouped(lan.fingerprint).slice(0, 19)}…</span></Tip>
                   </span>
                 )}
               </>

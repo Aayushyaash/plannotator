@@ -71,8 +71,11 @@ test('a link to an attached file opens it beside the thread; an unattached one i
     // Attached: a real link; a click opens the mock in the side pane.
     const mock = body.getByRole('link', { name: 'the mock' });
     await expect(mock).toHaveAttribute('data-local-link', 'open');
-    // The tooltip names the file by its path in the project.
-    await expect(mock).toHaveAttribute('title', 'Open design/mock.html beside the thread');
+    // The tooltip names the file by its path in the project: ui's Tooltip, never a native title.
+    await expect(mock).not.toHaveAttribute('title', /./);
+    await mock.hover();
+    await expect(page.locator('[data-side].bg-popover')).toHaveText('Open design/mock.html beside the thread');
+    await page.mouse.move(1, 1);
     // Its href is the window's deep link to the file: a new tab opens the same file there.
     const deepLink = await mock.getAttribute('href');
     expect(deepLink).toMatch(new RegExp(`^#thread=${sent.thread_id}&file=att_[0-9A-Z]+$`));
@@ -101,7 +104,10 @@ test('a link to an attached file opens it beside the thread; an unattached one i
 
     // Not attached: inert text with its reason, never requested.
     const notes = body.locator('[data-local-link="unavailable"]', { hasText: 'working notes' });
-    await expect(notes).toHaveAttribute('title', /Not attached/);
+    await expect(notes).not.toHaveAttribute('title', /./);
+    await notes.hover();
+    await expect(page.locator('[data-side].bg-popover')).toContainText('Not attached');
+    await page.mouse.move(1, 1);
     expect(await notes.evaluate((el) => el.tagName)).toBe('SPAN');
     await notes.click();
     await expect(page.locator('[data-attachment-pane]')).toHaveCount(0);

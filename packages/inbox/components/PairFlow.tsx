@@ -16,6 +16,7 @@ import {
   type CheckLine,
 } from '../pairing';
 import { qrModules } from '../qr';
+import { isTextCut, Tip } from './Tip';
 
 /** How often the code's screen looks for the phone that scanned it, and for what reached the door. */
 const PAIRED_POLL_MS = 2000;
@@ -263,9 +264,11 @@ export function PairFlow({ lan, tailnet, busy, error, onSwitchLan, onSwitchTailn
                   'Not working'
                 )}
               </span>
-              <span className={`ib-way-addr${working ? '' : ' ib-way-err'}`} title={working ? (address ?? undefined) : undefined}>
-                {working ? <code>{address}</code> : (state?.error ?? 'Not reachable yet')}
-              </span>
+              <Tip content={working ? address : null} when={(trigger) => isTextCut(trigger) || isTextCut(trigger.querySelector('code'))}>
+                <span className={`ib-way-addr${working ? '' : ' ib-way-err'}`}>
+                  {working ? <code>{address}</code> : (state?.error ?? 'Not reachable yet')}
+                </span>
+              </Tip>
               <span className="ib-way-btns">
                 <button type="button" className="ib-btn ib-sm ib-ghost" disabled={busy} onClick={() => void switchWay(false)} aria-label={`Turn off ${title}`}>
                   Turn off

@@ -18,7 +18,6 @@ import type { OpenInSurface } from './OpenIn';
 import { attachmentSequence } from '../stepping';
 import { AnnotationsChip } from './AnnotationsChip';
 import { agentName, clockTime, dayWords, fullTime, plural, whenTime } from '../format';
-import { titleIfClipped } from '../clipTitle';
 import { answerWords, foldSnippet, holdingsOf, isDelivered, isPersonReply, lastNonNote, lookBoundary, newSinceLook, planFolds, snippetText, type FoldSnippet, type Holding } from '../folding';
 import { highlightSearchHits } from '../search/highlight';
 import { AuthorMark, DecisionDiamond, Icon } from '../icons';
@@ -54,6 +53,7 @@ import { SkillsLine } from './SkillsLine';
 import { paintSkillReferences } from '../skillHighlight';
 import { INBOX_REPLY_SKILL_AUDIENCE, annotationSkillTexts, inboxSkillsBlock, withSkillsBlock } from '../skills';
 import { splitInboxSkillsBlock } from '@plannotator/core/skill-reference-block';
+import { Tip } from './Tip';
 
 const noop = () => {};
 /** The agent superseded the question this call named (`422 question_superseded`). */
@@ -696,9 +696,9 @@ export function AckPill({
       <span className="ib-ackchip">
         <span aria-hidden="true">👍</span> {ack.label}
       </span>
-      <span className="ib-ackwhen" title={line.state === 'delivered' && ack.delivered_at ? `You marked it ${fullTime(ack.at)}; delivered ${fullTime(ack.delivered_at)}` : fullTime(ack.at)}>
-        {line.text}
-      </span>
+      <Tip content={line.state === 'delivered' && ack.delivered_at ? `You marked it ${fullTime(ack.at)}; delivered ${fullTime(ack.delivered_at)}` : fullTime(ack.at)}>
+        <span className="ib-ackwhen">{line.text}</span>
+      </Tip>
     </p>
   );
 }
@@ -1885,26 +1885,21 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
   };
 
   const archiveButton = (
-    <button
-      type="button"
-      className="ib-iconbtn"
-      onClick={() => void resolve(!archived)}
-      title={archived ? 'Unarchive' : 'Archive: the thread ends; the next message starts a new one'}
-      aria-label={archived ? 'Unarchive the thread' : 'Archive the thread'}
-      data-archive=""
-    >
-      <Icon name="archive" />
-    </button>
+    <Tip content={archived ? 'Unarchive' : 'Archive: the thread ends; the next message starts a new one'}>
+      <button
+        type="button"
+        className="ib-iconbtn"
+        onClick={() => void resolve(!archived)}
+        aria-label={archived ? 'Unarchive the thread' : 'Archive the thread'}
+        data-archive=""
+      >
+        <Icon name="archive" />
+      </button>
+    </Tip>
   );
   const markReadButton = markReadOffered ? (
-    <button
-      type="button"
-      className="ib-hbtn"
-      data-mark-read=""
-      aria-pressed={readAt !== null}
-      disabled={!markReadEnabled}
-      onClick={() => onMarkRead!(readAt === null)}
-      title={
+    <Tip
+      content={
         readAt !== null
           ? 'Move it back to the top'
           : markReadEnabled
@@ -1912,17 +1907,18 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
             : 'Nothing here waits on you'
       }
     >
-      <Icon name="checkCircle" size={16} />
-      {readAt !== null ? 'Read' : 'Mark read'}
-      <kbd className="ib-kbd ib-wide">E</kbd>
-    </button>
+      <button type="button" className="ib-hbtn" data-mark-read="" aria-pressed={readAt !== null} disabled={!markReadEnabled} onClick={() => onMarkRead!(readAt === null)}>
+        <Icon name="checkCircle" size={16} />
+        {readAt !== null ? 'Read' : 'Mark read'}
+        <kbd className="ib-kbd ib-wide">E</kbd>
+      </button>
+    </Tip>
   ) : null;
 
   return (
     <>
     <section
       ref={sectionRef}
-      onPointerOver={titleIfClipped}
       className={`ib-pane${fileOpen ? ' ib-withfile' : ''}`}
       aria-label={thread.subject ?? 'Thread'}
       data-thread-id={thread.thread_id}
@@ -1939,27 +1935,24 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
             {/* A stacked thread covers the list: the way back to it leads, where the list was. */}
             {stacked && (
               <>
-                <button type="button" className="ib-pback" onClick={onClose} aria-label={`Back to ${backLabel}`} title={`Back to ${backLabel}`} data-stack-back="">
-                  <Icon name="chevL" size={16} />
-                  <span className="ib-pback-l">{backLabel}</span>
-                </button>
+                <Tip content={`Back to ${backLabel}`}>
+                  <button type="button" className="ib-pback" onClick={onClose} aria-label={`Back to ${backLabel}`} data-stack-back="">
+                    <Icon name="chevL" size={16} />
+                    <span className="ib-pback-l">{backLabel}</span>
+                  </button>
+                </Tip>
                 <span className="ib-vsep" aria-hidden="true" />
               </>
             )}
             {/* A file beside the thread hides the list: the same way back leads; it closes the file. */}
             {backBesideFile && (
               <>
-                <button
-                  type="button"
-                  className="ib-pback"
-                  onClick={backToList}
-                  aria-label={`Back to ${backLabel}`}
-                  title={openAttachment ? `Close ${openAttachment.name} and show the list` : `Back to ${backLabel}`}
-                  data-file-back=""
-                >
-                  <Icon name="chevL" size={16} />
-                  <span className="ib-pback-l">{backLabel}</span>
-                </button>
+                <Tip content={openAttachment ? `Close ${openAttachment.name} and show the list` : `Back to ${backLabel}`}>
+                  <button type="button" className="ib-pback" onClick={backToList} aria-label={`Back to ${backLabel}`} data-file-back="">
+                    <Icon name="chevL" size={16} />
+                    <span className="ib-pback-l">{backLabel}</span>
+                  </button>
+                </Tip>
                 <span className="ib-vsep" aria-hidden="true" />
               </>
             )}
@@ -1976,24 +1969,27 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
             <span className="ib-phsubj" dir="auto" data-header-subject="" data-on={chrome.subject ? '' : undefined} aria-hidden="true">
               {thread.subject ?? '(no subject)'}
             </span>
-            <button
-              type="button"
-              className="ib-ptool"
-              data-expand-all=""
-              onClick={expandAll}
-              title={allOpen ? 'Fold the earlier messages' : 'Expand all messages'}
-              aria-label={allOpen ? 'Fold the earlier messages' : 'Expand all messages'}
-            >
-              <Icon name={allOpen ? 'collapse' : 'expand'} size={15} />
-              <span className="ib-ptool-l">{allOpen ? 'Fold all' : 'Expand all'}</span>
-            </button>
+            <Tip content={allOpen ? 'Fold the earlier messages' : 'Expand all messages'}>
+              <button
+                type="button"
+                className="ib-ptool"
+                data-expand-all=""
+                onClick={expandAll}
+                aria-label={allOpen ? 'Fold the earlier messages' : 'Expand all messages'}
+              >
+                <Icon name={allOpen ? 'collapse' : 'expand'} size={15} />
+                <span className="ib-ptool-l">{allOpen ? 'Fold all' : 'Expand all'}</span>
+              </button>
+            </Tip>
           </>
         )}
         {archiveButton}
         {phone || stacked || backBesideFile ? null : (
-          <button type="button" className="ib-iconbtn" onClick={onClose} title="Close" aria-label="Close the thread">
-            <Icon name="x" />
-          </button>
+          <Tip content="Close">
+            <button type="button" className="ib-iconbtn" onClick={onClose} aria-label="Close the thread">
+              <Icon name="x" />
+            </button>
+          </Tip>
         )}
       </div>
       <div className={`ib-pbody${one ? '' : ' ib-folding'}`} ref={bodyRef}>
@@ -2109,15 +2105,22 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                       <Icon name="reply" />
                     </span>
                   )}
-                  <span className="ib-fl-nm" data-clip="">{name}</span>
-                  <span className="ib-fl-sn" dir="auto" data-snippet={snippet.kind} title={snippetText(snippet)}>
-                    <SnippetText snippet={snippet} />
-                  </span>
+                  <Tip content={name} cut>
+                    <span className="ib-fl-nm">{name}</span>
+                  </Tip>
+                  {/* An answers snippet is shortened (each prompt cut at a word): its whole text always; words only while cut. */}
+                  <Tip content={snippetText(snippet)} cut={snippet.kind !== 'answers'}>
+                    <span className="ib-fl-sn" dir="auto" data-snippet={snippet.kind}>
+                      <SnippetText snippet={snippet} />
+                    </span>
+                  </Tip>
                   <HoldingChips holdings={holdings} />
-                  <span className="ib-fl-tm" title={fullWhen}>
-                    {isNew && <span className="ib-newtag">New</span>}
-                    {time}
-                  </span>
+                  <Tip content={fullWhen}>
+                    <span className="ib-fl-tm">
+                      {isNew && <span className="ib-newtag">New</span>}
+                      {time}
+                    </span>
+                  </Tip>
                 </button>
               </article>,
             );
@@ -2208,9 +2211,11 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                     </span>
                   )}
                 </span>
-                <span className="ib-fl-nm ib-who" aria-hidden={hide} data-clip={one ? '' : undefined}>
-                  <bdi>{name}</bdi>
-                </span>
+                <Tip content={one ? name : null} cut>
+                  <span className="ib-fl-nm ib-who" aria-hidden={hide}>
+                    <bdi>{name}</bdi>
+                  </span>
+                </Tip>
                 {/* The project gives way first; "to you", the session-ended mark and the count never shrink (the row wraps instead). */}
                 <span className="ib-fl-meta">
                   <span className="ib-fl-in" aria-hidden={hide}>
@@ -2224,11 +2229,15 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                 <span className="ib-fl-chips" />
                 <span className="ib-fl-tm">
                   {isNew && <span className="ib-newtag">New</span>}
-                  <span title={fullWhen}>{time}</span>
+                  <Tip content={fullWhen}>
+                    <span data-full-when="">{time}</span>
+                  </Tip>
                   {isAgent && liveMessage(message) && (
-                    <button type="button" className="ib-mut" onClick={() => openBox(picksCount > 0)} title="Reply" aria-label="Reply">
-                      <Icon name="reply" size={15} />
-                    </button>
+                    <Tip content="Reply">
+                      <button type="button" className="ib-mut" onClick={() => openBox(picksCount > 0)} aria-label="Reply">
+                        <Icon name="reply" size={15} />
+                      </button>
+                    </Tip>
                   )}
                 </span>
               </div>
@@ -2329,16 +2338,17 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                       <span className="ib-dl-text">{delivered.text}</span>
                     </span>
                     {delivered.sendNow && (
-                      <button
-                        type="button"
-                        className="ib-sendnow"
-                        data-send-now=""
-                        disabled={sendNowState?.id === last.id && sendNowState.busy}
-                        title="Put it into the running turn now: the agent reads it at its next step, without waiting for the turn to end."
-                        onClick={() => void sendNow()}
-                      >
-                        Send now
-                      </button>
+                      <Tip content="Put it into the running turn now: the agent reads it at its next step, without waiting for the turn to end.">
+                        <button
+                          type="button"
+                          className="ib-sendnow"
+                          data-send-now=""
+                          disabled={sendNowState?.id === last.id && sendNowState.busy}
+                          onClick={() => void sendNow()}
+                        >
+                          Send now
+                        </button>
+                      </Tip>
                     )}
                   </div>
                 )}
@@ -2477,9 +2487,11 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                   )}
                   <SkipChip count={unanswered.length} keepOpen={keepOpen} onToggle={toggleKeepOpen} />
                   {dropped.length > 0 && (
-                    <span className="ib-rchip ib-dropped" data-dropped-picks-chip="" title="Replaced; this pick won't be sent">
-                      {dropped.length} {dropped.length === 1 ? 'pick' : 'picks'} on a replaced question
-                    </span>
+                    <Tip content="Replaced; this pick won't be sent">
+                      <span className="ib-rchip ib-dropped" data-dropped-picks-chip="">
+                        {dropped.length} {dropped.length === 1 ? 'pick' : 'picks'} on a replaced question
+                      </span>
+                    </Tip>
                   )}
                   {takesAnnotations && (
                     <AnnotationsChip records={records} attachments={allFiles} onEdit={editRecord} onRemove={removeRecord} onOpen={openRecord} />
@@ -2525,23 +2537,20 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
             </button>
             {/* 👍 Looks good beside Reply: sent to the agent after the Undo window; hidden while a question waits. */}
             {ackOffered && !waiting && (
-              <button
-                type="button"
-                className="ib-btn ib-ack"
-                data-ack=""
-                aria-pressed={ackOn}
-                onClick={() => onAck!(ackTarget!.id, !ackOn, agentName(ackTarget!.author))}
-                title={
+              <Tip
+                content={
                   ackOn
                     ? 'Take back Looks good'
                     : `Tells ${agentName(ackTarget!.author)} you read it and need nothing more. Moves to Quiet until it writes again.`
                 }
               >
-                <span className="ib-ack-emoji" aria-hidden="true">
-                  👍
-                </span>
-                Looks good
-              </button>
+                <button type="button" className="ib-btn ib-ack" data-ack="" aria-pressed={ackOn} onClick={() => onAck!(ackTarget!.id, !ackOn, agentName(ackTarget!.author))}>
+                  <span className="ib-ack-emoji" aria-hidden="true">
+                    👍
+                  </span>
+                  Looks good
+                </button>
+              </Tip>
             )}
             {/* The in-thread New message button is off (approval "inbox-acknowledge", 2026-10-15): Reply and compose cover it.
                 Its route, door row and code stay; turn SHOW_NEW_MESSAGE_BUTTON on to bring it back. */}

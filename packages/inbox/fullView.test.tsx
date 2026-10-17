@@ -19,6 +19,7 @@ import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { InboxAnnotationRecord, InboxAttachmentState, InboxMessageWire } from '@plannotator/core/inbox-types';
 import { attachmentSequence, type AttachmentStep } from './stepping';
+import { tooltipOf } from './testing/tooltip';
 
 const hasDom = typeof document !== 'undefined';
 const { AttachmentPane } = (hasDom ? await import('./components/AttachmentPane') : {}) as typeof import('./components/AttachmentPane');
@@ -364,7 +365,7 @@ test.skipIf(!hasDom)('full view keeps the changed line as a chip at the top left
   const chip = () => host!.querySelector<HTMLElement>('[data-full-view-changed]');
   expect(chip()!.querySelector('.ib-fvver-t')!.textContent).toBe('Changed since sent');
   expect(chip()!.querySelector('button')!.textContent).toBe('Open the version it sent');
-  expect(chip()!.getAttribute('title')).toMatch(/^Changed since Claude Code sent it at /);
+  expect(await tooltipOf(chip()!)).toMatch(/^Changed since Claude Code sent it at /);
   await click(chip()!.querySelector('button'));
   expect(harness.versions).toEqual(['sent']);
 

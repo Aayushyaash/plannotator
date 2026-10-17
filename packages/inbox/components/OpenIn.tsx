@@ -7,6 +7,7 @@ import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import { InboxApiError, inboxApi } from '../api';
 import { Icon } from '../icons';
 import { newTabUrl, openInMenu, remembersOpenInItem, type OpenInItem, type OpenInMenu } from '../openIn';
+import { Tip } from './Tip';
 
 /**
  * "Open in" for an attachment (design record "inbox-open-in", approved
@@ -104,6 +105,8 @@ function OpenInMenuItems({ attachment, menu, onLaunch, onCopyPath }: { attachmen
           >
             <ItemIcon item={item} attachment={attachment} />
             <span className="flex-1 truncate">{item.label}</span>
+            {/* The file is gone or changed type: the apps are disabled and say so. */}
+            {menu.missing && <span className="ib-openin-miss">{missingLabel(attachment)}</span>}
             {item === menu.primary && <Icon name="check" size={14} className="ib-openin-check" />}
           </DropdownMenuItem>
         ),
@@ -153,9 +156,11 @@ function NewTabButton({ attachment, version, big }: { attachment: InboxAttachmen
   const href = newTabUrl(attachment, version);
   if (!href) return null;
   return (
-    <a className="ib-iconbtn" href={href} target="_blank" rel="noopener noreferrer" aria-label="Open in new tab" title="Open in new tab" data-open-in-tab="">
-      <Icon name="external" size={big ? 18 : 16} />
-    </a>
+    <Tip content="Open in new tab">
+      <a className="ib-iconbtn" href={href} target="_blank" rel="noopener noreferrer" aria-label="Open in new tab" data-open-in-tab="">
+        <Icon name="external" size={big ? 18 : 16} />
+      </a>
+    </Tip>
   );
 }
 
@@ -178,27 +183,32 @@ function OpenInSplit({ attachment, version, label }: { attachment: InboxAttachme
     <span className="ib-openin" data-open-in={attachment.id}>
       <span className={`ib-split${open ? ' ib-on' : ''}${menu.missing ? ' ib-dis' : ''}`}>
         {primary?.kind === 'browser' ? (
-          <a className="ib-sa" href={primary.href} target="_blank" rel="noopener noreferrer" aria-label="Open in Browser" title={title} data-open-in-primary="browser">
-            {face}
-          </a>
+          <Tip content={title}>
+            <a className="ib-sa" href={primary.href} target="_blank" rel="noopener noreferrer" aria-label="Open in Browser" data-open-in-primary="browser">
+              {face}
+            </a>
+          </Tip>
         ) : (
-          <button
-            type="button"
-            className="ib-sa"
-            disabled={disabled}
-            onClick={() => primary && void launch(primary)}
-            aria-label={primary ? `Open in ${primary.label}` : 'Open'}
-            title={title}
-            data-open-in-primary={primary?.id ?? ''}
-          >
-            {face}
-          </button>
+          <Tip content={title}>
+            <button
+              type="button"
+              className="ib-sa"
+              disabled={disabled}
+              onClick={() => primary && void launch(primary)}
+              aria-label={primary ? `Open in ${primary.label}` : 'Open'}
+              data-open-in-primary={primary?.id ?? ''}
+            >
+              {face}
+            </button>
+          </Tip>
         )}
         <DropdownMenu open={open} onOpenChange={setOpen}>
-          <DropdownMenuTrigger render={<button type="button" className="ib-st" aria-label="Open in…" title="Open in…" data-open-in-caret="" />}>
-            <Icon name="chevD" size={12} />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" sideOffset={6} className="min-w-[12rem]" finalFocus={false} data-open-in-menu={attachment.id} title={menu.missing ? missingLabel(attachment) : undefined}>
+          <Tip content="Open in…">
+            <DropdownMenuTrigger render={<button type="button" className="ib-st" aria-label="Open in…" data-open-in-caret="" />}>
+              <Icon name="chevD" size={12} />
+            </DropdownMenuTrigger>
+          </Tip>
+          <DropdownMenuContent align="end" sideOffset={6} className="min-w-[12rem]" finalFocus={false} data-open-in-menu={attachment.id}>
             <OpenInMenuItems attachment={attachment} menu={menu} onLaunch={(item) => void launch(item)} onCopyPath={() => void copyPath()} />
           </DropdownMenuContent>
         </DropdownMenu>
@@ -219,11 +229,11 @@ export function OpenInTileMenu({ attachment, version }: { attachment: InboxAttac
   return (
     <>
       <DropdownMenu>
-        <DropdownMenuTrigger
-          render={<button type="button" className="ib-att-more" aria-label={`Open in…, ${attachment.name}`} title="Open in…" data-open-in-more={attachment.id} />}
-        >
-          <Icon name="dots" size={16} />
-        </DropdownMenuTrigger>
+        <Tip content="Open in…">
+          <DropdownMenuTrigger render={<button type="button" className="ib-att-more" aria-label={`Open in…, ${attachment.name}`} data-open-in-more={attachment.id} />}>
+            <Icon name="dots" size={16} />
+          </DropdownMenuTrigger>
+        </Tip>
         <DropdownMenuContent align="end" sideOffset={6} className="min-w-[12rem]" finalFocus={false} data-open-in-menu={attachment.id}>
           <OpenInMenuItems attachment={attachment} menu={menu} onLaunch={(item) => void launch(item)} onCopyPath={() => void copyPath()} />
         </DropdownMenuContent>

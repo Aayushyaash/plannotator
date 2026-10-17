@@ -15,6 +15,7 @@ import { ROOT_DOCUMENT_GROUP_KEY } from '../utils/annotationScope';
 import type { AnnotationScope, AnnotationDocumentGroup } from '../utils/annotationScope';
 import type { QuestionPanelRow } from '../utils/questionAnswers';
 import { QuestionsPanelSection } from './QuestionsPanelSection';
+import { HostTitle } from './HostTitle';
 
 // Card type-word colors. Deletion uses `destructive` (reliably red on every
 // theme, matching the in-document .deletion highlight). Comment uses the
@@ -375,16 +376,17 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
             </div>
             {titleNote && <span data-annotation-panel-note="" className="ml-auto mr-1 text-[11px] text-muted-foreground">{titleNote}</span>}
             {mobilePanel && onClose && (
-              <button
-                onClick={onClose}
-                className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-foreground md:hidden"
-                title="Close panel"
-                aria-label="Close panel"
-              >
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
+              <HostTitle title="Close panel">
+                <button
+                  onClick={onClose}
+                  className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-foreground md:hidden"
+                  aria-label="Close panel"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </HostTitle>
             )}
           </div>
           {scopeEnabled ? (
@@ -398,13 +400,14 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
             </div>
           ) : (
             otherFileAnnotations && otherFileAnnotations.count > 0 && (
-              <button
-                onClick={onOtherFileAnnotationsClick}
-                className="px-3 pb-2 text-[10px] text-primary/70 hover:text-primary transition-colors cursor-pointer"
-                title="Show annotated files in sidebar"
-              >
-                +{otherFileAnnotations.count} in {otherFileAnnotations.files} other file{otherFileAnnotations.files === 1 ? '' : 's'}
-              </button>
+              <HostTitle title="Show annotated files in sidebar">
+                <button
+                  onClick={onOtherFileAnnotationsClick}
+                  className="px-3 pb-2 text-[10px] text-primary/70 hover:text-primary transition-colors cursor-pointer"
+                >
+                  +{otherFileAnnotations.count} in {otherFileAnnotations.files} other file{otherFileAnnotations.files === 1 ? '' : 's'}
+                </button>
+              </HostTitle>
             )
           )}
         </div>
@@ -420,15 +423,16 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
       )}
 
       {embedded && !scopeEnabled && otherFileAnnotations && otherFileAnnotations.count > 0 && (
-        <button
-          type="button"
-          data-pn-touch-target="true"
-          onClick={onOtherFileAnnotationsClick}
-          className="min-h-11 flex-shrink-0 border-b border-border/50 px-3 text-left text-xs text-primary/80 active:bg-muted"
-          title="Show annotated files in navigator"
-        >
-          {otherFileAnnotations.count} more in {otherFileAnnotations.files} other file{otherFileAnnotations.files === 1 ? '' : 's'}
-        </button>
+        <HostTitle title="Show annotated files in navigator">
+          <button
+            type="button"
+            data-pn-touch-target="true"
+            onClick={onOtherFileAnnotationsClick}
+            className="min-h-11 flex-shrink-0 border-b border-border/50 px-3 text-left text-xs text-primary/80 active:bg-muted"
+          >
+            {otherFileAnnotations.count} more in {otherFileAnnotations.files} other file{otherFileAnnotations.files === 1 ? '' : 's'}
+          </button>
+        </HostTitle>
       )}
 
       {/* List */}
@@ -478,14 +482,13 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
                     >
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                     </svg>
-                    <span
-                      className={cn('min-w-0 flex-1 truncate font-mono text-[10px]', group.isCurrent ? 'text-foreground' : 'text-muted-foreground')}
-                      // The pathless root document (plan review) is keyed by a
-                      // sentinel, which is not something to show a reader.
-                      title={group.path === ROOT_DOCUMENT_GROUP_KEY ? group.label : group.path}
-                    >
-                      {group.label}
-                    </span>
+                    {/* The pathless root document (plan review) is keyed by a
+                        sentinel, which is not something to show a reader. */}
+                    <HostTitle title={group.path === ROOT_DOCUMENT_GROUP_KEY ? group.label : group.path}>
+                      <span className={cn('min-w-0 flex-1 truncate font-mono text-[10px]', group.isCurrent ? 'text-foreground' : 'text-muted-foreground')}>
+                        {group.label}
+                      </span>
+                    </HostTitle>
                     {group.isCurrent && (
                       <span className="flex-shrink-0 text-[9px] text-muted-foreground/50">open</span>
                     )}
@@ -569,16 +572,17 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
               </>
             )}
             {otherGroups.length > 0 && onOtherFileAnnotationsClick && (
-              <button
-                type="button"
-                data-pn-touch-target="true"
-                data-annotation-show-in-files="true"
-                onClick={onOtherFileAnnotationsClick}
-                className="mt-1 cursor-pointer self-start px-1.5 text-[10px] text-muted-foreground/60 transition-colors hover:text-primary"
-                title="Show annotated files in the navigator"
-              >
-                Show in files
-              </button>
+              <HostTitle title="Show annotated files in the navigator">
+                <button
+                  type="button"
+                  data-pn-touch-target="true"
+                  data-annotation-show-in-files="true"
+                  onClick={onOtherFileAnnotationsClick}
+                  className="mt-1 cursor-pointer self-start px-1.5 text-[10px] text-muted-foreground/60 transition-colors hover:text-primary"
+                >
+                  Show in files
+                </button>
+              </HostTitle>
             )}
           </>
         ) : timelineCount === 0 && showQuestions ? (
@@ -801,9 +805,9 @@ const DirectEditsCard: React.FC<{
       <div className="flex items-center gap-1.5">
         <span className="text-[11px] font-medium text-primary">{title}</span>
         {label && (
-          <span className="min-w-0 truncate text-[10px] text-muted-foreground" title={label}>
-            {label}
-          </span>
+          <HostTitle title={label} cut>
+            <span className="min-w-0 truncate text-[10px] text-muted-foreground">{label}</span>
+          </HostTitle>
         )}
         <span className="font-mono text-[10px] tabular-nums">
           <span className="text-success">+{added}</span>
@@ -1039,21 +1043,18 @@ const AnnotationCard: React.FC<{
           </span>
         )}
         {annotation.pageUrl && (
-          <span
-            className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-muted text-muted-foreground truncate max-w-[10rem]"
-            title={annotation.pageUrl}
-          >
-            {annotation.pageUrl}
-          </span>
+          <HostTitle title={annotation.pageUrl}>
+            <span className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-muted text-muted-foreground truncate max-w-[10rem]">
+              {annotation.pageUrl}
+            </span>
+          </HostTitle>
         )}
         {unanchored && (
-          <span
-            data-annotation-unanchored="true"
-            className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-muted text-muted-foreground"
-            title="This comment no longer matches a location in the document"
-          >
-            Unanchored
-          </span>
+          <HostTitle title="This comment no longer matches a location in the document">
+            <span data-annotation-unanchored="true" className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-muted text-muted-foreground">
+              Unanchored
+            </span>
+          </HostTitle>
         )}
         <span className="text-[10px] text-muted-foreground/50 truncate">
           {annotation.author ? `${annotation.author}${isMe ? ' (me)' : ''} · ` : ''}{formatTimestamp(annotation.createdA)}
@@ -1074,23 +1075,25 @@ const AnnotationCard: React.FC<{
         {!readOnly && (
           <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100">
             {onEdit && annotation.type !== AnnotationType.DELETION && !isEditing && (
+              <HostTitle title="Edit annotation" name>
+                <button
+                  type="button"
+                  onClick={handleStartEdit}
+                  className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-foreground"
+                >
+                  <PencilIcon />
+                </button>
+              </HostTitle>
+            )}
+            <HostTitle title="Delete annotation" name>
               <button
                 type="button"
-                onClick={handleStartEdit}
-                className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-foreground"
-                title="Edit annotation"
+                onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); onDelete(); }}
+                className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-destructive"
               >
-                <PencilIcon />
+                <TrashCardIcon />
               </button>
-            )}
-            <button
-              type="button"
-              onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); onDelete(); }}
-              className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-destructive"
-              title="Delete annotation"
-            >
-              <TrashCardIcon />
-            </button>
+            </HostTitle>
           </div>
         )}
       </div>
@@ -1138,7 +1141,9 @@ const AnnotationCard: React.FC<{
                 size="sm"
                 showRemove={false}
               />
-              <div className="text-[9px] text-muted-foreground truncate max-w-[3rem]" title={img.name}>{img.name}</div>
+              <HostTitle title={img.name} cut>
+                <div className="text-[9px] text-muted-foreground truncate max-w-[3rem]">{img.name}</div>
+              </HostTitle>
             </div>
           ))}
         </div>
@@ -1225,31 +1230,35 @@ const CodeAnnotationCard: React.FC<{
         {!readOnly && (
           <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100">
             {onEdit && !isEditing && (
+              <HostTitle title="Edit annotation" name>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); setIsEditing(true); }}
+                  className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-foreground"
+                >
+                  <PencilIcon />
+                </button>
+              </HostTitle>
+            )}
+            <HostTitle title="Delete annotation" name>
               <button
                 type="button"
-                onClick={(e) => { e.stopPropagation(); setIsEditing(true); }}
-                className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-foreground"
-                title="Edit annotation"
+                onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-destructive"
               >
-                <PencilIcon />
+                <TrashCardIcon />
               </button>
-            )}
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); onDelete(); }}
-              className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-destructive"
-              title="Delete annotation"
-            >
-              <TrashCardIcon />
-            </button>
+            </HostTitle>
           </div>
         )}
       </div>
 
       {/* File / line meta */}
-      <div className="rounded px-2 py-1 bg-surface-1 font-mono text-[11px] text-muted-foreground truncate" title={annotation.filePath}>
-        {fileName} · {lineRange}
-      </div>
+      <HostTitle title={annotation.filePath}>
+        <div className="rounded px-2 py-1 bg-surface-1 font-mono text-[11px] text-muted-foreground truncate">
+          {fileName} · {lineRange}
+        </div>
+      </HostTitle>
 
       {annotation.originalCode && (
         <p className="mt-1.5 line-clamp-2 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground/80">
@@ -1296,7 +1305,9 @@ const CodeAnnotationCard: React.FC<{
           {annotation.images.map((img) => (
             <div key={img.path} className="text-center">
               <ImageThumbnail path={img.path} size="sm" showRemove={false} />
-              <div className="text-[9px] text-muted-foreground truncate max-w-[3rem]" title={img.name}>{img.name}</div>
+              <HostTitle title={img.name} cut>
+                <div className="text-[9px] text-muted-foreground truncate max-w-[3rem]">{img.name}</div>
+              </HostTitle>
             </div>
           ))}
         </div>

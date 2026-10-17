@@ -345,7 +345,11 @@ test('a message, a file and a decision recorded from an answer draw their thread
   // The list's chip: the thread's name.
   const budgetChip = budget.locator('.ib-key[data-result-thread="name"]');
   await expect(budgetChip.locator('.ib-keyt')).toHaveText('retry');
-  await expect(budgetChip).toHaveAttribute('title', 'Thread: retry: Retry storm on the relay after a deploy');
+  // The whole thread is the chip's component tooltip (portaled into the palette's dialog), never a native title.
+  await expect(budgetChip).not.toHaveAttribute('title', /./);
+  await budgetChip.hover();
+  await expect(palette(page).getByText('Thread: retry: Retry storm on the relay after a deploy', { exact: true })).toBeVisible();
+  await page.mouse.move(1, 1);
   await input(page).fill('retry-policy');
   await settled(page);
   await expect(palette(page).locator('[data-result="file"]').first().locator('.ib-key .ib-keyt')).toHaveText('retry');
@@ -354,7 +358,10 @@ test('a message, a file and a decision recorded from an answer draw their thread
   for (const kind of ['message', 'decision']) {
     const chip = palette(page).locator(`[data-result="${kind}"]`).first().locator('.ib-key[data-result-thread]');
     await expect(chip.locator('.ib-keyt')).toHaveText('nightly-deploy-investigation-for-the-customer-portal');
-    await expect(chip).toHaveAttribute('title', /^Thread: nightly-deploy-investigation-for-the-customer-portal: Investigate why the nightly deploy/);
+    await expect(chip).not.toHaveAttribute('title', /./);
+    await chip.hover();
+    await expect(palette(page).getByText(/^Thread: nightly-deploy-investigation-for-the-customer-portal: Investigate why the nightly deploy/)).toBeVisible();
+    await page.mouse.move(1, 1);
   }
   await shot(page, '09a-thread-on-row');
   // Every part of the second line stays inside its row: the time is drawn whole, at desktop and phone widths.
@@ -389,10 +396,17 @@ test('long, right-to-left and CJK text stays inside the palette', async () => {
     return { list: list.scrollWidth - list.clientWidth, rows: rows.filter((r) => r.scrollWidth > r.clientWidth + 1).length };
   });
   expect(overflow).toEqual({ list: 0, rows: 0 });
-  // The truncating line carries dir="auto" and its full text in title.
+  // The truncating line carries dir="auto"; its full text is a component tooltip while cut, never a native title.
   const arabic = palette(page).locator(`[data-result="thread"][data-result-id="${world.threads.arabic}"] .ib-sp-p`);
   await expect(arabic).toHaveAttribute('dir', 'auto');
-  await expect(arabic).toHaveAttribute('title', /تقرير/);
+  await expect(arabic).not.toHaveAttribute('title', /./);
+  // Cut it (a narrow box, as on a phone): hovered, the component tooltip holds the whole right-to-left text.
+  await arabic.evaluate((el) => ((el as HTMLElement).style.maxWidth = '140px'));
+  expect(await arabic.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+  await arabic.hover();
+  await expect(palette(page).locator('[data-side].bg-popover')).toHaveText('تقرير أخطاء الدفع بعد آخر deploy على الخادم الثاني');
+  await page.mouse.move(1, 1);
+  await arabic.evaluate((el) => ((el as HTMLElement).style.maxWidth = ''));
   await shot(page, '09-stress-long-rtl');
 });
 

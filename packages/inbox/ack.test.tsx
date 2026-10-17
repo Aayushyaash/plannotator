@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { InboxListSection, InboxMessageWire } from '@plannotator/core/inbox-types';
 import type { RecipientConnection } from './deliveryLine';
+import { tooltipOf } from './testing/tooltip';
 
 const hasDom = typeof document !== 'undefined';
 const { InboxApp } = (hasDom ? await import('./App') : {}) as typeof import('./App');
@@ -183,7 +184,9 @@ test.skipIf(!hasDom)('the foot is Reply and Looks good side by side; there is no
   expect(footButtons(el)).toEqual(['Reply', '👍Looks good']);
   expect(el.querySelector('[data-new-message]')).toBeNull();
   expect(ackButton(el)!.getAttribute('aria-pressed')).toBe('false');
-  expect(ackButton(el)!.title).toContain('Tells Claude Code you read it');
+  // Its explanation is the component tooltip, not a native title.
+  expect(ackButton(el)!.hasAttribute('title')).toBe(false);
+  expect(await tooltipOf(ackButton(el)!)).toContain('Tells Claude Code you read it');
 });
 
 test.skipIf(!hasDom)('hidden while a question waits: the foot is Reply alone', async () => {

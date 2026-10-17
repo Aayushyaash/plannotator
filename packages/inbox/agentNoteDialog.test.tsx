@@ -13,6 +13,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { InboxAgentRow, InboxAgentsModel, InboxConnectReport } from '@plannotator/core/inbox-types';
+import { sized, tooltipOf } from './testing/tooltip';
 
 const hasDom = typeof document !== 'undefined';
 const { AgentNoteDialog } = (hasDom ? await import('./components/AgentNoteDialog') : {}) as typeof import('./components/AgentNoteDialog');
@@ -256,12 +257,14 @@ test.skipIf(!hasDom)('Show the note opens the exact block', () => {
   expect(button(el, 'Hide the note').getAttribute('aria-expanded')).toBe('true');
 });
 
-test.skipIf(!hasDom)('a long path is cut in the middle on screen, whole in the DOM and in its title; folder names isolated; the name left to the browser\'s direction', () => {
+test.skipIf(!hasDom)('a long path is cut in the middle on screen, whole in the DOM and in its tooltip; folder names isolated; the name left to the browser\'s direction', async () => {
   const long = '~/Library/Application Support/com.openai.codex/profiles/work-laptop-2026-q4/AGENTS.override.md';
   const { el } = mount([row('codex', 'Codex', { path: long }), row('pi', 'Pi', { path: '/Users/ジョン・スミス/.config/مشاريع/AGENTS.md' })]);
   const path = el.querySelector('.ib-anote-path')!;
   expect(path.textContent).toBe(long);
-  expect(path.getAttribute('title')).toBe(long);
+  expect(path.hasAttribute('title')).toBe(false);
+  sized(path.querySelector('.ib-anote-ph')!, 400, 120);
+  expect(await tooltipOf(path)).toBe(long);
   expect(path.getAttribute('dir')).toBe('ltr');
   expect(path.querySelector('.ib-anote-pt')?.textContent).toBe('AGENTS.override.md');
   expect([...el.querySelectorAll('.ib-anote-path')[1]!.querySelectorAll('bdi')].map((b) => b.textContent)).toEqual(['Users', 'ジョン・スミス', '.config', 'مشاريع', 'AGENTS.md']);

@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { HostMark, Icon } from '../icons';
+import { isTextCut, Tip } from '../components/Tip';
 import { tildePath } from '../format';
 import { splitPath } from '../agents';
 import { filterGroups, hostLabel, pickerRows, type ComposeGroup, type ComposeTarget } from './model';
@@ -142,9 +143,11 @@ export function ToPicker({
                 {target.project.name}
               </span>
               <FolderPath path={folder} />
-              <span className="ib-cp-os" data-compose-started={started ?? undefined} title={started ? `Started ${started}` : undefined}>
-                {started ? `· ${started}` : null}
-              </span>
+              <Tip content={started ? `Started ${started}` : null}>
+                <span className="ib-cp-os" data-compose-started={started ?? undefined}>
+                  {started ? `· ${started}` : null}
+                </span>
+              </Tip>
               <span className="ib-cp-check" aria-hidden="true">
                 {target.session === selected && <Icon name="check" size={15} />}
               </span>
@@ -156,7 +159,7 @@ export function ToPicker({
   );
 }
 
-/** A project folder on one line, cut in the middle: the leading folders shrink with "…", the last name stays; the whole path in `title`. */
+/** A project folder on one line, cut in the middle: the leading folders shrink with "…", the last name stays; the whole path in a tooltip while it is cut. */
 function FolderPath({ path }: { path: string }) {
   const split = splitPath(path);
   // The slash before the last name stays with it, so a cut reads "~/pando/proj…/main".
@@ -171,9 +174,11 @@ function FolderPath({ path }: { path: string }) {
       </Fragment>
     ));
   return (
-    <span className="ib-cp-of" dir="ltr" title={path}>
-      <span className="ib-cp-ofh">{segments(head)}</span>
-      <span className="ib-cp-oft">{segments(tail)}</span>
-    </span>
+    <Tip content={path} when={(trigger) => isTextCut(trigger.querySelector('.ib-cp-ofh')) || isTextCut(trigger.querySelector('.ib-cp-oft')) || isTextCut(trigger)}>
+      <span className="ib-cp-of" dir="ltr">
+        <span className="ib-cp-ofh">{segments(head)}</span>
+        <span className="ib-cp-oft">{segments(tail)}</span>
+      </span>
+    </Tip>
   );
 }

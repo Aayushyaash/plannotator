@@ -28,6 +28,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { InboxSearchAnswer, InboxSearchRow, InboxSearchThreadRow } from '@plannotator/core/inbox-search';
+import { tooltipOf } from './testing/tooltip';
 
 const hasDom = typeof document !== 'undefined';
 const { default: SearchPalette } = (hasDom ? await import('./search/SearchPalette') : {}) as typeof import('./search/SearchPalette');
@@ -484,13 +485,14 @@ test.skipIf(!hasDom)('every result in a thread draws the list’s thread chip: i
   const row = (type: string, id: string) => host!.querySelector<HTMLElement>(`[data-result="${type}"][data-result-id="${id}"]`)!;
   const chip = (type: string, id: string) => row(type, id).querySelector<HTMLElement>('[data-result-thread]');
 
-  // The list's chip, its whole text in the DOM and its title naming the whole thread.
+  // The list's chip, its whole text in the DOM and its tooltip naming the whole thread.
   const named = chip('message', 'msg_a')!;
   expect(named.classList.contains('ib-key')).toBe(true);
   expect(named.getAttribute('data-result-thread')).toBe('name');
   expect(named.querySelector('.ib-keyt')!.textContent).toBe('nightly-deploy');
   expect(named.querySelector('.ib-keyt')!.getAttribute('dir')).toBe('auto');
-  expect(named.getAttribute('title')).toBe(`Thread: nightly-deploy: ${longSubject}`);
+  expect(named.hasAttribute('title')).toBe(false);
+  expect(await tooltipOf(named)).toBe(`Thread: nightly-deploy: ${longSubject}`);
   // A screen reader hears the thread, then ", " where each "·" is drawn.
   expect(row('message', 'msg_a').textContent).toContain(`Thread: nightly-deploy, ${longSubject}, Claude Code·, plannotator·, `);
   // No name: the subject in the chip, even a short one met inside the text.

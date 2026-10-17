@@ -603,7 +603,7 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-lhead { height: 60px; display: flex; align-items: center; gap: 12px; padding: 0 22px; flex: none; }
 /* One line each: a long project name and its folder are cut with "…" (the full text is their hover text), the folder first; neither wraps out of the 60 px header. */
 .ib-lhead h1 { font-size: var(--ib-fs-20, 20px); font-weight: 650; margin: 0; letter-spacing: -0.01em; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ib-lhead .ib-path { font-family: var(--font-mono); font-size: 12px; color: var(--muted-foreground); min-width: 0; flex: 0 1000 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ib-lhead .ib-path { font-family: var(--font-mono); font-size: 12px; color: var(--muted-foreground); min-width: 0; flex: 0 1000000 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ib-lbody { padding: 0 10px 10px; overflow-y: auto; flex: 1; min-height: 0; position: relative; }
 /* A row that left the rows on screen when the list settled (settle.ts): a copy drawn where it was, fading
    out under the rows sliding past it (they are opaque and sit above it while they move). */
@@ -629,9 +629,13 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
    to min(45%, 220px) or its own width, whichever is less (its width sets the
    floor through the automatic minimum while flex-basis: content keeps its
    natural size); then the chip shrinks; the line clips the rest. The guided
-   review mark keeps only its icon when the cell is narrow (under 300px). */
+   review mark keeps only its icon when the cell is narrow (under 300px).
+   The subject's shrink factor is a million, not a thousand: flex shares a
+   shortfall by factor times width, so at a thousand a chip still lost a
+   fraction of a pixel whenever the subject shrank, and Chrome drew an
+   ellipsis on a chip that fit (a 0.06 px cut). */
 .ib-row .ib-subj { display: flex; align-items: center; gap: 9px; min-width: 0; overflow: hidden; container-type: inline-size; }
-.ib-row .ib-s, .ib-nrow .ib-l2 .ib-s { flex: 0 1000 content; width: min(45%, 220px); white-space: nowrap; }
+.ib-row .ib-s, .ib-nrow .ib-l2 .ib-s { flex: 0 1000000 content; width: min(45%, 220px); white-space: nowrap; }
 .ib-row .ib-s > .ib-st, .ib-nrow .ib-l2 .ib-s > .ib-st { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @container (max-width: 300px) { .ib-row .ib-att .ib-att-l { display: none; } }
 /* Where the chip would be squeezed to its bare border it is left out: a cell
@@ -1730,8 +1734,8 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
 .pn-inbox :is(button.ib-fline, .ib-fline:has(> .ib-fl-hit)):hover { background: color-mix(in oklch, var(--muted) 40%, transparent); }
 .pn-inbox .ib-fl-hit { position: absolute; inset: 0; border-radius: inherit; }
 .ib-fline:has(> .ib-fl-hit) > :not(.ib-fl-hit) { position: relative; pointer-events: none; }
-/* The row's own buttons, and the time (its title is the whole moment, as it always was) take the pointer. */
-.ib-fline:has(> .ib-fl-hit) :is(.ib-hcount, .ib-fl-tm > button, .ib-fl-tm > [title]) { pointer-events: auto; }
+/* The row's own buttons, and the time (its tooltip is the whole moment) take the pointer. */
+.ib-fline:has(> .ib-fl-hit) :is(.ib-hcount, .ib-fl-tm > button, .ib-fl-tm > [data-full-when]) { pointer-events: auto; }
 .ib-fline.ib-is-open .ib-fl-nm { font-weight: 600; }
 /* The open row's third column: the project gives way first ("in plann…"); "to you", the session-ended mark
    and the attachments count never shrink, and the column wraps rather than cut them (the row grows). */
@@ -2744,7 +2748,7 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-cp-op { color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .ib-cp-of { display: flex; min-width: 0; overflow: hidden; color: var(--muted-foreground); font-size: var(--ib-fs-12-5, 12.5px); white-space: nowrap; unicode-bidi: isolate; }
 /* The leading folders shrink first; the last name shrinks only once they are gone, with its own ellipsis (never a hard cut). */
-.ib-cp-ofh { flex: 0 1000 auto; overflow: hidden; text-overflow: ellipsis; min-width: 1ch; white-space: nowrap; }
+.ib-cp-ofh { flex: 0 1000000 auto; overflow: hidden; text-overflow: ellipsis; min-width: 1ch; white-space: nowrap; }
 .ib-cp-oft { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ib-cp-os { color: var(--muted-foreground); font-size: var(--ib-fs-12-5, 12.5px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; font-variant-numeric: tabular-nums; }
 .ib-cp-check { width: 16px; flex: none; color: var(--primary); display: inline-flex; }
@@ -2912,6 +2916,7 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 [data-open-in-menu] svg.ib-ic { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 [data-open-in-menu] svg.ib-glyph { color: var(--muted-foreground); }
 [data-open-in-menu] svg.ib-openin-check { width: 14px; height: 14px; color: var(--foreground); }
+[data-open-in-menu] .ib-openin-miss { font-size: 11px; color: var(--muted-foreground); }
 [data-open-in-menu] a[data-open-in-item] { color: inherit; text-decoration: none; }
 .ib-openin-status.ib-err { position: absolute; top: calc(100% + 6px); right: 0; z-index: 6; max-width: 18rem; padding: 4px 8px; border-radius: 6px; background: var(--popover); border: 1px solid var(--border); color: var(--destructive); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: var(--ib-shadow-tooltip); }
 
@@ -2947,6 +2952,21 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
   .pn-inbox .ib-sendnow { position: relative; }
   .pn-inbox .ib-sendnow::after { content: ''; position: absolute; inset: -9px -4px; }
 }
+
+/* A project's tooltip (Tip's ProjectTipText): its whole name over its folder. The popup is portaled into the
+   window's root (or the open dialog); these rules are not scoped, so a tooltip portaled elsewhere keeps them. */
+.ib-tip-proj { display: flex; flex-direction: column; gap: 2px; }
+.ib-tip-name { font-weight: 600; overflow-wrap: anywhere; }
+.ib-tip-path { font-family: var(--font-mono); font-size: 11px; color: var(--muted-foreground); overflow-wrap: anywhere; }
+.ib-tip-fp { font-family: var(--font-mono); font-size: 11px; overflow-wrap: anywhere; }
+/* A tooltip (ui's popup, portaled into the window's root) floats like the window's other floating surfaces:
+   with --ib-soft-float on, Soft's shadow and no outline; off, ui's own border and shadow, unchanged. */
+.pn-inbox [data-pn-tooltip] { border-color: var(--ib-float-line-s, var(--border)); box-shadow: var(--ib-float-s, var(--tw-shadow)); }
+
+/* Tip: a control that can be disabled hangs its tooltip on this wrapper, since a disabled control takes no
+   pointer events; the pointer passes through the disabled control to the wrapper. */
+.ib-tipwrap { display: inline-flex; flex: none; }
+.ib-tipwrap > :disabled { pointer-events: none; }
 
 /* The Soft paint on a phone's list: today's rows and sticky section headers, rows parted by space. */
 @media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {

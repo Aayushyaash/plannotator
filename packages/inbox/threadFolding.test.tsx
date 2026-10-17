@@ -13,6 +13,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { parseInboxQuestionBlocks } from '@plannotator/core/inbox-questions';
 import type { InboxAuthor, InboxMessageWire, InboxProject, InboxQuestion, InboxThread } from '@plannotator/core/inbox-types';
+import { sized, tooltipOf } from './testing/tooltip';
 
 const hasDom = typeof document !== 'undefined';
 // Viewer pulls in web-highlighter, which reads `window` at module-eval time.
@@ -260,9 +261,10 @@ test.skipIf(!hasDom)("a folded line's snippet is the person's answers when every
   act(() => (el.querySelector('[data-middle-fold] button') as HTMLButtonElement).click());
   const snippet = (id: string) => article(el, id)!.querySelector('[data-snippet]')!;
   expect(snippet('msg_A1').getAttribute('data-snippet')).toBe('answers');
-  // A prompt over 40 characters is cut at a word, so the answer stays on the line; the whole prompt is the title.
+  // A prompt over 40 characters is cut at a word, so the answer stays on the line; the whole prompt is in the tooltip while the line is cut.
   expect(snippet('msg_A1').textContent).toBe('Which search index should the docs site… → Pagefind · Which sections go in the index → Guides, API reference');
-  expect(snippet('msg_A1').getAttribute('title')).toBe('Which search index should the docs site use: Pagefind; Which sections go in the index: Guides, API reference');
+  sized(snippet('msg_A1'), 600, 200);
+  expect(await tooltipOf(snippet('msg_A1'))).toBe('Which search index should the docs site use: Pagefind; Which sections go in the index: Guides, API reference');
   expect(snippet('msg_A3').getAttribute('data-snippet')).toBe('words');
   // Markdown marks gone, link text kept.
   expect(snippet('msg_A3').textContent).toBe('Both notes are in: results show the section path. Ready for a read.');

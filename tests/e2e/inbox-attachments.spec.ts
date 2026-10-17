@@ -393,13 +393,13 @@ test('a selection comment on the plan is saved and listed in the reply box chip'
   const page = world.page;
   const pane = page.locator(`[data-attachment-pane="${world.attachments.plan}"]`);
   await selectText(page, 'retries them one by one');
-  await page.locator('button[title="Comment"]').click();
+  await page.locator('.annotation-toolbar button[aria-label="Comment"]').click();
   await composer(page).fill('One by one is right. Keep Retry all out of v1.');
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(pane.locator('.ib-apanel')).toContainText('One by one is right');
 
   await selectText(page, 'at most three times, 2, 4 and 8 seconds apart');
-  await page.locator('button[title="Comment"]').click();
+  await page.locator('.annotation-toolbar button[aria-label="Comment"]').click();
   await composer(page).fill('Does Stripe say how long a key stays in flight? If it can be longer than 14 seconds the third retry still collides.');
   await shot('2.2-selection-comment-beside-the-thread');
   await page.getByRole('button', { name: 'Save' }).click();

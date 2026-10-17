@@ -5,6 +5,7 @@ import { formatBytes, plural, shortTime, whenTime } from '../format';
 import { Icon, type IconName } from '../icons';
 import { FileName } from './FileName';
 import { OpenInTileMenu, type OpenInSurface } from './OpenIn';
+import { Tip } from './Tip';
 
 /** The icon a tile (and the stepper's list) shows for a file of this kind. */
 export function iconOf(attachment: InboxAttachmentState): IconName {
@@ -209,12 +210,14 @@ export function AttachmentTiles({
             <span className="ib-att-text">
               <FileName name={attachment.name} className="ib-nm" />
               {changed ? (
-                <span className="ib-ch" title={detailLong}>
-                  <span aria-hidden="true">{detail}</span>
-                  <span className="ib-sr" id={detailId}>
-                    {detailLong}
+                <Tip content={detailLong}>
+                  <span className="ib-ch">
+                    <span aria-hidden="true">{detail}</span>
+                    <span className="ib-sr" id={detailId}>
+                      {detailLong}
+                    </span>
                   </span>
-                </span>
+                </Tip>
               ) : (
                 <span className="ib-kd" id={detailId}>
                   {detail}

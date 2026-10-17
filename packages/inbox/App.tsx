@@ -12,6 +12,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ThemeProvider } from '@plannotator/ui/components/ThemeProvider';
+import { TooltipProvider } from '@plannotator/ui/components/Tooltip';
+import { TIP_DELAY_MS } from './components/Tip';
 import { configurePlannotatorUI } from '@plannotator/ui/configure';
 import { storage } from '@plannotator/ui/utils/storage';
 import type { SkillCatalogEntry } from '@plannotator/ui/utils/skillReferences';
@@ -92,6 +94,9 @@ import type { DraftView } from './api';
 // Inbox does not have, so the composer says so instead of posting nowhere.
 configurePlannotatorUI({
   serverSync: inboxThemeSync,
+  // ui's own hover text (annotation panel and toolbar, question cards, links to attachments) as ui's Tooltip,
+  // never a native title (the owner, 2026-10-17).
+  componentTooltips: true,
   // Images in a message load from the Inbox's per-message route (#1813).
   imageSrcResolver: inboxImageSrcResolver,
   webmcp: { enabled: false, namePrefix: 'plannotator.' },
@@ -2160,6 +2165,8 @@ function Inbox() {
     <div
       ref={rootRef}
       className="pn-inbox"
+      // Tooltips (Tip, ui's HostTitle) portal here, so the window's tokens (the Soft switches) reach them.
+      data-pn-tooltip-root=""
       data-view={view}
       data-enter={entered.current ?? undefined}
       data-stack={stack.thread || stack.file || stack.decision ? [stack.thread && 'thread', stack.file && 'file', stack.decision && 'decision'].filter(Boolean).join(' ') : undefined}
@@ -2310,7 +2317,10 @@ function Inbox() {
 export function InboxApp() {
   return (
     <ThemeProvider defaultTheme="system">
-      <Inbox />
+      {/* Every tooltip in the window (Tip): 150 ms to open, and the next one at once within 400 ms. */}
+      <TooltipProvider delayDuration={TIP_DELAY_MS} skipDelayDuration={400} disableHoverableContent>
+        <Inbox />
+      </TooltipProvider>
     </ThemeProvider>
   );
 }

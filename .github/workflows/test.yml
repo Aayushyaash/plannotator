@@ -128,6 +128,7 @@ jobs:
           packages/ui/components/DiagramBlock.askAI.test.tsx
           packages/ui/components/Viewer.askAISelectionLine.test.tsx
           packages/ui/components/ImageLightbox.test.tsx
+          packages/ui/components/HostTitle.dom.test.tsx
           packages/inbox/images.test.tsx
           packages/inbox/inlineImages.test.tsx
           packages/inbox/codeAttachment.test.tsx
@@ -170,6 +171,7 @@ jobs:
           packages/inbox/openStaysPut.test.tsx
           packages/inbox/phoneList.test.tsx
           packages/inbox/listLabels.test.tsx
+          packages/inbox/componentTooltips.test.tsx
           packages/inbox/toast.test.tsx
           packages/inbox/attachmentsHeader.test.tsx
           packages/inbox/sentQuestionLocked.test.tsx

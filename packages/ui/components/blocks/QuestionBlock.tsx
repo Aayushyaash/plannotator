@@ -13,6 +13,7 @@ import {
 } from '@plannotator/core/question-block';
 import { InlineMarkdown } from '../InlineMarkdown';
 import { QuestionContext } from './QuestionContext';
+import { HostTitle } from '../HostTitle';
 
 /**
  * A `:::question` block rendered as an answer card (the approved "Card"
@@ -534,15 +535,14 @@ export const QuestionBlock: React.FC<QuestionBlockProps> = ({
               data-pinpoint-ignore=""
               data-question-decision-tag=""
             >{decisionToggleable ? (
-              <button
+              <HostTitle title="Record as a decision"><button
                 type="button"
                 aria-pressed={recordingOn}
                 aria-label="Record as a decision"
-                title="Record as a decision"
                 onClick={() => onToggleDecisionRecording!(question.key, !recordingOn)}
                 className="relative inline-flex cursor-pointer items-center rounded pl-1.5 pr-0.5 before:absolute before:-inset-1.5 before:content-[''] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
                 data-question-decision-toggle=""
-              ><DiamondGlyph /></button>
+              ><DiamondGlyph /></button></HostTitle>
             ) : (
               <span className="inline-flex items-center pl-1.5 pr-0.5"><DiamondGlyph /></span>
             )}<button

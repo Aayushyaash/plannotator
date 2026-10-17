@@ -350,7 +350,7 @@ test('This Wi-Fi: turned on in step 1, the code carries the address and the cert
   await flow.getByRole('button', { name: 'Done' }).click();
   await expect(page.locator('[data-lan-address]')).toHaveAttribute('data-lan-address', lan);
   await expect(page.locator('[data-lan-fingerprint]')).toHaveAttribute('data-lan-fingerprint', fingerprint);
-  await expect(page.locator('[data-lan-fingerprint] .ib-sfp')).toHaveAttribute('title', fingerprint.match(/.{4}/g)!.join(' '));
+  await expect(page.locator('[data-lan-fingerprint] .ib-sfp')).toHaveAttribute('data-fingerprint', fingerprint.match(/.{4}/g)!.join(' '));
   const bonjour = process.platform === 'darwin' || onPath('avahi-publish') !== null;
   await expect(page.locator('[data-lan-no-bonjour]')).toHaveCount(bonjour ? 0 : 1);
   // A phone holding another fingerprint refuses the connection itself.

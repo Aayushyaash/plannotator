@@ -5,6 +5,7 @@ import { inboxApi, type InboxNoteResult } from '../api';
 import { bandLines, defaultPicks, joinNames, noteResultLabel, primaryAction, sentence, splitPath, tidyReason, whoLabel } from '../agents';
 import { HostMark, Icon } from '../icons';
 import { Modal } from './Updates';
+import { isTextCut, Tip } from './Tip';
 
 export interface AgentNoteDialogProps {
   /** The agents asked about (fixed when the dialog opens): the candidates not asked yet. */
@@ -308,9 +309,11 @@ function RowMain({ row, failure, onRetry }: { row: InboxAgentRow; failure?: stri
   const note = row.note;
   return (
     <span className="ib-anote-main">
-      <span className="ib-anote-name" dir="auto" title={row.label}>
-        {row.label}
-      </span>
+      <Tip content={row.label} cut>
+        <span className="ib-anote-name" dir="auto">
+          {row.label}
+        </span>
+      </Tip>
       {note?.path && <NotePath path={note.path} />}
       {!failure && row.id === 'pi' && <span className="ib-anote-sub">Pi reads only one of its instruction files; this is the one.</span>}
       {!failure && note?.shared_with && note.shared_with.length > 0 && (
@@ -341,7 +344,7 @@ function RowMain({ row, failure, onRetry }: { row: InboxAgentRow; failure?: stri
   );
 }
 
-/** A path on one line, cut in the middle; each folder name its own bidi isolate; the whole path in the DOM and in `title`. */
+/** A path on one line, cut in the middle; each folder name its own bidi isolate; the whole path in the DOM and in a tooltip while it is cut. */
 function NotePath({ path }: { path: string }) {
   const { head, tail } = splitPath(path);
   const segments = (part: string) =>
@@ -356,10 +359,12 @@ function NotePath({ path }: { path: string }) {
       </Fragment>
     ));
   return (
-    <span className="ib-anote-path" dir="ltr" title={path}>
-      <span className="ib-anote-ph">{segments(head)}</span>
-      <span className="ib-anote-pt">{segments(tail)}</span>
-    </span>
+    <Tip content={path} when={(trigger) => isTextCut(trigger.querySelector('.ib-anote-ph')) || isTextCut(trigger.querySelector('.ib-anote-pt')) || isTextCut(trigger)}>
+      <span className="ib-anote-path" dir="ltr">
+        <span className="ib-anote-ph">{segments(head)}</span>
+        <span className="ib-anote-pt">{segments(tail)}</span>
+      </span>
+    </Tip>
   );
 }
 

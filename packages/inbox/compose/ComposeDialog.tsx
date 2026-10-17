@@ -24,6 +24,7 @@ import { ToPicker } from './ToPicker';
 import { ThreadNameChip } from './ThreadNameChip';
 import { useComposeSessions } from './useComposeSessions';
 import { InboxComposerField } from '../components/ComposerField';
+import { Tip } from '../components/Tip';
 import { INBOX_MESSAGE_SKILL_AUDIENCE, inboxSkillsBlock, withSkillsBlock } from '../skills';
 import {
   NOTHING_SENT_NO_AGENT,
@@ -580,19 +581,21 @@ export function ComposeDialog(props: ComposeDialogProps) {
         </div>
       ) : (
         <div className="ib-cp-foot">
-          <label className="ib-cp-clip" title="Attach files" aria-label="Attach files">
-            <Icon name="clip" size={17} />
-            <input
-              type="file"
-              multiple
-              className="ib-sr"
-              data-compose-attach=""
-              onChange={(event) => {
-                if (event.target.files) files.add(event.target.files);
-                event.target.value = '';
-              }}
-            />
-          </label>
+          <Tip content="Attach files">
+            <label className="ib-cp-clip" aria-label="Attach files">
+              <Icon name="clip" size={17} />
+              <input
+                type="file"
+                multiple
+                className="ib-sr"
+                data-compose-attach=""
+                onChange={(event) => {
+                  if (event.target.files) files.add(event.target.files);
+                  event.target.value = '';
+                }}
+              />
+            </label>
+          </Tip>
           {/* On a desktop the To line already says "Draft · saved". */}
           {draft && !dirty && phone && (
             <span className="ib-cp-savedline" data-compose-saved="">

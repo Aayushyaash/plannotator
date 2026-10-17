@@ -8,6 +8,7 @@ import { attachmentDownloadUrl, attachmentVideoUrl, compareVideoTimes, videoComm
 import { formatBytes, plural } from '../format';
 import { Icon } from '../icons';
 import { FileName } from './FileName';
+import { Tip } from './Tip';
 
 /** A fresh annotation id. */
 function newId(): string {
@@ -218,17 +219,18 @@ export const VideoAttachmentView = forwardRef<VideoAttachmentViewHandle, {
   // The moment: following the film, or pinned while a comment is written (then a click goes back to it).
   const chip =
     pinned !== null ? (
-      <button
-        type="button"
-        className="ib-vtime"
-        onClick={() => seek(pinned)}
-        title={`The comment is pinned at ${formatInboxVideoTime(pinned)}; go back to it`}
-        aria-label={`Pinned at ${formatInboxVideoTime(pinned)}, go back to it`}
-        data-video-time=""
-        data-pinned=""
-      >
-        {formatInboxVideoTime(pinned)}
-      </button>
+      <Tip content={`The comment is pinned at ${formatInboxVideoTime(pinned)}; go back to it`}>
+        <button
+          type="button"
+          className="ib-vtime"
+          onClick={() => seek(pinned)}
+          aria-label={`Pinned at ${formatInboxVideoTime(pinned)}, go back to it`}
+          data-video-time=""
+          data-pinned=""
+        >
+          {formatInboxVideoTime(pinned)}
+        </button>
+      </Tip>
     ) : (
       <span className="ib-vtime" data-video-time="">
         {formatInboxVideoTime(current)}
@@ -240,14 +242,16 @@ export const VideoAttachmentView = forwardRef<VideoAttachmentViewHandle, {
       {chip}
       {(markup || frame) && (
         // `ib-markup` on a drawing: the pane's unsaved-comment question (unsavedComposer) knows a drawing not yet commented.
-        <span className={`ib-vframe${markup ? ' ib-markup' : ''}`} title={markup ? 'Your marked-up frame rides this comment' : `The frame at ${formatInboxVideoTime(shownTime)} rides this comment`} data-video-frame="">
-          <img src={markup ? getImageSrc(markup.path) : frame!.url} alt="" />
-          {markup && (
-            <span className="ib-vpen" aria-hidden="true">
-              <Icon name="pen" size={9} />
-            </span>
-          )}
-        </span>
+        <Tip content={markup ? 'Your marked-up frame rides this comment' : `The frame at ${formatInboxVideoTime(shownTime)} rides this comment`}>
+          <span className={`ib-vframe${markup ? ' ib-markup' : ''}`} data-video-frame="">
+            <img src={markup ? getImageSrc(markup.path) : frame!.url} alt="" />
+            {markup && (
+              <span className="ib-vpen" aria-hidden="true">
+                <Icon name="pen" size={9} />
+              </span>
+            )}
+          </span>
+        </Tip>
       )}
       <textarea
         ref={textRef}
@@ -274,10 +278,12 @@ export const VideoAttachmentView = forwardRef<VideoAttachmentViewHandle, {
           }
         }}
       />
-      <button type="button" className="ib-btn" onClick={() => void openMarkup()} title="Draw on this frame (pen, arrow, circle)" data-markup-open="">
-        <Icon name="pen" size={14} />
-        {markup ? 'Redraw' : 'Mark up'}
-      </button>
+      <Tip content="Draw on this frame (pen, arrow, circle)">
+        <button type="button" className="ib-btn" onClick={() => void openMarkup()} data-markup-open="">
+          <Icon name="pen" size={14} />
+          {markup ? 'Redraw' : 'Mark up'}
+        </button>
+      </Tip>
       {phone && (
         <button type="button" className="ib-btn" onClick={reset} data-video-cancel="">
           Cancel
@@ -335,19 +341,19 @@ export const VideoAttachmentView = forwardRef<VideoAttachmentViewHandle, {
               sorted.map((annotation) => {
                 const time = readInboxVideoTime(annotation)!;
                 return (
-                  <button
-                    key={annotation.id}
-                    type="button"
-                    className={`ib-vdot${annotation.id === selectedId ? ' ib-on' : ''}`}
-                    style={{ left: at(time) }}
-                    onClick={() => {
-                      seek(time);
-                      onSelect(annotation.id);
-                    }}
-                    title={`${formatInboxVideoTime(time)}: ${annotation.text ?? ''}`}
-                    aria-label={`Go to the comment at ${formatInboxVideoTime(time)}`}
-                    data-video-dot={annotation.id}
-                  />
+                  <Tip key={annotation.id} content={`${formatInboxVideoTime(time)}: ${annotation.text ?? ''}`}>
+                    <button
+                      type="button"
+                      className={`ib-vdot${annotation.id === selectedId ? ' ib-on' : ''}`}
+                      style={{ left: at(time) }}
+                      onClick={() => {
+                        seek(time);
+                        onSelect(annotation.id);
+                      }}
+                      aria-label={`Go to the comment at ${formatInboxVideoTime(time)}`}
+                      data-video-dot={annotation.id}
+                    />
+                  </Tip>
                 );
               })}
             {span !== null && pinned !== null && <span className="ib-vdot ib-draft" style={{ left: at(pinned) }} aria-hidden="true" data-video-draft-dot="" />}

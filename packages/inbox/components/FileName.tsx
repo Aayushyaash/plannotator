@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { sliceText } from '@plannotator/core/inbox-questions';
+import { Tip } from './Tip';
 
 /**
  * A file name that is cut in the middle when it runs short, never at its
@@ -12,18 +13,27 @@ import { sliceText } from '@plannotator/core/inbox-questions';
  * reads right to left and is cut at its own end.
  *
  * `wrap` draws the whole name, broken where it must, for places with room
- * (the download card). A cut name gets its whole name as hover text
- * (`data-clip`, clipTitle.ts) only while it is cut.
+ * (the download card). A cut name gets its whole name in a tooltip (Tip)
+ * only while it is cut.
  */
 export function FileName({ name, className, wrap = false }: { name: string; className?: string; wrap?: boolean }) {
   useEffect(keepNamesWholeOnCopy, []);
   const [head, tail] = splitFileName(name);
   const cls = `ib-fname${wrap ? ' ib-fname-wrap' : ''}${className ? ` ${className}` : ''}`;
-  if (wrap || !tail) {
+  if (wrap) {
     return (
-      <span className={cls} dir="auto" data-clip={wrap ? undefined : ''}>
+      <span className={cls} dir="auto">
         <span className="ib-fname-h">{name}</span>
       </span>
+    );
+  }
+  if (!tail) {
+    return (
+      <Tip content={name} cut>
+        <span className={cls} dir="auto">
+          <span className="ib-fname-h">{name}</span>
+        </span>
+      </Tip>
     );
   }
   // The two parts are flex items, which a screen reader would read apart
@@ -31,14 +41,16 @@ export function FileName({ name, className, wrap = false }: { name: string; clas
   // name from `data-name` (inbox.css draws it as a visually hidden ::after).
   // The text content stays the name.
   return (
-    <span className={cls} dir="auto" data-clip="" data-name={name}>
-      <span className="ib-fname-h" aria-hidden="true">
-        {head}
+    <Tip content={name} cut>
+      <span className={cls} dir="auto" data-name={name}>
+        <span className="ib-fname-h" aria-hidden="true">
+          {head}
+        </span>
+        <span className="ib-fname-t" aria-hidden="true">
+          {tail}
+        </span>
       </span>
-      <span className="ib-fname-t" aria-hidden="true">
-        {tail}
-      </span>
-    </span>
+    </Tip>
   );
 }
 

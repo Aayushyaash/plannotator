@@ -6,6 +6,7 @@ import type { Annotation, ImageAttachment } from '@plannotator/ui/types';
 import { InboxApiError, inboxApi } from '../api';
 import { attachmentImageUrl, imageCommentAnnotation, WIDE_IMAGE_RATIO } from '../attachments';
 import { Icon } from '../icons';
+import { Tip } from './Tip';
 
 /** A fresh annotation id. */
 function newId(): string {
@@ -186,17 +187,18 @@ export function ImageAttachmentView({
         )}
         <div className="ib-imgbar">
           {natural && <span className="ib-imgsize">{`${natural.width} × ${natural.height}`}</span>}
-          <button
-            type="button"
-            className="ib-btn ib-ghost ib-sm"
-            onClick={() => setFit((v) => (v === 'fit' ? 'actual' : 'fit'))}
-            disabled={!canZoom}
-            aria-pressed={fit === 'actual'}
-            title={fit === 'fit' ? 'Show the image at its own size' : 'Fit the image to the pane'}
-          >
-            <Icon name={fit === 'fit' ? 'expand' : 'collapse'} size={13} />
-            {fit === 'fit' ? 'Actual size' : 'Fit'}
-          </button>
+          <Tip content={fit === 'fit' ? 'Show the image at its own size' : 'Fit the image to the pane'}>
+            <button
+              type="button"
+              className="ib-btn ib-ghost ib-sm"
+              onClick={() => setFit((v) => (v === 'fit' ? 'actual' : 'fit'))}
+              disabled={!canZoom}
+              aria-pressed={fit === 'actual'}
+            >
+              <Icon name={fit === 'fit' ? 'expand' : 'collapse'} size={13} />
+              {fit === 'fit' ? 'Actual size' : 'Fit'}
+            </button>
+          </Tip>
         </div>
         {failed ? (
           <div className="ib-error" role="alert" style={{ alignSelf: 'center' }}>
@@ -225,12 +227,14 @@ export function ImageAttachmentView({
       {!readOnly && (
         <div className="ib-imgcompose" data-image-composer="">
           {markup && (
-            <span className="ib-markup" title="Your marked-up copy rides this comment">
-              <img src={getImageSrc(markup.path)} alt="Your marked-up copy" />
-              <button type="button" onClick={() => setMarkup(null)} aria-label="Remove the marked-up copy">
-                <Icon name="x" size={10} />
-              </button>
-            </span>
+            <Tip content="Your marked-up copy rides this comment">
+              <span className="ib-markup">
+                <img src={getImageSrc(markup.path)} alt="Your marked-up copy" />
+                <button type="button" onClick={() => setMarkup(null)} aria-label="Remove the marked-up copy">
+                  <Icon name="x" size={10} />
+                </button>
+              </span>
+            </Tip>
           )}
           <textarea
             ref={textRef}
@@ -248,10 +252,12 @@ export function ImageAttachmentView({
               }
             }}
           />
-          <button type="button" className="ib-btn" onClick={() => setAnnotating(true)} disabled={failed} title="Draw on the image (pen, arrow, circle)" data-markup-open="">
-            <Icon name="pen" size={14} />
-            {markup ? 'Redraw' : 'Mark up'}
-          </button>
+          <Tip content="Draw on the image (pen, arrow, circle)">
+            <button type="button" className="ib-btn" onClick={() => setAnnotating(true)} disabled={failed} data-markup-open="">
+              <Icon name="pen" size={14} />
+              {markup ? 'Redraw' : 'Mark up'}
+            </button>
+          </Tip>
           <button type="button" className="ib-btn ib-pri" onClick={() => void submit()} disabled={saving || (!text.trim() && !markup)} data-image-comment-save="">
             Comment
           </button>

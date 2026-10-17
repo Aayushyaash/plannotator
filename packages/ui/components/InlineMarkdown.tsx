@@ -14,6 +14,7 @@ import type { ValidationEntry } from "../hooks/useValidatedCodePaths";
 import { CodeFilePicker } from "./CodeFilePicker";
 import { normalizeMathTex, renderMathToHtml } from "../utils/math";
 import { useMathRenderer } from "../hooks/useMathRenderer";
+import { HostTitle } from "./HostTitle";
 
 export interface DocPreviewResult {
   contents?: string;
@@ -1110,8 +1111,8 @@ export const InlineMarkdown: React.FC<{
         const openLink = localLink.open;
         const hostHref = localLink.href;
         parts.push(
+          <HostTitle key={key++} title={localLink.title}>
           <a
-            key={key++}
             href={hostHref ?? safeLinkUrl}
             onClick={(e) => {
               // With the host's own address, a new-tab click goes there.
@@ -1123,7 +1124,6 @@ export const InlineMarkdown: React.FC<{
             // Without it, a middle click would open the path on the host's own origin.
             onAuxClick={hostHref ? undefined : (e) => e.preventDefault()}
             className="text-primary underline underline-offset-2 hover:text-primary/80 inline-flex items-center gap-1 cursor-pointer"
-            title={localLink.title}
             data-local-link="open"
           >
             {linkText}
@@ -1141,18 +1141,16 @@ export const InlineMarkdown: React.FC<{
                 d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"
               />
             </svg>
-          </a>,
+          </a>
+          </HostTitle>,
         );
       } else if (localLink?.kind === 'unavailable') {
         parts.push(
-          <span
-            key={key++}
-            className="text-muted-foreground underline decoration-dotted underline-offset-2"
-            title={localLink.title}
-            data-local-link="unavailable"
-          >
-            {linkText}
-          </span>,
+          <HostTitle key={key++} title={localLink.title}>
+            <span className="text-muted-foreground underline decoration-dotted underline-offset-2" data-local-link="unavailable">
+              {linkText}
+            </span>
+          </HostTitle>,
         );
       } else if (isInPageAnchor) {
         parts.push(

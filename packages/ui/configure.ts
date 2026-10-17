@@ -17,6 +17,7 @@ import { setFenceThemeResolver, type FenceThemeResolver } from './utils/syntaxTh
 import { configStore } from './config';
 import type { ServerSyncFn } from './config/configStore';
 import type { ExternalAnnotationEvent, VaultNode } from './types';
+import { setComponentTooltips } from './components/HostTitle';
 
 // One-stop type barrel: every seam contract a host implements is importable
 // from this module, next to configurePlannotatorUI itself.
@@ -118,6 +119,14 @@ export interface PlannotatorUIConfig {
    * pane keeps its own pair. An unknown theme name renders plain text.
    */
   fenceTheme?: FenceThemeResolver;
+  /**
+   * Draw ui's own hover text (the annotation panel's and toolbar's buttons, a
+   * question card's decision tag, a host-resolved local link's
+   * `LocalLinkResolution.title`) as ui's `Tooltip` instead of a native
+   * `title` (`components/HostTitle`). Default: false, native titles exactly
+   * as before. The Plannotator Inbox passes true.
+   */
+  componentTooltips?: boolean;
   /** Re-hydrate settings from the installed (SYNCHRONOUS) storageBackend after install. */
   loadSettingsFromBackend?: boolean;
 }
@@ -142,6 +151,7 @@ export function configurePlannotatorUI(config: PlannotatorUIConfig): void {
   if (config.identityGenerator) setIdentityGenerator(config.identityGenerator);
   if (config.alertIconRenderer) setAlertIconRenderer(config.alertIconRenderer);
   if (config.fenceTheme) setFenceThemeResolver(config.fenceTheme);
+  if (config.componentTooltips !== undefined) setComponentTooltips(config.componentTooltips);
   // Re-hydrate AFTER storageBackend is installed (load-bearing order — gated last).
   if (config.loadSettingsFromBackend) configStore.loadFromBackend();
 }

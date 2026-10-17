@@ -6,6 +6,7 @@ import { DecisionDiamond, Icon } from '../icons';
 import { SidebarTrigger } from '../shell/sidebar';
 import { DecisionsProjectPicker } from './DecisionsProjectPicker';
 import { useNarrowerThan } from '../narrower';
+import { Tip } from './Tip';
 
 /**
  * Below this page width the wide decision row (a 22 px mark, the text, then
@@ -186,10 +187,12 @@ function DecisionPane({
         {/* A stacked decision covers the list: the way back leads, where the list was. */}
         {stacked && !phone && (
           <>
-            <button type="button" className="ib-pback" onClick={onClose} aria-label="Back to Decisions" title="Back to Decisions" data-stack-back="">
-              <Icon name="chevL" size={16} />
-              <span className="ib-pback-l">Decisions</span>
-            </button>
+            <Tip content="Back to Decisions">
+              <button type="button" className="ib-pback" onClick={onClose} aria-label="Back to Decisions" data-stack-back="">
+                <Icon name="chevL" size={16} />
+                <span className="ib-pback-l">Decisions</span>
+              </button>
+            </Tip>
             <span className="ib-vsep" aria-hidden="true" />
           </>
         )}
@@ -199,9 +202,11 @@ function DecisionPane({
         </span>
         <span className="ib-sp" />
         {!phone && !stacked && (
-          <button type="button" className="ib-iconbtn" onClick={onClose} title="Close" aria-label="Close the decision">
-            <Icon name="x" />
-          </button>
+          <Tip content="Close">
+            <button type="button" className="ib-iconbtn" onClick={onClose} aria-label="Close the decision">
+              <Icon name="x" />
+            </button>
+          </Tip>
         )}
       </div>
       <div className="ib-pbody">

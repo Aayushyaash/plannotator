@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { DecisionProjectCounts, ProjectFolder } from '../api';
 import { tildePath } from '../format';
 import { Icon } from '../icons';
+import { isTextCut, ProjectTipText, Tip } from './Tip';
 
 /**
  * The Decisions page's project switch (it replaced a native <select>, which
@@ -267,15 +268,14 @@ export function DecisionsProjectPicker(props: DecisionsProjectPickerProps) {
         const words = decisionCountWords(projectCounts);
         const path = tildePath(project.root, home);
         return (
+          <Tip key={project.id} side="right" content={<ProjectTipText name={project.name} root={path} />} when={optionCut}>
           <div
-            key={project.id}
             id={`${base}-${project.id}`}
             role="option"
             aria-selected={selected}
             aria-label={`${project.name}, ${path}${words ? `, ${words}` : ''}`}
             tabIndex={-1}
             className="ib-ppick-o"
-            title={`${project.name}\n${path}`}
             onClick={() => pick(project.id)}
             data-project-option={project.id}
             data-project-name={project.name}
@@ -291,6 +291,7 @@ export function DecisionsProjectPicker(props: DecisionsProjectPickerProps) {
               <CountChips counts={projectCounts} />
             </span>
           </div>
+          </Tip>
         );
       })}
     </div>
@@ -298,6 +299,7 @@ export function DecisionsProjectPicker(props: DecisionsProjectPickerProps) {
 
   return (
     <div className="ib-ppick" data-project-picker="">
+      <Tip content={current.name} when={(trigger) => !open && isTextCut(trigger.querySelector('.ib-ppick-tn'))}>
       <button
         type="button"
         ref={triggerRef}
@@ -306,7 +308,6 @@ export function DecisionsProjectPicker(props: DecisionsProjectPickerProps) {
         aria-expanded={open}
         aria-controls={open ? listId : undefined}
         aria-label={`Project: ${current.name}${currentWords ? `, ${currentWords}` : ''}`}
-        title={current.name}
         onClick={() => (open ? close(true) : setOpen(true))}
         onKeyDown={onTriggerKey}
         data-project-picker-trigger=""
@@ -319,6 +320,7 @@ export function DecisionsProjectPicker(props: DecisionsProjectPickerProps) {
         )}
         <Icon name="chevD" size={14} />
       </button>
+      </Tip>
       {open && phone && (
         <>
           <div className="ib-ppick-scrim" aria-hidden="true" />
@@ -336,4 +338,9 @@ export function DecisionsProjectPicker(props: DecisionsProjectPickerProps) {
       {open && !phone && listbox}
     </div>
   );
+}
+
+/** An option's tooltip opens only while its name or folder is cut. */
+function optionCut(trigger: Element): boolean {
+  return isTextCut(trigger.querySelector('.ib-ppick-ot b')) || isTextCut(trigger.querySelector('.ib-ppick-p'));
 }

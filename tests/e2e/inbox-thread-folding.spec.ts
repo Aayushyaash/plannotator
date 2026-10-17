@@ -246,10 +246,14 @@ test('the read run folds: first and last two as lines, the middle behind "3 earl
   await expect(pane().locator('[data-middle-fold]')).toHaveText('3 earlier messages');
   // Every question answered: the line shows the answers, not the first words.
   const first = article(ids[0]!);
-  // A long prompt is cut at a word, so the answer stays on the line; the whole prompt is the line's title.
+  // A long prompt is cut at a word, so the answer stays on the line; the whole prompt is the line's tooltip.
   const answers = first.locator('[data-snippet="answers"]');
   await expect(answers).toHaveText('Which search index should the docs site… → Pagefind · Which sections go in the index → Guides, API reference');
-  await expect(answers).toHaveAttribute('title', `${LONG_PLAIN}: Pagefind; Which sections go in the index: Guides, API reference`);
+  // The whole answers are its component tooltip, never a native title.
+  await expect(answers).not.toHaveAttribute('title', /./);
+  await answers.hover();
+  await expect(world.page.locator('[data-side].bg-popover')).toHaveText(`${LONG_PLAIN}: Pagefind; Which sections go in the index: Guides, API reference`);
+  await world.page.mouse.move(1, 1);
   const line = (await answers.boundingBox())!;
   const answer = (await answers.locator('b').first().boundingBox())!;
   expect(answer.x).toBeGreaterThanOrEqual(line.x);

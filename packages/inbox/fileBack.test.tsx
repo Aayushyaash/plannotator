@@ -20,6 +20,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync 
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { tooltipOf } from './testing/tooltip';
 
 const hasDom = typeof document !== 'undefined';
 const { InboxApp } = (hasDom ? await import('./App') : {}) as typeof import('./App');
@@ -184,7 +185,7 @@ test.skipIf(!hasDom)('with a file open beside the thread, ‹ Inbox leads the he
   expect(head.lastElementChild).toBe(head.querySelector('[data-archive]'));
   expect(back(el)!.getAttribute('aria-label')).toBe('Back to Inbox');
   expect(back(el)!.textContent?.trim()).toBe('Inbox');
-  expect(back(el)!.title).toBe('Close notes.md and show the list');
+  expect(await tooltipOf(back(el)!)).toBe('Close notes.md and show the list');
   expect(closeThread(el)).toBeNull();
   expect(el.querySelector('[data-stack-back]')).toBeNull();
 

@@ -1,6 +1,7 @@
 import type { DraftView } from '../api';
 import { shortTime, whenTime } from '../format';
 import { HostMark, Icon } from '../icons';
+import { Tip } from '../components/Tip';
 import { SidebarTrigger } from '../shell/sidebar';
 import { draftChip, draftSnippet, hostLabel, subjectPreview } from './model';
 
@@ -98,9 +99,11 @@ export function DraftsPage({
                   </span>
                 </span>
               </button>
-              <button type="button" className="ib-draft-del" aria-label={`Delete draft: ${subject}`} title="Delete draft" onClick={() => onDelete(draft)} data-draft-delete="">
-                <Icon name="trash" size={17} />
-              </button>
+              <Tip content="Delete draft">
+                <button type="button" className="ib-draft-del" aria-label={`Delete draft: ${subject}`} onClick={() => onDelete(draft)} data-draft-delete="">
+                  <Icon name="trash" size={17} />
+                </button>
+              </Tip>
             </div>
           );
         })}

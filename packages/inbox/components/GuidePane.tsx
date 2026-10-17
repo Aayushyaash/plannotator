@@ -25,6 +25,7 @@ import { guideCommentOf } from '../attachments';
 import { agentName, whenTime, plural } from '../format';
 import { Icon } from '../icons';
 import { useNarrowerThan } from '../narrower';
+import { Tip } from './Tip';
 
 // `#guide-reader` is packages/inbox/guide/GuideReader.tsx (package.json `imports`).
 const GuideReader = lazy(() => import('#guide-reader'));
@@ -210,16 +211,17 @@ export function GuidePane({ thread, message, onBack, onClose }: GuidePaneProps) 
             aria-expanded={sheet}
             aria-controls={sheetId}
             aria-label={`Comments, ${comments.length}`}
-            title="Comments"
             data-guide-comments-sheet=""
           >
             <Icon name="comment" size={15} />
             {comments.length}
           </button>
         )}
-        <button type="button" className="ib-iconbtn" onClick={onClose} title="Close" aria-label="Close the guided review">
-          <Icon name="x" />
-        </button>
+        <Tip content="Close">
+          <button type="button" className="ib-iconbtn" onClick={onClose} aria-label="Close the guided review">
+            <Icon name="x" />
+          </button>
+        </Tip>
       </div>
       <div className="ib-gsplit">
         <div className="ib-gbody">
