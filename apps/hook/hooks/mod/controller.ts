@@ -1566,7 +1566,12 @@ export class PlannotatorMod {
   }
 
   /** Turn events, from register.ts. */
-  async onTurnStart(turnId: string, text: string): Promise<void> {
+  async onTurnStart(turnId: string, text: string, agentId?: string): Promise<void> {
+    // The main loop's turns only. Every hook hears a subagent's start (a
+    // background one included), but its end is not counted (register.ts
+    // filters turn.complete by agent id), so counting the start left the
+    // session busy after the main turn ended, and the Inbox's replies waited.
+    if (agentId) return
     this.host.debug(`turn.start ${turnId}: ${JSON.stringify(text.slice(0, 160))}`)
     const drop = this.turns.onTurnStart(turnId, text)
     if (drop) await this.host.abortTurn(drop).catch(() => undefined)

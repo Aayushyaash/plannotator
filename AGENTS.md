@@ -991,8 +991,8 @@ an `ask` is submitted as a real turn (`$.prompt.submit`), identified at
 `turn.start` by its header and last line (Claude Code frames a plugin prompt as
 "The plannotator plugin sent a message: …", seen live), streamed back from
 `turn.step` text/tool chunks, and finished from `turn.complete`'s `answer`.
-`busy` = a turn is running (pushed on `turn.start` / `turn.complete`, not only
-at the next poll); `interrupt` aborts the running turn (`$.turn.abort`);
+`busy` = a MAIN-LOOP turn is running (pushed on `turn.start` / `turn.complete`, not only
+at the next poll; a subagent's `turn.start`, which every hook hears, is ignored by `onTurnStart`: its end is never counted, so counting it left the session busy for good after a background subagent started, and the Inbox wake never delivered); `interrupt` aborts the running turn (`$.turn.abort`);
 cancel aborts our own turn, or, while it is still queued, confirms at once and
 aborts its turn the moment it starts. Claude Code never raises a plugin's own hooks
 for a prompt its code submitted (the debug log says "skipped: re-entry"), so the

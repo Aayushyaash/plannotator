@@ -447,7 +447,8 @@ export function register(on: On) {
   on('turn.start', async ($: Engine, e: any, next: Next) => {
     if (allowed && typeof e.turnId === 'string') {
       const instance = await currentMod($).catch(() => null)
-      if (instance) await instance.onTurnStart(e.turnId, typeof e.text === 'string' ? e.text : '')
+      // A subagent's start carries its id: the controller counts only the main loop's turns.
+      if (instance) await instance.onTurnStart(e.turnId, typeof e.text === 'string' ? e.text : '', typeof e.agentId === 'string' ? e.agentId : undefined)
     }
     return next(e)
   })

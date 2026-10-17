@@ -601,5 +601,23 @@ describe('register', () => {
     for (let second = 0; second < 10; second++) await w.clock.advance(1_000)
     expect(w.submits).toHaveLength(1)
   })
-})
 
+  test("a background subagent's turn does not hold the reply: the main loop is idle, so it arrives as a turn", async ($: any, on: any) => {
+    const calls: { url: string; body: any }[] = []
+    let delivered = false
+    const reply = { type: 'reply', id: 'msg_reply', thread_id: 'msg_1', reply_to: 'msg_1', subject: 'Ship it?', body: 'Yes.', url: 'http://localhost:5150/#thread=msg_1' }
+    const w = world(on, {
+      files: withRegistry(),
+      fetch: inbox(TOOLS, calls, (path, body) => {
+        if (path === '/api/inbox/bridge/event' && body.type === 'delivered' && body.id === 'msg_reply') delivered = true
+        return path === '/api/inbox/bridge/poll' ? { commands: delivered ? [] : [reply] } : { ok: true }
+      }),
+    })
+    on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+    await $.session.start(SESSION)
+    await $.turn.start({ turnId: 'sub-turn-1', text: 'Explore the repo.', agentId: 'agent-1' })
+    for (let second = 0; second < 6; second++) await w.clock.advance(1_000)
+    expect(w.submits).toHaveLength(1)
+    expect(delivered).toBe(true)
+  })
+})
