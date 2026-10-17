@@ -6,7 +6,28 @@
  */
 import { describe, expect, test } from 'bun:test';
 import type { InboxComposeProject } from '@plannotator/core/inbox-types';
-import { actionLabel, composeActions, composeGroups, composeTargets, draftChip, filterGroups, isDirty, namesActionWord, pickerRows, preselect, statusLine } from './compose/model';
+import { derivePersonThreadSubject } from '@plannotator/core/inbox-questions';
+import {
+  actionLabel,
+  composeActions,
+  composeGroups,
+  composeTargets,
+  composeThreadName,
+  draftChip,
+  draftThreadName,
+  sendThreadName,
+  shownThreadName,
+  suggestThreadName,
+  threadNameStateOf,
+  typeThreadName,
+  filterGroups,
+  isDirty,
+  namesActionWord,
+  pickerRows,
+  preselect,
+  statusLine,
+  subjectPreview,
+} from './compose/model';
 
 const session = (id: string, host: string, extra: Partial<InboxComposeProject['sessions'][number]> = {}) => ({
   session: id,
@@ -111,5 +132,61 @@ describe('the palette\'s Actions', () => {
     expect(namesActionWord('send it')).toBe(true);
     expect(namesActionWord('mes')).toBe(false);
     expect(namesActionWord('newsletter')).toBe(false);
+  });
+});
+
+describe('the subject preview and the thread name', () => {
+  test("the preview is the store's rule for a thread the person starts, so what compose shows is what is stored", () => {
+    const dictated = 'I want to explore what adding a board would look like. Kanban specifically. And the kanban needs to be well thought out.';
+    expect(subjectPreview(dictated)).toBe(derivePersonThreadSubject(dictated));
+    expect(subjectPreview(dictated)).toBe('I want to explore what adding a board would look like');
+    expect(subjectPreview('   ')).toBeNull();
+  });
+
+  test('a thread name: empty is none, a valid one is trimmed, an invalid one says why', () => {
+    expect(composeThreadName('  ')).toEqual({ name: '' });
+    expect(composeThreadName('  Kanban board ')).toEqual({ name: 'Kanban board' });
+    expect(composeThreadName('a\nb')).toEqual({ error: 'Thread name must not contain control characters or line breaks.' });
+    expect('error' in composeThreadName('x'.repeat(121))).toBe(true);
+  });
+
+  test('a changed thread name alone makes a saved draft dirty; a name alone makes a new message dirty', () => {
+    const saved = { body: 'hi', session: null, files: [], threadName: 'Board' };
+    expect(isDirty({ ...saved }, saved, true)).toBe(false);
+    expect(isDirty({ ...saved, threadName: 'Kanban' }, saved, true)).toBe(true);
+    expect(isDirty({ body: '', session: null, files: [], threadName: 'Board' }, { body: '', session: null, files: [] }, false)).toBe(true);
+  });
+
+  test('the chip follows the message until typed in; emptied, it follows again', () => {
+    const fresh = threadNameStateOf(null);
+    expect(fresh).toEqual({ typed: '', edited: false });
+    expect(shownThreadName(fresh, 'Paste bug')).toBe('Paste bug');
+    const typed = typeThreadName('Board ideas');
+    expect(typed).toEqual({ typed: 'Board ideas', edited: true });
+    // The suggestion moves on; the typed name does not.
+    expect(shownThreadName(typed, 'Kanban board')).toBe('Board ideas');
+    expect(typeThreadName('   ')).toEqual({ typed: '', edited: false });
+    expect(typeThreadName('')).toEqual({ typed: '', edited: false });
+  });
+
+  test('a draft keeps the typed name only, and opens in the state it was saved in', () => {
+    expect(draftThreadName(typeThreadName('Kanban board'))).toBe('Kanban board');
+    expect(draftThreadName(threadNameStateOf(null))).toBe('');
+    expect(threadNameStateOf({ thread_name: 'Kanban board' })).toEqual({ typed: 'Kanban board', edited: true });
+    expect(threadNameStateOf({ thread_name: '  ' })).toEqual({ typed: '', edited: false });
+    expect(threadNameStateOf({})).toEqual({ typed: '', edited: false });
+  });
+
+  test('a Send carries the typed name as is, the suggestion marked auto, or nothing', () => {
+    expect(sendThreadName(typeThreadName('  Kanban board '), 'Paste bug')).toEqual({ thread_name: 'Kanban board' });
+    expect(sendThreadName(threadNameStateOf(null), 'Paste bug')).toEqual({ thread_name: 'Paste bug', thread_name_auto: true });
+    expect(sendThreadName(threadNameStateOf(null), '')).toEqual({});
+    expect(sendThreadName(typeThreadName('a\u202eb'), 'Paste bug')).toEqual({ error: 'Thread name must not contain bidirectional control characters.' });
+  });
+
+  test("the suggestion is the core namer's, short, from the words or else the files", () => {
+    expect(suggestThreadName('can you fix the paste bug in the reply box')).toBe('Paste bug');
+    expect(suggestThreadName('', ['relay-retry-budget.md'])).toBe('Relay retry budget');
+    expect(suggestThreadName('What do you think?')).toBe('');
   });
 });

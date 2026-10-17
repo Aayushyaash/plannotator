@@ -12,7 +12,7 @@
  *   GET  /api/inbox/sessions                 every live session, grouped by project;
  *                                            `?session=<id>` adds `session: { session, live }`
  *                                            (with the asker grace) for a thread's delivery line
- *   POST /api/inbox/messages                 `{ to, body, idempotency_key, uploads?, draft_id? }`:
+ *   POST /api/inbox/messages                 `{ to, body, idempotency_key, uploads?, draft_id?, thread_name?, thread_name_auto? }`:
  *                                            a new thread (409 `session_not_live`, nothing written)
  *   POST /api/inbox/messages/:id/to          `{ to }`: "Send to another session" for a message
  *                                            no session took yet (a live session of its project)
@@ -113,7 +113,7 @@ export function createInboxCompose(options: {
     // A replayed Send answers the thread it wrote, whatever the session's state now.
     const replay = store.personThreadByKey(key);
     if (replay) {
-      const result = store.startPersonThread({ project_id: replay.project_id, body: body.body, to: replay.to ?? null, idempotency_key: key });
+      const result = store.startPersonThread({ project_id: replay.project_id, body: body.body, to: replay.to ?? null, idempotency_key: key, thread_name: body.thread_name, thread_name_auto: body.thread_name_auto });
       return json({ thread_id: result.message.thread_id, message: result.message, replayed: true });
     }
     if (typeof body.body !== "string" || body.body.trim() === "") throw new InboxError("validation_error", "body: write a message.", { field: "body" });
@@ -137,6 +137,8 @@ export function createInboxCompose(options: {
         to: { host: target.host, session: target.session },
         idempotency_key: key,
         attachments,
+        thread_name: body.thread_name,
+        thread_name_auto: body.thread_name_auto,
       });
     } catch (error) {
       removeInboxAttachmentFiles(store.dir, attachments);

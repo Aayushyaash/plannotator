@@ -22,6 +22,9 @@ import { InboxError } from "./schema";
 import { readInboxUpload } from "./uploads";
 
 export const INBOX_DRAFTS_DIR = "drafts";
+/** The longest thread name a draft keeps while the person types (a Send takes at most INBOX_THREAD_NAME_MAX). */
+export const INBOX_DRAFT_THREAD_NAME_MAX = 500;
+
 /** The longest draft body, in characters (the store takes any body, but a draft is saved on every pause). */
 export const INBOX_DRAFT_BODY_MAX = 1_000_000;
 const SHORT_MAX = 4096;
@@ -133,13 +136,18 @@ function checkProject(value: unknown): InboxDraft["project"] {
 export function saveInboxDraft(
   inboxDirPath: string,
   id: unknown,
-  input: { body?: unknown; to?: unknown; project?: unknown; files?: unknown; base?: unknown },
+  input: { body?: unknown; to?: unknown; project?: unknown; files?: unknown; base?: unknown; thread_name?: unknown },
   at: string,
 ): InboxDraft {
   if (!isInboxId("drf", id)) throw new InboxError("validation_error", "id: a draft id (drf_…).", { field: "id" });
   const body = input.body === undefined ? "" : input.body;
   if (typeof body !== "string" || body.length > INBOX_DRAFT_BODY_MAX) {
     throw new InboxError("validation_error", `body: a string of at most ${INBOX_DRAFT_BODY_MAX} characters.`, { field: "body" });
+  }
+  // The thread's name as the person is typing it: kept as typed (the Send checks it by the thread-name rules).
+  const threadName = input.thread_name === undefined || input.thread_name === null ? "" : input.thread_name;
+  if (typeof threadName !== "string" || threadName.length > INBOX_DRAFT_THREAD_NAME_MAX) {
+    throw new InboxError("validation_error", `thread_name: a string of at most ${INBOX_DRAFT_THREAD_NAME_MAX} characters.`, { field: "thread_name" });
   }
   const files: InboxUpload[] = [];
   const listed = input.files === undefined || input.files === null ? [] : input.files;
@@ -165,7 +173,17 @@ export function saveInboxDraft(
   // Strictly later than the last save, so a compare-and-set within one millisecond still tells the two apart.
   let updatedAt = at;
   if (existing && updatedAt <= existing.updated_at) updatedAt = new Date(Date.parse(existing.updated_at) + 1).toISOString();
-  const draft: InboxDraft = { v: 1, id, created_at: existing?.created_at ?? at, updated_at: updatedAt, body, to, project, files };
+  const draft: InboxDraft = {
+    v: 1,
+    id,
+    created_at: existing?.created_at ?? at,
+    updated_at: updatedAt,
+    body,
+    to,
+    project,
+    files,
+    ...(threadName.trim() ? { thread_name: threadName } : {}),
+  };
   const dir = draftsDir(inboxDirPath);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = draftFile(inboxDirPath, id);

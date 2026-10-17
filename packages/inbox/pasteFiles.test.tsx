@@ -272,7 +272,7 @@ test.skipIf(!hasDom)('compose: a pasted image makes a tile with a dated name, up
   const sent = posted.find((p) => p.path === '/api/inbox/messages')!;
   expect((sent.body.uploads as string[]).length).toBe(1);
   const threads = JSON.parse((await loopback('/api/inbox/threads')).text) as { sections: { threads: { thread_id: string; subject: string }[] }[] };
-  const started = threads.sections.flatMap((s) => s.threads).find((t) => t.subject === 'This is what the legend looks like.')!;
+  const started = threads.sections.flatMap((s) => s.threads).find((t) => t.subject === 'This is what the legend looks like')!;
   const model = JSON.parse((await loopback(`/api/inbox/threads/${started.thread_id}`)).text) as { thread: { messages: InboxMessage[] } };
   expect(model.thread.messages[0]!.attachments!.map((a) => [a.name, a.kind])).toEqual([[name, 'image']]);
 }, 30_000);

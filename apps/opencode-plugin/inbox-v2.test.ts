@@ -19,12 +19,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import path from "node:path";
-import { INBOX_REMINDER_TEXT, INBOX_WAKE_INSTRUCTION, inboxWakeText } from "@plannotator/shared/inbox/connection";
+import { INBOX_NAME_THREAD_LINE, INBOX_NEW_THREAD_INSTRUCTION, INBOX_REMINDER_TEXT, INBOX_WAKE_INSTRUCTION, inboxWakeText } from "@plannotator/shared/inbox/connection";
 import {
   createInboxWorld,
   destroyInboxWorld,
   gate,
   listedThreads,
+  personComposes,
   personSends,
   QUESTION,
   registry,
@@ -461,5 +462,39 @@ describe.skipIf(!opencodeBin || !tarball)("OpenCode 2 ↔ Plannotator Inbox (the
     const delivered = (await thread(w, asked.thread_id)).messages.find((message) => message.id === replyId)?.delivery;
     expect(delivered).toMatchObject({ state: "delivered", host: "opencode", session });
     w.proof(`B's turn ended: the reply was queued in B, once (wake rows A 0, B 1; delivered at ${delivered?.at})`);
+  }, 900_000);
+
+  test("a thread the person starts: the wake asks the session to name it, and the name its reply passes becomes the thread's chip", async () => {
+    const w = createInboxWorld("plannotator-inbox-oc2-", "04-compose-name-the-thread", "opencode2");
+    worlds.push(w);
+    knob(w, true);
+    startInbox(w);
+    // The scripted model does what the wake asks: when it says to name the thread, its reply passes `thread`.
+    const m = model((request) => {
+      const last = lastMessage(request);
+      const wake = /^Plannotator Inbox: .* \((msg_[^)]+)\)$/.exec(last.text.split("\n", 1)[0] ?? "");
+      if (last.role !== "user" || !wake) return null;
+      const name = last.text.includes(INBOX_NAME_THREAD_LINE) ? { thread: "Relay retry budget" } : {};
+      return { toolCall: { name: "plannotator_inbox", arguments: { action: "send_message", body: "On it.", reply_to: wake[1], ...name } } };
+    });
+    const host = await openOpenCode(w, m);
+    const session = await newSession(host);
+    // A run makes the session's wake (and its poll) start.
+    await type(host, session, "hello");
+    await waitFor("the first model turn", () => m.requests.some((request) => request.tools.length > 0), 60_000);
+    await idle(host, session);
+    const { port } = registry(w);
+    await waitFor("the session live in the Inbox", async () => {
+      const model = (await (await fetch(`http://127.0.0.1:${port}/api/inbox/sessions`)).json()) as { projects: { sessions: { session: string }[] }[] };
+      return model.projects.some((group) => group.sessions.some((s) => s.session === session));
+    }, 60_000);
+
+    const rootId = await personComposes(w, { host: "opencode", session }, "Idea: a retry budget for the relay. Five a minute should do.");
+    const wake = await waitFor("the new-thread wake at the model", () => wakeRequests(m)[0], 60_000);
+    expect(wake.split("\n").slice(1, 3)).toEqual([INBOX_NEW_THREAD_INSTRUCTION, INBOX_NAME_THREAD_LINE]);
+    const named = await waitFor("the thread named", async () => (await thread(w, rootId)).thread_name ?? null, 60_000);
+    expect(named).toBe("Relay retry budget");
+    expect((await thread(w, rootId)).subject).toBe("Idea: a retry budget for the relay");
+    w.proof(`the wake:\n${wake}\n\nthe agent's reply named the thread "${named}"`);
   }, 900_000);
 });

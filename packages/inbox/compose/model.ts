@@ -4,8 +4,8 @@
  * React and no requests here, so each rule is tested alone.
  */
 
-import { deriveInboxSubject } from '@plannotator/core/inbox-questions';
-import { INBOX_HOST_NAMES, type InboxComposeProject, type InboxComposeSession, type InboxDraft, type InboxDraftTo } from '@plannotator/core/inbox-types';
+import { derivePersonThreadSubject, suggestPersonThreadName } from '@plannotator/core/inbox-questions';
+import { checkInboxThreadName, INBOX_HOST_NAMES, type InboxComposeProject, type InboxComposeSession, type InboxDraft, type InboxDraftTo } from '@plannotator/core/inbox-types';
 import { whenTime } from '../format';
 
 /** One live session with the project it works in: what To names. */
@@ -102,9 +102,70 @@ export function startedLine(target: Pick<ComposeTarget, 'started_at'>): string {
 /** The status chip: a word, never colour alone. */
 export const busyWord = (target: Pick<ComposeTarget, 'busy'>): 'Working' | 'Idle' => (target.busy ? 'Working' : 'Idle');
 
-/** The subject a message starts its thread with: the server's own rule (core), so the preview never differs. */
-export function subjectPreview(body: string): string | null {
-  return body.trim() ? deriveInboxSubject(body, []) : null;
+/** The subject a message starts its thread with: the store's own rule for a thread the person starts (core), so the preview never differs. */
+export function subjectPreview(body: string, files: readonly string[] = []): string | null {
+  return body.trim() ? derivePersonThreadSubject(body, { files }) : null;
+}
+
+/**
+ * The thread name the person typed, as the Send would take it: '' for none,
+ * else the trimmed name, or an error in the thread-name rules' words.
+ */
+export function composeThreadName(value: string): { name: string } | { error: string } {
+  if (value.trim() === '') return { name: '' };
+  const checked = checkInboxThreadName(value);
+  return checked.ok ? { name: checked.name } : { error: `Thread name ${checked.message}` };
+}
+
+/**
+ * The thread chip in compose: one name, which follows the message (compose's
+ * suggestion, `suggestPersonThreadName`) until the person types in it. From
+ * then on it is theirs (`edited`) and never changes by itself; emptied, it
+ * follows the message again. A draft keeps `typed` only while `edited`.
+ */
+export interface ThreadNameState {
+  typed: string;
+  edited: boolean;
+}
+
+/** The chip as a draft (or a new message) opens: the draft's typed name, else following the message. */
+export function threadNameStateOf(draft: Pick<InboxDraft, 'thread_name'> | null | undefined): ThreadNameState {
+  const typed = draft?.thread_name ?? '';
+  return typed.trim() ? { typed, edited: true } : { typed: '', edited: false };
+}
+
+/** The person typed in the chip: theirs, unless they emptied it (then it follows the message again). */
+export function typeThreadName(value: string): ThreadNameState {
+  return value.trim() ? { typed: value, edited: true } : { typed: '', edited: false };
+}
+
+/** The name compose suggests for the message: the core rule, so the chip and the store agree. */
+export function suggestThreadName(body: string, files: readonly string[] = []): string {
+  return suggestPersonThreadName(body, { files });
+}
+
+/** What the chip shows: the typed name, else the suggestion. */
+export function shownThreadName(state: ThreadNameState, suggested: string): string {
+  return state.edited ? state.typed : suggested;
+}
+
+/**
+ * What a Send carries for the chip: the typed name (checked by the thread-name
+ * rules), else the suggestion marked `thread_name_auto` (best effort: the
+ * server drops one it cannot use, and the agent may rename it), else nothing.
+ */
+export function sendThreadName(state: ThreadNameState, suggested: string): { thread_name?: string; thread_name_auto?: true } | { error: string } {
+  if (state.edited) {
+    const named = composeThreadName(state.typed);
+    if ('error' in named) return named;
+    return named.name ? { thread_name: named.name } : {};
+  }
+  return suggested.trim() ? { thread_name: suggested.trim(), thread_name_auto: true } : {};
+}
+
+/** What a draft keeps of the chip: the typed name, or '' while it follows the message. */
+export function draftThreadName(state: ThreadNameState): string {
+  return state.edited ? state.typed : '';
 }
 
 /** A draft's one-line snippet: its words after the subject line, whitespace folded. */
@@ -128,10 +189,12 @@ export interface ComposeSnapshot {
   body: string;
   session: string | null;
   files: readonly string[];
+  /** The thread name the person typed in the chip (`draftThreadName`); absent counts as none. */
+  threadName?: string;
 }
 
-export function draftSnapshot(draft: Pick<InboxDraft, 'body' | 'to' | 'files'> | null): ComposeSnapshot {
-  return { body: draft?.body ?? '', session: draft?.to?.session ?? null, files: (draft?.files ?? []).map((file) => file.upload_id) };
+export function draftSnapshot(draft: Pick<InboxDraft, 'body' | 'to' | 'files' | 'thread_name'> | null): ComposeSnapshot {
+  return { body: draft?.body ?? '', session: draft?.to?.session ?? null, files: (draft?.files ?? []).map((file) => file.upload_id), threadName: draft?.thread_name ?? '' };
 }
 
 /**
@@ -141,9 +204,14 @@ export function draftSnapshot(draft: Pick<InboxDraft, 'body' | 'to' | 'files'> |
  * alone on an empty message is not worth asking about.
  */
 export function isDirty(now: ComposeSnapshot, saved: ComposeSnapshot, savedExists: boolean): boolean {
-  const empty = now.body.trim() === '' && now.files.length === 0;
+  const empty = now.body.trim() === '' && now.files.length === 0 && (now.threadName ?? '').trim() === '';
   if (!savedExists) return !empty;
-  return now.body !== saved.body || now.session !== saved.session || now.files.join('\n') !== saved.files.join('\n');
+  return (
+    now.body !== saved.body ||
+    now.session !== saved.session ||
+    now.files.join('\n') !== saved.files.join('\n') ||
+    (now.threadName ?? '').trim() !== (saved.threadName ?? '').trim()
+  );
 }
 
 /** The status line beside Send. */

@@ -191,7 +191,7 @@ test.skipIf(!hasDom)('no live agent: Send sends nothing and says so; Escape asks
   await openCompose(el);
   await until(() => dialog()!.querySelector('[data-compose-to="none"]') !== null, 'the no-agent state');
   type('Rename the Quiet section to Done?');
-  expect(dialog()!.querySelector('[data-compose-subject]')?.textContent).toBe('New thread: Rename the Quiet section to Done?');
+  await until(() => chipInput().value === 'Quiet section', 'the chip named from the message');
   expect(dialog()!.querySelector('[data-compose-send]')?.getAttribute('aria-disabled')).toBe('true');
   key('Enter', { metaKey: true });
   await until(() => dialog()!.querySelector('[data-compose-error]') !== null, 'the error');
@@ -223,7 +223,7 @@ test.skipIf(!hasDom)('Keep draft: the sidebar\'s Drafts row and the Drafts page 
   await until(() => el.querySelectorAll('[data-draft-id]').length === 1, 'the draft row');
   const row = el.querySelector('[data-draft-id]')!;
   expect(row.querySelector('[data-draft-chip]')?.textContent).toBe('No agent chosen');
-  expect(row.textContent).toContain('Idea: group the list by session.');
+  expect(row.textContent).toContain('Idea: group the list by session');
 
   // From the keyboard: the delete button has focus; with no other draft it goes to the Drafts heading, never the page.
   const del = row.querySelector('[data-draft-delete]') as HTMLButtonElement;
@@ -256,7 +256,7 @@ test.skipIf(!hasDom)('a live session: To is prefilled, Send starts the thread ad
   expect(await drafts()).toEqual([]);
   await until(() => el.querySelector('[data-drafts-nav]') === null, 'no Drafts row');
   const sections = (JSON.parse((await loopback('/api/inbox/threads')).text) as { sections: InboxListSection[] }).sections;
-  const row = sections.flatMap((s) => s.threads).find((t) => t.subject === 'Idea: group the list by session.')!;
+  const row = sections.flatMap((s) => s.threads).find((t) => t.subject === 'Idea: group the list by session')!;
   expect(row).toMatchObject({ section: 'sent', addressee: { host: 'claude-code', session: 'ses_live_dom' } });
 });
 
@@ -310,4 +310,205 @@ test.skipIf(!hasDom)('the To picker: one line per session, a start time only whe
   expect(to.querySelector('.ib-cp-tod')!.textContent).toBe('· other-project');
   key('Escape');
   await until(() => dialog() === null, 'compose closed');
+});
+
+const chip = () => dialog()!.querySelector('[data-compose-thread-name]') as HTMLElement;
+const chipInput = () => dialog()!.querySelector('[data-compose-thread-name] input') as HTMLInputElement;
+const chipError = () => dialog()!.querySelector('[data-compose-thread-name-error]');
+/** Type into the chip as a person does: focus, the value, the input event. */
+function fillChip(value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+  act(() => {
+    chipInput().focus();
+    setter.call(chipInput(), value);
+    chipInput().dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+const blurChip = () => act(() => chipInput().blur());
+
+test.skipIf(!hasDom)('the thread chip follows the message until typed in; typed, it stays; emptied, it follows again once focus leaves; a draft keeps only a typed name', async () => {
+  await poll('ses_named', 'claude-code', projects[0]!);
+  const el = await renderApp();
+  await openCompose(el);
+  await until(() => dialog()!.querySelector('[data-compose-to^="ses_"]') !== null, 'To prefilled');
+  // Nothing written yet: an empty chip with its placeholder, right under To, before the message.
+  expect(chip().getAttribute('data-compose-thread-name')).toBe('auto');
+  expect(chip().hasAttribute('data-empty')).toBe(true);
+  expect(chipInput().value).toBe('');
+  expect(chipInput().placeholder).toBe('Name this thread');
+  expect(dialog()!.querySelector('[data-compose-thread-row] .ib-cp-tol')!.textContent).toBe('Thread');
+  expect(dialog()!.querySelector('[data-compose-subject]')).toBeNull();
+
+  // It follows the message, a short name, live, marked "auto" (seen, and heard through aria-describedby).
+  type('can you fix the paste bug in the reply box');
+  await until(() => chipInput().value === 'Paste bug', 'the chip named from the message');
+  expect(chip().hasAttribute('data-auto')).toBe(true);
+  expect(chip().querySelector('.ib-cp-tname-auto')?.textContent).toBe('auto');
+  const described = () => chipInput().getAttribute('aria-describedby')!.split(' ').map((id) => document.getElementById(id)?.textContent).join(' ');
+  expect(described()).toContain('Named from your message until you type here.');
+  expect(chipInput().hasAttribute('title')).toBe(false);
+  type('I want to explore what adding a board would look like. Kanban specifically.');
+  await until(() => chipInput().value === 'Kanban board', 'the chip follows the message');
+  // A bare question has nothing to name: the placeholder again, nothing invented.
+  type('What do you think?');
+  await until(() => chipInput().value === '', 'nothing to name');
+
+  // Typed in, it is the person's: the message no longer moves it.
+  type('I want to explore what adding a board would look like. Kanban specifically.');
+  await until(() => chipInput().value === 'Kanban board', 'named again');
+  fillChip('Board ideas');
+  expect(chip().getAttribute('data-compose-thread-name')).toBe('edited');
+  expect(chip().hasAttribute('data-auto')).toBe(false);
+  expect(described()).toContain('Your name for the thread.');
+  type('can you fix the paste bug in the reply box');
+  await new Promise((r) => setTimeout(r, 400));
+  expect(chipInput().value).toBe('Board ideas');
+
+  // Emptied: empty while the caret is in it, then it follows the message again.
+  fillChip('');
+  await new Promise((r) => setTimeout(r, 300));
+  expect(chipInput().value).toBe('');
+  blurChip();
+  await until(() => chipInput().value === 'Paste bug', 'following the message again');
+  expect(chip().getAttribute('data-compose-thread-name')).toBe('auto');
+
+  // A draft of a chip that follows the message keeps no name; reopened, it is worked out again.
+  key('Escape');
+  act(() => (dialog()!.querySelector('[data-compose-keep]') as HTMLButtonElement).click());
+  await until(() => dialog() === null, 'compose closed');
+  let saved = (JSON.parse((await loopback('/api/inbox/drafts')).text) as { drafts: { id: string; thread_name?: string }[] }).drafts;
+  expect(saved.map((d) => d.thread_name)).toEqual([undefined]);
+  act(() => (el.querySelector('[data-drafts-nav]') as HTMLButtonElement).click());
+  await until(() => el.querySelectorAll('[data-draft-id]').length === 1, 'the draft row');
+  act(() => (el.querySelector('.ib-draft-open') as HTMLButtonElement).click());
+  await until(() => dialog()?.querySelector('[data-compose-to="ses_named"]') != null && chipInput()?.value === 'Paste bug', 'reopened, named from the message');
+
+  // A typed name is kept by the draft, as typed.
+  fillChip('Kanban board');
+  key('Escape');
+  act(() => (dialog()!.querySelector('[data-compose-keep]') as HTMLButtonElement).click());
+  await until(() => dialog() === null, 'compose closed');
+  saved = (JSON.parse((await loopback('/api/inbox/drafts')).text) as { drafts: { id: string; thread_name?: string }[] }).drafts;
+  expect(saved.map((d) => d.thread_name)).toEqual(['Kanban board']);
+});
+
+test.skipIf(!hasDom)('Send: a typed name goes as thread_name (checked first), the chip that follows the message as thread_name_auto; the row has either as its chip', async () => {
+  await poll('ses_named', 'claude-code', projects[0]!);
+  const el = await renderApp();
+  await openCompose(el);
+  await until(() => dialog()!.querySelector('[data-compose-to^="ses_"]') !== null, 'To prefilled');
+  type('I want to explore what adding a board would look like. Kanban specifically.');
+  await until(() => chipInput().value === 'Kanban board', 'named from the message');
+  // Not a valid name: Send sends nothing and says why on the chip.
+  fillChip('Kanban\u202eboard');
+  posted = [];
+  act(() => (dialog()!.querySelector('[data-compose-send]') as HTMLButtonElement).click());
+  await until(() => chipError() !== null, 'the error on the chip');
+  expect(chipError()!.textContent).toBe('Thread name must not contain bidirectional control characters.');
+  expect(chip().hasAttribute('data-invalid')).toBe(true);
+  expect(chipInput().getAttribute('aria-invalid')).toBe('true');
+  expect(dialog()!.querySelector('[data-compose-error]')).toBeNull();
+  expect(posted.some((p) => p.path === '/api/inbox/messages')).toBe(false);
+  // Typing again clears it; ⌘↵ in the chip sends.
+  fillChip('Kanban board');
+  expect(chipError()).toBeNull();
+  act(() => {
+    chipInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true, cancelable: true }));
+  });
+  await until(() => dialog() === null, 'sent');
+  let send = posted.find((p) => p.path === '/api/inbox/messages')!;
+  expect(send.body.thread_name).toBe('Kanban board');
+  expect(send.body.thread_name_auto).toBeUndefined();
+
+  // The chip left as it was goes as compose's suggestion.
+  await openCompose(el);
+  await until(() => dialog()!.querySelector('[data-compose-to^="ses_"]') !== null, 'To prefilled');
+  type('can you fix the paste bug in the reply box');
+  await until(() => chipInput().value === 'Paste bug', 'named from the message');
+  posted = [];
+  act(() => (dialog()!.querySelector('[data-compose-send]') as HTMLButtonElement).click());
+  await until(() => dialog() === null, 'sent');
+  send = posted.find((p) => p.path === '/api/inbox/messages')!;
+  expect(send.body).toMatchObject({ thread_name: 'Paste bug', thread_name_auto: true });
+
+  const sections = (JSON.parse((await loopback('/api/inbox/threads')).text) as { sections: InboxListSection[] }).sections;
+  const rows = sections.flatMap((s) => s.threads);
+  expect(rows.find((t) => t.subject === 'I want to explore what adding a board would look like')!.thread_name).toBe('Kanban board');
+  expect(rows.find((t) => t.subject === 'can you fix the paste bug in the reply box')!.thread_name).toBe('Paste bug');
+});
+
+test.skipIf(!hasDom)('a typed name another open thread has: refused (409) and said on the chip; a suggestion another thread has is simply not used; the limit counts characters, not UTF-16 units', async () => {
+  await poll('ses_taken', 'claude-code', projects[0]!);
+  // An open thread of the project already has the name.
+  const { serverSession } = JSON.parse((await loopback('/api/inbox/settings')).text) as { serverSession: string };
+  const first = await loopback(
+    '/api/inbox/messages',
+    'POST',
+    JSON.stringify({ serverSession, to: { session: 'ses_taken' }, body: 'Relay retry budget, five a minute.', idempotency_key: 'taken-1', thread_name: 'Relay budget' }),
+  );
+  expect(first.status).toBe(200);
+
+  const el = await renderApp();
+  await openCompose(el);
+  await until(() => dialog()!.querySelector('[data-compose-to^="ses_"]') !== null, 'To prefilled');
+  // 130 emoji (260 UTF-16 units): kept to 120 characters, as the server counts them.
+  fillChip('🎉'.repeat(130));
+  expect([...chipInput().value].length).toBe(120);
+
+  type('Another idea about the relay.');
+  fillChip('relay  BUDGET');
+  act(() => (dialog()!.querySelector('[data-compose-send]') as HTMLButtonElement).click());
+  await until(() => chipError() !== null, 'the refusal on the chip');
+  expect(chipError()!.textContent).toContain('Another open thread in this project has this name.');
+  expect(chip().hasAttribute('data-invalid')).toBe(true);
+  expect(dialog()!.querySelector('[data-compose-error]')).toBeNull();
+  // Editing the name clears the mark and the message.
+  fillChip('Relay budget v2');
+  expect(chip().hasAttribute('data-invalid')).toBe(false);
+  expect(chipError()).toBeNull();
+  act(() => (dialog()!.querySelector('[data-compose-send]') as HTMLButtonElement).click());
+  await until(() => dialog() === null, 'sent');
+
+  // A suggestion that is taken: the Send goes, the thread just has no name yet (its agent names it).
+  await openCompose(el);
+  await until(() => dialog()!.querySelector('[data-compose-to^="ses_"]') !== null, 'To prefilled');
+  type('Thinking about the relay budget again.');
+  await until(() => chipInput().value === 'Relay budget', 'a taken suggestion');
+  act(() => (dialog()!.querySelector('[data-compose-send]') as HTMLButtonElement).click());
+  await until(() => dialog() === null, 'sent anyway');
+  const rows = (JSON.parse((await loopback('/api/inbox/threads')).text) as { sections: InboxListSection[] }).sections.flatMap((s) => s.threads);
+  expect(rows.find((t) => t.subject === 'Thinking about the relay budget again')!.thread_name ?? null).toBeNull();
+});
+
+test.skipIf(!hasDom)('dictation or a paste into the chip that cannot be a name is never cut short: it goes to the message, and the chip says so', async () => {
+  await poll('ses_named', 'claude-code', projects[0]!);
+  const el = await renderApp();
+  await openCompose(el);
+  await until(() => dialog()!.querySelector('[data-compose-to^="ses_"]') !== null, 'To prefilled');
+  type('Kanban board idea.');
+  await until(() => chipInput().value !== '', 'named');
+  const before = chipInput().value;
+  const paste = (text: string) => {
+    const event = new Event('paste', { bubbles: true, cancelable: true }) as Event & { clipboardData: unknown };
+    Object.defineProperty(event, 'clipboardData', { value: { getData: (kind: string) => (kind === 'text/plain' ? text : ''), files: [], items: [], types: ['text/plain'] } });
+    act(() => {
+      chipInput().focus();
+      chipInput().dispatchEvent(event);
+    });
+    return event;
+  };
+  // A dictated sentence far longer than a name: into the message, whole.
+  const long = 'And the columns should follow every state a thread can be in, '.repeat(3).trim();
+  const event = paste(long);
+  expect(event.defaultPrevented).toBe(true);
+  const text = dialog()!.querySelector('textarea') as HTMLTextAreaElement;
+  await until(() => text.value === `Kanban board idea. ${long}`, 'the words in the message');
+  expect(chipInput().value).toBe(before);
+  expect(dialog()!.querySelector('[data-compose-thread-name-note]')!.textContent).toBe('Too long for a name, so it went into your message.');
+  // A paste with a line break goes there too; a short one is the name's.
+  paste('Line one\nline two');
+  await until(() => text.value.endsWith('\nLine one\nline two'), 'the lines in the message');
+  // A dictated sentence of eight words or more is a sentence, not a name, even when it would fit.
+  expect(paste('this is a sentence the person said out loud').defaultPrevented).toBe(true);
+  expect(paste('Short').defaultPrevented).toBe(false);
 });

@@ -179,7 +179,7 @@ export const INBOX_AGENT_FIELD_DESCRIPTIONS: Readonly<Record<string, Readonly<Re
       '',
       '`:::question-multi` takes several choices, `:::question-text` free text. The person can always answer Other, add a note or skip, so never add an Other choice yourself. `Stopped: <why>` only when you cannot go on until it is answered (never `Stopped: no`); `Holds up: <work>` names work that waits while you go on. Ask only what you cannot decide alone, about 8 a round at most. Answers come back in the reply under "Answers to your questions".',
     ].join('\n'),
-    thread: "A short thread name, one line, to keep separate work apart: the same name in this project is the same open thread, across sessions. Without it, your messages join your session's open thread. Ignored with reply_to.",
+    thread: "A short thread name, one line, to keep separate work apart: the same name in this project is the same open thread, across sessions. Without it, your messages join your session's open thread. Ignored with reply_to, except when you are asked to name a thread the person started: then it names that thread, once.",
     supersedes: 'Your own questions in this thread that are still open (read_thread state open or picked) and no longer apply: a newer message replaces them, or the reply settled them in words. "<message id>/<key>" for one, "<message id>" for all of that message\'s; send with reply_to into their thread. With one question in this message it replaces them, otherwise they read "No longer applies".',
     attachments: 'Files to show the person beside the message, absolute or relative to project_path: a plan, a screenshot, an HTML mock, code, a video, any file. Link one from the body (`[the mock](mock.html)`) to open it beside the thread. Their comments on the files come back in the reply. Folders and .env files are refused.',
   },
@@ -440,6 +440,14 @@ export interface InboxReplyCommand {
    * Absent on every other command.
    */
   continues_thread?: boolean
+  /**
+   * In a thread the person started that has no name yet, on a command handed
+   * to a session that may name it (`InboxStore.canNameThread`: the session it
+   * is addressed to): the wake adds INBOX_NAME_THREAD_LINE. Absent once a name
+   * is set (by the person in compose, or by an agent) and on every other
+   * command; an older connection ignores it.
+   */
+  name_thread?: boolean
 }
 
 export function parseInboxBridgeCommands(text: string): InboxReplyCommand[] {
@@ -471,6 +479,15 @@ export const INBOX_MESSAGE_INSTRUCTION =
  */
 export const INBOX_NEW_THREAD_INSTRUCTION =
   "The person started a new thread with you in the Plannotator Inbox: an idea or a request of their own, not an answer to something you asked. Their message follows as they wrote it. It may be unrelated to what you were doing; say how you will handle it before you start. When they need to hear back, answer in the same thread: plannotator_inbox send_message with reply_to set to the id in parentheses on the line above."
+
+/**
+ * The line under the instruction (and any redirected or continues line) on a
+ * command that carries `name_thread`: the agent names the thread the person
+ * started, with send_message's `thread` on its reply (approval
+ * "inbox-agent-names-own-thread"; the name is the thread's chip).
+ */
+export const INBOX_NAME_THREAD_LINE =
+  "Name this thread in your reply: pass `thread` with a few words saying what it is about. The first name you give sets it, once."
 
 /**
  * The line under the instruction on a message that adds to a thread the
@@ -508,6 +525,7 @@ export function inboxWakeText(
     redirected_from?: string | null
     new_thread?: boolean
     continues_thread?: boolean
+    name_thread?: boolean
   },
 ): string {
   const subject = (command.subject ?? '').replace(/\s+/g, ' ').trim() || (command.type === 'message' ? 'a message' : 'a reply')
@@ -522,7 +540,8 @@ export function inboxWakeText(
     : command.continues_thread === true
       ? `\n${inboxContinuesLine(command.id)}`
       : ''
-  return `Plannotator Inbox: ${subject} (${command.id})\n${instruction}${redirected}\n\n${command.body}`
+  const naming = command.name_thread === true ? `\n${INBOX_NAME_THREAD_LINE}` : ''
+  return `Plannotator Inbox: ${subject} (${command.id})\n${instruction}${redirected}${naming}\n\n${command.body}`
 }
 
 /**

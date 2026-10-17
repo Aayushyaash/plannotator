@@ -328,6 +328,29 @@ export interface InboxMessage {
    */
   started_by_person?: true;
   /**
+   * On the root of a thread the person started: who gave it its name, the
+   * thread chip (approval "inbox-agent-names-own-thread"). The person may name
+   * it in compose; otherwise the first reply from a session that may name it
+   * (`InboxStore.canNameThread`) carrying a valid `thread` names it, once, and
+   * the root is written again with the name and this field. Absent while the
+   * thread has no name, and on every other message. A name set here is never
+   * replaced, except compose's suggestion (`kind: "auto"`), which the first
+   * agent that may name the thread replaces.
+   */
+  named_by?: InboxThreadNamedBy;
+  /**
+   * On an agent's reply: the `thread` it carried, as given (trimmed), so a
+   * retry with the same idempotency key and another `thread` is told apart.
+   * Absent when it carried none, and on every other message.
+   */
+  reply_thread?: string;
+  /**
+   * On an agent's reply into a thread the person started that it could name:
+   * what the naming came to (`InboxThreadNaming`), so a retry answers the
+   * same. Absent everywhere else.
+   */
+  thread_naming?: InboxThreadNaming;
+  /**
    * On an agent's message: the person's 👍 Looks good (design record
    * "inbox-acknowledge", approved 2026-10-15). Silent: nothing is sent, no
    * session is woken; the thread is marked read. Null after Undo. Absent on
@@ -335,6 +358,51 @@ export interface InboxMessage {
    */
   ack?: InboxAck | null;
 }
+
+/**
+ * Who named a thread the person started (`InboxMessage.named_by`): the person
+ * in compose (`thread_name` on the Send), compose's own suggestion the person
+ * left as it was (`thread_name_auto: true`), or the agent whose reply named it.
+ */
+export type InboxThreadNamedBy =
+  | { kind: "person"; at: string }
+  /**
+   * The name compose suggested from the message (`suggestPersonThreadName`)
+   * and the person sent without editing it: shown like any name, but the
+   * first agent that may name the thread (`InboxStore.canNameThread`) still
+   * replaces it, once.
+   */
+  | { kind: "auto"; at: string }
+  | {
+      kind: "agent";
+      host: string | null;
+      session: string;
+      /** The reply that carried the name. */
+      message_id: string;
+      at: string;
+    };
+
+/**
+ * What a reply's naming of a thread the person started came to (approval
+ * "inbox-agent-names-own-thread"), kept on the reply so a retry answers the
+ * same: `named` (the thread's `thread_name` is now `name`); `refused`, with a
+ * code (`invalid_thread_name`, or `thread_name_taken` when another open
+ * thread of the project already has the name) and one sentence saying why;
+ * `unnamed` when the reply gave no `thread`.
+ */
+export type InboxThreadNaming =
+  | { status: "named"; name: string }
+  | { status: "refused"; code: "invalid_thread_name" | "thread_name_taken"; reason: string }
+  | { status: "unnamed" };
+
+/**
+ * The one line an agent is handed while a thread the person started still
+ * has no name an agent gave and that agent may name it: in `wait_for_reply`
+ * and `read_thread` beside `name_this_thread: true`. The wake of the thread
+ * (INBOX_NAME_THREAD_LINE in shared/inbox/connection.ts) carries the same ask.
+ */
+export const INBOX_NAME_THIS_THREAD_HINT =
+  "Name this thread: pass `thread` (a few words saying what it is about) with your reply. The first name you give sets it, once.";
 
 /** The one acknowledgment the window offers (plan review's 👍 says the same words). */
 export const INBOX_ACK_LABEL = "Looks good";
@@ -1116,6 +1184,12 @@ export interface InboxDraft {
   /** The project it was written in (the chosen session's, or the one open in the list). */
   project: { id: string | null; root: string; name: string } | null;
   files: InboxUpload[];
+  /**
+   * The thread's name the person typed in compose (the chip), as typed.
+   * Absent while the chip follows the message (compose's suggestion, worked
+   * out again from the body when the draft opens).
+   */
+  thread_name?: string;
 }
 
 /** A draft's chip: its chosen session is live, has ended, or none was chosen. */

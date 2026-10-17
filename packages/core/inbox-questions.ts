@@ -27,6 +27,14 @@ import { resolveReferenceLinks } from "./markdown-structure";
 import { cutText } from "./text-cut";
 // The grapheme-safe cuts, re-exported here: core's export map is checked against the published package, and the Inbox is what uses them.
 export { cutText, sliceText } from "./text-cut";
+// The subject of a thread the person starts: beside deriveInboxSubject, so the store and compose's preview share it.
+export {
+  derivePersonThreadSubject,
+  PERSON_THREAD_SUBJECT_COLUMNS,
+  suggestPersonThreadName,
+  PERSON_THREAD_NAME_COLUMNS,
+  PERSON_THREAD_NAME_WORDS,
+} from "./inbox-thread-subject";
 import {
   canonicalQuestionAnswer,
   findQuestionBlocks,
@@ -478,6 +486,9 @@ const SUBJECT_MAX = 120;
 /**
  * A thread's subject when the agent gave none: the first open question's
  * prompt, else the first heading or non-empty line of the body, plain.
+ * A thread the PERSON starts (compose) is named by
+ * `derivePersonThreadSubject` instead (./inbox-thread-subject, re-exported
+ * below): a short name, not the first 120 characters of a dictated paragraph.
  */
 export function deriveInboxSubject(body: string, questions: readonly Pick<ParsedInboxQuestion, "prompt">[]): string | null {
   const pick = questions[0]?.prompt ?? firstLine(body);

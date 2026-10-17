@@ -12,7 +12,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { inboxAgentTool, INBOX_MESSAGE_INSTRUCTION, INBOX_NEW_THREAD_INSTRUCTION, INBOX_TOOL_ACTIONS, INBOX_WAKE_INSTRUCTION, inboxRedirectedLine, inboxWakeText, mcpAnswerOf } from './inbox-contract'
+import { inboxAgentTool, INBOX_MESSAGE_INSTRUCTION, INBOX_NAME_THREAD_LINE, INBOX_NEW_THREAD_INSTRUCTION, INBOX_TOOL_ACTIONS, INBOX_WAKE_INSTRUCTION, inboxRedirectedLine, inboxWakeText, mcpAnswerOf } from './inbox-contract'
 import { ClaudeSession } from './testing/claude-session'
 import { removeStubbedHtml, stubBuiltHtml } from '../../../../tests/helpers/inbox-world'
 import { inboxEntryOf, isAlive, mustSignalInbox, stopProvenInboxes } from '../../../../tests/helpers/inbox-process'
@@ -134,7 +134,7 @@ interface ThreadMessage {
   delivery?: { state: string; host: string; session: string; at: string } | null
 }
 
-async function thread(w: World, threadId: string): Promise<{ subject: string; project: { root: string }; messages: ThreadMessage[] }> {
+async function thread(w: World, threadId: string): Promise<{ subject: string; thread_name: string | null; project: { root: string }; messages: ThreadMessage[] }> {
   const response = await fetch(`http://127.0.0.1:${registry(w).port}/api/inbox/threads/${threadId}`)
   return ((await response.json()) as { thread: never }).thread
 }
@@ -617,15 +617,21 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
 
     const turn = await waitFor('the new-thread turn', () => session.turns.find((t) => t.text.includes(message.id)))
     await Bun.sleep(3_000)
-    expect(session.host.submits).toEqual([inboxWakeText({ type: 'message', new_thread: true, id: message.id, subject: 'Idea: show which session wrote each thread.', body: words })])
-    expect(session.host.submits[0]!.split('\n')[1]).toBe(INBOX_NEW_THREAD_INSTRUCTION)
+    // The thread's subject is its short name; the wake asks the session to name the thread (its chip).
+    expect(session.host.submits).toEqual([inboxWakeText({ type: 'message', new_thread: true, name_thread: true, id: message.id, subject: 'Idea: show which session wrote each thread', body: words })])
+    expect(session.host.submits[0]!.split('\n').slice(1, 3)).toEqual([INBOX_NEW_THREAD_INSTRUCTION, INBOX_NAME_THREAD_LINE])
     w.proof(`turn.start ${turn.id} in session-compose:\n${turn.text}\n`)
     const delivered = await waitFor('the delivery record', async () => (await thread(w, message.thread_id)).messages[0]?.delivery)
     expect(delivered).toMatchObject({ host: 'claude-code', session: 'session-compose' })
 
-    const answer = await session.callInbox({ action: 'send_message', body: "I'll add the chip after this fix.", reply_to: message.id }, w.project)
+    // The answer names the thread through the tool's own `thread` field: the name round-trips to the chip.
+    const answer = await session.callInbox({ action: 'send_message', body: "I'll add the chip after this fix.", reply_to: message.id, thread: 'Session chip' }, w.project)
     if ('deny' in answer) throw new Error(answer.deny)
-    expect((await thread(w, message.thread_id)).messages.map((m) => m.author.kind)).toEqual(['person', 'agent'])
+    expect(JSON.stringify(answer)).toContain('Named this thread: Session chip.')
+    const named = await thread(w, message.thread_id)
+    expect(named.messages.map((m) => m.author.kind)).toEqual(['person', 'agent'])
+    expect(named.thread_name).toBe('Session chip')
+    w.proof(`> plannotator_inbox send_message reply_to ${message.id} thread "Session chip"\nthe thread's name: ${named.thread_name}`)
     // A thread the person started is no session's default thread.
     const own = await send(session, w, 'Unrelated: the export is done.')
     expect(own.thread_id).not.toBe(message.thread_id)

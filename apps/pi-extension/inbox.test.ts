@@ -17,7 +17,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { INBOX_NEW_THREAD_INSTRUCTION, INBOX_REMINDER_TEXT, INBOX_WAKE_INSTRUCTION, inboxWakeText } from "./generated/inbox/connection.ts";
+import { INBOX_NAME_THREAD_LINE, INBOX_NEW_THREAD_INSTRUCTION, INBOX_REMINDER_TEXT, INBOX_WAKE_INSTRUCTION, inboxWakeText } from "./generated/inbox/connection.ts";
 import { entriesCarryReminder, PI_INBOX_REMINDER_CUSTOM_TYPE } from "./inbox.ts";
 import { INBOX_INSTALL_TEXT } from "./generated/inbox/agent-link.ts";
 import {
@@ -379,7 +379,15 @@ describe.skipIf(!piRuns)("Pi ↔ Plannotator Inbox (the real Pi in RPC mode, a r
 		const w = world("02b-compose-new-thread");
 		knob(w, true);
 		startInbox(w);
-		const m = model(askingScript());
+		// The scripted model does what the wake asks: when it says to name the thread, its reply passes `thread`.
+		const m = model(
+			askingScript((request) => {
+				const last = lastMessage(request);
+				const wake = /^Plannotator Inbox: .* \((msg_[^)]+)\)$/m.exec(last.text.split("\n", 1)[0] ?? "");
+				if (last.role === "tool" || !wake || !last.text.includes(INBOX_NAME_THREAD_LINE)) return null;
+				return { toolCall: { name: "plannotator_inbox", arguments: { action: "send_message", body: "Done: retries reuse the key.", reply_to: wake[1], thread: "Relay retry budget" } } };
+			}),
+		);
 		const pi = await openPi(w, m);
 		await ask(pi, "hello");
 		const { port } = registry(w);
@@ -401,14 +409,17 @@ describe.skipIf(!piRuns)("Pi ↔ Plannotator Inbox (the real Pi in RPC mode, a r
 		expect(response.status).toBe(200);
 		const message = ((await response.json()) as { message: { id: string; thread_id: string } }).message;
 		const wake = await waitFor("the new-thread wake", () => wakes(pi)[0]);
-		expect(wake.split("\n")[1]).toBe(INBOX_NEW_THREAD_INSTRUCTION);
-		expect(wake).toBe(inboxWakeText({ type: "message", new_thread: true, id: message.id, subject: "Idea: a retry budget for the relay.", body: "Idea: a retry budget for the relay." }));
+		expect(wake.split("\n").slice(1, 3)).toEqual([INBOX_NEW_THREAD_INSTRUCTION, INBOX_NAME_THREAD_LINE]);
+		expect(wake).toBe(inboxWakeText({ type: "message", new_thread: true, name_thread: true, id: message.id, subject: "Idea: a retry budget for the relay", body: "Idea: a retry budget for the relay." }));
 		const answered = await waitFor("the answer in the person's thread", async () => {
 			const last = (await thread(w, message.thread_id)).messages.at(-1);
 			return last?.author.kind === "agent" ? last : null;
 		});
 		expect(answered.author.session).toBe(pi.sessionId);
-		w.proof(`the wake:\n${wake}\n\nthe answer landed in ${message.thread_id}`);
+		// The name round-trips: the thread's chip is the name the agent passed.
+		const named = await waitFor("the thread named", async () => (await thread(w, message.thread_id)).thread_name ?? null);
+		expect(named).toBe("Relay retry budget");
+		w.proof(`the wake:\n${wake}\n\nthe answer landed in ${message.thread_id}, named "${named}"`);
 	}, 120_000);
 
 	test("a typed prompt goes first, and a prompt typed into the wake's turn takes it over: one delivery, no abort", async () => {

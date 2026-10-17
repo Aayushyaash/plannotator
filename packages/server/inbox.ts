@@ -372,6 +372,8 @@ const ERROR_STATUS: Record<string, number> = {
   // Compose: a new thread the person starts (packages/server/inbox-compose.ts).
   already_delivered: 409,
   not_addressed: 422,
+  // A thread name another open thread of the project already has.
+  thread_name_taken: 409,
   draft_conflict: 409,
   upload_refused: 422,
   upload_too_large: 413,
@@ -1237,6 +1239,11 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   // out again on every poll until it is delivered or an agent read it, and it
   // survives an Inbox restart.
   const threadPageUrl = (base: string, threadId: string) => `${base}#thread=${threadId}`;
+  /** The session a person's message without `to` goes to: the author of the message it answers. */
+  const recipientOf = (reply: InboxMessage): string | null => {
+    const parent = reply.reply_to ? store.message(reply.reply_to) : null;
+    return parent?.author.kind === "agent" ? parent.author.session : null;
+  };
   const replyCommand = (reply: InboxMessage): InboxReplyCommand => {
     // A reply the person sent to another session because the one that asked
     // had ended: the wake says so, naming the agent that asked.
@@ -1272,6 +1279,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       // A thread the person started: the wake says so (INBOX_NEW_THREAD_INSTRUCTION).
       ...(reply.started_by_person && reply.thread_id === reply.id ? { new_thread: true } : {}),
       ...(continues && !redirected ? { continues_thread: true } : {}),
+      // A thread the person started with no name yet, handed to a session that may name it: the wake asks it to.
+      ...(store.canNameThread(reply.thread_id, reply.to?.session ?? recipientOf(reply)) ? { name_thread: true } : {}),
     };
   };
 

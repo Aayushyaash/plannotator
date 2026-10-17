@@ -2337,7 +2337,7 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-cp-dsaved { margin-left: auto; flex: none; font-size: 12.5px; color: var(--muted-foreground); white-space: nowrap; }
 
 /* The To picker: anchored under the To line, over the message. */
-.ib-cp-picker { position: absolute; top: 46px; left: 52px; z-index: 40; width: min(560px, calc(100% - 64px)); display: flex; flex-direction: column; max-height: min(480px, 62vh); background: var(--popover); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28); overflow: hidden; }
+.ib-cp-picker { position: absolute; top: 46px; left: 72px; z-index: 40; width: min(560px, calc(100% - 64px)); display: flex; flex-direction: column; max-height: min(480px, 62vh); background: var(--popover); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28); overflow: hidden; }
 .ib-cp-filter { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--ib-line); color: var(--muted-foreground); flex: none; }
 .pn-inbox .ib-cp-filter input { flex: 1; min-width: 0; height: 40px; border: 0; outline: none; background: transparent; color: var(--foreground); font: inherit; font-size: 14px; }
 /* One line per live session; the rows share the list's columns (subgrid), so agent, project and folder line up. */
@@ -2383,8 +2383,23 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-cp-prog i { display: block; height: 100%; background: var(--primary); transition: width 120ms linear; }
 .pn-inbox .ib-cp-fx { flex: none; width: 26px; height: 26px; border-radius: 6px; border: 0; background: transparent; color: var(--muted-foreground); display: inline-flex; align-items: center; justify-content: center; }
 .pn-inbox .ib-cp-fx:hover { background: var(--muted); color: var(--foreground); }
-.ib-cp-subj { margin-top: 10px; font-size: 12.5px; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ib-cp-subj b { color: var(--foreground); font-weight: 600; }
+/* The thread row (ThreadNameChip): under To, its chip the list's grey chip and a text field; aligned with To's agent. */
+.ib-cp-thread { display: flex; align-items: flex-start; gap: 10px; min-height: 42px; padding: 8px 14px 8px 16px; border-bottom: 1px solid var(--ib-line); flex: none; }
+.ib-cp-to .ib-cp-tol, .ib-cp-thread .ib-cp-tol { min-width: 46px; }
+.ib-cp-thread .ib-cp-tol { line-height: 26px; }
+.ib-cp-tnamew { display: inline-flex; align-items: flex-start; gap: 4px 10px; min-width: 0; flex: 1; margin-left: 8px; flex-wrap: wrap; }
+.ib-key.ib-cp-tname { flex: none; align-items: center; height: 26px; padding: 0 7px; max-width: 100%; cursor: text; }
+.ib-key.ib-cp-tname[data-compose-thread-name="edited"] { color: var(--foreground); }
+.ib-key.ib-cp-tname[data-empty] { border-style: dashed; }
+.ib-key.ib-cp-tname:focus-within { border-color: var(--ring); border-style: solid; box-shadow: 0 0 0 1px var(--ring); }
+.ib-key.ib-cp-tname[data-invalid] { border-color: var(--destructive); border-style: solid; }
+.pn-inbox .ib-cp-tname-in { min-width: 0; max-width: 100%; border: 0; outline: none; background: transparent; color: inherit; font: inherit; font-size: 12px; padding: 0; }
+.pn-inbox .ib-cp-tname-in::placeholder { color: var(--muted-foreground); opacity: 0.8; }
+/* While it follows the message: muted words and a small "auto" (aria-describedby says the same). */
+.ib-key.ib-cp-tname[data-auto] .ib-cp-tname-in { font-style: italic; }
+.ib-cp-tname-auto { flex: none; margin-left: 6px; padding: 0 4px; border-radius: 3px; font-family: var(--font-sans, inherit); font-size: 10px; font-style: normal; line-height: 15px; letter-spacing: 0.02em; color: var(--muted-foreground); background: color-mix(in oklch, var(--muted) 80%, transparent); }
+.ib-cp-tname-note { font-size: 12.5px; line-height: 18px; padding-top: 4px; color: var(--muted-foreground); min-width: 0; flex: 1 1 200px; }
+.ib-cp-tname-err { font-size: 12.5px; line-height: 18px; padding-top: 4px; color: var(--destructive); min-width: 0; flex: 1 1 200px; }
 .ib-cp-error { padding: 0 16px 8px; font-size: 12.5px; color: var(--destructive); flex: none; }
 .ib-cp-conflict { display: inline-flex; gap: 12px; margin-left: 10px; }
 .pn-inbox .ib-cp-conflict .ib-lnk { margin-top: 0; }
@@ -2454,7 +2469,14 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
   /* A file's × keeps its look and takes a 44 px hit area (compose's tiles and the reply box's). */
   .pn-inbox .ib-cp-fx { position: relative; }
   .pn-inbox .ib-cp-fx::after { content: ''; position: absolute; inset: -9px; }
-  .ib-cp-subj { white-space: nowrap; }
+  /* The thread row: 44 px to touch, 16 px so iOS does not zoom into the name. */
+  .ib-cp-thread { min-height: 52px; padding-top: 9px; padding-bottom: 9px; }
+  .ib-cp-thread .ib-cp-tol { line-height: 34px; }
+  .ib-cp-tname-err, .ib-cp-tname-note { padding-top: 0; flex-basis: 100%; }
+  .ib-cp-tname-auto { font-size: 11px; line-height: 17px; }
+  .ib-key.ib-cp-tname { position: relative; height: 34px; padding: 0 9px; }
+  .ib-key.ib-cp-tname::after { content: ''; position: absolute; inset: -5px -2px; }
+  .pn-inbox .ib-cp-tname-in { font-size: 16px; position: relative; z-index: 1; }
   .ib-cp-foot { min-height: 52px; }
   .pn-inbox .ib-cp-clip { width: 44px; height: 44px; }
   .ib-cp-ask { flex-wrap: wrap; border-radius: 0; }

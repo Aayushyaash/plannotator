@@ -155,7 +155,7 @@ describe("a thread the person starts", () => {
     expect(response.status).toBe(200);
     const sent = (await response.json()) as { thread_id: string; message: InboxMessage; project: { id: string; root: string } };
     expect(sent.project.root).toBe(billing);
-    expect(sent.message).toMatchObject({ started_by_person: true, to: { host: "pi", session: "ses-pi" }, subject: "Idea: retry the webhook on a 409." });
+    expect(sent.message).toMatchObject({ started_by_person: true, to: { host: "pi", session: "ses-pi" }, subject: "Idea: retry the webhook on a 409" });
 
     let opened = await thread(server, sent.thread_id);
     expect(opened.row).toMatchObject({ section: "sent", addressee: { host: "pi", session: "ses-pi" } });
@@ -165,7 +165,7 @@ describe("a thread the person starts", () => {
     expect(commands).toHaveLength(1);
     expect(commands[0]).toMatchObject({ type: "message", id: sent.message.id, reply_to: null, new_thread: true });
     const lines = inboxWakeText(commands[0]!).split("\n");
-    expect(lines[0]).toBe(`Plannotator Inbox: Idea: retry the webhook on a 409. (${sent.message.id})`);
+    expect(lines[0]).toBe(`Plannotator Inbox: Idea: retry the webhook on a 409 (${sent.message.id})`);
     expect(lines[1]).toBe(INBOX_NEW_THREAD_INSTRUCTION);
     // An older connection that ignores new_thread still words it as a New message, which stays true.
     const { new_thread: _ignored, ...older } = commands[0]!;

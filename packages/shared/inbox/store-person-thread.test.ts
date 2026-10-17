@@ -44,11 +44,25 @@ describe("a thread the person starts", () => {
     const { message, replayed } = store.startPersonThread({ project_id: project.id, body, to: claude, idempotency_key: "k1" });
     expect(replayed).toBe(false);
     expect(message).toMatchObject({ thread_id: message.id, reply_to: null, author: { kind: "person" }, started_by_person: true, to: claude });
-    expect(message.subject).toBe("Idea: let the list show which session wrote each thread.");
+    // The short name a thread the person starts gets (derivePersonThreadSubject): its first sentence, final "." dropped.
+    expect(message.subject).toBe("Idea: let the list show which session wrote each thread");
     // The person's text never becomes question records.
     expect(store.questionsOf(message.id)).toEqual([]);
     const row = store.listRow(message.id)!;
     expect(row).toMatchObject({ section: "sent", unread: false, unseen: 0, waiting_on_person: false, addressee: claude });
+  });
+
+  test("a dictated paragraph is stored under a short name; the body is kept whole", () => {
+    const { store, project } = world();
+    const body =
+      "I want to explore what adding a board would look like. Kanban specifically. And the kanban needs to be well thought out, with a column for every state a thread can be in.";
+    const { message } = store.startPersonThread({ project_id: project.id, body, to: claude, idempotency_key: "dictated" });
+    expect(message.subject).toBe("I want to explore what adding a board would look like");
+    expect(message.body).toBe(body);
+    expect(store.listRow(message.id)!.subject).toBe("I want to explore what adding a board would look like");
+    // An image-only body is named by its file.
+    const image = store.startPersonThread({ project_id: project.id, body: "![](./design/board-mock.png)", to: claude, idempotency_key: "image" });
+    expect(image.message.subject).toBe("board-mock.png");
   });
 
   test("is handed only to the addressed session, and its delivery moves it to Quiet", () => {
