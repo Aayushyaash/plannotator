@@ -12,7 +12,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { inboxAckLine, inboxAgentTool, INBOX_MESSAGE_INSTRUCTION, INBOX_NAME_THREAD_LINE, INBOX_NEW_THREAD_INSTRUCTION, INBOX_TOOL_ACTIONS, INBOX_WAKE_INSTRUCTION, inboxRedirectedLine, inboxWakeText, mcpAnswerOf } from './inbox-contract'
+import { inboxAckLine, inboxAgentTool, inboxSentNowFollowUpText, INBOX_MESSAGE_INSTRUCTION, INBOX_NAME_THREAD_LINE, INBOX_NEW_THREAD_INSTRUCTION, INBOX_TOOL_ACTIONS, INBOX_WAKE_INSTRUCTION, inboxRedirectedLine, inboxWakeText, mcpAnswerOf } from './inbox-contract'
 import { ClaudeSession } from './testing/claude-session'
 import { removeStubbedHtml, stubBuiltHtml } from '../../../../tests/helpers/inbox-world'
 import { inboxEntryOf, isAlive, mustSignalInbox, stopProvenInboxes } from '../../../../tests/helpers/inbox-process'
@@ -678,5 +678,277 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
     const own = await send(session, w, 'Unrelated: the export is done.')
     expect(own.thread_id).not.toBe(message.thread_id)
     w.proof('the answer with reply_to landed in the person\'s thread; the session\'s next message without reply_to started its own thread')
+  }, 120_000)
+
+  test('Send now while Claude works: the session says it can, the window reads it as queued and busy, and the reply goes into the running turn at once (one user row, no turn); the next request carries it; Delivered', async () => {
+    const w = world('12-send-now-into-the-running-turn')
+    startInbox(w)
+    const session = await open(w, 'session-send-now')
+    const asked = await send(session, w, QUESTION)
+    const { port } = registry(w)
+
+    // Claude is working (a long turn: background subagents' notifications keep starting turns).
+    await session.startTurn('Refactor the webhook handler.')
+    const replyId = await personSends(w, asked.message_id, 'Retry with the same key.')
+    // What the window reads under the reply: queued, the session busy, Send now offered.
+    const connection = await waitFor('the busy connection', async () => {
+      const model = (await (await fetch(`http://127.0.0.1:${port}/api/inbox/threads/${asked.thread_id}/sessions?asker=session-send-now`)).json()) as {
+        asker: { connection: { busy: boolean | null; send_now: boolean } | null }
+      }
+      return model.asker.connection?.busy === true ? model.asker.connection : null
+    })
+    expect(connection).toMatchObject({ busy: true, send_now: true })
+    await Bun.sleep(2_500)
+    expect(session.host.submits).toEqual([])
+    expect(session.host.appended).toEqual([])
+    w.proof('Claude works: the reply is queued (0 submits, 0 rows after 2.5 s); the sessions route says busy, send_now')
+
+    // The person presses Send now.
+    const health = (await (await fetch(`http://127.0.0.1:${port}/api/inbox/health`)).json()) as { serverSession: string }
+    const pressed = await fetch(`http://127.0.0.1:${port}/api/inbox/messages/${replyId}/send-now`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({ serverSession: health.serverSession }),
+    })
+    expect(pressed.status).toBe(200)
+    w.proof(`> the person presses Send now on ${replyId}`)
+    const row = await waitFor('the row in the running turn', () => session.host.appended[0])
+    const reply = (await thread(w, asked.thread_id)).messages.find((m) => m.id === replyId)!
+    expect(row).toBe(inboxWakeText({ id: replyId, subject: 'What should the worker do on a Stripe 409?', body: reply.body }))
+    expect(session.host.notices).toHaveLength(1)
+    expect(session.host.submits).toEqual([])
+    w.proof(`$.session.append (user row, into the running turn):\n${row}\n`)
+    const delivered = await waitFor('the delivery record', async () => (await thread(w, asked.thread_id)).messages.find((m) => m.id === replyId)?.delivery)
+    expect(delivered).toMatchObject({ host: 'claude-code', session: 'session-send-now' })
+
+    // The turn's next model request carries it, then the turn ends: no extra turn, no second delivery.
+    session.step()
+    session.endTurn()
+    await Bun.sleep(2_500)
+    expect(session.host.submits).toEqual([])
+    expect(session.host.appended).toHaveLength(1)
+    expect(session.host.aborted).toEqual([])
+    w.proof('the next request carried it; the turn ended: 0 submits, 1 row, 0 aborts')
+  }, 120_000)
+
+  test('Send now as the turn was making its last request: no request carried the row, so one short turn points Claude at it', async () => {
+    const w = world('13-send-now-as-the-turn-ends')
+    startInbox(w)
+    const session = await open(w, 'session-late')
+    const asked = await send(session, w, QUESTION)
+    const { port } = registry(w)
+    await session.startTurn('Write the summary.')
+    const replyId = await personSends(w, asked.message_id, 'Fail the job and alert.')
+    await waitFor('the busy connection', async () => {
+      const model = (await (await fetch(`http://127.0.0.1:${port}/api/inbox/threads/${asked.thread_id}/sessions?asker=session-late`)).json()) as {
+        asker: { connection: { busy: boolean | null } | null }
+      }
+      return model.asker.connection?.busy === true
+    })
+    const health = (await (await fetch(`http://127.0.0.1:${port}/api/inbox/health`)).json()) as { serverSession: string }
+    expect(
+      (
+        await fetch(`http://127.0.0.1:${port}/api/inbox/messages/${replyId}/send-now`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` },
+          body: JSON.stringify({ serverSession: health.serverSession }),
+        })
+      ).status,
+    ).toBe(200)
+    await waitFor('the row in the running turn', () => session.host.appended[0])
+    // The turn ends with no model request after the row.
+    session.endTurn()
+    const follow = await waitFor('the follow-up turn', () => session.host.submits[0])
+    expect(follow).toBe(inboxSentNowFollowUpText({ id: replyId, subject: 'What should the worker do on a Stripe 409?', type: 'reply' }))
+    await Bun.sleep(2_000)
+    expect(session.host.submits).toHaveLength(1)
+    w.proof(`the turn ended before reading it: one follow-up turn:\n${follow}\n`)
+  }, 120_000)
+
+  /** Send now pressed on a reply, as the window does. */
+  async function pressSendNow(w: World, replyId: string): Promise<void> {
+    const { port } = registry(w)
+    const health = (await (await fetch(`http://127.0.0.1:${port}/api/inbox/health`)).json()) as { serverSession: string }
+    const pressed = await fetch(`http://127.0.0.1:${port}/api/inbox/messages/${replyId}/send-now`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({ serverSession: health.serverSession }),
+    })
+    expect(pressed.status).toBe(200)
+  }
+
+  /** Waits until the Inbox has heard this session busy (its poll said so). */
+  async function busyKnown(w: World, threadId: string, session: string): Promise<void> {
+    await waitFor('the busy connection', async () => {
+      const model = (await (await fetch(`http://127.0.0.1:${registry(w).port}/api/inbox/threads/${threadId}/sessions?asker=${session}`)).json()) as {
+        asker: { connection: { busy: boolean | null; send_now: boolean } | null }
+      }
+      return model.asker.connection?.busy === true && model.asker.connection.send_now === true
+    })
+  }
+
+  test('Send now, and the turn ends just before the row would go in (after the claim): it goes in as a turn, never as a row in an idle conversation', async () => {
+    const w = world('14-send-now-turn-ends-before-the-append')
+    startInbox(w)
+    const session = await open(w, 'session-race')
+    const asked = await send(session, w, QUESTION)
+    await session.startTurn('Refactor the handler.')
+    const replyId = await personSends(w, asked.message_id, 'Retry with the same key.')
+    await busyKnown(w, asked.thread_id, 'session-race')
+    // The turn ends while the delivery is claimed: every check before it read busy.
+    session.host.onRun = (argv) => {
+      if (argv.includes('plannotator-inbox-claim')) session.endTurn()
+    }
+    await pressSendNow(w, replyId)
+    const turn = await waitFor('the wake turn', () => session.turns.find((t) => t.text.includes(replyId)))
+    expect(session.host.appended).toEqual([])
+    expect(session.host.submits).toHaveLength(1)
+    expect(session.host.submits[0]!.startsWith(`Plannotator Inbox: What should the worker do on a Stripe 409? (${replyId})`)).toBe(true)
+    w.proof(`the turn ended before the append: delivered as turn ${turn.id}, 0 rows`)
+  }, 120_000)
+
+  test('Send now, and the turn ends while the row goes in: the pointer turn goes at once (the next turn would otherwise mark it read)', async () => {
+    const w = world('15-send-now-turn-ends-during-the-append')
+    startInbox(w)
+    const session = await open(w, 'session-during')
+    const asked = await send(session, w, QUESTION)
+    await session.startTurn('Refactor the handler.')
+    const replyId = await personSends(w, asked.message_id, 'Fail the job and alert.')
+    await busyKnown(w, asked.thread_id, 'session-during')
+    session.host.onAppend = async () => {
+      session.endTurn()
+    }
+    await pressSendNow(w, replyId)
+    const follow = await waitFor('the pointer turn', () => session.host.submits[0])
+    expect(session.host.appended).toHaveLength(1)
+    expect(follow).toBe(inboxSentNowFollowUpText({ id: replyId, subject: 'What should the worker do on a Stripe 409?', type: 'reply' }))
+    // A later turn's step does not swallow it, and nothing is sent twice.
+    await session.startTurn('Next thing.')
+    session.step()
+    session.endTurn()
+    await Bun.sleep(1_500)
+    expect(session.host.submits).toHaveLength(1)
+  }, 120_000)
+
+  test("Send now while this session's own Ask question runs, or waits queued: never into that turn; it goes in as a turn once the session is idle", async () => {
+    const w = world('16-send-now-ask-this-session')
+    startInbox(w)
+    const session = await open(w, 'session-ask')
+    const asked = await send(session, w, QUESTION)
+    const sink = { delta: () => {}, tool: () => {}, done: () => {}, error: () => {} }
+    // Queued: the question is in flight, no turn runs yet.
+    expect(session.mod.turns.beginAsk('ask-1', 'What does the retry loop do?', sink)).toBe(true)
+    const replyId = await personSends(w, asked.message_id, 'Retry with the same key.')
+    // The Inbox hears the session busy and unable to take a reply now: no Send now offered, and a press is refused.
+    await waitFor('the busy connection without Send now', async () => {
+      const model = (await (await fetch(`http://127.0.0.1:${registry(w).port}/api/inbox/threads/${asked.thread_id}/sessions?asker=session-ask`)).json()) as {
+        asker: { connection: { busy: boolean | null; send_now: boolean } | null }
+      }
+      return model.asker.connection?.busy === true && model.asker.connection.send_now === false
+    })
+    const health = (await (await fetch(`http://127.0.0.1:${registry(w).port}/api/inbox/health`)).json()) as { serverSession: string }
+    const refused = await fetch(`http://127.0.0.1:${registry(w).port}/api/inbox/messages/${replyId}/send-now`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${registry(w).port}` },
+      body: JSON.stringify({ serverSession: health.serverSession }),
+    })
+    expect(refused.status).toBe(409)
+    await Bun.sleep(3_000)
+    expect(session.host.appended).toEqual([])
+    expect(session.host.submits).toEqual([])
+    // Running: the question's own turn.
+    await session.startTurn('Plannotator asks: What does the retry loop do?')
+    await Bun.sleep(3_000)
+    expect(session.host.appended).toEqual([])
+    expect(session.host.submits).toEqual([])
+    w.proof('the Ask question queued, then running: 0 rows, 0 submits')
+    session.endTurn('It retries three times.')
+    await waitFor('the wake turn', () => session.turns.find((t) => t.text.includes(replyId)))
+    expect(session.host.appended).toEqual([])
+    expect(session.host.submits).toHaveLength(1)
+  }, 120_000)
+
+  // The failure this catches: a claim held while the reply waits (here, the session's own Ask question took
+  // the turn after the claim) whose `alive` goes stale, so another process reports a reply this one still holds.
+  test("Send now claimed, then this session's own Ask question holds the turn: the claim is given back while it waits, and the reply goes in once, as a turn", async () => {
+    const w = world('16b-send-now-held-claim-alive')
+    startInbox(w)
+    const session = await open(w, 'session-held')
+    const asked = await send(session, w, QUESTION)
+    await session.startTurn('Refactor the handler.')
+    const replyId = await personSends(w, asked.message_id, 'Retry with the same key.')
+    await busyKnown(w, asked.thread_id, 'session-held')
+    const sink = { delta: () => {}, tool: () => {}, done: () => {}, error: () => {} }
+    // At the claim, the person's turn ends and an Ask question is queued: busy, and no turn to go into.
+    let claimed = false
+    let released = false
+    session.host.onRun = (argv) => {
+      if (argv.includes('plannotator-inbox-release')) released = true
+      if (!argv.includes('plannotator-inbox-claim') || claimed) return
+      claimed = true
+      session.endTurn()
+      expect(session.mod.turns.beginAsk('ask-held', 'What does the retry loop do?', sink)).toBe(true)
+    }
+    await pressSendNow(w, replyId)
+    const claim = join(w.dataDir, 'claude-code-mod', 'session-held', 'inbox', 'claims', replyId)
+    await waitFor('the claim, then its release', () => released)
+    // Nothing went in under it, so the claim is given back (any process may deliver it), not held.
+    await waitFor('the claim given back', () => !existsSync(claim))
+    await Bun.sleep(6_000)
+    expect(existsSync(claim)).toBe(false)
+    expect(session.host.appended).toEqual([])
+    expect(session.host.submits).toEqual([])
+    // The Ask question runs and ends: the reply goes in as a turn, once.
+    await session.startTurn('Plannotator asks: What does the retry loop do?')
+    session.endTurn('It retries three times.')
+    await waitFor('the wake turn', () => session.turns.find((t) => t.text.includes(replyId)))
+    expect(session.host.appended).toEqual([])
+    expect(session.host.submits).toHaveLength(1)
+  }, 120_000)
+
+  test('two processes on one session: the claimant\'s turn starts right after its claim and the person moves to the other process; that process delivers the reply once', async () => {
+    const w = world('16c-claim-then-lease-moves')
+    startInbox(w)
+    const first = await open(w, 'session-moves')
+    const second = await open(w, 'session-moves')
+    // The tool call in `first` makes it the person's process, so it claims the reply.
+    const asked = await send(first, w, QUESTION)
+    // Right after its claim, a turn starts in `first` (busy: the reply cannot go in there now).
+    first.host.onRun = (argv) => {
+      if (!argv.includes('plannotator-inbox-claim')) return
+      first.host.onRun = () => undefined
+      void first.startTurn('Keep refactoring the handler.')
+    }
+    const replyId = await personSends(w, asked.message_id, 'Retry with the same key.')
+    await waitFor('the turn in the claimant', () => first.turns.some((t) => t.text === 'Keep refactoring the handler.'))
+    // The person moves to the second process while that turn runs: the lease follows them.
+    await second.type('Over here now.')
+    second.endTurn()
+    await waitFor('the delivery in the second process', () => second.host.submits.some((text) => text.includes(`(${replyId})`)), 40_000)
+    expect(first.host.submits).toEqual([])
+    // The claimant's turn ends: still exactly one delivery.
+    first.endTurn()
+    await Bun.sleep(6_000)
+    expect([...first.host.submits, ...second.host.submits].filter((text) => text.includes(`(${replyId})`))).toHaveLength(1)
+    w.proof(`reply ${replyId}: claimed in the first process, delivered once in the second`)
+  }, 90_000)
+
+  test('Send now with an older reply waiting for the same session: both go into the running turn, oldest first', async () => {
+    const w = world('17-send-now-keeps-the-order')
+    startInbox(w)
+    const session = await open(w, 'session-order')
+    const first = await send(session, w, QUESTION)
+    const second = await session.callInbox({ action: 'send_message', body: 'Second question: rename the worker?', thread: 'naming' }, w.project)
+    if ('deny' in second) throw new Error(second.deny)
+    const secondId = (JSON.parse(second.text.slice(second.text.indexOf('{'))) as { message_id: string; thread_id: string })
+    await session.startTurn('Refactor the handler.')
+    const older = await personSends(w, first.message_id, 'Retry with the same key.')
+    const newer = await personSends(w, secondId.message_id, 'Yes, rename it.')
+    await busyKnown(w, first.thread_id, 'session-order')
+    await pressSendNow(w, newer)
+    await waitFor('both rows', () => session.host.appended.length === 2)
+    expect(session.host.appended[0]!).toContain(`(${older})`)
+    expect(session.host.appended[1]!).toContain(`(${newer})`)
+    expect(session.host.submits).toEqual([])
   }, 120_000)
 })

@@ -43,7 +43,7 @@ import type { SessionBridge } from "@plannotator/ai/session-bridge";
 import { createOpenCodeSessionBridge, markPlanReviewPending } from "./opencode-session-bridge";
 import type { PlanEdit } from "./plan-edits";
 import { getPlanningPrompt } from "./planning-prompt";
-import { findInboxConnection, registerInboxOpenCode2, type InboxToolDomainLike } from "./inbox";
+import { dropInboxDuplicates, findInboxConnection, registerInboxOpenCode2, type InboxToolDomainLike } from "./inbox";
 
 const DEFAULT_PLAN_TIMEOUT_SECONDS = 345_600;
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -141,6 +141,8 @@ const serverPlugin = {
       try {
         await ctx.session.hook("context", (event) => {
           dropSessionUrlNotices(event.messages as unknown[]);
+          // A Send now reply that reached the session twice (its steer row and the fallback queued turn): one copy.
+          dropInboxDuplicates(event.messages as unknown[]);
         });
         // `session.generate` (plan review's "Quick answer from this session")
         // builds its request through its own hook with the same shape
@@ -148,6 +150,7 @@ const serverPlugin = {
         // notice is kept out of those answers too.
         await ctx.session.hook("generate", (event) => {
           dropSessionUrlNotices(event.messages as unknown[]);
+          dropInboxDuplicates(event.messages as unknown[]);
         });
       } catch (error) {
         console.error(`[Plannotator] Could not register the session-URL notice filter: ${error instanceof Error ? error.message : String(error)}`);

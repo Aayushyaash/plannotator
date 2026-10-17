@@ -193,11 +193,17 @@ test('a waking connection: Queued, then one wake naming the message, then Delive
     await page.goto(`${world.url}#thread=${threads.wake}`);
     await expect(page.locator('[data-ack-pill]')).toHaveAttribute('data-ack-pill', 'queued', { timeout: 1_000 });
   }).toPass({ timeout: 20_000 });
-  await expect(page.locator('[data-ack-pill]')).toContainText('Queued for Claude Code; it gets this as its next turn.');
-  await shot(page, '06-queued');
-  // The session's connection polls: one command, the wake naming the message.
+  // The same honest words as a reply's line: no connection polls for that session yet.
+  await expect(page.locator('[data-ack-pill]')).toContainText('Queued for Claude Code; it gets this when its session is back.');
   const bridge = (path: string, body: unknown) =>
     fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${registry.token}` }, body: JSON.stringify(body) });
+  // The session polls while a turn runs: "is working", and no Send now (a 👍 asks nothing of the agent).
+  expect((await bridge('/api/inbox/bridge/poll', { session, host: 'claude-code', waitMs: 0, busy: true, send_now: true })).status).toBe(200);
+  await page.goto(`${world.url}#thread=${threads.wake}`);
+  await expect(page.locator('[data-ack-pill]')).toContainText('Queued · Claude Code is working; it gets this when its turn ends.');
+  await expect(page.locator('[data-send-now]')).toHaveCount(0);
+  await shot(page, '06-queued');
+  // The session's connection polls: one command, the wake naming the message.
   const polled = (await (await bridge('/api/inbox/bridge/poll', { session, host: 'claude-code', waitMs: 0 })).json()) as { commands: InboxReplyCommand[] };
   expect(polled.commands).toHaveLength(1);
   const command = polled.commands[0]!;

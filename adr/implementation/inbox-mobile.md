@@ -151,7 +151,8 @@ The allowlist. Each row is the window's handler as it is today, with the request
 | `POST messages/:id/guide/annotations` | same | `{ idempotency_key, annotation }` (the review app's line comment: `id`, `filePath` in the guide's patch, `side` `old`/`new`, `lineStart`/`lineEnd`, `text`); an edit is the same annotation id under a new key | `{ annotation: record }`. Removed through `annotations/:id/remove` (7.18). The window's refusals pass through: `422 validation_error` (a file not in the patch, a bad side, lines not in one hunk), `404 guide_not_found` / `message_not_found`, `409 annotation_closed`, `409 thread_resolved`. Added 2026-10-15 | 7.53 |
 | `POST messages/:id/decision` | same | `{ idempotency_key, key, recording?, draft? }` | `{ question }` | 7.21 |
 | `GET decisions?project=prj_...` | same | | `{ serverSession, cursor, project_id, waiting, decisions, project_counts }` (`project_counts`, added later, is every project's `{ project_id, waiting, settled }`; a phone may ignore it) | 7.22 |
-| `GET threads/:id/sessions` | same | | `{ serverSession, home, project, sessions }` | 7.23 |
+| `GET threads/:id/sessions` | same | | `{ serverSession, home, project, sessions }` (`?asker=<session>` adds `asker: { session, live, connection }`, `connection` = `{ busy, idle_since, send_now }` while that session's connection polls, else null; each session carries `send_now`) | 7.23 |
+| `POST messages/:id/send-now` | same | `{ idempotency_key }` | `{ message }` with `deliver_now_at`: Send now (2026-10-16). The session the person's reply or message goes to gets it at once, into its running turn when one runs. Offer it only while `asker.connection.send_now` and `busy` are true (draw "Queued · <agent> is working; it gets this when its turn ends"); `409 send_now_unavailable` when that session's connection does not poll now or cannot take it mid-turn, `409 already_delivered`, `422 not_addressed`. A second press writes nothing. An Inbox before it answers `404 device_route_not_found` | 7.58 |
 | `POST threads/:id/message` | same | `{ idempotency_key, session, body }` | `{ message, replayed }` | 7.24 |
 | `GET sessions[?session=ses_...]` | `GET /api/inbox/sessions` | | `{ serverSession, home, projects: [{ project: { id or null, name, root }, sessions: [{ session, host, started_at, last_seen_at, busy, idle_since, last_thread }] }], session? }`: every live session, any project (compose's To). A snapshot: a session may have ended by the time a relayed answer is read. Added 2026-10-15 | 7.39 |
 | `POST messages` | `POST /api/inbox/messages` | `{ idempotency_key, to: { host?, session }, body, uploads?: [upl_...], thread_name? }` | `{ thread_id, message, project, replayed }`: a thread the person starts, addressed to one live session. `draft_id` (which deletes a shared draft) is refused by the door, `422 { "field": "draft_id" }`: drafts stay on the computer. The body key is also the store's own. `409 session_not_live` (nothing written), `503 project_unresolved` (not recorded, so the same call runs again), `422 validation_error`, `409 idempotency_key_reused` pass through. `thread_name` (optional, added 2026-10-16) is the thread's name, its chip, checked by the thread-name rules (`422 validation_error`) and refused with `409 thread_name_taken` (nothing written) while another open thread of the project has the name; an agent never replaces it. `thread_name_auto: true` (optional, added 2026-10-16) marks `thread_name` as compose's own suggestion: dropped instead of refused when not valid or taken, and replaced by the agent's first name. A name refused here (`409 thread_name_taken`, `422`) is stored by the door under the idempotency key like any 4xx, so a retry with another name, or none, must use a NEW idempotency key; the same key answers the stored refusal again. Added 2026-10-15 | 7.40 |
@@ -1157,7 +1158,7 @@ curl -sS -X POST "$INBOX/api/inbox/device/markups?idempotency_key=00000000-0000-
 
 ### 7.53 A comment on a guided review's diff
 
-7.50 to 7.52 (shared drafts) and 7.54, 7.55 (decision retire and replace) are held and not built. 7.56 is 👍 Looks good, 7.57 a reply carrying files (below).
+7.50 to 7.52 (shared drafts) and 7.54, 7.55 (decision retire and replace) are held and not built. 7.56 is 👍 Looks good, 7.57 a reply carrying files, 7.58 Send now (below).
 
 ```sh
 curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/guide/annotations" \
@@ -1188,6 +1189,18 @@ curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K7000000000000000000002
 ```
 
 7.11's answer, with `reply.attachments` holding each file as an ordinary attachment record (the same as 7.40's thread). The agent reads them as `Attached: <name> (<path>)` lines under the words, on its wake and from `wait_for_reply`. A Send of files alone (no words, no answers) is a reply, read as a words-only one. Replaying the key answers the reply it wrote and copies nothing; an id that is gone: `404 upload_not_found`, nothing written. On a Send that answers several messages, name the files on the reply that carries the words (the last), as the window does.
+
+### 7.58 Send now
+
+The line under the person's last reply says where it is (the window's `deliveryLine`, `packages/inbox/deliveryLine.ts`): for a reply to a message with `wakes`, or a message with `to`, read `GET threads/:id/sessions?asker=<that session>`; `asker.connection.busy` true reads "Queued · <agent> is working; it gets this when its turn ends", false reads "Sending to <agent>…", null (the connection does not say) or no `connection` reads "Queued for <agent>; it gets this as its next turn", `connection: null` reads "Queued for <agent>; it gets this when its session is back"; `deliver_now_at` on the message reads "Sending to <agent> now…"; a reply to a message without `wakes` reads "Saved for <agent>. It sees it when it next reads this thread". Offer Send now only while `connection.busy` and `connection.send_now` are true:
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000058/send-now" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000058"}'
+```
+
+`{ "message": { "id": "msg_01K70000000000000000000058", "deliver_now_at": "2026-10-16T17:06:00.000Z", "...": "" } }`. The session's connection then puts it into the running turn (Claude Code: a user row; Pi and OpenCode 2: a steer) and records the delivery as usual ("Delivered to <agent>, <time>").
 
 ## 8. What this contract leaves out
 

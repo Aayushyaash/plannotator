@@ -34,12 +34,13 @@
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import {
   INBOX_BRIDGE_EVENT_PATH,
   INBOX_BRIDGE_POLL_PATH,
+  INBOX_SEND_NOW_POLL_FIELD,
   inboxToolCall,
   inboxToolCallParams,
   inboxToolResultText,
@@ -350,6 +351,23 @@ export interface InboxWakeTarget {
   isBusy(): boolean | Promise<boolean>;
   /** Put the wake text into the session as a turn; resolves once it entered, rejects when it could not. */
   deliver(text: string, command: InboxReplyCommand): Promise<void>;
+  /**
+   * Send now, while a turn runs: put the wake text into that turn (Pi's
+   * steer, OpenCode 2's `delivery: "steer"`), so the model reads it at its
+   * next step instead of after the turn. Resolves once the host took it.
+   * Optional: a host without it never says it can (`INBOX_SEND_NOW_POLL_FIELD`)
+   * and the window never offers Send now for its sessions.
+   */
+  steer?(text: string, command: InboxReplyCommand): Promise<void>;
+  /**
+   * Whether `steer` can work right now (OpenCode 2: only while its event
+   * stream runs, which is how a steer's delivery is confirmed). False while
+   * the running turn is this session's own "Ask this session" question (its
+   * answer streams to Plannotator, so a reply steered in would be answered
+   * there): the reply then waits for idle, and the poll stops offering Send
+   * now. Absent: as long as `steer` exists.
+   */
+  canSteer?(): boolean;
   /** A line for the person, outside the model's context (a toast, a notice). */
   notify(message: string): void;
   /**
@@ -378,6 +396,8 @@ export class InboxWake {
   private readonly abort = new AbortController();
   /** Handed out by the Inbox and not yet settled here, in arrival order. */
   private readonly pending = new Map<string, InboxReplyCommand>();
+  /** Send now could not go into the running turn: these wait for idle, as before. */
+  private readonly noSteer = new Set<string>();
   /** Settled here: delivered, claimed by another process, or reported. */
   private readonly settled = new Set<string>();
   /** Delivered, not yet acknowledged to the Inbox. */
@@ -395,6 +415,8 @@ export class InboxWake {
   private busy: boolean | null = null;
   private idleSince: number | null = null;
   private stateCheckedAt = Number.NEGATIVE_INFINITY;
+  /** Whether Send now could go in, as last told to the Inbox. */
+  private lastSteerable: boolean | null = null;
 
   constructor(
     private readonly connection: InboxAgentConnection,
@@ -484,24 +506,45 @@ export class InboxWake {
     if (now - this.leaseCheckedAt >= INBOX_LEASE_EVERY_MS) this.holdLease(now);
     if (!this.leader) return;
     if (!this.polling && now >= this.retryAt) void this.poll();
-    if (!this.delivering && this.pending.size > 0 && this.idleTicks >= 2) {
+    // Send now: once the person asked for one, the waiting replies go in without waiting for two idle
+    // ticks, oldest first (an urgent reply never overtakes an older one to the same session).
+    // Only when there is a turn it may go into, or the session is idle: never into a turn the target
+    // refuses (`canSteer`: this session's own "Ask this session" question, as the Claude Code mod rules).
+    const urgent =
+      [...this.pending.values()].some((command) => command.now === true && !this.noSteer.has(command.id)) &&
+      (this.steerable || busy === false);
+    if (!this.delivering && this.pending.size > 0 && (this.idleTicks >= 2 || urgent)) {
       this.delivering = true;
       try {
-        await this.deliverNext();
+        await this.deliverNext(this.idleTicks < 2 && urgent);
       } finally {
         this.delivering = false;
       }
     }
   }
 
-  /** A turn started or ended: the Inbox's live sessions say so (a `state` event, as the Claude Code mod posts). */
+  /** `steer` exists and can work now. */
+  private get steerable(): boolean {
+    return typeof this.target.steer === "function" && (this.target.canSteer?.() ?? true);
+  }
+
+  /**
+   * A turn started or ended, or whether Send now can go in changed (an Ask
+   * question began or ended): the Inbox's live sessions say so (a `state`
+   * event, as the Claude Code mod posts), so the window offers Send now only
+   * when it can work.
+   */
   private noteBusy(busy: boolean, now: number): void {
-    if (busy === this.busy) return;
+    const steerable = this.steerable;
+    if (busy === this.busy && steerable === this.lastSteerable) return;
     const known = this.busy !== null;
+    if (busy !== this.busy && !busy) this.idleSince = now;
     this.busy = busy;
-    if (!busy) this.idleSince = now;
+    this.lastSteerable = steerable;
     if (known && this.leader && !this.disposed) {
-      void this.connection.bridge(INBOX_BRIDGE_EVENT_PATH, this.sessionId, { type: "state", busy, idle_since: this.idleSince }).catch(() => null);
+      void this.connection
+        .bridge(INBOX_BRIDGE_EVENT_PATH, this.sessionId, { type: "state", busy, idle_since: this.idleSince, [INBOX_SEND_NOW_POLL_FIELD]: steerable })
+        .catch(() => null);
     }
   }
 
@@ -527,6 +570,7 @@ export class InboxWake {
         ...(typeof projectPath === "string" && projectPath ? { project_path: projectPath } : {}),
         started_at: this.startedAt,
         ...(this.busy === null ? {} : { busy: this.busy, idle_since: this.idleSince }),
+        ...(this.steerable ? { [INBOX_SEND_NOW_POLL_FIELD]: true } : {}),
       },
       signal,
     );
@@ -548,6 +592,7 @@ export class InboxWake {
       this.backoffMs = 0;
       this.retryAt = 0;
       for (const command of commands) {
+        // A later poll may carry `now` (the person pressed Send now): the newest command wins.
         if (!this.settled.has(command.id)) this.pending.set(command.id, command);
       }
     } finally {
@@ -560,8 +605,12 @@ export class InboxWake {
     this.settled.add(id);
   }
 
-  /** Deliver the oldest waiting reply as a turn, once. */
-  private async deliverNext(): Promise<void> {
+  /**
+   * Deliver the oldest waiting reply as a turn, once; `urgent` (the person
+   * pressed Send now, the session not idle for two ticks yet): into the
+   * running turn when one runs (`steer`), else as a turn at once.
+   */
+  private async deliverNext(urgent = false): Promise<void> {
     const command = this.pending.values().next().value as InboxReplyCommand | undefined;
     if (!command) return;
     // Still waiting? An agent may have read it through the tool meanwhile, or
@@ -572,7 +621,9 @@ export class InboxWake {
       this.settle(command.id);
       return;
     }
-    if (await this.target.isBusy()) {
+    const busy = await this.target.isBusy();
+    const steering = busy && urgent && this.steerable;
+    if (busy && !steering) {
       this.idleTicks = 0;
       return;
     }
@@ -585,6 +636,27 @@ export class InboxWake {
     } catch (error) {
       // EEXIST: another process (or an earlier instance here) took it.
       if ((error as NodeJS.ErrnoException).code === "EEXIST") this.settle(command.id);
+      return;
+    }
+    if (steering) {
+      try {
+        await this.target.steer!(inboxWakeText(command), command);
+      } catch {
+        // It did not go into the running turn: give the claim back, and the
+        // reply reads as queued again and waits for idle, as before.
+        try {
+          rmSync(claim, { recursive: true, force: true });
+        } catch {
+          // A leftover claim: this instance cannot take it again; another process reports it.
+        }
+        this.noSteer.add(command.id);
+        void this.connection.bridge(INBOX_BRIDGE_EVENT_PATH, this.sessionId, { type: "send_now_failed", id: command.id }).catch(() => null);
+        return;
+      }
+      writeQuietly(join(claim, "delivered"), new Date().toISOString());
+      this.settle(command.id);
+      this.unacked.add(command.id);
+      await this.acknowledge(command.id);
       return;
     }
     try {

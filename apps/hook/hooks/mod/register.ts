@@ -61,7 +61,7 @@
 import { PlannotatorMod } from './controller'
 import { resolveAgentToolEnabled, resolveClaudeModEnabled, resolveInboxReminderEnabled, resolveInboxToolEnabled } from './enabled'
 import type { Host } from './host'
-import { discoverInboxTools, inboxRegistryPathOf, withInboxReminder } from './inbox'
+import { discoverInboxTools, engineHasSessionAppend, inboxRegistryPathOf, withInboxReminder } from './inbox'
 import { inboxAgentTool, type InboxToolInfo } from './inbox-contract'
 import { INBOX_DEFAULT_TOOLS } from './inbox-default-tools'
 import { COMMANDS, dataDirOf, debugAppendArgv, isModCommand, waitArgv } from './launch'
@@ -112,6 +112,24 @@ function hostOf($: Engine, debugPath: string | null): Host {
     storeSet: (key, value) => $.store.set(key, value),
     submit: async (text) => {
       await $.prompt.submit({ text })
+    },
+    // Called only where `sessionAppendAvailable` said the engine has it; a refusal stops Send now here (inbox.ts).
+    appendUserRow: async (text) => {
+      const stored = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
+      if (stored && typeof stored.deny === 'string') throw new Error(stored.deny)
+    },
+    appendNotice: async (text) => {
+      const stored = await $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } })
+      if (stored && typeof stored.deny === 'string') throw new Error(stored.deny)
+    },
+    // Decided from the engine's version (validate refuses `typeof $.session.append`): an older engine never offers Send now.
+    sessionAppendAvailable: async () => {
+      try {
+        const version = await $.session.version()
+        return engineHasSessionAppend(version?.base ?? version?.version)
+      } catch {
+        return false
+      }
     },
     suggest: async (text) => {
       await $.prompt.suggest({ text })
@@ -455,6 +473,8 @@ export function register(on: On) {
 
   on('turn.step', async function* ($: Engine, e: any, next: Next) {
     const instance = allowed ? mod : null
+    // A main-loop model request is going out: a reply Send now put into the turn is in it (inbox.ts).
+    if (instance && !instance.isDisposed && !e.agentId && typeof e.turnId === 'string') instance.onMainStep(e.turnId)
     if (!instance || !instance.turns.ownsTurn(e.turnId)) return yield* next(e)
     // A question's turn that someone else's prompt entered settles here: this
     // request carries their prompt, so nothing it says is the question's answer.

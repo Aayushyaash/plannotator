@@ -2561,3 +2561,16 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-ackchip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--success) 50%, transparent); background: color-mix(in srgb, var(--success) 12%, var(--card)); color: var(--foreground); font-weight: 500; white-space: nowrap; }
 .ib-ackwhen { min-width: 0; }
 .ib-toast > .ib-temoji { flex: none; font-size: 15px; line-height: 1; }
+
+/* The line under the person's last message: queued, sending, delivered; Send now while the agent works. */
+.ib-delivered { flex-wrap: wrap; row-gap: 6px; }
+.ib-delivered .ib-dl-main { display: inline-flex; align-items: flex-start; gap: 6px; min-width: 0; }
+.ib-delivered .ib-dl-main > svg { flex: none; margin-top: 2px; }
+.ib-delivered .ib-dl-text { min-width: 0; }
+.pn-inbox .ib-sendnow { margin-left: 4px; height: 26px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--foreground); font-size: 12.5px; font-weight: 500; cursor: pointer; white-space: nowrap; }
+.pn-inbox .ib-sendnow:hover { background: var(--muted); }
+.pn-inbox .ib-sendnow:disabled { opacity: 0.6; cursor: progress; }
+@media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
+  .pn-inbox .ib-sendnow { position: relative; }
+  .pn-inbox .ib-sendnow::after { content: ''; position: absolute; inset: -9px -4px; }
+}

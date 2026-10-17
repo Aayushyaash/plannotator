@@ -285,6 +285,14 @@ export interface InboxMessage {
    */
   delivery?: InboxDelivery | null;
   /**
+   * On a person's reply or message not yet delivered: the person pressed
+   * Send now in the Inbox, and when. The session's connection then delivers
+   * it at once, into the running turn when one runs, instead of waiting for
+   * the session to go idle (the bridge command's `now`). Absent otherwise
+   * and on older records.
+   */
+  deliver_now_at?: string | null;
+  /**
    * A guided review this message carries (submit_guide, PLAN step 5): the
    * snapshot is a content-addressed blob, `inbox/blobs/<sha256>`. Absent on
    * every other message and on records older than step 5.
@@ -751,7 +759,17 @@ export interface InboxListRow extends InboxThreadSummary {
    * The person's reply is the last message, the Inbox's own notes read past:
    * when, and when the agent read it (null until it has).
    */
-  sent: { at: string; checked_at: string | null } | null;
+  sent: {
+    at: string;
+    checked_at: string | null;
+    /**
+     * It goes to a session whose connection delivers it as a turn by itself
+     * (the asking message came through a waking connection, or the person
+     * addressed it to a live session): "Queued for <agent>", not "Saved for".
+     * Absent from an older Inbox.
+     */
+    wakes?: boolean;
+  } | null;
   /**
    * When the latest agent message arrived (`last_at` also moves on the
    * person's messages and the Inbox's notes). The window's held list counts

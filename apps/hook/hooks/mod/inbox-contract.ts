@@ -449,6 +449,14 @@ export interface InboxReplyCommand {
    */
   name_thread?: boolean
   /**
+   * The person pressed Send now in the Inbox: deliver it at once, into the
+   * running turn when one runs (Claude Code: `$.session.append`; Pi: a
+   * steer; OpenCode 2: `delivery: "steer"`), instead of waiting for the
+   * session to go idle. Only handed to a connection whose poll said it can
+   * (`INBOX_SEND_NOW_POLL_FIELD`). Absent on every other command.
+   */
+  now?: boolean
+  /**
    * On the person's 👍 Looks good, delivered once its Undo window passed
    * (amended 2026-10-16: it reaches the agent): the agent message they
    * marked. The wake is `inboxAckLine` instead of a reply's instruction and
@@ -457,6 +465,24 @@ export interface InboxReplyCommand {
    * Absent on every other command.
    */
   ack_of?: string
+}
+
+/**
+ * The poll field (`true`) by which a connection says it can deliver a reply
+ * into a running turn: the window offers Send now only for such a session.
+ * An older Inbox ignores it; an older connection never sends it, so it is
+ * never offered there.
+ */
+export const INBOX_SEND_NOW_POLL_FIELD = 'send_now'
+
+/**
+ * The turn a connection submits when a reply it put into a running turn
+ * arrived as that turn ended, so the model never read it: the reply is in
+ * the conversation already, so this only points at it.
+ */
+export function inboxSentNowFollowUpText(command: Pick<InboxReplyCommand, 'id' | 'subject' | 'type'>): string {
+  const subject = (command.subject ?? '').replace(/\s+/g, ' ').trim() || (command.type === 'message' ? 'a message' : 'a reply')
+  return `Plannotator Inbox: ${subject} (${command.id})\nThe person's ${command.type === 'message' ? 'message' : 'reply'} above (${command.id}) arrived as your last turn was ending. If you have not answered it yet, answer it now.`
 }
 
 export function parseInboxBridgeCommands(text: string): InboxReplyCommand[] {

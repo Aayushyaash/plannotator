@@ -238,7 +238,8 @@ describe("a reply to another session when the asking one has ended", () => {
     const asked = await agentSends(client, project, "ses-asker", QUESTION);
     await poll(server, "ses-asker", project);
     const model = (await (await fetch(`${base(server)}/api/inbox/threads/${asked.thread_id}/sessions?asker=ses-asker`)).json()) as { asker: unknown };
-    expect(model.asker).toEqual({ session: "ses-asker", live: true });
+    // `connection` (additive, Send now): how it is connected now; this poll said nothing of busy or send_now.
+    expect(model.asker).toEqual({ session: "ses-asker", live: true, connection: { busy: null, idle_since: null, send_now: false } });
     const plain = (await (await fetch(`${base(server)}/api/inbox/threads/${asked.thread_id}/sessions`)).json()) as { asker?: unknown };
     expect(plain.asker).toBeUndefined();
   });

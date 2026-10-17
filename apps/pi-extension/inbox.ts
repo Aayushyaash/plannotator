@@ -21,7 +21,10 @@
  * settled: `agent_settled` where Pi has it, idle alone on older Pi), goes in
  * with `pi.sendUserMessage(text, { deliverAs: "followUp" })` (a follow-up
  * never steers into a run that started in the same instant), and counts as
- * delivered when Pi starts that user message. Nothing here ever aborts a
+ * delivered when Pi starts that user message. Send now (the person pressed
+ * it in the Inbox; the command's `now`) goes in at once instead: as a
+ * `deliverAs: "steer"` while a run is going, which Pi reads after the run's
+ * current tool calls, else as the follow-up. Nothing here ever aborts a
  * run, so a prompt typed into the wake's turn takes it over, the rule of
  * `pi-session-bridge.ts`'s run protection, and the reply is never sent again.
  * Listeners are registered once, at load (`pi.on` has no unsubscribe before 1.0).
@@ -68,6 +71,33 @@ type InboxPi = Pick<ExtensionAPI, "registerTool" | "sendUserMessage" | "getActiv
 export interface PiInboxOptions {
 	/** An "Ask this session" question is running (the session bridge hub). */
 	isAskActive: () => boolean;
+}
+
+/**
+ * The editor without `text` (Pi joins restored queued messages and the draft
+ * with a blank line): the joint closes up, the person's own words stay.
+ */
+export function editorWithout(editor: string, text: string): string | null {
+	const at = text ? editor.indexOf(text) : -1;
+	if (at < 0) return null;
+	let before = editor.slice(0, at);
+	let after = editor.slice(at + text.length);
+	if (before.endsWith("\n\n")) before = before.slice(0, -2);
+	if (after.startsWith("\n\n")) after = after.slice(2);
+	return before && after ? `${before}\n\n${after}` : before + after;
+}
+
+/** Takes `text` out of the session's editor, where Pi puts queued messages when a run is aborted. Best effort. */
+function takeOutOfEditor(current: ExtensionContext, text: string): void {
+	try {
+		const ui = current.ui as { getEditorText?: () => string; setEditorText?: (text: string) => void };
+		const editor = ui.getEditorText?.();
+		if (typeof editor !== "string") return;
+		const rest = editorWithout(editor, text);
+		if (rest !== null) ui.setEditorText?.(rest);
+	} catch {
+		// No editor (a session without UI): nothing was moved there.
+	}
 }
 
 /**
@@ -178,32 +208,44 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 		}
 	};
 
+	/** Put the wake text into the session and wait until Pi starts it as a user message. */
+	const send = (text: string, command: InboxReplyCommand, deliverAs: "followUp" | "steer") =>
+		new Promise<void>((resolve, reject) => {
+			const current = ctx;
+			const watchdog = () => {
+				if (waiting?.id !== command.id) return;
+				// Still busy (Pi preparing the run, or the person's run first): look again later.
+				if (current && isCtxAlive(current) && !idleNow(current)) {
+					waiting.timer = setTimeout(watchdog, DELIVERY_WATCHDOG_MS);
+					return;
+				}
+				// A steer that never started: the person pressed Esc during the run, and Pi moved its
+				// queued messages into the editor. Take ours back out, so the reply, which now waits for
+				// idle and arrives as a follow-up, is not also sent a second time from the editor.
+				if (deliverAs === "steer" && current && isCtxAlive(current)) takeOutOfEditor(current, text);
+				endWaiting(new Error("the message did not reach the session"));
+			};
+			waiting = { id: command.id, resolve, reject, timer: setTimeout(watchdog, DELIVERY_WATCHDOG_MS) };
+			try {
+				pi.sendUserMessage(text, { deliverAs });
+			} catch (error) {
+				endWaiting(error instanceof Error ? error : new Error(String(error)));
+			}
+		});
+
 	const target = {
+		// Never steer into this session's own "Ask this session" question (its answer streams to
+		// Plannotator; the Claude Code mod's rule): the reply waits for idle, and the poll stops offering Send now.
+		canSteer: () => !options.isAskActive(),
 		isBusy: () => {
 			const current = ctx;
 			if (!current || !isCtxAlive(current) || !idleNow(current)) return true;
 			if (options.isAskActive()) return true;
 			return settleEvents && runOpen;
 		},
-		deliver: (text: string, command: InboxReplyCommand) =>
-			new Promise<void>((resolve, reject) => {
-				const current = ctx;
-				const watchdog = () => {
-					if (waiting?.id !== command.id) return;
-					// Still busy (Pi preparing the run, or the person's run first): look again later.
-					if (current && isCtxAlive(current) && !idleNow(current)) {
-						waiting.timer = setTimeout(watchdog, DELIVERY_WATCHDOG_MS);
-						return;
-					}
-					endWaiting(new Error("the message did not reach the session"));
-				};
-				waiting = { id: command.id, resolve, reject, timer: setTimeout(watchdog, DELIVERY_WATCHDOG_MS) };
-				try {
-					pi.sendUserMessage(text, { deliverAs: "followUp" });
-				} catch (error) {
-					endWaiting(error instanceof Error ? error : new Error(String(error)));
-				}
-			}),
+		deliver: (text: string, command: InboxReplyCommand) => send(text, command, "followUp"),
+		// Send now while a run is going: a steer, which Pi puts into the run after its current tool calls.
+		steer: (text: string, command: InboxReplyCommand) => send(text, command, "steer"),
 		notify: (message: string) => {
 			try {
 				ctx?.ui.notify(message, "warning");

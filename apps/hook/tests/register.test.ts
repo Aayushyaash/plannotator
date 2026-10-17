@@ -602,6 +602,35 @@ describe('register', () => {
     expect(w.submits).toHaveLength(1)
   })
 
+  test('Send now while a turn runs: the poll says the engine can, and the reply goes into the running turn as one user row ($.session.append), with no turn submitted', async ($: any, on: any) => {
+    const calls: { url: string; body: any }[] = []
+    let delivered = false
+    const reply = { type: 'reply', id: 'msg_reply', thread_id: 'msg_1', reply_to: 'msg_1', subject: 'Ship it?', body: 'Yes, now.', url: 'http://localhost:5150/#thread=msg_1', now: true }
+    const w = world(on, {
+      files: withRegistry(),
+      fetch: inbox(TOOLS, calls, (path, body) => {
+        if (path === '/api/inbox/bridge/event' && body.type === 'delivered' && body.id === 'msg_reply') delivered = true
+        return path === '/api/inbox/bridge/poll' ? { commands: delivered ? [] : [reply] } : { ok: true }
+      }),
+    })
+    const session = mock.session(on)
+    on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+    // An engine whose API has `$.session.append` (the version decides: validate refuses testing the noun itself).
+    on('session.version', () => ({ value: { version: '2.1.302', base: '2.1.302' } }))
+    await $.session.start(SESSION)
+    // A main-loop turn starts and keeps running (a subagent's start alone would not count).
+    await $.turn.start({ turnId: 'turn-1', text: 'Refactor the handler.' })
+    for (let second = 0; second < 6; second++) await w.clock.advance(1_000)
+
+    expect(calls.filter((c) => c.url.endsWith('/api/inbox/bridge/poll')).some((c) => c.body.send_now === true && c.body.busy === true)).toBe(true)
+    expect(w.submits).toEqual([])
+    const rows = session.appended().filter((row: any) => row.message?.type === 'user')
+    expect(rows).toHaveLength(1)
+    expect(JSON.stringify(rows[0]!.message.content)).toContain('Plannotator Inbox: Ship it? (msg_reply)')
+    expect(JSON.stringify(rows[0]!.message.content)).toContain('Yes, now.')
+    expect(delivered).toBe(true)
+  })
+
   test("a background subagent's turn does not hold the reply: the main loop is idle, so it arrives as a turn", async ($: any, on: any) => {
     const calls: { url: string; body: any }[] = []
     let delivered = false
@@ -619,5 +648,19 @@ describe('register', () => {
     for (let second = 0; second < 6; second++) await w.clock.advance(1_000)
     expect(w.submits).toHaveLength(1)
     expect(delivered).toBe(true)
+  })
+
+  test('an engine older than the API with $.session.append never says it can take a reply mid-turn', async ($: any, on: any) => {
+    const calls: { url: string; body: any }[] = []
+    const w = world(on, {
+      files: withRegistry(),
+      fetch: inbox(TOOLS, calls, (path) => (path === '/api/inbox/bridge/poll' ? { commands: [] } : { ok: true })),
+    })
+    on('session.version', () => ({ value: { version: '2.1.290', base: '2.1.290' } }))
+    await $.session.start(SESSION)
+    for (let second = 0; second < 4; second++) await w.clock.advance(1_000)
+    const polls = calls.filter((c) => c.url.endsWith('/api/inbox/bridge/poll'))
+    expect(polls.length).toBeGreaterThan(0)
+    expect(polls.some((c) => c.body.send_now === true)).toBe(false)
   })
 })

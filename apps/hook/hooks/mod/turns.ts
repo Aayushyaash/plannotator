@@ -194,6 +194,11 @@ export class TurnTracker {
     return this.takenOverTurns.has(turnId) || (this.askOn(turnId)?.pending ?? 0) > 0
   }
 
+  /** The turn running now (main loop), or null. */
+  get runningTurn(): string | null {
+    return this.runningTurnId
+  }
+
   get busy(): boolean {
     return this.runningTurnId !== null || (this.ask !== null && !this.ask.finished)
   }

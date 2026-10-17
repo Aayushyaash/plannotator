@@ -276,7 +276,8 @@ test('the asking session stopped and another is live: the thread says so, Send a
   expect((await threadMessages()).at(-1)).toMatchObject({ id: command.id, to: { host: 'pi', session: 'pi-session-taker' } });
   const mine = pane.locator('article.ib-message[data-author="person"]');
   await expect(mine.locator('.ib-to')).toHaveText('to Pi (another session)');
-  await expect(pane.locator('[data-delivery="queued"]')).toHaveText('Pi (another session) takes it as its next turn.');
+  // The taker's connection polls idle: it takes it within seconds.
+  await expect(pane.locator('[data-delivery="sending"]')).toHaveText('Sending to Pi (another session)…');
 
   await taker.deliver(command.id);
   await expect(pane.locator('[data-delivery="delivered"]')).toHaveText(/^Delivered to Pi \(another session\), \d{1,2}:\d{2} [AP]M$/);

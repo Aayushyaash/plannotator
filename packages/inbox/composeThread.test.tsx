@@ -118,7 +118,7 @@ test.skipIf(!hasDom)('a thread the person started names whom it went to, and say
   const el = await render(started());
   expect(el.querySelector('[data-started-by]')?.textContent).toBe('You started this threadto Claude Code in ledger');
   expect(el.querySelector('[data-delivery]')?.getAttribute('data-delivery')).toBe('queued');
-  expect(el.querySelector('[data-delivery]')?.textContent).toBe('Claude Code takes it as its next turn.');
+  expect(el.querySelector('[data-delivery]')?.textContent).toBe('Queued for Claude Code; it gets this as its next turn.');
   expect(el.querySelector('[data-readdress]')).toBeNull();
 });
 

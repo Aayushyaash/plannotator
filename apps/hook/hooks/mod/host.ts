@@ -52,6 +52,24 @@ export interface Host {
   storeSet(key: string, value: unknown): Promise<void>
   /** `$.prompt.submit`: runs once the session is idle, read under the plugin's name. */
   submit(text: string): Promise<void>
+  /**
+   * `$.session.append` of a user-role row (the model reads it; the person
+   * does not see it as typed): in a running turn it is in the turn's next
+   * model request, the one way a plugin puts words into a running turn
+   * (`$.prompt.submit` never folds into one). Rejects when the row was
+   * refused, or the engine has no `$.session.append`. Optional for hosts
+   * (tests) that model an engine without it.
+   */
+  appendUserRow?(text: string): Promise<void>
+  /**
+   * Whether this engine has `$.session.append` (a build that documents it;
+   * `claude plugin validate` refuses reading `$.session.append` as a value,
+   * so it is decided from the engine's version). Absent or false: Send now
+   * is never advertised.
+   */
+  sessionAppendAvailable?(): Promise<boolean>
+  /** `$.session.append` of a notice the transcript shows and the model never reads. */
+  appendNotice?(text: string): Promise<void>
   suggest(text: string): Promise<void>
   status(text: string | undefined): void
   log(text: string): void

@@ -22,6 +22,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { InboxListSection, InboxMessageWire } from '@plannotator/core/inbox-types';
+import type { RecipientConnection } from './deliveryLine';
 
 const hasDom = typeof document !== 'undefined';
 const { InboxApp } = (hasDom ? await import('./App') : {}) as typeof import('./App');
@@ -275,12 +276,14 @@ test.skipIf(!hasDom)('the pressed button takes it back; the line says each state
 
   const at = '2026-10-15T10:59:00.000Z';
   const base = { label: 'Looks good', at, read_seq: 4 };
-  const lineOf = (ack: NonNullable<InboxMessageWire['ack']>, wakes: boolean) => {
+  const lineOf = (ack: NonNullable<InboxMessageWire['ack']>, wakes: boolean, connection?: RecipientConnection | null) => {
     const box = document.createElement('div');
     document.body.appendChild(box);
     const pillRoot = createRoot(box);
-    act(() => pillRoot.render(<AckPill ack={ack} agent="Claude Code" wakes={wakes} />));
+    act(() => pillRoot.render(<AckPill ack={ack} agent="Claude Code" wakes={wakes} connection={connection} />));
     const pill = box.querySelector('[data-ack-pill]')!;
+    // A 👍 asks nothing of the agent: never a Send now beside it.
+    expect(box.querySelector('button')).toBeNull();
     const out = { state: pill.getAttribute('data-ack-pill'), text: pill.textContent ?? '' };
     act(() => pillRoot.unmount());
     box.remove();
@@ -288,6 +291,11 @@ test.skipIf(!hasDom)('the pressed button takes it back; the line says each state
   };
   expect(lineOf({ ...base, settled_seq: null }, true)).toMatchObject({ state: 'pending', text: expect.stringContaining('goes to Claude Code in a few seconds') });
   expect(lineOf({ ...base, settled_seq: 5, note_id: 'msg_note' }, true)).toMatchObject({ state: 'queued', text: expect.stringContaining('Queued for Claude Code; it gets this as its next turn.') });
+  // The same honest words as a reply's line, from the session's connection now (deliveryLine).
+  const sent = { ...base, settled_seq: 5, note_id: 'msg_note' };
+  expect(lineOf(sent, true, { busy: true, idle_since: null, send_now: true })).toMatchObject({ state: 'queued', text: expect.stringContaining('Queued · Claude Code is working; it gets this when its turn ends.') });
+  expect(lineOf(sent, true, { busy: false, idle_since: at, send_now: true })).toMatchObject({ state: 'sending', text: expect.stringContaining('Sending to Claude Code…') });
+  expect(lineOf(sent, true, null)).toMatchObject({ state: 'queued', text: expect.stringContaining('Queued for Claude Code; it gets this when its session is back.') });
   expect(lineOf({ ...base, settled_seq: 5, note_id: 'msg_note' }, false)).toMatchObject({ state: 'saved', text: expect.stringContaining('Saved for Claude Code. It sees it when it next reads this thread.') });
   // Settled before it was sent through (an older Inbox): no wake will take it.
   expect(lineOf({ ...base, settled_seq: 5 }, true).state).toBe('saved');

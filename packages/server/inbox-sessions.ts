@@ -37,7 +37,7 @@
 import { homedir } from "node:os";
 import type { InboxProject } from "@plannotator/core/inbox-types";
 import { checkServerSession, INBOX_SERVER_SESSION_MISMATCH_ERROR, serverSessionMismatchBody } from "@plannotator/core/server-session";
-import { INBOX_SESSION_LIVE_MS } from "@plannotator/shared/inbox/connection";
+import { INBOX_SEND_NOW_POLL_FIELD, INBOX_SESSION_LIVE_MS } from "@plannotator/shared/inbox/connection";
 import { InboxError } from "@plannotator/shared/inbox/schema";
 import type { InboxStore } from "@plannotator/shared/inbox/store";
 
@@ -53,6 +53,20 @@ export interface InboxLiveSession {
   idle_since: string | null;
   /** It wrote in this thread. */
   wrote_thread: boolean;
+  /** Its connection can deliver into a running turn (Send now); false when it does not say. */
+  send_now: boolean;
+}
+
+/**
+ * How the session a person's message goes to is connected now, for the
+ * window's line under that message: present while the session's connection
+ * polls (live, no grace). `busy` null when the connection does not say.
+ */
+export interface InboxRecipientConnection {
+  busy: boolean | null;
+  idle_since: string | null;
+  /** Send now can be offered: the connection said it can deliver into a running turn. */
+  send_now: boolean;
 }
 
 interface SeenSession {
@@ -65,6 +79,8 @@ interface SeenSession {
   holding: number;
   busy: boolean | null;
   idleSince: number | null;
+  /** Its poll said it can deliver into a running turn (`send_now`). */
+  sendNow: boolean;
 }
 
 /**
@@ -146,8 +162,9 @@ export function createInboxLiveSessions(options: {
   const pollStarted = async (session: string, host: string, body: Record<string, unknown>): Promise<() => void> => {
     const at = now();
     const root = await rootOf(body.project_path);
-    const entry = sessions.get(session) ?? { host, root, startedAt: finiteMs(body.started_at) ?? at, lastSeen: at, holding: 0, busy: null, idleSince: null };
+    const entry = sessions.get(session) ?? { host, root, startedAt: finiteMs(body.started_at) ?? at, lastSeen: at, holding: 0, busy: null, idleSince: null, sendNow: false };
     entry.host = host;
+    entry.sendNow = body[INBOX_SEND_NOW_POLL_FIELD] === true;
     if (root !== null) entry.root = root;
     entry.startedAt = finiteMs(body.started_at) ?? entry.startedAt;
     entry.lastSeen = at;
@@ -160,7 +177,7 @@ export function createInboxLiveSessions(options: {
     };
   };
 
-  /** A `state` event: a turn started or ended. */
+  /** A `state` event: a turn started or ended, or whether a Send now reply can go in changed. */
   const stateChanged = (session: string, host: string, body: Record<string, unknown>) => {
     const entry = sessions.get(session);
     if (!entry) return;
@@ -168,6 +185,7 @@ export function createInboxLiveSessions(options: {
     entry.host = host;
     entry.lastSeen = at;
     applyState(entry, body, at);
+    if (typeof body[INBOX_SEND_NOW_POLL_FIELD] === "boolean") entry.sendNow = body[INBOX_SEND_NOW_POLL_FIELD] === true;
   };
 
   const isLive = (entry: SeenSession) => entry.holding > 0 || now() - entry.lastSeen <= INBOX_SESSION_LIVE_MS;
@@ -235,6 +253,7 @@ export function createInboxLiveSessions(options: {
         busy: entry.busy,
         idle_since: entry.busy === false && entry.idleSince !== null ? iso(entry.idleSince) : null,
         wrote_thread: lastWrote.has(session),
+        send_now: entry.sendNow,
         order: lastWrote.get(session) ?? -1,
         started: entry.startedAt,
       });
@@ -254,6 +273,17 @@ export function createInboxLiveSessions(options: {
       out.push({ session, host: entry.host, root: entry.root, startedAt: entry.startedAt, lastSeen: entry.lastSeen, busy: entry.busy, idleSince: entry.busy === false ? entry.idleSince : null });
     }
     return out;
+  };
+
+  /** How a session is connected now (live, no grace), or null when its connection does not poll. */
+  const connectionOf = (session: string): InboxRecipientConnection | null => {
+    const entry = sessions.get(session);
+    if (!entry || !isLive(entry)) return null;
+    return {
+      busy: entry.busy,
+      idle_since: entry.busy === false && entry.idleSince !== null ? iso(entry.idleSince) : null,
+      send_now: entry.sendNow,
+    };
   };
 
   /** Whether a session is live now (no grace: compose sends only to a session that polls). */
@@ -293,8 +323,22 @@ export function createInboxLiveSessions(options: {
         home: homedir(),
         project: live.project,
         sessions: live.sessions,
-        ...(asker ? { asker: { session: asker, live: askerLive(asker) } } : {}),
+        // `connection` (additive): how that session is connected now, for the line under the person's message ("Queued", "Sending", Send now).
+        ...(asker ? { asker: { session: asker, live: askerLive(asker), connection: connectionOf(asker) } } : {}),
       });
+    }
+    const sendNowMatch = /^\/api\/inbox\/messages\/([A-Za-z0-9_]+)\/send-now$/.exec(path);
+    if (sendNowMatch) {
+      if (req.method !== "POST") return answer({ error: "Use POST." }, 405);
+      let body: Record<string, unknown> = {};
+      try {
+        const value = await req.json();
+        body = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+      } catch {
+        throw new InboxError("validation_error", "body: expected a JSON object.");
+      }
+      if (checkServerSession(body, serverSession) === "mismatch") return answer(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409);
+      return answer({ message: sendNow(sendNowMatch[1]!) });
     }
     const messageMatch = /^\/api\/inbox\/threads\/([A-Za-z0-9_]+)\/message$/.exec(path);
     if (!messageMatch) return null;
@@ -320,5 +364,27 @@ export function createInboxLiveSessions(options: {
     return answer({ message: result.message, replayed: result.replayed });
   };
 
-  return { pollStarted, stateChanged, liveFor, askerLive, replyTarget, seenOverMcp, holdOverMcp, route, allLive, isSessionLive, composeTarget };
+  /**
+   * Send now: the person's reply or message, delivered at once by its
+   * session's connection (into the running turn when one runs). Refused when
+   * that session's connection does not poll now or cannot deliver into a
+   * running turn (`send_now_unavailable`), or once delivered.
+   */
+  const sendNow = (messageId: string) => {
+    const message = store.message(messageId);
+    if (!message) throw new InboxError("message_not_found", `No message ${messageId}.`);
+    if (message.delivery) throw new InboxError("already_delivered", "That session already took this.", { delivery: message.delivery });
+    const recipient = store.recipientOf(message);
+    if (!recipient) throw new InboxError("not_addressed", "Only your reply or message to an agent session can be sent now.");
+    const connection = connectionOf(recipient.session);
+    if (!connection?.send_now) {
+      throw new InboxError(
+        "send_now_unavailable",
+        connection ? "This agent's connection cannot take a message mid-turn; it gets it when its turn ends." : "That session is not connected now; it gets this when it is back.",
+      );
+    }
+    return store.requestDeliverNow(messageId);
+  };
+
+  return { pollStarted, stateChanged, liveFor, askerLive, replyTarget, seenOverMcp, holdOverMcp, route, allLive, isSessionLive, composeTarget, connectionOf };
 }

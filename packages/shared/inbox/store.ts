@@ -885,7 +885,11 @@ export class InboxStore {
     const lastReal = lastNonNote(messages) ?? root;
     const sent =
       lastReal.author.kind === "person"
-        ? { at: lastReal.created_at, checked_at: (root.agent_checked_seq ?? 0) >= seqOf(lastReal) ? (root.agent_checked_at ?? null) : null }
+        ? {
+            at: lastReal.created_at,
+            checked_at: (root.agent_checked_seq ?? 0) >= seqOf(lastReal) ? (root.agent_checked_at ?? null) : null,
+            wakes: this.wakesRecipient(lastReal),
+          }
         : null;
     // An agent wrote after the person archived the thread (mail apps' rule):
     // it comes back to the list while something there waits (an agent
@@ -2754,6 +2758,69 @@ export class InboxStore {
     if (message.to) return message.to.session === session;
     const asked = message.reply_to ? this.messages.get(message.reply_to) : undefined;
     return asked?.author.kind === "agent" && asked.author.session === session;
+  }
+
+  /**
+   * The agent session a person's message goes to (`isFor`'s answer): the
+   * session it is addressed to, else the session of the message it replies
+   * to; null when there is none (a reply to a message sent without a
+   * session, the Inbox's own notes).
+   */
+  recipientOf(message: InboxMessage): { host: string | null; session: string } | null {
+    if (message.author.kind !== "person" || isInboxNote(message)) return null;
+    if (message.to) return { host: message.to.host, session: message.to.session };
+    const asked = message.reply_to ? this.messages.get(message.reply_to) : undefined;
+    if (asked?.author.kind !== "agent" || !asked.author.session) return null;
+    return { host: asked.author.host ?? null, session: asked.author.session };
+  }
+
+  /** Whether a person's message goes to a session whose connection delivers it as a turn by itself. */
+  private wakesRecipient(message: InboxMessage): boolean {
+    if (message.author.kind !== "person" || isInboxNote(message)) return false;
+    if (message.to) return true;
+    const asked = message.reply_to ? this.messages.get(message.reply_to) : undefined;
+    return asked?.author.kind === "agent" && asked.wakes === true;
+  }
+
+  /**
+   * Send now: the person asks for a reply or message of theirs to be
+   * delivered at once (the bridge command's `now`), into the running turn
+   * when one runs. A new snapshot of the same message with `deliver_now_at`
+   * (the last line wins); a second press writes nothing. Refused once
+   * delivered (`already_delivered`) or for a message that goes to no
+   * session (`not_addressed`). Whether that session's connection can do it
+   * is the server's check, before this is called.
+   */
+  requestDeliverNow(messageId: string): InboxMessage {
+    const message = this.messages.get(messageId);
+    if (!message) throw new InboxError("message_not_found", `No message ${messageId}.`);
+    if (!this.recipientOf(message)) {
+      throw new InboxError("not_addressed", "Only your reply or message to an agent session can be sent now.");
+    }
+    if (message.delivery) throw new InboxError("already_delivered", "That session already took this.", { delivery: message.delivery });
+    if (message.deliver_now_at) return message;
+    const at = this.stamp();
+    const next: InboxMessage = { ...message, deliver_now_at: at };
+    this.appendMessage(next, at);
+    return next;
+  }
+
+  /**
+   * The session's connection could not put a Send now reply into the running
+   * turn (the engine refused it): the mark goes, so the window reads it as
+   * queued again and the reply waits for idle as before. Only the session it
+   * goes to may say so; a delivered reply or one without the mark is left as
+   * it is.
+   */
+  clearDeliverNow(messageId: string, session: string): InboxMessage {
+    const message = this.messages.get(messageId);
+    if (!message) throw new InboxError("message_not_found", `No message ${messageId}.`);
+    if (!this.isFor(message, session)) throw new InboxError("validation_error", "session: this message goes to another session.", { field: "session" });
+    if (message.delivery || !message.deliver_now_at) return message;
+    const at = this.stamp();
+    const next: InboxMessage = { ...message, deliver_now_at: null };
+    this.appendMessage(next, at);
+    return next;
   }
 
   /** The blobs the store's messages use (attachments and guided reviews): the upload sweep keeps them. */

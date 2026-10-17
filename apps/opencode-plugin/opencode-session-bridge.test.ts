@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   createOpenCodeMessageId,
   createOpenCodeSessionBridge,
+  isAskTurnActive,
   markPlanReviewPending,
   readAnswerAfter,
   TAKEN_OVER_INTERRUPT_TEXT,
@@ -184,6 +185,34 @@ describe("OpenCode session bridge", () => {
     expect(sink.done).toBe("Because of X.\n\nAlso Y.");
     expect(sink.deltas.join("")).toBe("Because of X.\n\nAlso Y.");
     expect(sink.tools).toEqual(["read"]);
+  });
+
+  // The Inbox wake never steers a Send now reply into this turn (isAskTurnActive); the failure this
+  // catches: a reply answered into the Ask panel, or a mark that outlives the question.
+  test("marks the session while its Ask question's turn runs, until it finishes or the bridge is disposed", async () => {
+    const host = fakeHost();
+    const bridge = bridgeFor(host);
+    expect(isAskTurnActive(SESSION)).toBe(false);
+    const sink = recordingSink();
+    bridge.ask({ askId: "a1", text: "[Plannotator Ask AI] why?", mode: "turn" }, sink.sink, new AbortController().signal);
+    await waitFor(() => host.prompts.length === 1);
+    expect(isAskTurnActive(SESSION)).toBe(true);
+    host.emit("session.execution.started");
+    host.emit("session.inbox.delivered", { inboxID: host.prompts[0].id });
+    host.emit("session.text.started", { assistantMessageID: "m1", ordinal: 0 });
+    host.emit("session.text.ended", { assistantMessageID: "m1", ordinal: 0, text: "Because." });
+    host.emit("session.execution.succeeded");
+    await waitFor(() => sink.done !== undefined);
+    expect(isAskTurnActive(SESSION)).toBe(false);
+
+    const second = recordingSink();
+    bridge.ask({ askId: "a2", text: "[Plannotator Ask AI] and?", mode: "turn" }, second.sink, new AbortController().signal);
+    await waitFor(() => host.prompts.length === 2);
+    host.emit("session.execution.started");
+    host.emit("session.inbox.delivered", { inboxID: host.prompts[1].id });
+    expect(isAskTurnActive(SESSION)).toBe(true);
+    bridge.dispose();
+    expect(isAskTurnActive(SESSION)).toBe(false);
   });
 
   test("reports busy while the session runs, blocked while a plan review waits, gone once deleted", async () => {

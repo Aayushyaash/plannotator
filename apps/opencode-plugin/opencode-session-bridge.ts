@@ -93,6 +93,29 @@ export function isPlanReviewPending(sessionID: string): boolean {
 	return planReviewPending.has(sessionID);
 }
 
+/**
+ * Sessions whose "Ask this session" question is a turn in progress here
+ * (sent, and not finished). The Inbox wake never steers a Send now reply into
+ * that turn (its answer streams to Plannotator): the reply waits for idle.
+ */
+const askTurns = new Map<string, number>();
+
+function markAskTurn(sessionID: string): () => void {
+	askTurns.set(sessionID, (askTurns.get(sessionID) ?? 0) + 1);
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		const count = (askTurns.get(sessionID) ?? 1) - 1;
+		if (count <= 0) askTurns.delete(sessionID);
+		else askTurns.set(sessionID, count);
+	};
+}
+
+export function isAskTurnActive(sessionID: string): boolean {
+	return askTurns.has(sessionID);
+}
+
 const ID_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 let lastIdTimestamp = 0;
 let idCounter = 0;
@@ -214,6 +237,12 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 	let running: boolean | undefined;
 	let lastStartedAt = 0;
 	let active: ActiveTurn | null = null;
+	/** Releases this bridge's mark in `askTurns` while `active` is set. */
+	let releaseAskTurn: (() => void) | null = null;
+	const endAskTurn = () => {
+		releaseAskTurn?.();
+		releaseAskTurn = null;
+	};
 	const controller = new AbortController();
 	let probeTimer: ReturnType<typeof setTimeout> | null = null;
 	let probing = false;
@@ -280,7 +309,10 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 		if (turn.finished) return;
 		turn.finished = true;
 		clearWatchdog(turn);
-		if (active === turn) active = null;
+		if (active === turn) {
+			active = null;
+			endAskTurn();
+		}
 		report();
 	};
 
@@ -487,6 +519,8 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 			stepCalledTools: false,
 		};
 		active = turn;
+		endAskTurn();
+		releaseAskTurn = markAskTurn(sessionID);
 
 		signal.addEventListener(
 			"abort",
@@ -633,6 +667,7 @@ export function createOpenCodeSessionBridge(options: OpenCodeSessionBridgeOption
 			probeTimer = null;
 			const turn = active;
 			if (turn && !turn.delivered) finishTurn(turn, () => turn.sink.error("gone"));
+			endAskTurn();
 		},
 	};
 }

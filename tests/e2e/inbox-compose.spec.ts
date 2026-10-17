@@ -307,7 +307,8 @@ test('an agent connects: the draft reopens with To prefilled; Send starts a thre
   const pane = page.locator('section.ib-pane');
   await expect(pane.locator('[data-started-by]')).toHaveText(/You started this thread\s*to Claude Code in ledger/);
   await expect(pane.locator('[data-attachment-name="notes.md"]').first()).toBeVisible();
-  await expect(pane.locator('[data-delivery="queued"]')).toHaveText('Claude Code takes it as its next turn.');
+  // The session's connection polls idle: it takes it within seconds.
+  await expect(pane.locator('[data-delivery="sending"]')).toHaveText('Sending to Claude Code…');
   const listRow = page.locator(`.ib-listcol [data-thread-id="${command.thread_id}"]`).first();
   await expect(listRow).toContainText('To Claude Code');
   // The chip as compose showed it.

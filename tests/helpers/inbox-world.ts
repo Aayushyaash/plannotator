@@ -210,6 +210,29 @@ export async function personSends(w: InboxWorld, messageId: string, words: strin
   return reply.id;
 }
 
+/** The person presses Send now on their reply, through the route the window posts to. */
+export async function pressSendNow(w: InboxWorld, replyId: string): Promise<void> {
+  const { port } = registry(w);
+  const health = (await (await fetch(`http://127.0.0.1:${port}/api/inbox/health`)).json()) as { serverSession: string };
+  const response = await fetch(`http://127.0.0.1:${port}/api/inbox/messages/${replyId}/send-now`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: `http://127.0.0.1:${port}` },
+    body: JSON.stringify({ serverSession: health.serverSession }),
+  });
+  if (response.status !== 200) throw new Error(`Send now answered ${response.status}: ${await response.text()}`);
+  w.proof(`> the person presses Send now on ${replyId}\n`);
+}
+
+/** Waits until the session's connection polled busy and able to take a reply mid-turn (Send now offered). */
+export async function sendNowOffered(w: InboxWorld, threadId: string, session: string): Promise<void> {
+  await waitFor("Send now offered", async () => {
+    const model = (await (await fetch(`http://127.0.0.1:${registry(w).port}/api/inbox/threads/${threadId}/sessions?asker=${session}`)).json()) as {
+      asker: { connection: { busy: boolean | null; send_now: boolean } | null };
+    };
+    return model.asker.connection?.busy === true && model.asker.connection.send_now === true;
+  });
+}
+
 /** The person starts a thread from compose (POST /api/inbox/messages) with a live session; returns the root message id. */
 export async function personComposes(w: InboxWorld, to: { host: string; session: string }, body: string, extra: { thread_name?: string } = {}): Promise<string> {
   const { port } = registry(w);

@@ -48,7 +48,7 @@ export type NewMessageMode = { kind: 'pick' } | { kind: 'none' } | { kind: 'comp
  * while it stays open, and on demand. With `asker` (the session that asked,
  * for a host whose sessions poll), also whether that session is still there.
  */
-export function useLiveSessions(threadId: string, asker: string | null = null, enabled = true) {
+export function useLiveSessions(threadId: string, asker: string | null = null, enabled = true, refreshMs = REFRESH_MS) {
   const [model, setModel] = useState<LiveSessionsModel | null>(null);
   const load = useCallback(async (): Promise<LiveSessionsModel | null> => {
     try {
@@ -64,9 +64,9 @@ export function useLiveSessions(threadId: string, asker: string | null = null, e
     // `enabled` false: nothing to watch (compose's "Not delivered" asks only while a message waits).
     if (!enabled) return;
     void load();
-    const timer = setInterval(() => void load(), REFRESH_MS);
+    const timer = setInterval(() => void load(), refreshMs);
     return () => clearInterval(timer);
-  }, [load, enabled]);
+  }, [load, enabled, refreshMs]);
   return { model, load };
 }
 

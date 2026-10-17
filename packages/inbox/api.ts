@@ -24,6 +24,7 @@ import type {
   InboxUpload,
 } from '@plannotator/core/inbox-types';
 import type { QuestionAnswer } from '@plannotator/core/question-block';
+import type { RecipientConnection } from './deliveryLine';
 import type { InboxSearchAnswer, InboxSearchFrom, InboxSearchGroupId, InboxSearchStatus } from '@plannotator/core/inbox-search';
 import type {
   InboxAgentId,
@@ -249,6 +250,8 @@ export interface LiveSession {
   idle_since: string | null;
   /** It wrote in this thread. */
   wrote_thread: boolean;
+  /** Its connection can put a message into a running turn (Send now). Absent from an older Inbox. */
+  send_now?: boolean;
 }
 
 export interface LiveSessionsModel {
@@ -262,7 +265,16 @@ export interface LiveSessionsModel {
    * (with a 60 s grace, packages/server/inbox-sessions.ts). Absent from an
    * older Inbox, which reads as live.
    */
-  asker?: { session: string; live: boolean };
+  asker?: {
+    session: string;
+    live: boolean;
+    /**
+     * How that session is connected now (no grace): null when its connection
+     * does not poll now. Absent from an older Inbox. The line under the
+     * person's message reads it ("Queued", "Sending", Send now).
+     */
+    connection?: RecipientConnection | null;
+  };
 }
 
 /** A paired phone as the window lists it (adr/implementation/inbox-mobile.md, 7.36). */
@@ -643,6 +655,8 @@ export const inboxApi = {
   deleteDraft: (id: string) => post<{ ok: true; deleted: boolean }>(`/api/inbox/drafts/${encodeURIComponent(id)}/delete`, {}),
   sessions: (threadId: string, asker?: string | null) =>
     get<LiveSessionsModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}/sessions${asker ? `?asker=${encodeURIComponent(asker)}` : ''}`),
+  /** Send now: deliver the person's reply or message at once, into the running turn when one runs. */
+  sendNow: (messageId: string) => post<{ message: InboxMessage }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/send-now`, {}),
   newMessage: (threadId: string, input: { session: string; body: string; idempotency_key: string }) =>
     post<{ message: InboxMessage; replayed: boolean }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/message`, input),
   // Phones: pairing, the paired devices, the tailnet and Wi-Fi switches (packages/server/inbox-devices.ts).
