@@ -1,5 +1,6 @@
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { inboxThreadNameKey, type InboxListRow, type InboxListSection } from '@plannotator/core/inbox-types';
+import type { InboxListRow, InboxListSection } from '@plannotator/core/inbox-types';
+import { threadChipName } from '../threadChip';
 import { Tooltip, TooltipProvider } from '@plannotator/ui/components/Tooltip';
 import { agentName, formatCount, questionCount, shortTime } from '../format';
 import { titleIfClipped } from '../clipTitle';
@@ -80,21 +81,9 @@ function countOf(row: InboxListRow): string {
   return questionCount(row.questions.open);
 }
 
-/**
- * The thread's name as a chip, unless the subject already starts with it
- * (agents often begin the subject with the thread's name, and the row then
- * said it twice). Compared the way threads are matched (`inboxThreadNameKey`),
- * and only when the name ends where the subject's words do: the subject ends
- * there, or goes on with a space, or with ":", "-", "–" or "—" and a space.
- * So `search` still shows beside "Searchable…", `v2` beside "v2.1 release"
- * and `auth` beside "auth-service down".
- */
+/** The thread's name as a chip, unless the subject already starts with it (`threadChipName`). */
 export function chipName(row: InboxListRow): string | null {
-  if (!row.thread_name) return null;
-  const name = inboxThreadNameKey(row.thread_name);
-  const subject = inboxThreadNameKey(subjectOf(row));
-  if (name && subject.startsWith(name) && /^(?:$|\s|[:\-–—]\s)/u.test(subject.slice(name.length))) return null;
-  return row.thread_name;
+  return threadChipName(row.thread_name, subjectOf(row));
 }
 
 /** The text is cut with "…" across (its own overflow): only then is the tooltip worth opening. */

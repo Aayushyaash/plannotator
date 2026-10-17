@@ -1029,9 +1029,10 @@ export class InboxSearchIndex {
           if (query.status || query.from) return null;
           return { group: "projects", facts: null };
       }
-      // A decision recorded from no thread (an agent's record_decision) has no section.
-      if (doc.type === "decision" && !doc.threadId) return query.status ? null : fromOk(doc, null) ? { group, facts: null } : null;
       const facts = doc.threadId ? this.factsOf(doc.threadId) : null;
+      // A decision recorded from no thread (an agent's record_decision), or whose thread was deleted since, has no
+      // section: it stays searchable, as on the Decisions page, and its row names no thread.
+      if (doc.type === "decision" && !facts) return query.status ? null : fromOk(doc, null) ? { group, facts: null } : null;
       if (doc.threadId && !facts) return null;
       if (!statusOk(facts) || !fromOk(doc, facts)) return null;
       return { group, facts };
@@ -1128,6 +1129,7 @@ export class InboxSearchIndex {
           ...where,
           author: message.author.kind === "agent" ? { kind: "agent", name: inboxAgentName(message.author) } : { kind: "me", name: "You" },
           title: facts.subject || "(no subject)",
+          thread_name: facts.threadName,
           snippet: inboxSearchSnippet(best.text, inboxSearchRanges(best.text, terms)),
           question: best.question,
           at: message.created_at,
@@ -1148,6 +1150,7 @@ export class InboxSearchIndex {
           folder: fileFolder(hit.attachment.path),
           kind: fileKind(hit.attachment.kind, name),
           title: facts.subject || "(no subject)",
+          thread_name: facts.threadName,
           at: hit.message.created_at,
         };
       }
@@ -1166,6 +1169,7 @@ export class InboxSearchIndex {
           folder: null,
           kind: "guide",
           title: facts.subject || "(no subject)",
+          thread_name: facts.threadName,
           at: message.created_at,
         };
       }
@@ -1181,6 +1185,9 @@ export class InboxSearchIndex {
           text_marks: toMarks(inboxSearchRanges(decision.text, terms)),
           state: decision.state,
           from: decision.source.kind === "agent" ? "agent" : "me",
+          thread_id: facts ? doc.threadId : null,
+          title: facts ? facts.subject || "(no subject)" : null,
+          thread_name: facts ? facts.threadName : null,
           at: decision.changed_at ?? decision.created_at,
         };
       }

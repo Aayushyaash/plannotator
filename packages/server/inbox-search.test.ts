@@ -97,6 +97,43 @@ describe("GET /api/inbox/search", () => {
     expect(scoped.body.totals.threads).toBe(1);
   });
 
+  test("rows in a thread carry its subject and name; a decision recorded from an answer names its thread, an agent's does not", async () => {
+    const w = await setup();
+    const sent = (await (clients.at(-1)!).callTool({
+      name: "send_message",
+      arguments: {
+        project_path: join(w.root, "api"),
+        agent_session: "ses_search",
+        agent_name: "Claude Code",
+        thread: "nightly-deploy",
+        subject: "Nightly deploy fails on the second retry",
+        body: ":::question\nPin the CDN cache key to the build id?\n\n- [ ] Yes\n- [ ] No\n:::",
+      },
+    })) as { structuredContent: { thread_id: string; message_id: string; questions: { key: string; kind: string; prompt: string }[] } };
+    const { thread_id: threadId, message_id: messageId, questions } = sent.structuredContent;
+    const q = questions[0]!;
+    const windowPost = (path: string, body: Json) =>
+      fetch(`${w.base}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, serverSession: w.server.serverSession }) });
+    const answer = { v: 1, key: q.key, kind: q.kind, prompt: q.prompt, selected: ["Yes"] };
+    expect((await windowPost(`/api/inbox/messages/${messageId}/picks`, { questions: [{ key: q.key, revision: 0, answer }] })).status).toBe(200);
+    expect((await windowPost(`/api/inbox/messages/${messageId}/decision`, { key: q.key, recording: true, draft: { text: "Pin the CDN cache key to the build id", reason: null } })).status).toBe(200);
+    expect((await windowPost(`/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k", questions: [{ key: q.key, revision: 1 }] })).status).toBe(200);
+    await clients.at(-1)!.callTool({ name: "record_decision", arguments: { project_path: join(w.root, "api"), agent_name: "Claude Code", text: "Pin every CDN cache key by hand" } });
+
+    const { body } = await w.searchSettled("q=cdn%20cache%20key");
+    expect(body.groups.messages[0]).toMatchObject({ type: "message", id: messageId, thread_id: threadId, title: "Nightly deploy fails on the second retry", thread_name: "nightly-deploy" });
+    const decisions = body.groups.decisions as Json[];
+    expect(decisions.find((d) => d.from === "me")).toMatchObject({ thread_id: threadId, title: "Nightly deploy fails on the second retry", thread_name: "nightly-deploy" });
+    expect(decisions.find((d) => d.from === "agent")).toMatchObject({ thread_id: null, title: null, thread_name: null });
+
+    // The thread deleted: its decision stays searchable (as on the Decisions page), naming no thread; a Status filter hides it.
+    expect((await windowPost(`/api/inbox/threads/${threadId}/delete`, {})).status).toBe(200);
+    const after = await w.searchSettled("q=cdn%20cache%20key");
+    expect(after.body.groups.messages).toEqual([]);
+    expect((after.body.groups.decisions as Json[]).find((d) => d.from === "me")).toMatchObject({ text: "Pin the CDN cache key to the build id", thread_id: null, title: null, thread_name: null, section: null });
+    expect((await w.searchSettled("q=cdn%20cache%20key&status=quiet")).body.totals.decisions).toBe(0);
+  });
+
   test("the first search builds in slices: indexing answers carry the thread count, other routes keep answering, and a later search finds a message sent after the build", async () => {
     // Slow slices: every thread is a slice and each yield waits 30 ms, so the build of 60 threads outlasts the route's wait.
     let clock = 0;

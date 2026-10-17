@@ -474,6 +474,8 @@ export interface InboxSearchMessageRow extends RowBase {
   author: { kind: 'agent' | 'me'; name: string };
   /** The thread's subject. */
   title: string;
+  /** The thread's name (`thread_name`), null for an unnamed thread. Additive. */
+  thread_name?: string | null;
   snippet: InboxSearchSnippet;
   /** The match is in a question (its prompt, choices or answer): the 'Question' chip. */
   question: { key: string; replaced: boolean } | null;
@@ -491,7 +493,10 @@ export interface InboxSearchFileRow extends RowBase {
   folder: string | null;
   /** The attachment's kind or the file's extension (`md`, `pdf`, `png`), or `guide`. */
   kind: string;
+  /** The thread's subject. */
   title: string;
+  /** The thread's name (`thread_name`), null for an unnamed thread. Additive. */
+  thread_name?: string | null;
 }
 
 export interface InboxSearchDecisionRow extends RowBase {
@@ -501,6 +506,14 @@ export interface InboxSearchDecisionRow extends RowBase {
   text_marks: [number, number][];
   state: InboxDecision['state'];
   from: InboxSearchFrom;
+  /**
+   * The thread a decision was recorded from (an answer), while that thread
+   * still exists: its id, subject and name. Null for a decision an agent
+   * recorded with no thread. Additive.
+   */
+  thread_id?: string | null;
+  title?: string | null;
+  thread_name?: string | null;
 }
 
 export interface InboxSearchProjectRow {

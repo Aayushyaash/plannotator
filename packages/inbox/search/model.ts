@@ -15,6 +15,7 @@ import {
   type InboxSearchThreadRow,
 } from '@plannotator/core/inbox-search';
 import { INBOX_SECTIONS, type InboxSectionId } from '@plannotator/core/inbox-types';
+import { threadChipName } from '../threadChip';
 
 export const GROUP_LABELS: Readonly<Record<InboxSearchGroupId, { heading: string; noun: string }>> = {
   threads: { heading: 'Threads', noun: 'threads' },
@@ -183,3 +184,53 @@ export function markedRuns(text: string, marks: readonly [number, number][]): { 
   if (at < text.length) out.push({ text: text.slice(at), mark: false });
   return out;
 }
+
+/** Text as compared for "the row already shows it": a cut's "…" dropped, whitespace as one space, case folded. */
+const sameText = (text: string): string =>
+  text
+    .replace(/^\s*…|…\s*$/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .toLocaleLowerCase();
+
+/** The shortest first line that counts as showing the thread's subject when it is a piece of it (a word or two is not). */
+const SHOWN_MIN = 12;
+
+/** The thread chip a result row draws: the list's chip (`.ib-key`), on the row's second line. */
+export interface RowThreadChip {
+  /** What the chip says: the thread's name, or its subject when it has none. */
+  text: string;
+  kind: 'name' | 'subject';
+  /** The thread's subject, for the chip's title and its accessible words. */
+  subject: string;
+}
+
+/**
+ * The one thread chip a result draws, in the form the list uses for a thread.
+ *
+ * - A thread row: the list's own rule (`threadChipName`): its name, unless its
+ *   subject (the row's first line) already starts with it; no name, no chip.
+ * - A message, file, guided review or decision recorded from an answer: the
+ *   thread's name; with no name, the thread's subject in the chip. That
+ *   subject chip is left out only when the row's first line is the subject,
+ *   begins with it, or is a start of it at least 12 characters long (a message
+ *   whose words became the subject); never for a word or two met inside the
+ *   text ("Deploy" in "We should deploy tomorrow").
+ * - A project, or a decision with no thread (an agent's `record_decision`, or
+ *   its thread deleted): none.
+ */
+export function rowThreadChip(row: InboxSearchRow): RowThreadChip | null {
+  if (row.type === 'project') return null;
+  const subject = row.title ?? null;
+  if (!subject) return null;
+  if (row.type === 'thread') {
+    const name = threadChipName(row.thread_name, subject);
+    return name ? { text: name, kind: 'name', subject } : null;
+  }
+  if (row.thread_name) return { text: row.thread_name, kind: 'name', subject };
+  const first = sameText(row.type === 'message' ? row.snippet.text : row.type === 'decision' ? row.text : row.name);
+  const wanted = sameText(subject);
+  const shown = wanted.length > 0 && (first.startsWith(wanted) || (first.length >= SHOWN_MIN && wanted.startsWith(first)));
+  return shown ? null : { text: subject, kind: 'subject', subject };
+}
+

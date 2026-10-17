@@ -337,6 +337,46 @@ test('filters: a chip menu by keyboard, Escape closes the menu before the palett
   await expect(page.locator('.ib-side .ib-sp-entry')).toBeFocused();
 });
 
+test('a message, a file and a decision recorded from an answer draw their thread’s chip; every second line keeps its time', async () => {
+  await openFromSidebar(page);
+  await input(page).fill('retry budget');
+  await settled(page);
+  const budget = palette(page).locator(`[data-result="message"][data-result-id="${world.retryBudget}"]`);
+  // The list's chip: the thread's name.
+  const budgetChip = budget.locator('.ib-key[data-result-thread="name"]');
+  await expect(budgetChip.locator('.ib-keyt')).toHaveText('retry');
+  await expect(budgetChip).toHaveAttribute('title', 'Thread: retry: Retry storm on the relay after a deploy');
+  await input(page).fill('retry-policy');
+  await settled(page);
+  await expect(palette(page).locator('[data-result="file"]').first().locator('.ib-key .ib-keyt')).toHaveText('retry');
+  await input(page).fill('CDN cache key');
+  await settled(page);
+  for (const kind of ['message', 'decision']) {
+    const chip = palette(page).locator(`[data-result="${kind}"]`).first().locator('.ib-key[data-result-thread]');
+    await expect(chip.locator('.ib-keyt')).toHaveText('nightly-deploy-investigation-for-the-customer-portal');
+    await expect(chip).toHaveAttribute('title', /^Thread: nightly-deploy-investigation-for-the-customer-portal: Investigate why the nightly deploy/);
+  }
+  await shot(page, '09a-thread-on-row');
+  // Every part of the second line stays inside its row: the time is drawn whole, at desktop and phone widths.
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const q of ['deploy', 'CDN cache key', 'spike']) {
+      await input(page).fill(q);
+      await settled(page);
+      const bad = await palette(page).evaluate((dialog) =>
+        [...dialog.querySelectorAll<HTMLElement>('.ib-sp-tl')].filter((line) => {
+          const at = line.querySelector('.ib-sp-at') ?? line.lastElementChild!;
+          return line.scrollWidth > line.clientWidth + 1 || at.getBoundingClientRect().right > line.getBoundingClientRect().right + 1;
+        }).length,
+      );
+      expect(bad, `${q} at ${width}px`).toBe(0);
+    }
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.keyboard.press('Escape');
+  await expect(palette(page)).toBeHidden();
+});
+
 test('long, right-to-left and CJK text stays inside the palette', async () => {
   await openFromSidebar(page);
   await input(page).fill('deploy');
