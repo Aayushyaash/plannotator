@@ -13,7 +13,8 @@
  * - Scrolled up: nothing moves, the pill says "1 new" and goes to it; the
  *   store keeps it unseen until it has been on screen. With messages new at
  *   the open also below the view, the pill counts the arrival alone and one
- *   click lands on it.
+ *   click lands on it. Once a new message has been on screen (seen on sight
+ *   or not: another app in front), scrolling back up never brings the pill back.
  * - Closed before seeing it: the row settles unread (Waiting, it asks).
  *   Closed after seeing it: Quiet.
  * - A phone (WebKit, iPhone 15): the same rule; Back shows the row unbolded in
@@ -44,7 +45,7 @@ const DWELL_MS = 1000;
 const LONG = ['The refund pipeline, step by step.', ...Array.from({ length: 40 }, (_, i) => `Step ${i + 1}: the worker reads the event, checks the idempotency key, and writes the ledger row.`)].join('\n\n');
 const QUESTION = [':::question', 'Retry a refund on a Stripe 409?', '', '- [ ] Yes, with the same key', '- [ ] No, dead-letter it', ':::'].join('\n');
 
-type Key = 'end' | 'up' | 'pill' | 'unseen' | 'seen' | 'phoneSeen' | 'phoneUnseen' | 'phoneSheet' | 'other';
+type Key = 'end' | 'up' | 'pill' | 'short' | 'unseen' | 'seen' | 'phoneSeen' | 'phoneUnseen' | 'phoneSheet' | 'other';
 
 interface World {
   url: string;
@@ -70,6 +71,7 @@ test.beforeAll(async () => {
     end: 'The refund webhook is wired.',
     up: LONG,
     pill: 'The refund webhook is wired.',
+    short: 'The refund webhook is wired.',
     unseen: LONG,
     seen: 'The refund webhook is wired.',
     phoneSeen: 'The refund webhook is wired.',
@@ -78,7 +80,7 @@ test.beforeAll(async () => {
     phoneSheet: `${LONG}\n\n:::question\nShould retries go to the dead-letter queue?\n\n- [ ] Yes\n- [ ] No\n:::`,
     other: 'Unrelated.',
   };
-  for (const key of ['end', 'up', 'pill', 'unseen', 'seen', 'phoneSeen', 'phoneUnseen', 'phoneSheet'] as const) {
+  for (const key of ['end', 'up', 'pill', 'short', 'unseen', 'seen', 'phoneSeen', 'phoneUnseen', 'phoneSheet'] as const) {
     const path = scratchProject(join(root, 'src'), `billing-${key}`);
     const sent = await agent.send({ project_path: path, subject: `Refund events (${key})`, body: bodies[key], agent_session: `ses_${key}` } as Parameters<SimAgent['send']>[0]);
     projects[key] = { path, id: '', thread: String(sent.thread_id), root: String(sent.message_id) };
@@ -239,6 +241,64 @@ test('desktop, new messages below at the open and an arrival: the pill counts th
     await expect(page.locator(`[data-message-article="${arrived.message_id}"]`)).toBeInViewport();
     await expect.poll(async () => (await storeRow(id)).unseen, { timeout: 6000 }).toBe(0);
     await expect(pill).toHaveAttribute('data-off', '');
+
+    // The owner, 2026-10-16: "Why does this whole 'one new' thing keep
+    // showing, even though I've seen the whole message? Shows when I scroll
+    // up." Read back up to the top, a screen at a time: every new message has
+    // been on screen, so none comes back into the pill's count.
+    const body = page.locator('section.ib-pane .ib-pbody');
+    for (let y = await body.evaluate((b) => b.scrollTop); y > 0; y -= 300) {
+      await body.evaluate((b, top) => (b.scrollTop = top), Math.max(0, y - 300));
+      await page.waitForTimeout(40);
+      await expect(pill).toHaveAttribute('data-off', '');
+    }
+    expect(await body.evaluate((b) => b.scrollTop)).toBe(0);
+    await page.waitForTimeout(300);
+    await expect(pill).toHaveAttribute('data-off', '');
+    await shot(page, '06b-desktop-pill-stays-off-scrolled-up');
+  } finally {
+    await context.close();
+  }
+});
+
+// The owner's report (2026-10-16): the "↓ 1 new" pill floated over the end of
+// the thread after he had read the short reply below it, and came back each
+// time he scrolled up. He reads the Inbox while another app (his terminal)
+// has focus, so the reply is never "seen on sight" (that needs the window in
+// front) and the pill kept counting it as unseen whenever it was below the
+// view. Now a message that has been on screen in a visible tab leaves the
+// pill for the visit; the store's look still waits for the window in front.
+test('desktop, read with another app in front: the reply on screen leaves the pill, and scrolling up never brings it back', async ({ browser }: { browser: Browser }) => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
+  try {
+    const page = await context.newPage();
+    await page.goto(`${world.url}/`);
+    await inFront(page);
+    const id = world.projects.short.thread;
+    const first = await reply('short', LONG);
+    await openRow(page, 'short');
+    const body = page.locator('section.ib-pane .ib-pbody');
+    await body.evaluate((b) => (b.scrollTop = b.scrollHeight));
+    // Another app takes focus; the browser window stays visible.
+    await page.evaluate(() => {
+      Document.prototype.hasFocus = () => false;
+      window.dispatchEvent(new Event('blur'));
+    });
+    const arrived = await reply('short', 'Ok, merged.');
+    const pill = page.locator('[data-new-pill]');
+    await expect(page.locator(`[data-message-article="${arrived.message_id}"]`)).toBeInViewport();
+    await expect(pill).toHaveAttribute('data-off', '');
+    await page.waitForTimeout(DWELL_MS + 500);
+    // Not seen on sight (the window is not in front): the store keeps it unseen, the row bold.
+    expect((await storeRow(id)).unseen).toBe(1);
+    // Up to the top past the long message, a screen at a time: the reply below never comes back into the pill.
+    for (let y = await body.evaluate((b) => b.scrollTop); y > 0; y -= 300) {
+      await body.evaluate((b, top) => (b.scrollTop = top), Math.max(0, y - 300));
+      await page.waitForTimeout(40);
+      await expect(pill).toHaveAttribute('data-off', '');
+    }
+    await expect(page.locator(`[data-message-article="${first.message_id}"]`)).toBeVisible();
+    await shot(page, '06c-desktop-read-in-background-scrolled-up');
   } finally {
     await context.close();
   }

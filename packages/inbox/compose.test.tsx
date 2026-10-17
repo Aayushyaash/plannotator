@@ -32,6 +32,8 @@ let child: ReturnType<typeof Bun.spawn> | null = null;
 let port = 0;
 let dir: string | null = null;
 let projects: string[] = [];
+/** The seeded world's thread ids (tests/helpers/inbox-dom-server.ts). */
+let seeded: { waiting: string } | null = null;
 let root: Root | null = null;
 let host: HTMLElement | null = null;
 let savedFetch: typeof fetch;
@@ -84,8 +86,9 @@ beforeAll(async () => {
     line += new TextDecoder().decode(value);
   }
   reader.releaseLock();
-  const started = JSON.parse(line.trim()) as { port: number };
+  const started = JSON.parse(line.trim()) as { port: number; worlds: { waiting: string }[] };
   port = started.port;
+  seeded = started.worlds[0]!;
   const model = JSON.parse((await loopback('/api/inbox/projects')).text) as { projects: { root: string }[] };
   projects = model.projects.map((p) => p.root);
 });
@@ -258,6 +261,61 @@ test.skipIf(!hasDom)('a live session: To is prefilled, Send starts the thread ad
   const sections = (JSON.parse((await loopback('/api/inbox/threads')).text) as { sections: InboxListSection[] }).sections;
   const row = sections.flatMap((s) => s.threads).find((t) => t.subject === 'Idea: group the list by session')!;
   expect(row).toMatchObject({ section: 'sent', addressee: { host: 'claude-code', session: 'ses_live_dom' } });
+});
+
+/** The ids of the list's rows on screen, by section. */
+function rowsOnScreen(el: HTMLElement): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const r of el.querySelectorAll<HTMLElement>('.ib-listcol .ib-lbody [data-thread-id]')) {
+    const section = r.closest('[data-section-id]')?.getAttribute('data-section-id') ?? '?';
+    (out[section] ??= []).push(r.getAttribute('data-thread-id')!);
+  }
+  return out;
+}
+
+async function threadIdOf(subject: string): Promise<string> {
+  const sections = (JSON.parse((await loopback('/api/inbox/threads?archived=exclude')).text) as { sections: InboxListSection[] }).sections;
+  const row = sections.flatMap((s) => s.threads).find((t) => t.subject === subject);
+  expect(row?.section).toBe('sent');
+  return row!.thread_id;
+}
+
+// The failure this guards (the owner, 2026-10-16: "When I create a new thread
+// and hit send, why doesn't it show up in the Sent list? I don't see it in the
+// inbox list at all."): with a thread open the held list took no new row, so
+// the thread the person had just started was nowhere in the list until they
+// closed the thread they were reading.
+test.skipIf(!hasDom)('Send with a thread open: the new thread is in Sent at once, "To Claude Code", and the rows on screen keep their places', async () => {
+  await poll('ses_sent_open', 'claude-code', projects[0]!);
+  const el = await renderApp(`#thread=${seeded!.waiting}`);
+  await until(() => el.querySelector('section.ib-pane') !== null && el.querySelector('.ib-listcol .ib-lbody [data-thread-id]') !== null, 'the thread and the list');
+  const before = rowsOnScreen(el);
+  await openCompose(el);
+  await until(() => dialog()!.querySelector('[data-compose-to="ses_sent_open"]') !== null, 'To prefilled');
+  type('Look at the flaky upload test while I read this.');
+  act(() => (dialog()!.querySelector('[data-compose-send]') as HTMLButtonElement).click());
+  await until(() => dialog() === null, 'sent');
+  const id = await threadIdOf('Look at the flaky upload test while I read this');
+  await until(() => (rowsOnScreen(el).sent ?? []).includes(id), 'the new row in Sent');
+  const row = el.querySelector<HTMLElement>(`.ib-listcol .ib-lbody [data-thread-id="${id}"]`)!;
+  expect(row.textContent).toContain('To Claude Code');
+  // The thread being read stays open, and every other row is where it was.
+  expect(el.querySelector('section.ib-pane')).not.toBeNull();
+  const after = rowsOnScreen(el);
+  for (const [section, ids] of Object.entries(before)) expect((after[section] ?? []).filter((t) => t !== id)).toEqual(ids);
+});
+
+test.skipIf(!hasDom)('Send with no thread open: the new thread is in Sent at once', async () => {
+  await poll('ses_sent_list', 'claude-code', projects[0]!);
+  const el = await renderApp();
+  await until(() => el.querySelector('.ib-listcol .ib-lbody [data-thread-id]') !== null, 'the list');
+  await openCompose(el);
+  await until(() => dialog()!.querySelector('[data-compose-to="ses_sent_list"]') !== null, 'To prefilled');
+  type('Draft the release notes for the paste fix.');
+  act(() => (dialog()!.querySelector('[data-compose-send]') as HTMLButtonElement).click());
+  await until(() => dialog() === null, 'sent');
+  const id = await threadIdOf('Draft the release notes for the paste fix');
+  await until(() => (rowsOnScreen(el).sent ?? []).includes(id), 'the new row in Sent');
 });
 
 test.skipIf(!hasDom)('git too slow to tell the project (project_unresolved): the dialog stays with the words and says to press Send again', async () => {

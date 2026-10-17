@@ -222,6 +222,33 @@ export function settleThread(shown: readonly InboxListSection[], latest: readonl
 }
 
 /**
+ * The held list with threads the person just started (compose's Send) put in
+ * (the owner, 2026-10-16: "When I create a new thread and hit send, why
+ * doesn't it show up in the Sent list?"). A thread the person started is
+ * their own action, like a pick or a Send in the open thread, which the held
+ * list shows at once; it is not agent activity, so nothing about it waits
+ * behind "N new". Each row `latest` has for `threadIds` and the list on
+ * screen lacks goes into its section at its place there (newest first: the
+ * top of Sent); every other row keeps its section and its order. A thread
+ * already on screen, or not in `latest`, changes nothing.
+ */
+export function addOwnThreads(shown: readonly InboxListSection[], latest: readonly InboxListSection[], threadIds: readonly string[]): InboxListSection[] {
+  const fresh = rowsById(latest);
+  const onScreen = rowsById(shown);
+  const adding = threadIds.map((id) => fresh.get(id)).filter((row): row is InboxListRow => row !== undefined && !onScreen.has(row.thread_id));
+  // The list always carries all six sections (empty ones included), so the row's section is on screen.
+  return shown.map((section) => {
+    const threads = [...section.threads];
+    for (const row of adding) {
+      if (row.section !== section.id) continue;
+      const at = threads.findIndex((other) => newestFirst(row, other) < 0);
+      threads.splice(at < 0 ? threads.length : at, 0, row);
+    }
+    return { ...section, threads };
+  });
+}
+
+/**
  * The person archived a thread while its row is on screen (the thread is
  * open). The list the window reads leaves archived threads out, so
  * refreshHeldRows would keep the row as it was; this shows it archived in

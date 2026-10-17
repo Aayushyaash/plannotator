@@ -95,13 +95,29 @@ const reducedMotion = () => typeof matchMedia === 'function' && matchMedia('(pre
  * not yet seen on sight (`data-arrival`, design record
  * "inbox-new-in-open-thread": the pill counts only unseen arrivals below);
  * only when none waits there, the messages that were new when the thread
- * opened (`data-new`). An arrival already seen (`data-sighted`) never counts.
+ * opened (`data-new`). An arrival already seen (`data-sighted`) never counts,
+ * and neither does a message the person has had on screen this visit
+ * (`passed`): once its top was in the view, or the view went past it, it is
+ * read as far as the pill is concerned, so scrolling back up never brings it
+ * back. `mark` (the tab visible and nothing over the thread) adds what is on
+ * screen now to `passed`; scrolled to the end, everything is on screen.
  */
-function newBelow(body: HTMLElement): HTMLElement[] {
+function newBelow(body: HTMLElement, passed: Set<string>, mark: boolean): HTMLElement[] {
   const bottom = body.getBoundingClientRect().bottom - PILL_BAND_PX;
-  const below = (selector: string) => [...body.querySelectorAll<HTMLElement>(selector)].filter((a) => a.getBoundingClientRect().top > bottom);
+  const end = mark && body.scrollHeight > 0 && atEnd(body);
+  const below = (selector: string) =>
+    [...body.querySelectorAll<HTMLElement>(selector)].filter((a) => {
+      const id = a.getAttribute('data-message-article') ?? '';
+      if (passed.has(id)) return false;
+      if (end || a.getBoundingClientRect().top <= bottom) {
+        if (mark) passed.add(id);
+        return false;
+      }
+      return true;
+    });
   const arrivals = below('[data-message-article][data-arrival]:not([data-sighted])');
-  return arrivals.length > 0 ? arrivals : below('[data-message-article][data-new]:not([data-arrival]):not([data-sighted])');
+  const atOpen = below('[data-message-article][data-new]:not([data-arrival]):not([data-sighted])');
+  return arrivals.length > 0 ? arrivals : atOpen;
 }
 
 /** A folded line's snippet: the message's first words, or the person's answers. */
@@ -1164,17 +1180,26 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
   // while new messages the person has not seen are below the view (its count:
   // those messages, never everything new this visit).
   const [chrome, setChrome] = useState({ subject: false, pill: 0 });
+  /** The new messages the person has had on screen this visit (newBelow): the pill never counts them again. */
+  const passed = useRef<{ threadId: string; ids: Set<string> }>({ threadId: thread.thread_id, ids: new Set() });
+  const passedIds = useCallback((): Set<string> => {
+    if (passed.current.threadId !== thread.thread_id) passed.current = { threadId: thread.thread_id, ids: new Set() };
+    return passed.current.ids;
+  }, [thread.thread_id]);
+  /** Whether what is on screen now counts as shown: the tab visible and nothing over the thread. */
+  const showingRef = useRef(true);
   const updateChrome = useCallback(() => {
     const body = bodyRef.current;
     if (!body) return;
     const box = body.getBoundingClientRect();
     const subject = body.querySelector<HTMLElement>('.ib-subject');
+    const shown = showingRef.current && (typeof document === 'undefined' || document.visibilityState !== 'hidden');
     const next = {
       subject: subject !== null && subject.getBoundingClientRect().bottom < box.top + 4,
-      pill: newBelow(body).length,
+      pill: newBelow(body, passedIds(), shown).length,
     };
     setChrome((current) => (current.subject === next.subject && current.pill === next.pill ? current : next));
-  }, []);
+  }, [passedIds]);
 
   // ── Seen on sight (design record "inbox-new-in-open-thread", variant A) ──
   // An agent message that arrives while the thread is open counts as seen once
@@ -1211,6 +1236,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
   const screenRef = useRef(onScreenChange);
   screenRef.current = onScreenChange;
   const paneCovered = covered || fileCovers;
+  showingRef.current = !paneCovered;
   useEffect(() => {
     screenRef.current?.({ threadId: thread.thread_id, covered: paneCovered });
   }, [thread.thread_id, paneCovered]);
@@ -1256,6 +1282,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
     body.addEventListener('scroll', trackEnd, { passive: true });
     body.addEventListener('scroll', updateChrome, { passive: true });
     window.addEventListener('resize', updateChrome);
+    document.addEventListener('visibilitychange', updateChrome);
     // The thread's own box changes without a scroll or a window resize when
     // the foot grows (the reply box, the stale guard, the New-message
     // composer) or a file opens beside it.
@@ -1265,6 +1292,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
       body.removeEventListener('scroll', trackEnd);
       body.removeEventListener('scroll', updateChrome);
       window.removeEventListener('resize', updateChrome);
+      document.removeEventListener('visibilitychange', updateChrome);
       resized?.disconnect();
     };
   }, [updateChrome]);
@@ -1305,7 +1333,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
       }
     }
     updateChrome();
-  }, [foldState, thread, file?.id, updateChrome, sighted]);
+  }, [foldState, thread, file?.id, updateChrome, sighted, paneCovered]);
 
   /**
    * n goes to the first new message (at the divider); the pill to what it
@@ -1317,11 +1345,11 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
     const body = bodyRef.current;
     const first = body?.querySelector<HTMLElement>('[data-message-article][data-new]');
     if (!body || !first) return;
-    const target = below ? (newBelow(body)[0] ?? first) : first;
+    const target = below ? (newBelow(body, passedIds(), false)[0] ?? first) : first;
     const divider = target === first ? body.querySelector<HTMLElement>('[data-new-divider]') : null;
     (divider ?? target).scrollIntoView?.({ block: 'start', behavior: reducedMotion() ? 'auto' : 'smooth' });
     target.querySelector<HTMLElement>('[data-fold-head]')?.focus({ preventScroll: true });
-  }, []);
+  }, [passedIds]);
 
   // j / k move between messages (and the middle fold), n goes to the first
   // new one; Enter and Space are the buttons' own. Never while typing.

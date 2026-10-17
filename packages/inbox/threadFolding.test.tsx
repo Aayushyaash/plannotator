@@ -594,7 +594,7 @@ test.skipIf(!hasDom)('typing in the reply box measures nothing: the chrome and t
   expect(measured).toBe(0);
 });
 
-test.skipIf(!hasDom)('the thread box shrinking (the reply box opening below it) brings the pill back without a scroll or a window resize', async () => {
+test.skipIf(!hasDom)('the thread box changing size (the reply box opening or closing below it) re-measures the pill without a scroll or a window resize; a message once on screen never brings it back', async () => {
   // A fake ResizeObserver the test drives, standing in for the browser's.
   const observers: { callback: ResizeObserverCallback; observed: Element[]; connected: boolean }[] = [];
   stub(globalThis, 'ResizeObserver', {
@@ -614,8 +614,8 @@ test.skipIf(!hasDom)('the thread box shrinking (the reply box opening below it) 
       }
     },
   });
-  // The new message's top is at 700; the thread box ends at 800, then at 600 once the foot grows.
-  let bottom = 800;
+  // The new message's top is at 700; the thread box ends at 600 while the reply box is open, at 800 once it closes.
+  let bottom = 600;
   stub(HTMLElement.prototype, 'getBoundingClientRect', {
     value(this: HTMLElement) {
       const y = this.classList.contains('ib-pbody') ? 0 : this.hasAttribute('data-new') ? 700 : 0;
@@ -628,10 +628,14 @@ test.skipIf(!hasDom)('the thread box shrinking (the reply box opening below it) 
   const watcher = observers.find((o) => o.observed.includes(body))!;
   expect(watcher).toBeDefined();
   const pill = el.querySelector<HTMLButtonElement>('[data-new-pill]')!;
+  expect(pill.hasAttribute('data-off')).toBe(false);
+  bottom = 800;
+  act(() => watcher.callback([], {} as ResizeObserver));
   expect(pill.hasAttribute('data-off')).toBe(true);
+  // The reply box opens again and covers it: it was on screen, so the pill stays away.
   bottom = 600;
   act(() => watcher.callback([], {} as ResizeObserver));
-  expect(pill.hasAttribute('data-off')).toBe(false);
+  expect(pill.hasAttribute('data-off')).toBe(true);
   act(() => root!.unmount());
   root = null;
   expect(watcher.connected).toBe(false);

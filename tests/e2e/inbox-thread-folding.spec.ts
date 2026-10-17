@@ -338,7 +338,7 @@ test('keys: n goes to the first new message, k and j move between messages; neve
   await pane().locator('.ib-pfoot').getByRole('button', { name: 'Cancel' }).click();
 });
 
-test("Expand all gives back today's fully open thread; scrolled up, the pill points down to the new message", async () => {
+test("Expand all gives back today's fully open thread; scrolled up past the new message already read, no pill comes back; n goes down to it", async () => {
   const { page, ids } = world;
   await pane().locator('[data-expand-all]').click();
   await expect(pane().locator('[data-expand-all]')).toHaveText('Fold all');
@@ -348,14 +348,20 @@ test("Expand all gives back today's fully open thread; scrolled up, the pill poi
   await expect(article(ids[0]!).getByText(/^Which search index should the docs site use for its first public release/)).toBeVisible();
   await expect(article(ids[3]!).locator('.ib-body')).toContainText('The plan is close.');
   await pane().locator('.ib-pbody').evaluate((el) => el.scrollTo({ top: 0 }));
+  // The new message has been on screen this visit (the tests above opened and
+  // read it), so scrolling back up above it never brings the pill back (the
+  // owner, 2026-10-16: "Why does this whole 'one new' thing keep showing, even
+  // though I've seen the whole message? Shows when I scroll up."). The pill
+  // pointing down to a message not yet on screen is proved in
+  // inbox-seen-on-sight.spec.ts.
   const pill = pane().locator('[data-new-pill]');
-  await expect(pill).not.toHaveAttribute('data-off', '');
-  await expect(pill).toHaveText('1 new');
+  await page.waitForTimeout(300);
+  await expect(pill).toHaveAttribute('data-off', '');
   await expect(pane().locator('[data-header-subject]')).not.toHaveAttribute('data-on', '');
-  await shot('4-expanded-pill');
-  // A real click where the pill floats (a locator click would scroll the sticky pill's own spot into view first).
-  const box = (await pill.boundingBox())!;
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await shot('4-expanded-scrolled-up');
+  // n still goes down to the first new message.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press('n');
   await expect(pane().locator('[data-new-divider]')).toBeInViewport();
   await expect(pill).toHaveAttribute('data-off', '');
   // Fold all: back to lines, the new message's included; the last stays open.

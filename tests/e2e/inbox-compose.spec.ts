@@ -321,6 +321,48 @@ test('an agent connects: the draft reopens with To prefilled; Send starts a thre
   expect(world.errors).toEqual([]);
 });
 
+// The failure this guards (the owner, 2026-10-16: "When I create a new thread
+// and hit send, why doesn't it show up in the Sent list? I don't see it in
+// the inbox list at all."): with a thread open, the held list took no new
+// row, so the thread the person just started was missing until they closed
+// the one they were reading.
+test('Send with a thread open: the new thread is in Sent at once, "To Claude Code", while the thread stays open and the other rows keep their order', async () => {
+  const { page } = world;
+  const { port } = registry();
+  const list = async () => (await (await fetch(`http://127.0.0.1:${port}/api/inbox/threads?archived=exclude`)).json()) as { sections: { id: string; threads: { thread_id: string; subject: string }[] }[] };
+  const reading = (await list()).sections.flatMap((s) => s.threads).find((t) => t.subject.startsWith('Run finished'))!;
+  await page.goto(`${world.url}#thread=${reading.thread_id}`);
+  const pane = page.locator('section.ib-pane');
+  await expect(pane).toBeVisible();
+  const rows = () => page.locator('.ib-listcol .ib-lbody [data-thread-id]').evaluateAll((all) => all.map((r) => r.getAttribute('data-thread-id')!));
+  await expect.poll(async () => (await rows()).length).toBeGreaterThan(0);
+  const before = await rows();
+  await page.locator('.ib-side [data-open-compose], .ib-lhead [data-open-compose]').first().click();
+  const dialog = page.locator('dialog[data-compose]');
+  await dialog.locator('.ib-cp-tobtn').click();
+  await dialog.locator('[data-compose-session="ses-claude"]').click();
+  await dialog.getByRole('textbox', { name: 'Message' }).fill('While I read this: look at the flaky upload test.');
+  await dialog.locator('[data-compose-send]').click();
+  await expect(dialog).toHaveCount(0);
+  let id = '';
+  await expect
+    .poll(async () => {
+      const sent = (await list()).sections.find((s) => s.id === 'sent')!.threads.find((t) => t.subject.startsWith('While I read this'));
+      id = sent?.thread_id ?? '';
+      return id;
+    })
+    .not.toBe('');
+  const row = page.locator(`.ib-listcol .ib-lbody [data-section-id="sent"] [data-thread-id="${id}"]`);
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('To Claude Code');
+  // The thread being read is still open, and every other row is where it was.
+  await expect(pane).toBeVisible();
+  expect(page.url()).toContain(reading.thread_id);
+  expect((await rows()).filter((t) => t !== id)).toEqual(before);
+  await shot(page, '07b-sent-row-while-reading');
+  expect(world.errors).toEqual([]);
+});
+
 test('⌘K: the Actions group opens compose for "Message <agent> in <project>"; a phone gets the full-screen sheet and the Drafts list', async () => {
   const { page } = world;
   await page.goto(world.url);

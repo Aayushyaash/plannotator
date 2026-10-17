@@ -28,7 +28,7 @@ import {
   type UpdateDetails,
   type WhatsNewModel,
 } from './api';
-import { filterSections, heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread, showBroughtIn, waitingCount, type OpenThread } from './held';
+import { addOwnThreads, filterSections, heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread, showBroughtIn, waitingCount, type OpenThread } from './held';
 import {
   captureSettle,
   COVERED_LIST_SETTLES,
@@ -1083,8 +1083,16 @@ function Inbox() {
     const next = sent.draftId ? draftNeighbour(sent.draftId) : null;
     if (sent.draftId) setDrafts((current) => (current ?? []).filter((d) => d.id !== sent.draftId));
     closeCompose(next);
-    // While a thread is open its list holds still; with none, the new row shows at once.
-    void refreshList(!routeRef.current.thread, true);
+    // With no thread open the list adopts what it reads, the new row with it.
+    // While one is open the list holds still, but the thread the person just
+    // started is their own action: it goes into Sent now (held.ts
+    // addOwnThreads), the other rows sliding to make room, never behind "N new".
+    const adopt = !routeRef.current.thread;
+    void refreshList(adopt, true).then((next) => {
+      if (!next || adopt) return;
+      armSlide();
+      setShown((current) => (current === null ? next.sections : addOwnThreads(current, next.sections, [sent.threadId])));
+    });
     if (sent.draftId) void refreshDrafts();
     showToast(
       {
