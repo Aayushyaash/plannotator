@@ -74,7 +74,7 @@ import { latestAgentSeq } from './seenOnSight';
 import { isPhone, trackKeyboard, usePhone } from './phone';
 import { installPasteFollowsField } from './pasteTarget';
 import { installPlainTextPaste } from '@plannotator/ui/utils/pasteInsert';
-import { LIST_MIN_WIDTH, THREAD_BESIDE_FILE_WIDTH, useStack } from './stack';
+import { LIST_MIN_WIDTH, THREAD_BESIDE_FILE_WIDTH, paneGutters, useStack } from './stack';
 import { backTo, pushScreen } from './history';
 import { adoptSavedTheme, inboxThemeSync } from './theme';
 import { parseSettingsHash, settingsHash, type SettingsSection } from './settingsRoute';
@@ -1197,7 +1197,7 @@ function Inbox() {
       const root = rootRef.current;
       if (!root) return;
       const sidebar = root.querySelector('.ib-sb-inner')?.getBoundingClientRect().width ?? 0;
-      if (root.getBoundingClientRect().width - sidebar >= LIST_MIN_WIDTH + THREAD_BESIDE_FILE_WIDTH) setSidebarHeld(false);
+      if (root.getBoundingClientRect().width - sidebar >= LIST_MIN_WIDTH + THREAD_BESIDE_FILE_WIDTH + paneGutters(root)) setSidebarHeld(false);
     };
     check();
     window.addEventListener('resize', check);
@@ -2144,7 +2144,7 @@ function Inbox() {
               if (root && sidebarOpen) {
                 const width = root.getBoundingClientRect().width;
                 const sidebar = root.querySelector('.ib-sb-inner')?.getBoundingClientRect().width ?? 0;
-                const room = LIST_MIN_WIDTH + THREAD_BESIDE_FILE_WIDTH;
+                const room = LIST_MIN_WIDTH + THREAD_BESIDE_FILE_WIDTH + paneGutters();
                 if (width >= room && width - sidebar < room) setSidebarHeld(true);
               }
               backFromFile.current = { thread: thread.thread_id, name: fileName, label: filterProject?.name ?? 'Inbox' };

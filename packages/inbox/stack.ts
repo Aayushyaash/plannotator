@@ -77,6 +77,20 @@ function mainWidthOf(root: HTMLElement): number {
 }
 
 /**
+ * The room the floating panes' gutters take: one on each side of `.ib-main` and one between its two panes,
+ * read from inbox.css's `--ib-gutter`, 8 px while the Soft look's panes switch (`--ib-soft-panes`) is on and
+ * 0 while it is off (today's flat window). Measured rooms leave them out, so two panes stack rather than draw
+ * narrower than their readable widths.
+ */
+export function paneGutters(el?: Element | null): number {
+  if (typeof document === 'undefined') return 0;
+  const root = el ?? document.querySelector('.pn-inbox');
+  if (!root) return 0;
+  const gutter = parseFloat(getComputedStyle(root).getPropertyValue('--ib-gutter'));
+  return Number.isFinite(gutter) ? 3 * gutter : 0;
+}
+
+/**
  * The stack for the window (`.pn-inbox`). Read before paint whenever one of
  * `deps` changes (the caller passes what moves the sidebar's target: the
  * route, the sidebar's open state, an open file), so a thread opened from its
@@ -88,7 +102,8 @@ export function useStack(ref: RefObject<HTMLElement | null>, phone: boolean, dep
   const [stack, setStack] = useState<Stack>(NO_STACK);
   const measure = () => {
     const root = ref.current;
-    const next = phone || !root ? NO_STACK : stackFor(mainWidthOf(root), root.getBoundingClientRect().width);
+    const gutters = paneGutters(root);
+    const next = phone || !root ? NO_STACK : stackFor(mainWidthOf(root) - gutters, root.getBoundingClientRect().width - gutters);
     setStack((current) => (same(current, next) ? current : next));
   };
   // The caller's deps are what change the sidebar's target in the same commit.

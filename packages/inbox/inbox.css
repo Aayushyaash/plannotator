@@ -6,28 +6,240 @@
  * drawn by ui itself, untouched.
  */
 
+/* The Soft look (.product/approved/inbox-soft/, approved 2026-10-16): today's window, modernized: the list and
+   the thread are rounded panes floating on a tinted ground, the sidebar sits on the ground with no rule beside
+   it. Every colour, shadow and surface is derived from the active palette's theme tokens (packages/ui/theme.css),
+   so each theme gets its own ground, lifted surface and shadow; nothing here names a colour of its own.
+
+   A palette may set any of these theme-level tokens to replace the derived value:
+     --inbox-ground        the ground the panes float on
+     --inbox-raise         a surface lifted inside a pane (question cards, tiles, section bands)
+     --inbox-shadow-ink    the colour of the panes' and floating surfaces' shadows
+     --inbox-pane-shadow   the panes' shadow
+     --inbox-float-shadow  menus, dialogs, the toast, the search palette
+
+   Switches. Each turns one part of the Soft paint on or off, and nothing else: a space (`--ib-soft-x: ;`) is
+   Soft, `initial` is today's. They work by the space-toggle: a token built as `var(--ib-soft-x) <Soft value>`
+   is invalid while its switch is `initial`, so `var(<token>, <today's value>)` falls back to today's (for
+   ui's own drawing, ui's own values, named). A switch may differ per mode: the light block below sets
+   the light half.
+
+   The values are the owner's (two blind rounds, 2026-10-16; .product/approved/inbox-soft/approval.md):
+   today's background and panes, selected row, lines and section band in both modes; Soft's badges, fewer
+   accents and question card in both; the sidebar's current item and quiet text today's in light, Soft's in
+   dark. */
 .pn-inbox {
+  --ib-soft-panes: initial;      /* a tinted ground with rounded floating panes and 8 px gutters (today's: a flat window, ruled panes) */
+  --ib-soft-selection: initial;  /* the open row: a neutral fill (today's: the accent's tint) */
+  --ib-soft-rows: initial;       /* rows part by space and lines take the faint fill (today's: hairlines and rules) */
+  --ib-soft-band: initial;       /* section bands on the raised surface (today's: the muted band) */
+  --ib-soft-badges: ;            /* Stopped and Holds up: tinted pills (today's: outlined badges) */
+  --ib-soft-accents: ;           /* fewer accents: the decision tag, links, Reply, a tile's Open (today's: the accent) */
+  --ib-soft-card: ;              /* the question card: a raised, borderless surface (today's: ui's card) */
+  --ib-soft-nav: ;               /* the sidebar's current page: a lifted card (today's: the accent's tint and text) */
+  --ib-soft-quiet: ;             /* quiet text stepped for its surface, on the ground and on raised surfaces (today's: the palette's muted text) */
+  /* Not ruled yet (owner, 2026-10-17): each is today's (`initial`) until he decides; a space turns it to Soft. */
+  --ib-soft-labels: initial;     /* small labels in sentence case at 12 px (today's: 11 px capitals, spaced out) */
+  --ib-soft-shape: initial;      /* Soft's rounder corners on rows, controls, menus and surfaces (today's radii) */
+  --ib-soft-float: initial;      /* floating surfaces (menus, dialogs, popovers, the toast, a row's action): Soft's shadow and no outline (today's: an outline and a drop shadow) */
+  --ib-soft-hover: initial;      /* hover fills where today has none, Soft's hover colours, and 140 ms fades (today's hovers) */
+  --ib-soft-chip: initial;       /* chips: the thread chip and the search field's key hint as grey pills (today's: an outlined monospace tag, an outlined key; the chip's face changes how a phone's chip wraps) */
+}
+:root.light .pn-inbox {
+  --ib-soft-nav: initial;
+  --ib-soft-quiet: initial;
+}
+.pn-inbox {
+  /* The shadows' colour: the palette's own background taken toward black in its own hue (dark); the text
+     colour (light, below). Without relative colours it is the background, and the ground is the background. */
+  --ib-shadow-ink: var(--inbox-shadow-ink, var(--background));
+  --ib-ground-soft: var(--inbox-ground, color-mix(in oklch, var(--background) 82%, var(--ib-shadow-ink)));
+  --ib-raise: var(--inbox-raise, color-mix(in oklch, var(--muted) 40%, var(--card)));
+  --ib-hover: color-mix(in oklch, var(--muted) 45%, transparent);
+  --ib-fill: color-mix(in oklch, var(--foreground) 7%, transparent);
+  /* Background and panes: Soft's tinted ground with floating panes, or today's flat window. */
+  --ib-ground-s: var(--ib-soft-panes) var(--ib-ground-soft);
+  --ib-ground: var(--ib-ground-s, var(--background));
+  --ib-gutter-s: var(--ib-soft-panes) 8px;
+  --ib-gutter: var(--ib-gutter-s, 0px);
+  --ib-pane-r-s: var(--ib-soft-panes) 14px;
+  --ib-pane-r: var(--ib-pane-r-s, 0px);
+  --ib-pane-shadow-s: var(--ib-soft-panes) var(--ib-pane-shadow-soft);
+  --ib-pane-shadow: var(--ib-pane-shadow-s, none);
+  --ib-main-bg-s: var(--ib-soft-panes) transparent;
+  --ib-pane-bg-s: var(--ib-soft-panes) var(--card);
+  --ib-clip-s: var(--ib-soft-panes) hidden;
+  --ib-main-bg: var(--ib-main-bg-s, var(--card));
+  --ib-pane-line-s: var(--ib-soft-panes) transparent;
+  --ib-pane-line: var(--ib-pane-line-s, var(--ib-line));
+  /* The sidebar's controls and hovers sit on the ground: Soft's lifted fills, or today's band and line. */
+  --ib-sidectl-bg-s: var(--ib-soft-panes) color-mix(in oklch, var(--card) 70%, transparent);
+  --ib-sidectl-ring-s: var(--ib-soft-panes) 0 0 0 1px color-mix(in oklch, var(--border) 45%, transparent);
+  --ib-sidectl-border-s: var(--ib-soft-panes) transparent;
+  --ib-sidectl-hover-s: var(--ib-soft-panes) var(--card);
+  /* The search field's key hint (--ib-soft-chip). */
+  --ib-kbd-bg-s: var(--ib-soft-chip) color-mix(in oklch, var(--muted) 80%, transparent);
+  --ib-kbd-line-s: var(--ib-soft-chip) transparent;
+  --ib-side-hover-s: var(--ib-soft-panes) color-mix(in oklch, var(--card) 55%, transparent);
+  --ib-side-menu-s: var(--ib-soft-panes) color-mix(in oklch, var(--card) 70%, transparent);
+  --ib-side-hover: var(--ib-side-hover-s, color-mix(in oklch, var(--muted) 45%, transparent));
+  --ib-side-menu: var(--ib-side-menu-s, color-mix(in oklch, var(--muted) 70%, transparent));
+  --ib-pane-shadow-soft: var(--inbox-pane-shadow, 0 0 0 1px color-mix(in oklch, var(--foreground) 6%, transparent), inset 0 1px 0 color-mix(in oklch, var(--foreground) 4%, transparent), 0 8px 24px -10px color-mix(in oklch, var(--ib-shadow-ink) 60%, transparent));
+  --ib-float-shadow: var(--inbox-float-shadow, 0 0 0 1px color-mix(in oklch, var(--foreground) 8%, transparent), 0 16px 40px -10px color-mix(in oklch, var(--ib-shadow-ink) 70%, transparent));
   --ib-band: color-mix(in oklch, var(--muted) 75%, var(--card));
-  /* A selected row's pill (dark first; light below), and the light a row gets after Show. */
-  --ib-sel: color-mix(in oklch, var(--primary) 15%, transparent);
-  --ib-sel-hover: color-mix(in oklch, var(--primary) 19%, transparent);
   --ib-lit: color-mix(in oklch, var(--primary) 15%, var(--card));
   --ib-line: color-mix(in oklch, var(--border) 70%, transparent);
   --ib-hair: color-mix(in oklch, var(--border) 55%, transparent);
+
+  /* Quiet text. Soft's (below, stepped where relative colours are there) or today's. Without relative
+     colours, Soft's is a step toward the text colour, so a palette whose muted text only just clears AA on
+     its own background still clears it on the slightly deeper ground and on a raised surface. */
+  --ib-side-fg-soft: var(--foreground);
+  --ib-side-mfg-soft: color-mix(in oklch, var(--muted-foreground) 70%, var(--foreground));
+  --ib-quiet-fg-soft: color-mix(in oklch, var(--muted-foreground) 75%, var(--foreground));
+  --ib-raise-fg-soft: var(--foreground);
+  --ib-raise-mfg-soft: var(--ib-quiet-fg-soft);
+  --ib-q-side-fg: var(--ib-soft-quiet) var(--ib-side-fg-soft);
+  --ib-q-side-mfg: var(--ib-soft-quiet) var(--ib-side-mfg-soft);
+  --ib-q-quiet-fg: var(--ib-soft-quiet) var(--ib-quiet-fg-soft);
+  --ib-side-fg: var(--ib-q-side-fg, var(--foreground));
+  --ib-side-mfg: var(--ib-q-side-mfg, var(--muted-foreground));
+  --ib-quiet-fg: var(--ib-q-quiet-fg, var(--muted-foreground));
+  /* Text on a raised Soft surface (cards, tiles, chips) follows the quiet-text switch: stepped for the surface
+     (Soft), or the palette's own text (today's), its quiet text moved as far as the raised surface moved from the
+     card (below, where relative colours are there), so a raised surface never costs today's contrast. A surface
+     whose own switch is off is today's and takes none of these. */
+  --ib-raise-fg-keep: var(--foreground);
+  --ib-raise-mfg-keep: var(--muted-foreground);
+  --ib-q-raise-fg: var(--ib-soft-quiet) var(--ib-raise-fg-soft);
+  --ib-q-raise-mfg: var(--ib-soft-quiet) var(--ib-raise-mfg-soft);
+  --ib-raise-fg: var(--ib-q-raise-fg, var(--ib-raise-fg-keep));
+  --ib-raise-mfg: var(--ib-q-raise-mfg, var(--ib-raise-mfg-keep));
+  /* A Sent or Quiet row's subject (Soft steps it back; today only Sent's is). Used as var(--ib-quiet-dim, currentcolor). */
+  --ib-quiet-dim: var(--ib-soft-quiet) var(--muted-foreground);
+
+  /* The selected row's pill: a neutral fill (Soft) or the accent's tint (today; dark here, light below). */
+  --ib-sel-today: color-mix(in oklch, var(--primary) 15%, transparent);
+  --ib-sel-hover-today: color-mix(in oklch, var(--primary) 19%, transparent);
+  --ib-sel-s: var(--ib-soft-selection) var(--ib-fill);
+  --ib-sel-hover-s: var(--ib-soft-selection) color-mix(in oklch, var(--foreground) 10%, transparent);
+  --ib-sel: var(--ib-sel-s, var(--ib-sel-today));
+  --ib-sel-hover: var(--ib-sel-hover-s, var(--ib-sel-hover-today));
+
+  /* The sidebar's current page: a lifted card with the icon in the accent (Soft) or the accent's tint and
+     text (today). */
+  --ib-cur-bg-s: var(--ib-soft-nav) var(--card);
+  --ib-cur-fg-s: var(--ib-soft-nav) var(--foreground);
+  --ib-cur-shadow-s: var(--ib-soft-nav) 0 1px 2px color-mix(in oklch, var(--foreground) 8%, transparent), 0 0 0 1px color-mix(in oklch, var(--border) 50%, transparent);
+  --ib-cur-bg: var(--ib-cur-bg-s, color-mix(in oklch, var(--primary) 12%, transparent));
+  --ib-cur-fg: var(--ib-cur-fg-s, var(--primary));
+  --ib-cur-shadow: var(--ib-cur-shadow-s, none);
+
+  /* The status badges: tinted pills (Soft) or today's outline. */
+  --ib-badge-border-s: var(--ib-soft-badges) transparent;
+  --ib-badge-radius-s: var(--ib-soft-badges) 999px;
+  --ib-badge-weight-s: var(--ib-soft-badges) 600;
+  --ib-badge-bg-s: var(--ib-soft-badges) color-mix(in oklch, var(--muted) 80%, transparent);
+  --ib-badge-stop-bg-s: var(--ib-soft-badges) color-mix(in oklch, var(--destructive) 13%, transparent);
+  --ib-badge-hold-bg-s: var(--ib-soft-badges) color-mix(in oklch, var(--warning) 17%, transparent);
+  --ib-badge-stop-fg-soft: color-mix(in oklab, var(--destructive) 70%, var(--foreground));
+  --ib-badge-hold-fg-soft: color-mix(in oklab, var(--warning) 50%, var(--foreground));
+  --ib-badge-stop-fg-s: var(--ib-soft-badges) var(--ib-badge-stop-fg-soft);
+  --ib-badge-hold-fg-s: var(--ib-soft-badges) var(--ib-badge-hold-fg-soft);
+  --ib-badge-border: var(--ib-badge-border-s, color-mix(in oklch, var(--foreground) 35%, transparent));
+  --ib-badge-radius: var(--ib-badge-radius-s, 6px);
+  --ib-badge-weight: var(--ib-badge-weight-s, 550);
+  --ib-badge-bg: var(--ib-badge-bg-s, transparent);
+  --ib-badge-stop-bg: var(--ib-badge-stop-bg-s, transparent);
+  --ib-badge-hold-bg: var(--ib-badge-hold-bg-s, transparent);
+  /* Used as var(--ib-badge-stop-fg, currentcolor): today's badge takes its row's colour. */
+  --ib-badge-stop-fg: var(--ib-badge-stop-fg-s);
+  --ib-badge-hold-fg: var(--ib-badge-hold-fg-s);
+
+  /* The line under each row: none (Soft; its 1 px stays, transparent) or today's hairline. */
+  --ib-row-line-s: var(--ib-soft-rows) transparent;
+  --ib-row-line: var(--ib-row-line-s, var(--ib-hair));
+
+  /* Small labels (--ib-soft-labels): 12 px sentence case, or today's 11 px capitals. Used as var(<token>, <today's>). */
+  --ib-lbl-size-s: var(--ib-soft-labels) 12px;
+  --ib-lbl-track-s: var(--ib-soft-labels) 0;
+  --ib-lbl-case-s: var(--ib-soft-labels) none;
+  --ib-lbl-550-s: var(--ib-soft-labels) 550;
+  /* Corners (--ib-soft-shape). Used as border-radius: var(--ib-rN-s, <today's>). */
+  --ib-r5-s: var(--ib-soft-shape) 5px;
+  --ib-r7-s: var(--ib-soft-shape) 7px;
+  --ib-r8-s: var(--ib-soft-shape) 8px;
+  --ib-r9-s: var(--ib-soft-shape) 9px;
+  --ib-r10-s: var(--ib-soft-shape) 10px;
+  --ib-r11-s: var(--ib-soft-shape) 11px;
+  --ib-r12-s: var(--ib-soft-shape) 12px;
+  --ib-r14-s: var(--ib-soft-shape) 14px;
+  --ib-r16-s: var(--ib-soft-shape) 16px;
+  --ib-pill-s: var(--ib-soft-shape) 999px;
+  /* Floating surfaces (--ib-soft-float): Soft's shadow with no outline. Used as var(<token>, <today's>). */
+  --ib-float-s: var(--ib-soft-float) var(--ib-float-shadow);
+  --ib-float-line-s: var(--ib-soft-float) transparent;
+  /* Hovers and fades (--ib-soft-hover). Today's fade is ui's global one (packages/ui/theme.css `*`). */
+  --ib-ui-fade: color 150ms cubic-bezier(0.4, 0, 0.2, 1), background-color 150ms cubic-bezier(0.4, 0, 0.2, 1), border-color 150ms cubic-bezier(0.4, 0, 0.2, 1), box-shadow 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --ib-hover-s: var(--ib-soft-hover) var(--ib-hover);
+  --ib-fade-s: var(--ib-soft-hover) background-color 140ms ease-out;
+  --ib-fade2-s: var(--ib-soft-hover) background-color 140ms ease-out, color 140ms ease-out;
+  --ib-side-hover-h: var(--ib-soft-hover) var(--ib-side-hover);
+
   height: 100%;
   font-family: var(--font-sans);
   font-feature-settings: "ss01", "ss02", "cv01";
   color: var(--foreground);
-  background: var(--background);
+  background: var(--ib-ground);
   font-size: 14px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
 }
+/* Where relative colours and sign() are there: the shadows' colour is the background taken toward black in its
+   own hue, and text Soft draws on the deeper ground or a lifted surface is mixed a little toward black on a light
+   surface and toward white on a dark one (whatever the palette calls its half), so it never costs contrast. */
+@supports (color: oklch(from red calc(0.5 - sign(l - 0.6) * 0.5) 0 h)) {
+  .pn-inbox {
+    --ib-shadow-ink: var(--inbox-shadow-ink, oklch(from var(--background) calc(l * 0.2) calc(c * 0.5) h));
+    /* No hue (`none`): mixed into a colour, the ink moves its lightness and keeps its hue. */
+    --ib-ink: oklch(from var(--ib-ground) calc(0.5 - sign(l - 0.6) * 0.5) 0 none);
+    --ib-card-ink: oklch(from var(--card) calc(0.5 - sign(l - 0.6) * 0.5) 0 none);
+    --ib-side-fg-soft: color-mix(in oklch, var(--foreground) 88%, var(--ib-ink));
+    --ib-side-mfg-soft: color-mix(in oklch, var(--muted-foreground) 78%, var(--ib-ink));
+    --ib-quiet-fg-soft: color-mix(in oklch, var(--muted-foreground) 82%, var(--ib-card-ink));
+    --ib-raise-fg-soft: color-mix(in oklch, var(--foreground) 84%, var(--ib-card-ink));
+    --ib-raise-mfg-soft: color-mix(in oklch, var(--muted-foreground) 68%, var(--ib-card-ink));
+    --ib-raise-fg-keep: color-mix(in oklch, var(--foreground) 90%, var(--ib-card-ink));
+    --ib-raise-mfg-keep: color-mix(in oklch, var(--muted-foreground) 82%, var(--ib-card-ink));
+    /* The badge's words step toward the card's ink rather than the text colour, so a palette's red or amber
+       reads on its own tint. */
+    --ib-badge-stop-fg-soft: color-mix(in oklab, var(--destructive) 50%, var(--ib-card-ink));
+    --ib-badge-hold-fg-soft: color-mix(in oklab, var(--warning) 45%, var(--ib-card-ink));
+  }
+}
 :root.light .pn-inbox {
+  --ib-shadow-ink: var(--inbox-shadow-ink, var(--foreground));
+  --ib-ground-soft: var(--inbox-ground, color-mix(in oklch, var(--muted) 55%, var(--background)));
+  --ib-pane-shadow-soft: var(--inbox-pane-shadow, 0 0 0 1px color-mix(in oklch, var(--border) 55%, transparent), 0 1px 2px color-mix(in oklch, var(--ib-shadow-ink) 5%, transparent), 0 6px 18px -8px color-mix(in oklch, var(--ib-shadow-ink) 12%, transparent));
+  --ib-float-shadow: var(--inbox-float-shadow, 0 0 0 1px color-mix(in oklch, var(--border) 70%, transparent), 0 12px 32px -8px color-mix(in oklch, var(--ib-shadow-ink) 22%, transparent));
   --ib-band: color-mix(in oklch, var(--muted) 55%, var(--card));
-  --ib-sel: color-mix(in oklch, var(--primary) 10%, transparent);
-  --ib-sel-hover: color-mix(in oklch, var(--primary) 14%, transparent);
   --ib-lit: color-mix(in oklch, var(--primary) 10%, var(--card));
+  --ib-sel-today: color-mix(in oklch, var(--primary) 10%, transparent);
+  --ib-sel-hover-today: color-mix(in oklch, var(--primary) 14%, transparent);
+}
+/* A floor under the separations. Some palettes set --muted to their --card (or --background), so a ground or a
+   raised surface built from --muted alone would vanish. Where relative colours are there, each is a third the
+   muted-based value and two thirds the card taken a fixed step in lightness (the ground always deeper; a raised surface deeper on
+   a light card, lighter on a dark one), so every palette keeps its panes and lifted surfaces visible while
+   keeping its own hue. */
+@supports (color: oklch(from red calc(0.5 - sign(l - 0.6) * 0.5) 0 h)) {
+  .pn-inbox {
+    --ib-ground-soft: var(--inbox-ground, color-mix(in oklch, color-mix(in oklch, var(--background) 82%, var(--ib-shadow-ink)) 35%, oklch(from var(--card) calc(l - 0.08) c h)));
+    --ib-raise: var(--inbox-raise, color-mix(in oklch, color-mix(in oklch, var(--muted) 40%, var(--card)) 35%, oklch(from var(--card) calc(l - sign(l - 0.6) * 0.055) c h)));
+  }
+  :root.light .pn-inbox {
+    --ib-ground-soft: var(--inbox-ground, color-mix(in oklch, color-mix(in oklch, var(--muted) 55%, var(--background)) 35%, oklch(from var(--card) calc(l - 0.08) c h)));
+  }
 }
 /* Resets in Tailwind's base layer: the window's own classes (unlayered) and
    ui's utilities (the question card inside Viewer) both win over them. */
@@ -82,7 +294,8 @@ button.ib-mut { border-radius: 6px; }
 /* shell */
 .ib-shell { display: flex; height: 100%; width: 100%; overflow: hidden; }
 .ib-shell > * { min-height: 0; overflow: hidden; }
-.ib-side { background: var(--background); border-right: 1px solid var(--ib-line); display: flex; flex-direction: column; padding: 14px 10px 12px; }
+.ib-side { --muted-foreground: var(--ib-side-mfg); --foreground: var(--ib-side-fg); color: var(--foreground); background: var(--ib-ground); border-right: 1px solid var(--ib-pane-line); display: flex; flex-direction: column; padding: 14px 10px 12px; }
+/* Floating (the peek, a phone's sheet), the sidebar keeps room on its right; docked, the panes' gutter is that room. */
 .ib-brand { display: flex; align-items: center; gap: 9px; padding: 0 6px 10px; }
 /* Workspaces' TaterSpriteSidebar: 24 frames of 77x88 at 2x shown 44 px high
    (a 924 px strip), mirrored, 3.5 s per loop; the first frame under reduced motion. */
@@ -93,10 +306,12 @@ button.ib-mut { border-radius: 6px; }
 }
 .ib-brand b { font-weight: 650; font-size: 15px; letter-spacing: -0.005em; }
 .ib-brand span { color: var(--muted-foreground); font-weight: 500; font-size: 15px; margin-left: -4px; }
-.ib-nav { display: flex; align-items: center; gap: 9px; height: 32px; padding: 0 9px; border-radius: 7px; color: var(--foreground); font-size: 14px; width: 100%; text-align: left; }
+.ib-nav { display: flex; align-items: center; gap: 9px; height: 32px; padding: 0 9px; border-radius: var(--ib-r10-s, 7px); color: var(--foreground); font-size: 14px; width: 100%; text-align: left; transition: var(--ib-fade-s, var(--ib-ui-fade)); }
 .ib-nav .ib-n { margin-left: auto; font-size: 12.5px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
-.ib-nav.ib-on { background: color-mix(in oklch, var(--primary) 12%, transparent); color: var(--primary); font-weight: 550; }
-.ib-nav.ib-on .ib-n { color: var(--primary); }
+/* The page shown: a lifted card on the ground (the panes' own surface), its icon in the accent; the words stay the text colour. */
+.ib-nav:hover:not(.ib-on):not(:disabled) { background: var(--ib-side-hover-h, transparent); }
+.ib-nav.ib-on .ib-n { color: var(--ib-cur-fg); }
+.ib-nav.ib-on, .ib-proj.ib-on { background: var(--ib-cur-bg); color: var(--ib-cur-fg); font-weight: 550; box-shadow: var(--ib-cur-shadow); }
 .ib-nav .ib-ic { color: var(--muted-foreground); }
 .ib-nav.ib-on .ib-ic { color: var(--primary); }
 .ib-nav:disabled { opacity: 0.55; }
@@ -105,45 +320,44 @@ button.ib-mut { border-radius: 6px; }
    paints over it and no scroll box (the projects' list) clips it. Free-standing controls keep the
    base ring, 2 px outside. */
 .pn-inbox :is(.ib-nav, .ib-proj, button.ib-band, .ib-mrow):focus-visible { outline-offset: -2px; }
-.ib-side-label { font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted-foreground); padding: 18px 9px 6px; }
+.ib-side-label { font-size: var(--ib-lbl-size-s, 11px); font-weight: var(--ib-lbl-550-s, 600); letter-spacing: var(--ib-lbl-track-s, 0.07em); text-transform: var(--ib-lbl-case-s, uppercase); color: var(--muted-foreground); padding: 18px 9px 6px; }
 .ib-projs { overflow-y: auto; min-height: 0; }
 /* Only the project list gives up height when there are many projects: Inbox, Decisions and the foot keep theirs (they
    shrank from 32 to 20 px past about 17 projects). The list fades at its foot while there is more to scroll. */
 .ib-side > :not(.ib-projs) { flex-shrink: 0; }
 .ib-projs[data-more] { mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent); }
-.ib-proj { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 9px; border-radius: 7px; font-size: 13.5px; width: 100%; text-align: left; }
+.ib-proj { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 9px; border-radius: var(--ib-r10-s, 7px); font-size: 13.5px; width: 100%; text-align: left; }
 .ib-proj .ib-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ib-proj .ib-n { margin-left: auto; font-size: 12.5px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
 .ib-proj.ib-proj-quiet { color: var(--muted-foreground); }
-.ib-proj.ib-on { background: color-mix(in oklch, var(--primary) 12%, transparent); color: var(--primary); font-weight: 550; }
 .ib-side-empty { font-size: 13px; color: var(--muted-foreground); padding: 2px 9px; line-height: 1.5; }
 /* The project menu (design record "inbox-project-menu", approved 2026-10-14): the row and its ⋯ are two buttons
    side by side (the Settings row's pattern). ⋯ shows on hover, on keyboard focus and while its menu is open, in
    place of the count; the row whose menu is open keeps a muted background. */
 .ib-projrow { position: relative; }
-.pn-inbox .ib-pmore { position: absolute; right: 3px; top: 3px; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; color: var(--muted-foreground); opacity: 0; }
+.pn-inbox .ib-pmore { position: absolute; right: 3px; top: 3px; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--ib-r7-s, 6px); color: var(--muted-foreground); opacity: 0; }
 .ib-pmore .ib-ic { width: 16px; height: 16px; stroke-width: 2.2; }
-.pn-inbox .ib-pmore:hover { background: color-mix(in oklch, var(--muted) 90%, transparent); color: var(--foreground); }
+.pn-inbox .ib-pmore:hover { background: var(--ib-hover-s, color-mix(in oklch, var(--muted) 90%, transparent)); color: var(--foreground); }
 .pn-inbox .ib-pmore:focus-visible { outline-offset: 0; }
 .ib-projrow:hover .ib-pmore, .ib-projrow:has(:focus-visible) .ib-pmore, .ib-projrow[data-menu] .ib-pmore { opacity: 1; }
 .ib-projrow:hover .ib-proj, .ib-projrow:has(:focus-visible) .ib-proj, .ib-projrow[data-menu] .ib-proj { padding-right: 32px; }
 /* The count steps aside for ⋯ for the eye only: it stays in the row button's accessible name ("pando 1"), which a
    screen reader announces exactly when keyboard focus lands on the row. */
 .ib-projrow:hover .ib-proj .ib-n, .ib-projrow:has(:focus-visible) .ib-proj .ib-n, .ib-projrow[data-menu] .ib-proj .ib-n { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.ib-projrow:hover .ib-proj:not(.ib-on) { background: color-mix(in oklch, var(--muted) 45%, transparent); }
-.ib-projrow[data-menu] .ib-proj:not(.ib-on) { background: color-mix(in oklch, var(--muted) 70%, transparent); color: var(--foreground); }
+.ib-projrow:hover .ib-proj:not(.ib-on) { background: var(--ib-side-hover); }
+.ib-projrow[data-menu] .ib-proj:not(.ib-on) { background: var(--ib-side-menu); color: var(--foreground); }
 .ib-projrow[data-menu] .ib-pmore { color: var(--foreground); }
 /* Shown only because the list shows it (nothing of it is listed): it leaves when the person goes elsewhere. */
 .ib-projrow[data-held] .ib-proj { color: var(--muted-foreground); }
 .ib-projrow[data-held] .ib-name { opacity: 0.7; }
 /* The menu: the Inbox's dropdown (the search chips' .ib-sp-menu), on Base UI Menu / ContextMenu. */
 .ib-pm-pos { z-index: 80; outline: none; }
-.ib-pm { min-width: 184px; padding: 4px; border-radius: 8px; background: var(--popover); color: var(--popover-foreground); box-shadow: 0 0 0 1px var(--border), 0 12px 30px -12px oklch(0 0 0 / 0.5); transform-origin: var(--transform-origin, top left); animation: ib-pm-in 120ms cubic-bezier(0.23, 1, 0.32, 1); outline: none; font-size: 13px; }
+.ib-pm { min-width: 184px; padding: 4px; border-radius: var(--ib-r12-s, 8px); background: var(--popover); color: var(--popover-foreground); box-shadow: var(--ib-float-s, 0 0 0 1px var(--border), 0 12px 30px -12px oklch(0 0 0 / 0.5)); transform-origin: var(--transform-origin, top left); animation: ib-pm-in 120ms cubic-bezier(0.23, 1, 0.32, 1); outline: none; font-size: 13px; }
 @keyframes ib-pm-in { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: scale(1); } }
 @media (prefers-reduced-motion: reduce) { .ib-pm { animation: none; } }
-.ib-pmi { display: flex; align-items: center; gap: 8px; width: 100%; height: 30px; padding: 0 8px; border-radius: 5px; font-size: 13px; white-space: nowrap; text-align: left; cursor: default; outline: none; user-select: none; }
+.ib-pmi { display: flex; align-items: center; gap: 8px; width: 100%; height: 30px; padding: 0 8px; border-radius: var(--ib-r8-s, 5px); font-size: 13px; white-space: nowrap; text-align: left; cursor: default; outline: none; user-select: none; }
 .ib-pmi .ib-ic { width: 15px; height: 15px; color: var(--muted-foreground); flex: none; }
-.ib-pmi[data-highlighted] { background: color-mix(in oklch, var(--muted) 80%, transparent); }
+.ib-pmi[data-highlighted] { background: var(--ib-hover-s, color-mix(in oklch, var(--muted) 80%, transparent)); }
 .ib-pmi:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 .ib-pmi[data-disabled] { opacity: 0.5; }
 .ib-pm-title { display: none; }
@@ -175,15 +389,15 @@ button.ib-mut { border-radius: 6px; }
    (the row keeps its full-width highlight, its text stops short of the toggle). */
 .ib-setrow { position: relative; }
 .ib-setrow > .ib-nav { padding-right: 40px; }
-.pn-inbox .ib-theme-tg { position: absolute; right: 3px; top: 50%; transform: translateY(-50%); width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; color: var(--muted-foreground); }
-.pn-inbox .ib-theme-tg:hover { background: var(--muted); color: var(--foreground); }
+.pn-inbox .ib-theme-tg { position: absolute; right: 3px; top: 50%; transform: translateY(-50%); width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--ib-r8-s, 6px); color: var(--muted-foreground); }
+.pn-inbox .ib-theme-tg:hover { background: var(--ib-side-menu-s, var(--muted)); color: var(--foreground); }
 .pn-inbox .ib-theme-tg:focus-visible { outline-offset: 0; }
 .ib-theme-tg .ib-ic { width: 15px; height: 15px; }
 /* Copy connect prompt (approval inbox-connect-row, 1b): an outlined pill as wide as its content,
    the four agent marks in their own colours, then the label. In a sidebar narrower than its
    content (the 200 px minimum) the label ends in an ellipsis; the marks never shrink. */
-.pn-inbox .ib-cpill { display: flex; align-items: center; gap: 9px; box-sizing: border-box; width: max-content; max-width: 100%; height: 34px; margin: 4px 0; padding: 0 12px 0 10px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--foreground); font-size: 14px; text-align: left; flex-shrink: 0; }
-.pn-inbox .ib-cpill:hover { background: color-mix(in oklch, var(--muted) 60%, transparent); }
+.pn-inbox .ib-cpill { display: flex; align-items: center; gap: 9px; box-sizing: border-box; width: max-content; max-width: 100%; height: 34px; margin: 4px 0; padding: 0 12px 0 10px; border: 1px solid var(--ib-sidectl-border-s, var(--border)); border-radius: 999px; background: var(--ib-sidectl-bg-s, transparent); box-shadow: var(--ib-sidectl-ring-s, none); color: var(--foreground); font-size: 14px; text-align: left; flex-shrink: 0; transition: var(--ib-fade-s, var(--ib-ui-fade)); }
+.pn-inbox .ib-cpill:hover { background: var(--ib-sidectl-hover-s, color-mix(in oklch, var(--muted) 60%, transparent)); }
 .pn-inbox .ib-cpill:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .ib-cpill-ags { display: inline-flex; gap: 3px; flex: none; color: var(--foreground); }
 .ib-cpill-ag { display: block; width: 16px; height: 16px; flex: none; }
@@ -259,19 +473,30 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 }
 
 /* main list */
-.ib-main { background: var(--card); display: flex; flex: 1; min-width: 0; height: 100%; }
+.ib-main { background: var(--ib-main-bg); display: flex; flex: 1; min-width: 0; height: 100%; padding: var(--ib-gutter); gap: var(--ib-gutter); }
+/* Each pane is a card on the ground: the list, a thread or a decision, a file beside its thread, Settings, What's new. */
+.ib-main > :is(.ib-listcol, .ib-pane, .ib-view, .ib-spage, .ib-dpage, .ib-wn) { border-radius: var(--ib-pane-r); box-shadow: var(--ib-pane-shadow); min-height: 0; }
+/* Each takes the card's colour under the panes switch. Off, today's: the thread pane its own card, a file the
+   window's background, and the rest none of their own (an opaque scroller draws its text differently). */
+.ib-main > :is(.ib-listcol, .ib-spage, .ib-dpage, .ib-wn) { background: var(--ib-pane-bg-s, transparent); }
+.ib-main > .ib-view { background: var(--ib-pane-bg-s, var(--background)); }
+/* The list keeps its resize edge in the gutter beside it (never clipped); its scroll box follows the card's corners instead.
+   Settings, Decisions and What's new scroll themselves, which clips them to their corners already. */
+.ib-main > :is(.ib-pane, .ib-view:not(.ib-full)) { overflow: var(--ib-clip-s, visible); }
+.ib-main > .ib-listcol > .ib-lbody { border-radius: 0 0 var(--ib-pane-r) var(--ib-pane-r); }
 .ib-listcol { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.ib-listcol.ib-narrow { flex: none; width: 380px; border-right: 1px solid var(--ib-line); }
+.ib-listcol.ib-narrow { flex: none; width: 380px; border-right: 1px solid var(--ib-pane-line); }
 /* Beside a thread, off phones, the column has the sidebar's resize edge
    (shell/ListColumnEdge.tsx sets its width): never narrower than 380px, and
    never so wide that the thread pane gets less than 480px. min-width wins
    when the window has room for neither. */
-.ib-listcol.ib-resizable { position: relative; min-width: 380px; max-width: calc(100% - 480px); }
-.ib-listcol > .ib-listedge { position: absolute; top: 0; bottom: 0; right: 0; z-index: 5; display: flex; }
+.ib-listcol.ib-resizable { position: relative; min-width: 380px; max-width: calc(100% - 480px - var(--ib-gutter)); }
+/* The edge sits in the middle of the gutter between the two panes. */
+.ib-listcol > .ib-listedge { position: absolute; top: 0; bottom: 0; right: calc(var(--ib-gutter) / -2); z-index: 5; display: flex; }
 /* Its grab area lies on the thread pane's side of the line (the sidebar's is
    centred on it), so a classic scrollbar at the list's right edge stays
    grabbable all the way across. */
-.ib-listedge .ib-handle-hit { left: 0; right: -12px; }
+.ib-listedge .ib-handle-hit { left: calc(var(--ib-gutter) / -2); right: calc(-12px + var(--ib-gutter) / 2); }
 /* Its focus track stays centred on the line, but only draws: it never takes the pointer from the scrollbar. */
 .ib-listedge .ib-handle-track { pointer-events: none; }
 .ib-lhead { height: 60px; display: flex; align-items: center; gap: 12px; padding: 0 22px; flex: none; }
@@ -376,6 +601,8 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 
 /* thread pane */
 .ib-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--card); position: relative; }
+/* A full-screen file covers the window: no card of its own. */
+.ib-main > .ib-view.ib-full { border-radius: 0; box-shadow: none; }
 .ib-phead { height: 46px; flex: none; display: flex; align-items: center; gap: 2px; padding: 0 14px; border-bottom: 1px solid var(--ib-hair); }
 .ib-phead .ib-sp { flex: 1; }
 .ib-pbody { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 30px 18px; container: ib-thread / inline-size; }
@@ -732,7 +959,7 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 
 /* the project's decisions (record 3.2), a row opening beside the list */
 .ib-dpage { padding: 28px 44px; flex: 1; min-width: 0; overflow-y: auto; }
-.ib-dpage.ib-narrow { flex: none; width: 460px; padding: 28px 22px; border-right: 1px solid var(--ib-line); }
+.ib-dpage.ib-narrow { flex: none; width: 460px; padding: 28px 22px; border-right: 1px solid var(--ib-pane-line); }
 .ib-dh { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
 .ib-dh h1 { font-size: 22px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
 /* The Decisions page's project switch (DecisionsProjectPicker): a button, then a listbox of every project with its folder and counts. */
@@ -784,7 +1011,7 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 /* attachments (step 2, record 2.1 to 2.8) */
 /* One line, "Changed 6:43 PM": the whole sentence is the hover text (tiles of a grid kept their heights uneven when it wrapped). */
 .ib-att-t .ib-ch { font-size: 12px; color: var(--warning); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ib-pane.ib-withfile { flex: none; width: 440px; border-right: 1px solid var(--ib-line); z-index: 2; }
+.ib-pane.ib-withfile { flex: none; width: 440px; border-right: 1px solid var(--ib-pane-line); z-index: 2; }
 .ib-pane.ib-withfile .ib-annpop { width: 400px; }
 .ib-pane.ib-withfile .ib-pbody { padding: 16px 20px 0; }
 .ib-pane.ib-withfile .ib-pfoot { padding: 12px 20px 14px; }
@@ -1137,7 +1364,7 @@ pre code.pn-code[data-keep-layout] {
   .ib-peek, .ib-peek[data-visible] { transition: none; }
 }
 /* The edge: click to collapse, drag to resize, a separator for the keyboard. */
-.ib-shell > .ib-edge-pos { position: fixed; top: 0; bottom: 0; z-index: 30; display: flex; overflow: visible; }
+.ib-shell > .ib-edge-pos { position: fixed; top: 0; bottom: 0; z-index: 30; display: flex; overflow: visible; margin-left: calc(var(--ib-gutter) / 2); }
 .ib-edge { position: relative; display: flex; width: 0; flex-shrink: 0; outline: none; }
 .ib-handle { position: relative; z-index: 10; width: 0; flex-shrink: 0; cursor: col-resize; }
 .ib-handle-track { position: absolute; top: 0; bottom: 0; left: -2px; right: -2px; transition: background-color 150ms; }
@@ -1580,7 +1807,10 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
    16 px, so iOS never zooms the page when one takes focus. */
 @media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
   .pn-inbox { height: var(--ib-vvh, 100%); background: var(--card); -webkit-tap-highlight-color: transparent; }
-  .ib-main { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); position: relative; overflow: hidden; }
+  .ib-main { padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left); gap: 0; position: relative; overflow: hidden; }
+  /* One screen at a time: the pane is the screen, edge to edge, with no card around it. */
+  .ib-main > :is(.ib-listcol, .ib-pane, .ib-view, .ib-spage, .ib-dpage, .ib-wn) { border-radius: 0; box-shadow: none; }
+  .ib-main > .ib-listcol > .ib-lbody { border-radius: 0; }
   body:has(.pn-inbox) :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select) { font-size: 16px !important; }
   .ib-lbody, .ib-pbody, .ib-spage, .ib-dpage, .ib-docscroll, .ib-gbody, .ib-wn { overscroll-behavior: contain; }
 
@@ -2186,8 +2416,9 @@ details.ib-wn-skipped[open] > summary { margin-bottom: 6px; }
 
 /* ───────────── Search (the approved "inbox-search" design; the palette after Workspaces' ui/command.tsx) ───────────── */
 /* The sidebar's Search entry: field-shaped, under the Tater mark, above Inbox. No key hint (no key opens it). */
-.pn-inbox .ib-sp-entry { display: flex; align-items: center; gap: 8px; height: 32px; margin: 0 0 8px; padding: 0 9px; width: 100%; flex: none; border-radius: 7px; border: 1px solid var(--ib-line); background: var(--ib-band); color: var(--muted-foreground); font-size: 13.5px; text-align: left; }
-.pn-inbox .ib-sp-entry:hover { color: var(--foreground); border-color: var(--border); }
+.pn-inbox .ib-sp-entry { display: flex; align-items: center; gap: 8px; height: 32px; margin: 0 0 8px; padding: 0 9px; width: 100%; flex: none; border-radius: var(--ib-r10-s, 7px); border: 1px solid var(--ib-sidectl-border-s, var(--ib-line)); background: var(--ib-sidectl-bg-s, var(--ib-band)); box-shadow: var(--ib-sidectl-ring-s, none); color: var(--muted-foreground); font-size: 13.5px; text-align: left; }
+.pn-inbox .ib-sp-entry:hover { color: var(--foreground); background: var(--ib-sidectl-hover-s, var(--ib-band)); border-color: var(--ib-sidectl-border-s, var(--border)); }
+.pn-inbox .ib-sp-entry .ib-kbd { border-color: var(--ib-kbd-line-s, var(--border)); background: var(--ib-kbd-bg-s, transparent); border-radius: var(--ib-r5-s, 4px); }
 .pn-inbox .ib-sp-entry svg.ib-ic { width: 15px; height: 15px; }
 /* ⌘K / Ctrl K, the one Inbox shortcut, at the entry's end. */
 .pn-inbox .ib-sp-entry .ib-sp-hint { margin-left: auto; }
@@ -2327,8 +2558,8 @@ dialog.ib-sp::backdrop { background: oklch(0 0 0 / 0.45); }
 /* The sidebar's Search entry and, at its right, the compose icon (32 px): one row, the entry keeps its look. */
 .ib-sp-entryrow { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; flex: none; }
 .pn-inbox .ib-sp-entryrow .ib-sp-entry { margin: 0; flex: 1; min-width: 0; width: auto; }
-.pn-inbox .ib-compose-btn { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 7px; border: 1px solid var(--ib-line); background: var(--ib-band); color: var(--muted-foreground); }
-.pn-inbox .ib-compose-btn:hover { color: var(--foreground); border-color: var(--border); }
+.pn-inbox .ib-compose-btn { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: var(--ib-r10-s, 7px); border: 1px solid var(--ib-sidectl-border-s, var(--ib-line)); background: var(--ib-sidectl-bg-s, var(--ib-band)); box-shadow: var(--ib-sidectl-ring-s, none); color: var(--muted-foreground); }
+.pn-inbox .ib-compose-btn:hover { color: var(--foreground); background: var(--ib-sidectl-hover-s, var(--ib-band)); border-color: var(--ib-sidectl-border-s, var(--border)); }
 .pn-inbox .ib-compose-btn svg.ib-ic { width: 16px; height: 16px; }
 /* A phone's list header (and the Drafts page): the compose icon beside search. */
 .pn-inbox .ib-lhead-compose { display: none; }

@@ -243,6 +243,10 @@ test('Inbox: the attached document never paints over the toolstrip, beside the t
         try {
           if (look === 'clean') await context.addCookies([{ name: 'plannotator-grid-enabled', value: 'false', url }]);
           const page = await context.newPage();
+          // Playwright's pointer starts at (0, 0), on the sidebar peek's edge strip: once a file closes the
+          // sidebar, resting there 600 ms opens the peek over everything, full screen included. Rest it in the
+          // middle, where a person reading the file would.
+          await page.mouse.move(400, 400);
           await page.goto(fileUrl);
           await expect(page.locator('[data-attachment-pane] .ib-docscroll table')).toBeVisible();
           if (layout.full) {
