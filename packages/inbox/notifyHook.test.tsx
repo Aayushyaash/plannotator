@@ -16,6 +16,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { InboxAuthor, InboxListRow, InboxMessage, InboxQuestion, InboxSectionId } from '@plannotator/core/inbox-types';
 import type { InboxEvent, ListModel } from './api';
 import type { InboxNotifications } from './notify';
+import { FROZEN_NOTICE_MS, NOTICE_CLAIMS_KEY, TEST_NOTIFICATION_TAG } from './notify';
 
 const hasDom = typeof document !== 'undefined';
 const { useInboxNotifications } = (hasDom ? await import('./notify') : {}) as typeof import('./notify');
@@ -311,5 +312,157 @@ describe.if(hasDom)('useInboxNotifications', () => {
     otherTabInFront = true;
     await batch([message('t3', 't3')], list([{ id: 't3', section: 'new' }]), [tabs[0]!]);
     expect(raised).toHaveLength(2);
+  });
+
+  test('a tab that may not notify claims nothing, so it never swallows an item a tab that may would show', async () => {
+    const Recording = (window as unknown as { Notification: { permission: NotificationPermission } }).Notification;
+    Recording.permission = 'default';
+    away();
+    await batch([message('t1', 't1'), question('t1', 'q-1')], list([{ id: 't1', section: 'waiting' }]));
+    expect(raised).toEqual([]);
+    expect(window.localStorage.getItem(NOTICE_CLAIMS_KEY)).toBeNull();
+    Recording.permission = 'denied';
+    await batch([message('t2', 't2'), question('t2', 'q-2')], list([{ id: 't2', section: 'waiting' }]));
+    expect(window.localStorage.getItem(NOTICE_CLAIMS_KEY)).toBeNull();
+    // The same item, in a tab allowed to notify: it raises it.
+    Recording.permission = 'granted';
+    act(() => window.dispatchEvent(new Event('focus')));
+    away();
+    await batch([message('t3', 't3'), question('t3', 'q-3')], list([{ id: 't3', section: 'waiting' }]));
+    expect(raised).toHaveLength(1);
+    expect(window.localStorage.getItem(NOTICE_CLAIMS_KEY)).toContain('q-3');
+  });
+
+  test('the permission is read again when the tab comes back (a change made in site settings)', () => {
+    const Recording = (window as unknown as { Notification: { permission: NotificationPermission } }).Notification;
+    expect(tabs[0]!.permission).toBe('granted');
+    Recording.permission = 'denied';
+    back();
+    expect(tabs[0]!.permission).toBe('denied');
+    Recording.permission = 'granted';
+  });
+
+  test('the ask stays on every load until resolved: a list with threads is enough, no new question needed', async () => {
+    const Recording = (window as unknown as { Notification: { permission: NotificationPermission } }).Notification;
+    Recording.permission = 'default';
+    act(() => root?.unmount());
+    host?.remove();
+    tabs.length = 0;
+    mountTabs(1);
+    expect(tabs[0]!.ask).toBeNull();
+    await batch([], list([]));
+    expect(tabs[0]!.ask).toBeNull();
+    await batch([], list([{ id: 'old', section: 'quiet' }]));
+    expect(tabs[0]!.ask).toBe('ask');
+    Recording.permission = 'granted';
+    back();
+    expect(tabs[0]!.ask).toBeNull();
+  });
+
+  test('Send a test notification: raised on its own tag when allowed, refused when not', async () => {
+    let result: string | undefined;
+    await act(async () => {
+      result = await tabs[0]!.sendTest();
+    });
+    expect(result).toBe('sent');
+    expect(raised).toHaveLength(1);
+    expect(raised[0]!.tag).toBe(TEST_NOTIFICATION_TAG);
+    expect(raised[0]!.title).toContain('test notification');
+    const Recording = (window as unknown as { Notification: { permission: NotificationPermission } }).Notification;
+    Recording.permission = 'default';
+    await act(async () => {
+      result = await tabs[0]!.sendTest();
+    });
+    expect(result).toBe('not-allowed');
+    expect(raised).toHaveLength(1);
+    Recording.permission = 'granted';
+  });
+
+  test('a tab the browser froze for a minute or more, or discarded, says so once', () => {
+    expect(tabs[0]!.slept).toBeNull();
+    const realNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    try {
+      act(() => document.dispatchEvent(new Event('freeze')));
+      now += 10_000;
+      act(() => document.dispatchEvent(new Event('resume')));
+      expect(tabs[0]!.slept).toBeNull();
+      act(() => document.dispatchEvent(new Event('freeze')));
+      now += FROZEN_NOTICE_MS + 1;
+      act(() => document.dispatchEvent(new Event('resume')));
+      expect(tabs[0]!.slept).toBe('frozen');
+      act(() => tabs[0]!.dismissSlept());
+      expect(tabs[0]!.slept).toBeNull();
+    } finally {
+      Date.now = realNow;
+    }
+    // A reload after Memory Saver discarded the tab.
+    act(() => root?.unmount());
+    host?.remove();
+    tabs.length = 0;
+    Object.defineProperty(document, 'wasDiscarded', { configurable: true, value: true });
+    try {
+      mountTabs(1);
+      expect(tabs[0]!.slept).toBe('discarded');
+    } finally {
+      delete (document as unknown as Record<string, unknown>).wasDiscarded;
+    }
+  });
+
+  test('every (re)connect of the event stream reports the permission as it is now, not as the stream URL says', async () => {
+    const posted: { window: string; permission: string }[] = [];
+    const realFetch = globalThis.fetch;
+    const RealEventSource = (globalThis as Record<string, unknown>).EventSource;
+    const sources: { url: string; listeners: Map<string, (event: Event) => void> }[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/inbox/window') posted.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ notify_reach: { enabled: true, windows: 1, allowed: 1, allowed_origins: [] } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    (globalThis as Record<string, unknown>).EventSource = class {
+      listeners = new Map<string, (event: Event) => void>();
+      constructor(public url: string) {
+        sources.push(this);
+      }
+      addEventListener(name: string, listener: (event: Event) => void) {
+        this.listeners.set(name, listener);
+      }
+      close() {}
+    };
+    const Recording = (window as unknown as { Notification: { permission: NotificationPermission } }).Notification;
+    try {
+      const { subscribeInboxEvents } = await import('./api');
+      // Opened while the browser had not been asked.
+      Recording.permission = 'default';
+      back();
+      const stop = subscribeInboxEvents(0, { onRecord: () => {}, onStatus: () => {}, onConnect: tabs[0]!.reportWindow }, tabs[0]!.windowReport());
+      expect(sources[0]!.url).toContain('permission=default');
+      // Allowed since; then the stream drops and reconnects (past the grace, or the Inbox restarted).
+      Recording.permission = 'granted';
+      back();
+      posted.length = 0;
+      await act(async () => {
+        sources[0]!.listeners.get('hello')!(new Event('hello'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(posted.map((p) => p.permission)).toEqual(['granted']);
+      expect(posted[0]!.window).toBe(tabs[0]!.windowReport().id);
+      stop();
+    } finally {
+      globalThis.fetch = realFetch;
+      (globalThis as Record<string, unknown>).EventSource = RealEventSource;
+      Recording.permission = 'granted';
+    }
+  });
+
+  test('the window report carries this tab: one id per page, its permission and origin', () => {
+    const report = tabs[0]!.windowReport();
+    expect(report.id.length).toBeGreaterThanOrEqual(8);
+    expect(report.permission).toBe('granted');
+    expect(report.origin).toBe(window.location.origin);
+    expect(tabs[0]!.windowReport().id).toBe(report.id);
   });
 });

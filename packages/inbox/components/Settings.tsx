@@ -7,7 +7,9 @@ import { HARNESSES, type ConnectContext } from '../harnesses';
 import { HostMark, Icon, type IconName } from '../icons';
 import { ConnectPicker } from './ConnectPicker';
 import { AgentsSettings } from './AgentsSettings';
-import type { InboxAgentsModel } from '@plannotator/core/inbox-types';
+import type { InboxAgentsModel, InboxNotifyReach } from '@plannotator/core/inbox-types';
+import type { TestResult } from '../notify';
+import { blockedSteps, browserName, isMac, notifyStatusKind, notifyStatusText, reachText, testMissHint } from '../notifyStatus';
 import { DevicesSection, devicesNeedAttention, usePhones } from './Devices';
 import { SidebarTrigger } from '../shell/sidebar';
 import { useInboxTheme } from '../theme';
@@ -41,6 +43,10 @@ export interface SettingsPageProps {
   tailscaleBusy: boolean;
   permission: NotificationPermission | 'unsupported';
   onToggleNotifications: (next: boolean) => void;
+  /** Whether any open Inbox tab can show a notification (the server's live report). */
+  notifyReach?: InboxNotifyReach | null;
+  /** Raise a test notice now (notify.ts `sendTest`). */
+  onTestNotification?: () => Promise<TestResult>;
   /** Delete a thread or a project with its files as they were sent (blobs no other thread uses). */
   onDeleteThread: (threadId: string) => Promise<void>;
   onDeleteProject: (projectId: string) => Promise<void>;
@@ -71,13 +77,6 @@ export interface SettingsPageProps {
   agents?: InboxAgentsModel | null;
   onAgents?: (next: InboxAgentsModel) => void;
 }
-
-const PERMISSION_LABEL: Record<NotificationPermission | 'unsupported', string> = {
-  granted: 'Allowed in this browser',
-  default: 'Not allowed in this browser yet',
-  denied: 'Blocked in this browser',
-  unsupported: 'This browser cannot show notifications',
-};
 
 /** A row's switch, named by its visible title. */
 function Switch({ on, labelledBy, label, disabled, onClick }: { on: boolean; labelledBy?: string; label?: string; disabled?: boolean; onClick: () => void }) {
@@ -171,15 +170,28 @@ function GeneralSection({
   settings,
   permission,
   onToggleNotifications,
+  notifyReach,
+  onTestNotification,
   sound,
 }: {
   settings: SettingsModel;
   permission: NotificationPermission | 'unsupported';
   onToggleNotifications: (next: boolean) => void;
+  notifyReach?: InboxNotifyReach | null;
+  onTestNotification?: () => Promise<TestResult>;
   sound?: InboxSound;
 }) {
   const { mode, shown, choose } = useInboxTheme();
   const notificationsOn = settings.notifications.enabled && permission === 'granted';
+  const status = notifyStatusKind(settings.notifications.enabled, permission);
+  const browser = browserName();
+  const address = typeof window !== 'undefined' ? window.location.host : '';
+  const [tested, setTested] = useState<TestResult | null>(null);
+  const reach = notifyReach ?? settings.notify_reach ?? null;
+  const reachLine =
+    permission === 'unsupported'
+      ? null
+      : reachText({ here: notificationsOn, enabled: settings.notifications.enabled, reach, origin: typeof window !== 'undefined' ? window.location.origin : '' });
   return (
     <>
       <section className="ib-sgroup" data-settings-theme={mode} aria-labelledby="ib-g-appearance">
@@ -216,9 +228,16 @@ function GeneralSection({
               <span className="ib-l" id="ib-notify-label">
                 Desktop notifications
               </span>
-              <span className="ib-desc">For questions and stops · {PERMISSION_LABEL[permission]}</span>
+              <span className="ib-desc" data-notify-status={status} aria-live="polite">
+                {notifyStatusText(status, browser)} ({address}) · new threads and questions
+              </span>
             </span>
             <span className="ib-ctl">
+              {status === 'not-allowed' && settings.notifications.enabled && (
+                <button type="button" className="ib-btn ib-pri ib-sm" data-notify-allow="" onClick={() => onToggleNotifications(true)}>
+                  Allow
+                </button>
+              )}
               <Switch
                 on={notificationsOn}
                 labelledBy="ib-notify-label"
@@ -230,7 +249,44 @@ function GeneralSection({
           {permission === 'denied' && (
             <div className="ib-callout ib-warn ib-in-card" data-notifications-blocked="">
               <Icon name="warn" />
-              <span>This browser blocks notifications for this page: allow them in its site settings, then reload.</span>
+              <span>
+                <b>Blocked in {browser} for {address}.</b> {blockedSteps(browser, address)}
+              </span>
+            </div>
+          )}
+          {status === 'on' && (
+            <div className="ib-prow" data-notify-test="">
+              <span className="ib-txt">
+                <span className="ib-l">Test notification</span>
+                <span className="ib-desc" aria-live="polite">
+                  {tested === 'sent'
+                    ? testMissHint(browser, isMac())
+                    : tested === 'failed'
+                      ? 'The browser would not show it. Reload this page and try again.'
+                      : tested === 'not-allowed'
+                        ? `Not allowed in ${browser} for this address any more.`
+                        : `${browser} can say it allows notifications while your system hides them: send one to see.`}
+                </span>
+              </span>
+              <span className="ib-ctl">
+                <button
+                  type="button"
+                  className="ib-btn ib-sm"
+                  data-notify-test-send=""
+                  disabled={!onTestNotification}
+                  onClick={() => void onTestNotification?.().then(setTested)}
+                >
+                  Send a test notification
+                </button>
+              </span>
+            </div>
+          )}
+          {reachLine && (
+            <div className="ib-prow" data-notify-reach={reachLine.yes ? 'yes' : 'no'}>
+              <span className="ib-txt">
+                <span className="ib-l">Notifications reach you</span>
+                <span className="ib-desc">{reachLine.text} With no Inbox tab open, nothing can notify you.</span>
+              </span>
             </div>
           )}
           {sound && <SoundRow sound={sound} />}
@@ -435,6 +491,8 @@ export function SettingsPage(props: SettingsPageProps) {
     tailscaleBusy,
     permission,
     onToggleNotifications,
+    notifyReach,
+    onTestNotification,
     onDeleteThread,
     onDeleteProject,
     about,
@@ -521,7 +579,16 @@ export function SettingsPage(props: SettingsPageProps) {
   if (section && settings) {
     switch (section) {
       case 'general':
-        body = <GeneralSection settings={settings} permission={permission} onToggleNotifications={onToggleNotifications} sound={sound} />;
+        body = (
+          <GeneralSection
+            settings={settings}
+            permission={permission}
+            onToggleNotifications={onToggleNotifications}
+            notifyReach={notifyReach}
+            onTestNotification={onTestNotification}
+            sound={sound}
+          />
+        );
         break;
       case 'agents':
         body = <AgentsSection settings={settings} context={context} onToggleTool={onToggleTool} agents={props.agents} onAgents={props.onAgents} />;

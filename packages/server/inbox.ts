@@ -128,6 +128,8 @@ import { createInboxRelay } from "./inbox-relay";
 import type { TailscaleRunner } from "@plannotator/shared/tailscale";
 import { createInboxTailscale, PHONES_TAILNET_HTTPS_PORT, type InboxTailscale } from "./inbox-tailscale";
 import { createInboxUpdates, type InboxUpdatesOptions } from "./inbox-updates";
+import { inboxCanonicalBaseUrl, inboxCanonicalRedirect } from "./inbox-canonical";
+import { createInboxWindows, parseWindowId, parseWindowOrigin, parseWindowPermission } from "./inbox-windows";
 import {
   agentSpec,
   claudeCodeModOn,
@@ -230,6 +232,8 @@ export interface InboxServerOptions {
    * tests): `/` answers a one-line page saying so.
    */
   htmlContent?: string;
+  /** Tests: how long a window's record outlives its last event stream (default `WINDOW_GRACE_MS`). */
+  windowGraceMs?: number;
   /**
    * The argv that runs this CLI (the compiled binary's absolute path, or bun
    * plus the entry script), so the window's connect snippets name a command
@@ -531,6 +535,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   let baseUrl = "";
   let portChanged = false;
   const statusListeners = new Set<() => void>();
+  // The Inbox windows open now and whether any can show a notification (inbox-windows.ts).
+  const windows = createInboxWindows({ graceMs: options.windowGraceMs });
   const binaryPath = options.binaryPath !== undefined ? options.binaryPath : version !== "dev" ? process.execPath : null;
   // The sidebar's Update button (packages/server/inbox-updates.ts): the daily
   // release check, the binary on disk, Update now, Remind me tomorrow.
@@ -604,7 +610,15 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     { legacy: "stateless", maxRequestBodySize: INBOX_MAX_REQUEST_BYTES },
   );
 
-  const health = (): InboxHealth => ({ ok: true, app: INBOX_APP_ID, version, serverSession, pid: process.pid, update: updates.current() });
+  const health = (): InboxHealth => ({
+    ok: true,
+    app: INBOX_APP_ID,
+    version,
+    serverSession,
+    pid: process.pid,
+    update: updates.current(),
+    notify_reach: windows.reach(notificationsState().enabled),
+  });
 
   /**
    * The sidebar's folders: every project, with its thread and unread counts,
@@ -1129,6 +1143,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     data_dir: dataDir,
     inbox_tool: inboxToolState(),
     notifications: notificationsState(),
+    /** Whether a notification can reach the person now: the windows open and how many may notify. */
+    notify_reach: windows.reach(notificationsState().enabled),
     /** The question sound: the Settings row, and whether the one-time dialog was shown. */
     sound: soundState(),
     /** Settings → About: update notices and automatic updates. */
@@ -1189,10 +1205,20 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     }
   };
 
-  const eventStream = (req: Request, url: URL): Response => {
-    const raw = url.searchParams.get("cursor") ?? req.headers.get("last-event-id");
-    const parsed = raw === null ? null : Number(raw);
-    const cursor = parsed !== null && Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+  const eventStream = (req: Request, url: URL, via: RequestVia): Response => {
+    // A reconnect: EventSource sends the last id it saw, while its URL still
+    // carries the cursor it first opened with. The last id wins, so a tab that
+    // slept or lost its connection catches up from where it was (and raises
+    // what it missed) instead of replaying everything since it loaded.
+    // Only a usable id counts (a non-negative whole number): an empty or
+    // malformed header falls back to the URL's cursor, never to a full replay
+    // or to none.
+    const seqOf = (raw: string | null): number | null => {
+      if (raw === null || !/^\d+$/.test(raw.trim())) return null;
+      const value = Number(raw.trim());
+      return Number.isSafeInteger(value) ? value : null;
+    };
+    const cursor = seqOf(req.headers.get("last-event-id")) ?? seqOf(url.searchParams.get("cursor"));
     const encoder = new TextEncoder();
     let cleanup = () => {};
     const stream = new ReadableStream<Uint8Array>({
@@ -1211,11 +1237,27 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         // `updated` (additive): the "What's new in X" link appears or goes once its notes are fetched or cannot be.
         const onStatus = () => send(`event: status\ndata: ${JSON.stringify({ update: updates.current(), updated: updates.updated() })}\n\n`);
         statusListeners.add(onStatus);
+        // An Inbox window (not the phone's door): counted while its stream is open, with what it reported.
+        const windowId = parseWindowId(url.searchParams.get("window"));
+        const leave = windowId
+          ? windows.connect(windowId, {
+              permission: parseWindowPermission(url.searchParams.get("permission")),
+              origin: parseWindowOrigin(url.searchParams.get("origin")),
+              via,
+            })
+          : () => {};
+        // Whether a notification can reach the person: every window's Settings shows it live.
+        // Windows only: the phone's door (contract 7.9) gets hello, record, status and the heartbeat.
+        const sendReach = () => send(`event: reach\ndata: ${JSON.stringify(windows.reach(notificationsState().enabled))}\n\n`);
+        const stopReach = windowId ? windows.subscribe(sendReach) : () => {};
+        if (windowId) sendReach();
         const heartbeat = setInterval(() => send(": ping\n\n"), SSE_HEARTBEAT_MS);
         cleanup = () => {
           clearInterval(heartbeat);
           unsubscribe();
           statusListeners.delete(onStatus);
+          stopReach();
+          leave();
         };
         req.signal.addEventListener("abort", () => {
           cleanup();
@@ -1532,7 +1574,19 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       if (path === "/api/inbox/threads" && req.method === "GET") return json(listModel(projectFilterOf(url), archivedModeOf(url)));
       if (path === "/api/inbox/threads/archived" && req.method === "GET") return json(archivedModel(url));
       if (path === "/api/inbox/projects" && req.method === "GET") return json({ serverSession, cursor: store.cursor(), projects: projectFolders() });
-      if (path === "/api/inbox/events" && req.method === "GET") return eventStream(req, url);
+      if (path === "/api/inbox/events" && req.method === "GET") return eventStream(req, url, via);
+      // A window's report: its browser's notification permission for its own origin changed (inbox-windows.ts).
+      if (path === "/api/inbox/window") {
+        if (req.method !== "POST") return json({ error: "Use POST." }, 405);
+        const body = await readBody(req);
+        if (checkServerSession(body, serverSession) === "mismatch") return json(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409);
+        const windowId = parseWindowId(body.window);
+        const permission = parseWindowPermission(body.permission);
+        if (!windowId) throw new InboxError("validation_error", "window: 8 to 64 letters, digits, - or _.", { field: "window" });
+        if (!permission) throw new InboxError("validation_error", "permission: granted, default, denied or unsupported.", { field: "permission" });
+        windows.report(windowId, { permission, origin: parseWindowOrigin(body.origin), via });
+        return json({ notify_reach: windows.reach(notificationsState().enabled) });
+      }
       if (path === "/api/inbox/restart") {
         if (req.method !== "POST") return json({ error: "Use POST." }, 405);
         const body = await readBody(req);
@@ -1883,6 +1937,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       if (decisionResponse) return decisionResponse;
 
       if (path === "/" && (req.method === "GET" || req.method === "HEAD")) {
+        // One origin: notification permission is per origin (inbox-canonical.ts).
+        const canonical = inboxCanonicalRedirect(req, url, port, via);
+        if (canonical) return canonical;
         const page = options.htmlContent ?? NOT_BUILT_PAGE;
         return new Response(req.method === "HEAD" ? null : page, {
           headers: {
@@ -1948,7 +2005,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   server = started.server;
   portChanged = started.portChanged;
   port = server.port as number;
-  baseUrl = `http://localhost:${port}/`;
+  baseUrl = inboxCanonicalBaseUrl(port);
 
   const registry: InboxRegistryEntry = {
     v: 1,
@@ -2049,6 +2106,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     if (stopped) return;
     stopped = true;
     clearInterval(dataCheck);
+    windows.stop();
     for (const timer of setAsideTimers) clearTimeout(timer);
     setAsideTimers.clear();
     connectStop.abort();

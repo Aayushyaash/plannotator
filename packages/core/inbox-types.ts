@@ -931,6 +931,26 @@ export interface InboxHealth {
    * `available` and `version` keep the older `{ available, version }` shape.
    */
   update: InboxUpdate | null;
+  /** Whether a notification can reach the person now (additive; absent from an older Inbox). */
+  notify_reach?: InboxNotifyReach;
+}
+
+/** What an Inbox window reports about its browser's notification permission for its own origin. */
+export type InboxWindowPermission = 'granted' | 'default' | 'denied' | 'unsupported' | 'unknown';
+
+/**
+ * Whether a browser notification can reach the person now
+ * (packages/server/inbox-windows.ts): notifications come from an open Inbox
+ * tab, so with none open, or none the browser lets notify, nothing reaches
+ * them. `windows`: Inbox tabs holding an event stream; `allowed`: those whose
+ * browser reported `granted`; `allowed_origins`: their addresses.
+ */
+export interface InboxNotifyReach {
+  /** The Settings switch (config.json `inboxNotifications.enabled`). */
+  enabled: boolean;
+  windows: number;
+  allowed: number;
+  allowed_origins: string[];
 }
 
 /** The Inbox's update control: what the button says and does. */

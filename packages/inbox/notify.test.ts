@@ -31,11 +31,24 @@ describe('askKind', () => {
     expect(askKind(saved('http://localhost:52817'), 'default', 'https://studio.tail0000.ts.net:52817')).toBe('ask');
     expect(askKind(saved('https://studio.tail0000.ts.net:52817'), 'default', 'http://localhost:52817')).toBe('ask');
   });
-  test('nothing when the browser decided, the person said Not now, or turned them off', () => {
+  test('nothing when this address is allowed, the person said Not now, or turned them off', () => {
     expect(askKind(saved('http://localhost:1'), 'granted', 'https://studio.tail0000.ts.net:1')).toBeNull();
     expect(askKind({ ...saved(null), dismissed: true }, 'default', 'http://localhost:1')).toBeNull();
+    expect(askKind({ ...saved(null), dismissed: true }, 'denied', 'http://localhost:1')).toBeNull();
     expect(askKind({ ...saved(null), enabled: false }, 'default', 'http://localhost:1')).toBeNull();
     expect(askKind(saved(null), 'default', 'http://localhost:1')).toBe('ask');
+  });
+  test("the owner's case: allowed at 127.0.0.1, now at localhost on the same port, no permission: moved, at once", () => {
+    expect(askKind(saved('http://127.0.0.1:59812'), 'default', 'http://localhost:59812', false)).toBe('moved');
+  });
+  test('the plain ask and the blocked line wait for a thread (never on an empty first run); moved does not', () => {
+    expect(askKind(saved(null), 'default', 'http://localhost:1', false)).toBeNull();
+    expect(askKind(saved(null), 'denied', 'http://localhost:1', false)).toBeNull();
+    expect(askKind(saved(null), 'denied', 'http://localhost:1', true)).toBe('blocked');
+    expect(askKind(saved('http://localhost:1'), 'default', 'http://localhost:2', false)).toBe('moved');
+  });
+  test('allowed here before but the permission was reset: the plain ask', () => {
+    expect(askKind(saved('http://localhost:1'), 'default', 'http://localhost:1')).toBe('ask');
   });
 });
 

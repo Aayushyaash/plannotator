@@ -23,7 +23,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { InboxAuthor, InboxListRow, InboxMessage, InboxSectionId } from '@plannotator/core/inbox-types';
+import type { InboxAuthor, InboxListRow, InboxMessage, InboxNotifyReach, InboxSectionId } from '@plannotator/core/inbox-types';
 import { inboxApi, type InboxEvent, type ListModel, type NotificationSettings } from './api';
 import { agentName, plural } from './format';
 import { pageInFront } from './sound';
@@ -186,17 +186,32 @@ export function startsNewBurst(last: { front: boolean; at: number } | null, fron
   return front && now - last.at > FRONT_BURST_MS;
 }
 
-export type AskKind = 'ask' | 'moved';
+export type AskKind = 'ask' | 'moved' | 'blocked';
 
 /**
- * Which one-time line the list shows, if any: the ask, or, when the person
- * turned notifications on at another origin (the Inbox moved port), "The
- * Inbox moved to a new address". Never once they said "Not now", turned
- * notifications off, or the browser already decided.
+ * Which line the list shows, if any. It stays on every load until it is
+ * resolved (the browser allows this address, or the person says "Not now" /
+ * turns notifications off), because a line shown once is easy to miss and a
+ * missing permission fails silently:
+ * - `moved`: the person allowed notifications at another address of this
+ *   computer (the Inbox changed port, or was opened at 127.0.0.1) and this one
+ *   has no permission. Shown as soon as the page knows, with the one-click
+ *   Allow: they already chose notifications once.
+ * - `ask`: the browser has not been asked here. Only once the Inbox holds a
+ *   thread (`hasThreads`), never on an empty first run.
+ * - `blocked`: the browser blocked this address. A quiet line pointing at
+ *   Settings, also only once there is something to notify about.
  */
-export function askKind(settings: NotificationSettings, permission: NotificationPermission, origin: string): AskKind | null {
-  if (permission !== 'default' || !settings.enabled || settings.dismissed) return null;
-  return settings.allowed_origin && settings.allowed_origin !== origin && sameHost(settings.allowed_origin, origin) ? 'moved' : 'ask';
+export function askKind(
+  settings: NotificationSettings,
+  permission: NotificationPermission,
+  origin: string,
+  hasThreads = true,
+): AskKind | null {
+  if (permission === 'granted' || !settings.enabled || settings.dismissed) return null;
+  if (permission === 'denied') return hasThreads ? 'blocked' : null;
+  if (settings.allowed_origin && settings.allowed_origin !== origin && sameHost(settings.allowed_origin, origin)) return 'moved';
+  return hasThreads ? 'ask' : null;
 }
 
 /**
@@ -223,11 +238,55 @@ function currentPermission(): NotificationPermission | 'unsupported' {
   return supported() ? Notification.permission : 'unsupported';
 }
 
-export interface InboxNotifications {
-  /** The browser's answer for this origin. */
+/** This page, for the server's count of open windows (inbox-windows.ts). */
+export interface InboxWindowReport {
+  id: string;
   permission: NotificationPermission | 'unsupported';
-  /** The one-time line to draw above the list, or null. */
+  origin: string;
+}
+
+/**
+ * The browser put this tab to sleep while it was in the background, so it
+ * could not notify: `discarded` (Chrome's Memory Saver closed it and this is
+ * the reload) or `frozen` (Chrome froze it for a while). Null otherwise.
+ */
+export type TabSlept = 'discarded' | 'frozen' | null;
+
+/** A freeze shorter than this is not worth a line (the page catches up as it wakes). */
+export const FROZEN_NOTICE_MS = 60_000;
+
+/** A new window id (`crypto.randomUUID`, else random hex). */
+function newWindowId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  } catch {
+    // Fall through.
+  }
+  return `w${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
+}
+
+/** The test notice's tag: its own, so it never replaces a real notice. */
+export const TEST_NOTIFICATION_TAG = 'plannotator-inbox-test';
+
+export type TestResult = 'sent' | 'not-allowed' | 'failed';
+
+export interface InboxNotifications {
+  /** The browser's answer for this origin, kept live (site settings, focus). */
+  permission: NotificationPermission | 'unsupported';
+  /** The line to draw above the list, or null. */
   ask: AskKind | null;
+  /** Whether any open Inbox tab can show a notification (the server's report; null until known). */
+  reach: InboxNotifyReach | null;
+  setReach: (reach: InboxNotifyReach) => void;
+  /** This window as the event stream reports it. */
+  windowReport: () => InboxWindowReport;
+  /** Tell the server this window's permission now (the event stream's hello calls it: a reconnect's URL may be stale). */
+  reportWindow: () => void;
+  /** The browser put this tab to sleep in the background (see `TabSlept`). */
+  slept: TabSlept;
+  dismissSlept: () => void;
+  /** Raise a test notice now (Settings): the browser may accept it while the system hides it. */
+  sendTest: () => Promise<TestResult>;
   /** Every event-stream line, before the debounced list read. */
   observe: (event: InboxEvent | null) => void;
   /** After a list read: raise what the lines brought (and remember the threads it shows). */
@@ -257,7 +316,16 @@ export function useInboxNotifications(options: {
   threadOnScreen?: (threadId: string) => boolean;
 }): InboxNotifications {
   const [permission, setPermission] = useState(currentPermission);
-  const [askRaised, setAskRaised] = useState(false);
+  /** The Inbox holds a thread (a list read showed one): the plain ask and the blocked line wait for it. */
+  const [hasThreads, setHasThreads] = useState(false);
+  const [reach, setReach] = useState<InboxNotifyReach | null>(null);
+  const [slept, setSlept] = useState<TabSlept>(() =>
+    typeof document !== 'undefined' && (document as Document & { wasDiscarded?: boolean }).wasDiscarded === true ? 'discarded' : null,
+  );
+  const windowId = useRef<string>('');
+  if (!windowId.current) windowId.current = newWindowId();
+  const permissionRef = useRef(permission);
+  permissionRef.current = permission;
   const settingsRef = useRef(options.settings);
   settingsRef.current = options.settings;
   const openRef = useRef({ thread: options.openThread, list: options.openList });
@@ -281,19 +349,67 @@ export function useInboxNotifications(options: {
   /** When the last notice was raised, and whether the tab was in front then. */
   const lastNotice = useRef<{ front: boolean; at: number } | null>(null);
 
-  // A grant or block made in the browser's site settings shows without a reload.
+  // A grant or block made in the browser's site settings shows without a
+  // reload: the permission's `change` event where there is one, and a fresh
+  // read whenever the tab comes back (a browser without the event, or one
+  // that fires it late).
   useEffect(() => {
-    if (!supported() || !navigator.permissions?.query) return;
+    if (!supported()) return;
     let status: PermissionStatus | null = null;
+    let gone = false;
     const sync = () => setPermission(currentPermission());
     navigator.permissions
-      .query({ name: 'notifications' })
+      ?.query?.({ name: 'notifications' })
       .then((s) => {
+        if (gone) return;
         status = s;
         s.addEventListener('change', sync);
       })
       .catch(() => {});
-    return () => status?.removeEventListener('change', sync);
+    window.addEventListener('focus', sync);
+    document.addEventListener('visibilitychange', sync);
+    return () => {
+      gone = true;
+      status?.removeEventListener('change', sync);
+      window.removeEventListener('focus', sync);
+      document.removeEventListener('visibilitychange', sync);
+    };
+  }, []);
+
+  // Tell the server what this window may do, whenever it changes and every
+  // time the event stream (re)connects (`reportWindow`, called on the
+  // stream's hello), so "Notifications reach you" is true across tabs, past
+  // a long disconnect and across an Inbox restart (inbox-windows.ts). An
+  // older Inbox answers 404: nothing to tell.
+  const reportWindow = useCallback(() => {
+    void inboxApi
+      .reportWindow({ window: windowId.current, permission: permissionRef.current, origin: window.location.origin })
+      .then((answer) => setReach(answer.notify_reach))
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    reportWindow();
+  }, [permission, reportWindow]);
+
+  // Chrome may freeze a background tab (Energy Saver) and discard one
+  // (Memory Saver). A frozen tab runs nothing, so a notice can only come late,
+  // as it wakes and the event stream catches up; a discarded tab is gone until
+  // the person comes back and it reloads. Either way the page says so once.
+  useEffect(() => {
+    let frozenAt: number | null = null;
+    const freeze = () => {
+      frozenAt = Date.now();
+    };
+    const resume = () => {
+      if (frozenAt !== null && Date.now() - frozenAt >= FROZEN_NOTICE_MS) setSlept((current) => current ?? 'frozen');
+      frozenAt = null;
+    };
+    document.addEventListener('freeze', freeze);
+    document.addEventListener('resume', resume);
+    return () => {
+      document.removeEventListener('freeze', freeze);
+      document.removeEventListener('resume', resume);
+    };
   }, []);
 
   // Back in front: the person sees the list, so the next notice starts a new burst.
@@ -401,6 +517,7 @@ export function useInboxNotifications(options: {
       pendingThreads.current = [];
       const rowList = list.sections.flatMap((section) => section.threads);
       for (const row of rowList) known.current.add(row.thread_id);
+      if (rowList.length > 0 || (list.projects ?? []).some((project) => project.threads > 0)) setHasThreads(true);
       if (questions.length === 0 && fresh.length === 0) return;
       // The threads these items landed in, newest last, with the agent that wrote.
       const threads = new Map<string, NotifyItem>();
@@ -429,11 +546,10 @@ export function useInboxNotifications(options: {
       if (!settings || !settings.enabled || !supported()) return;
       const now = Notification.permission;
       setPermission(now);
-      if (now === 'default') {
-        // The one-time ask, as before: a new question raises it.
-        if (asks) setAskRaised(true);
-        return;
-      }
+      // No permission here: nothing is raised, and this tab claims nothing, so a
+      // tab that may not notify (an old address, a blocked one) never takes an
+      // item another tab would have shown (claimNotices). The line above the
+      // list says what to do (askKind).
       if (now !== 'granted') return;
       const front = pageInFront();
       // Another Inbox tab in front raises it (and knows what it has on screen).
@@ -455,14 +571,51 @@ export function useInboxNotifications(options: {
     if (!supported()) return;
     const answer = await Notification.requestPermission();
     setPermission(answer);
-    setAskRaised(false);
-    await save(answer === 'granted' ? { enabled: true, dismissed: false, allowed_origin: window.location.origin } : { dismissed: true });
+    // Allow: on, here. Block in the browser's prompt is an answer too (no line
+    // nags about it after). Closing the prompt answers nothing: the line stays.
+    if (answer === 'granted') await save({ enabled: true, dismissed: false, allowed_origin: window.location.origin });
+    else if (answer === 'denied') await save({ dismissed: true });
   }, [save]);
 
   const notNow = useCallback(() => {
-    setAskRaised(false);
     void save({ dismissed: true });
   }, [save]);
+
+  // Allowed here (the prompt, or the browser's site settings while the page
+  // is open): this address is where notifications work now, so a later move
+  // to another port is told as "moved". Once per page, so two tabs at two
+  // allowed addresses do not write back and forth.
+  const recordedOrigin = useRef(false);
+  useEffect(() => {
+    const settings = options.settings;
+    if (recordedOrigin.current || permission !== 'granted' || !settings?.enabled) return;
+    if (settings.allowed_origin === window.location.origin) return;
+    recordedOrigin.current = true;
+    void save({ allowed_origin: window.location.origin });
+  }, [permission, options.settings, save]);
+
+  const sendTest = useCallback(async (): Promise<TestResult> => {
+    if (!supported() || Notification.permission !== 'granted') {
+      setPermission(currentPermission());
+      return 'not-allowed';
+    }
+    try {
+      const notification = new Notification('Plannotator Inbox: test notification', {
+        ...inboxNotificationOptions({ body: `Notifications from ${window.location.host} reach you.` }),
+        tag: TEST_NOTIFICATION_TAG,
+      } as InboxNotificationOptions);
+      notification.onclick = () => {
+        window.focus();
+        notification.close();
+      };
+      return 'sent';
+    } catch {
+      return 'failed';
+    }
+  }, []);
+
+  const windowReport = useCallback((): InboxWindowReport => ({ id: windowId.current, permission: permissionRef.current, origin: window.location.origin }), []);
+  const dismissSlept = useCallback(() => setSlept(null), []);
 
   const setEnabled = useCallback(
     async (next: boolean) => {
@@ -477,8 +630,7 @@ export function useInboxNotifications(options: {
     [save],
   );
 
-  const ask =
-    askRaised && options.settings && permission !== 'unsupported' ? askKind(options.settings, permission, window.location.origin) : null;
+  const ask = options.settings && permission !== 'unsupported' ? askKind(options.settings, permission, window.location.origin, hasThreads) : null;
 
-  return { permission, ask, observe, flush, turnOn, notNow, setEnabled };
+  return { permission, ask, reach, setReach, windowReport, reportWindow, slept, dismissSlept, sendTest, observe, flush, turnOn, notNow, setEnabled };
 }

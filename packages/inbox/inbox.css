@@ -357,6 +357,12 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-askline .ib-grow { flex: 1; min-width: 0; }
 .ib-askline b { font-weight: 600; }
 .ib-askline .ib-mut { color: var(--muted-foreground); }
+/* Notifications are off at this address though the person allowed them before (the Inbox moved): not to be missed. */
+.ib-askline.ib-askmoved { border-color: color-mix(in oklch, var(--warning, oklch(0.75 0.15 85)) 45%, transparent); background: color-mix(in oklch, var(--warning, oklch(0.75 0.15 85)) 9%, var(--background)); }
+.pn-inbox .ib-askline.ib-askmoved svg.ib-ic { color: var(--warning, oklch(0.75 0.15 85)); }
+/* Blocked, or the tab slept: said quietly, once per load until hidden. */
+.ib-askline.ib-askquiet { padding: 8px 12px; font-size: 13px; }
+.pn-inbox .ib-askline.ib-askquiet svg.ib-ic { color: var(--muted-foreground); width: 16px; height: 16px; }
 .ib-portline { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border); font-size: 13px; margin-bottom: 12px; color: var(--muted-foreground); }
 
 /* buttons */
