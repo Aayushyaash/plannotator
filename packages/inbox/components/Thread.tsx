@@ -2304,7 +2304,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                 {message === lastAgent && liveMessage(lastAgent) && waitingHoldsUp.length > 0 && (
                   <div className="ib-waitfoot">
                     <b>Waiting on this answer</b>
-                    <span className="ib-badge">Holds up {waitingHoldsUp.length}</span>
+                    <span className="ib-badge ib-b-hold">Holds up {waitingHoldsUp.length}</span>
                     <span className="ib-sp" />
                     <button type="button" className="ib-mut" onClick={() => setHoldsOpen((v) => !v)} aria-expanded={holdsOpen}>
                       {holdsOpen ? 'Hide' : 'Show'} <Icon name={holdsOpen ? 'chevR' : 'chevD'} size={14} />

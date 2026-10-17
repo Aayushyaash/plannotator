@@ -769,7 +769,8 @@ for (const narrow of [
         await expect(page.locator('.ib-listcol')).toBeHidden();
         const [paneBox, mainBox] = await Promise.all([pane.boundingBox(), page.locator('.ib-main').boundingBox()]);
         expect(paneBox!.width).toBeGreaterThanOrEqual(480);
-        expect(Math.abs(paneBox!.width - mainBox!.width)).toBeLessThan(2);
+        // The whole room the list had: .ib-main less its two 8 px gutters (the panes float on the ground).
+        expect(Math.abs(paneBox!.width - (mainBox!.width - 16))).toBeLessThan(2);
         await page.screenshot({ path: join(proofDir, `${tag}-2-thread.png`) });
         expect(await sideways(page)).toEqual([]);
         expect(await overlaps(page, '.ib-fline.ib-is-open', '.ib-mk, .ib-fl-nm, .ib-fl-meta, .ib-fl-tm')).toEqual([]);
@@ -806,7 +807,7 @@ for (const narrow of [
         await expect(dpane.getByRole('heading', { name: 'Retry a Stripe 409 with the same idempotency key' })).toBeVisible();
         await expect(page.locator('.ib-dpage')).toBeHidden();
         const [dpaneBox, dmainBox] = await Promise.all([dpane.boundingBox(), page.locator('.ib-main').boundingBox()]);
-        expect(Math.abs(dpaneBox!.width - dmainBox!.width)).toBeLessThan(2);
+        expect(Math.abs(dpaneBox!.width - (dmainBox!.width - 16))).toBeLessThan(2);
         await page.screenshot({ path: join(proofDir, `${tag}-4-decision.png`) });
         expect(await sideways(page)).toEqual([]);
         expect(await overlaps(page, 'section.ib-dpane .ib-phead', '.ib-pback, .ib-dstate')).toEqual([]);
@@ -1039,19 +1040,21 @@ test.describe('a desktop window', () => {
     await expect(decisionRow).toBeFocused();
   });
 
-  test('an iPad on its side (1080 px) keeps the list beside a 468 px thread, as main does', async ({ page }) => {
+  test('an iPad on its side (1080 px) keeps the list beside a 444 px thread (the panes float in 8 px gutters)', async ({ page }) => {
     await page.setViewportSize({ width: 1080, height: 810 });
     await page.goto(`${world.url}#thread=${world.threads.stopped}`);
     const pane = page.locator('section.ib-pane');
     await expect(pane.getByRole('heading', { name: /Stripe 409/ })).toBeVisible();
     await expect(page.locator('.ib-listcol.ib-narrow')).toBeVisible();
-    expect(Math.round((await pane.boundingBox())!.width)).toBe(1080 - 232 - 380);
+    expect(Math.round((await pane.boundingBox())!.width)).toBe(1080 - 232 - 380 - 3 * 8);
     await expect(pane.getByRole('button', { name: 'Close the thread' })).toBeVisible();
-    expect(await page.evaluate(() => document.querySelector('.pn-inbox')!.getAttribute('data-stack'))).toBeNull();
+    // Neither the thread nor a file stacks there (an open decision would: 460 + 380 px and the gutters need 1096).
+    expect(await page.evaluate(() => document.querySelector('.pn-inbox')!.getAttribute('data-stack') ?? '')).not.toMatch(/thread|file/);
   });
 
   test('a window just wide enough keeps the list beside the thread, which keeps 480 px', async ({ page }) => {
-    await page.setViewportSize({ width: 1100, height: 800 });
+    // 232 + 380 + 480 and the panes' three 8 px gutters.
+    await page.setViewportSize({ width: 1116, height: 800 });
     await page.goto(`${world.url}#thread=${world.threads.stopped}`);
     const pane = page.locator('section.ib-pane');
     await expect(pane.getByRole('heading', { name: /Stripe 409/ })).toBeVisible();

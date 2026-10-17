@@ -372,14 +372,16 @@ test('a row opens the thread as an email with the question cards; the decision t
   await expect(tags).toHaveCount(2);
   await expect(tags.nth(0)).toHaveAttribute('aria-pressed', 'true');
   await expect(tags.nth(1)).toHaveAttribute('aria-pressed', 'false');
-  await expect(pane.getByText('Answering this records a decision')).toHaveCount(1);
+  // The Inbox draws no "Answering this records a decision" row (the owner, 2026-10-16): the tag says it.
+  await expect(pane.locator('[data-question-decision-row]')).toHaveCount(1);
+  await expect(pane.locator('[data-question-decision-row]').filter({ visible: true })).toHaveCount(0);
   await shot('2.1-thread');
 
   await tags.nth(0).click();
   await tags.nth(1).click();
   await expect(tags.nth(0)).toHaveAttribute('aria-pressed', 'false');
   await expect(tags.nth(1)).toHaveAttribute('aria-pressed', 'true');
-  await expect(pane.getByText('Answering this records a decision')).toHaveCount(1);
+  await expect(pane.locator('[data-question-decision-row]').filter({ visible: true })).toHaveCount(0);
   // Kept on the question record (step 3), so a reload reads it back.
   await page.reload();
   const after = page.locator('section.ib-pane').getByRole('button', { name: 'Record as a decision', exact: true });

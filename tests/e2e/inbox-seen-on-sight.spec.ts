@@ -403,8 +403,10 @@ test('phone (WebKit, iPhone 15): an arrival under the decision card\'s sheet is 
     await page.locator('section.ib-pane').getByRole('button', { name: 'Records a decision', exact: true }).tap();
     const sheet = page.locator('[data-decision-card]');
     await expect(sheet).toBeVisible();
-    // Back at the end of the thread, the sheet over it.
+    // Back at the end of the thread, the sheet over it. The window learns it is at the end from the scroll
+    // event, which fires on a later frame: wait two frames so the arrival never lands before it.
     await body.evaluate((b) => (b.scrollTop = b.scrollHeight));
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 
     const arrived = await reply('phoneSheet', 'Retries are on: three attempts, then the dead-letter queue.');
     const article = page.locator(`[data-message-article="${arrived.message_id}"]`);

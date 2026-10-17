@@ -390,7 +390,8 @@ async function openFile(page: Page, thread: string, name: string): Promise<void>
   await page.waitForTimeout(500);
 }
 
-for (const width of [920, 1024, 1180, 1280]) {
+// 944: the narrowest window with a file beside its thread (a 440 px thread, a 480 px file and the panes' three 8 px gutters).
+for (const width of [944, 1024, 1180, 1280]) {
   test(`${width}: a file beside the thread keeps a readable column; the comments fold into a button below 1280 (rows 45 to 47, 50)`, async ({ browser }) => {
     const { context, page } = await open(browser, { name: String(width), width, height: 800 });
     try {

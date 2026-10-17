@@ -205,7 +205,8 @@ test('the tag is on for a `Decision: when answered` question and off for a plain
   await expect(switches(page)).toHaveCount(2);
   await expect(switches(page).nth(0)).toHaveAttribute('aria-pressed', 'true');
   await expect(switches(page).nth(1)).toHaveAttribute('aria-pressed', 'false');
-  await expect(pane(page).getByText('Answering this records a decision')).toHaveCount(1);
+  // The question's row is never drawn in the Inbox (the owner, 2026-10-16): the tag carries it.
+  await expect(pane(page).getByText('Answering this records a decision').filter({ visible: true })).toHaveCount(0);
   // On beside Open and off beside Open: one row of equal pills.
   await expectEyebrowPillsAligned(page);
   // The record says so too, and the sidebar counts the one that waits.

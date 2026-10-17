@@ -64,6 +64,11 @@ function badgeOf(row: InboxListRow): string | null {
   return null;
 }
 
+/** The badge's class: its tint names the state (Stopped in the destructive colour, Holds up in the warning one). */
+function badgeClass(row: InboxListRow): string {
+  return row.section === 'stopped' ? 'ib-badge ib-b-stop' : 'ib-badge ib-b-hold';
+}
+
 /** The subject cell's words: a Sent row says where its reply is (queued for a turn, or saved until the agent reads the thread). */
 function subjectOf(row: InboxListRow): string {
   // A thread the person started keeps its own subject in Sent; its count cell says whom it went to.
@@ -153,7 +158,7 @@ export const WIDE_ROWS_MIN_LIST_WIDTH = 900;
 function WideRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow; selected: boolean; filtered: boolean; lit: boolean; onOpen: () => void }) {
   const badge = badgeOf(row);
   const sent = row.section === 'sent';
-  const badgeEl = badge && <span className="ib-badge">{badge}</span>;
+  const badgeEl = badge && <span className={badgeClass(row)}>{badge}</span>;
   return (
     <button
       type="button"
@@ -227,7 +232,7 @@ function NarrowRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow
         <span className={`ib-t${count ? '' : ' ib-alone'}`}>{shortTime(row.last_at)}</span>
       </div>
       <div className="ib-l2">
-        {badge && <span className="ib-badge">{badge}</span>}
+        {badge && <span className={badgeClass(row)}>{badge}</span>}
         <AuthorMark author={rowAgent(row)} />
         <SubjectLine row={row} />
       </div>
@@ -264,7 +269,7 @@ function PhoneRow({ row, filtered, lit, onOpen }: { row: InboxListRow; filtered:
       <span className="ib-m2" dir="auto">{subjectOf(row)}</span>
       {(badge || chip || count || guide) && (
         <span className="ib-m3">
-          {badge && <span className="ib-badge">{badge}</span>}
+          {badge && <span className={badgeClass(row)}>{badge}</span>}
           {chip && (
             <span className="ib-key">
               <span className="ib-keyt" dir="auto">{chip}</span>

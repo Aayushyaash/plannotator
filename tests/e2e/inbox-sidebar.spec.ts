@@ -24,6 +24,8 @@ const repo = resolve(__dirname, '../..');
 const builtBinary = resolve(process.env.PLANNOTATOR_E2E_BINARY ?? join(repo, '.local/plannotator'));
 const proofDir = join(resolve(process.env.PLANNOTATOR_E2E_PROOF_DIR ?? join(repo, '.local/proof')), 'sidebar');
 const WIDTH = 232;
+// The panes float on the ground (inbox.css --ib-gutter): the list starts one 8px gutter past the sidebar.
+const GUTTER = 8;
 
 interface World {
   root: string;
@@ -142,7 +144,7 @@ test('the toggle closes and opens the sidebar on the spring, and the list takes 
   await expect(side(page)).toBeVisible();
   await expect(side(page).getByRole('button', { name: /^billing-svc(?: \d+)?$/ })).toBeVisible();
   const list = page.locator('.ib-listcol');
-  await expect.poll(() => list.evaluate((el) => el.getBoundingClientRect().left)).toBe(WIDTH);
+  await expect.poll(() => list.evaluate((el) => el.getBoundingClientRect().left)).toBe(WIDTH + GUTTER);
   await shot('open');
 
   const trigger = page.locator('.ib-lhead').getByRole('button', { name: 'Toggle Sidebar' });
@@ -155,7 +157,7 @@ test('the toggle closes and opens the sidebar on the spring, and the list takes 
   for (let i = 1; i < closing.length; i++) expect(closing[i]![1]).toBeLessThanOrEqual(closing[i - 1]![1]);
   await expect(side(page)).toBeHidden();
   await expect(page.locator('.ib-sb-panel')).toHaveAttribute('inert', '');
-  expect(await list.evaluate((el) => el.getBoundingClientRect().left)).toBe(0);
+  expect(await list.evaluate((el) => el.getBoundingClientRect().left)).toBe(GUTTER);
   expect(await cookie(page, 'plannotator-inbox-sidebar-open')).toBe('false');
   await shot('closed');
 
@@ -273,7 +275,7 @@ test('the edge: a click collapses, a drag resizes, past half the minimum it clos
   await page.mouse.move(WIDTH + 68, 500, { steps: 6 });
   await page.mouse.up();
   await expect(edge).toHaveAttribute('aria-valuenow', '300');
-  await expect.poll(() => page.locator('.ib-listcol').evaluate((el) => el.getBoundingClientRect().left)).toBe(300);
+  await expect.poll(() => page.locator('.ib-listcol').evaluate((el) => el.getBoundingClientRect().left)).toBe(300 + GUTTER);
   expect(await cookie(page, 'plannotator-inbox-sidebar-width')).toBe('300');
 
   // Below 100 px (half the 200 minimum) it closes mid-drag; back above, it reopens.
