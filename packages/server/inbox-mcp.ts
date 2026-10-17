@@ -284,13 +284,20 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string, calle
 
 /**
  * wait_for_reply's answer to the person's 👍 Looks good on the caller's
- * latest message: no reply is coming for it. Not a person reply (nothing was
- * sent); the ack is marked seen, so the window says the agent saw it.
+ * latest message: no reply is coming for it. The note that carries the 👍
+ * counts as delivered (the window says "Delivered to <agent>"), so the
+ * agent's connection, if it has one, does not wake it with the same 👍.
  */
 function ackResult(store: InboxStore, message: InboxMessage, base: string): ToolResult {
   const ack = message.ack!;
-  const cursor = ack.settled_seq ?? store.cursor();
+  const note = store.ackNote(message.id);
+  const cursor = Math.max(ack.settled_seq ?? 0, (note && store.messageCursor(note.id)) ?? 0) || store.cursor();
   store.markAcksSeen(message.thread_id, cursor);
+  if (note && message.author.kind === "agent" && message.author.session) {
+    store.recordDelivery(note.id, { host: message.author.host ?? "agent", session: message.author.session });
+  } else if (note) {
+    store.markAgentChecked(message.thread_id, store.messageCursor(note.id) ?? cursor);
+  }
   const subject = store.threadSubject(message.thread_id);
   return ok(
     `The person marked your message in thread ${message.thread_id}${subject ? ` (${subject})` : ""} 👍 ${ack.label}: they read it and need nothing more. No reply is coming for it; go on.`,
@@ -595,7 +602,7 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
     {
       title: "Read a thread, or list your threads",
       description:
-        "Read one Inbox thread (thread_id or message_id): every message with its questions and the person's answers. A message the person marked 👍 Looks good carries `ack` (they read it and need nothing more; nothing was sent). Without an id, list this project's threads, newest activity first, each with its section in the person's list: only the ones you sent in unless asked_by is \"anyone\", and only open ones unless include_resolved.",
+        "Read one Inbox thread (thread_id or message_id): every message with its questions and the person's answers. A message the person marked 👍 Looks good carries `ack` (they read it and need nothing more; no reply is needed). Without an id, list this project's threads, newest activity first, each with its section in the person's list: only the ones you sent in unless asked_by is \"anyone\", and only open ones unless include_resolved.",
       inputSchema: z
         .object({
           thread_id: z.string().optional(),
@@ -736,6 +743,7 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
             for (const threadId of thresholds.keys()) {
               for (const message of store.thread(threadId)?.messages ?? []) {
                 const settled = message.ack?.settled_seq;
+                if (message.ack?.not_sent) continue;
                 if (acrossThreads && message.ack?.seen_at) continue;
                 if (settled != null && ackCounts(message, settled)) return message;
               }
@@ -775,9 +783,10 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
                 const message = line.record;
                 const threshold = thresholds.get(message.thread_id);
                 if (threshold === undefined) return;
-                if (message.author.kind === "person" && forCaller(message) && line.seq > threshold && store.messageCursor(message.id) === line.seq) {
+                // The note carrying a 👍 is answered as `acknowledged`, from the ack's own line.
+                if (message.author.kind === "person" && !message.ack_of && forCaller(message) && line.seq > threshold && store.messageCursor(message.id) === line.seq) {
                   finish({ kind: "reply", message });
-                } else if (message.ack?.settled_seq === line.seq && ackCounts(message, line.seq)) {
+                } else if (message.ack?.settled_seq === line.seq && !message.ack.not_sent && ackCounts(message, line.seq)) {
                   finish({ kind: "ack", message });
                 } else if (message.id === message.thread_id && message.resolved_at !== null && threadIds.length === 1 && !store.agentAfterArchive(message.id)) {
                   finish({ kind: "resolved", threadId: message.id });

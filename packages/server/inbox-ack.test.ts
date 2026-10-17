@@ -1,10 +1,11 @@
 /**
- * 👍 Looks good (design record "inbox-acknowledge", approved 2026-10-15)
- * through the Inbox's real doors: `POST /api/inbox/messages/:id/ack` on a
- * running Inbox (temp data dir, loopback), the agent side over the official
- * MCP client, the wake over the bridge. Silent: nothing is sent and no
- * session is woken; the agent sees the ack only after the Undo window
- * (shortened here), in read_thread and as wait_for_reply's `acknowledged`.
+ * 👍 Looks good (design record "inbox-acknowledge", approved 2026-10-15,
+ * amended 2026-10-16: it reaches the agent) through the Inbox's real doors:
+ * `POST /api/inbox/messages/:id/ack` on a running Inbox (temp data dir,
+ * loopback), the agent side over the official MCP client, the wake over the
+ * bridge. Inside the Undo window (shortened here) nothing is sent; after it
+ * the 👍 is delivered once: as a wake turn to a connection's session, or as
+ * wait_for_reply's `acknowledged`, and read_thread shows it.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -12,7 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type { InboxListRow, InboxListSection, InboxMessageWire } from "@plannotator/core/inbox-types";
-import { INBOX_BRIDGE_POLL_PATH, parseInboxBridgeCommands } from "@plannotator/shared/inbox/connection";
+import { INBOX_BRIDGE_EVENT_PATH, INBOX_BRIDGE_POLL_PATH, inboxAckLine, inboxWakeText, parseInboxBridgeCommands } from "@plannotator/shared/inbox/connection";
+import { InboxAgentConnection, InboxWake } from "@plannotator/shared/inbox/agent-link";
 import { startInboxServer, type InboxServer } from "./inbox";
 
 const roots: string[] = [];
@@ -89,14 +91,22 @@ async function waitForReply(client: Client, threadId: string, seconds = 1) {
   };
 }
 
-async function poll(server: InboxServer, session: string) {
+async function poll(server: InboxServer, session: string, waitMs = 0) {
   const response = await fetch(url(server, INBOX_BRIDGE_POLL_PATH), {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${server.token}` },
-    body: JSON.stringify({ session, waitMs: 0 }),
+    body: JSON.stringify({ session, waitMs }),
   });
   expect(response.status).toBe(200);
   return parseInboxBridgeCommands(await response.text());
+}
+
+async function delivered(server: InboxServer, session: string, id: string) {
+  return fetch(url(server, INBOX_BRIDGE_EVENT_PATH), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${server.token}` },
+    body: JSON.stringify({ session, host: "claude-code", type: "delivered", id }),
+  });
 }
 
 describe("POST /api/inbox/messages/:id/ack", () => {
@@ -110,8 +120,9 @@ describe("POST /api/inbox/messages/:id/ack", () => {
     expect(answer.thread.section).toBe("quiet");
     expect(answer.thread.read_at).not.toBeNull();
     expect(answer.thread.ack).toMatchObject({ label: "Looks good" });
-    // Silent: no message was written, nothing was sent.
+    // Inside the Undo window nothing is written for the agent.
     expect(server.store.thread(threadId)!.messages).toHaveLength(1);
+    expect(server.store.pendingReplies(SESSION)).toEqual([]);
     expect((await windowMessage(server, threadId, messageId)).ack).toMatchObject({ label: "Looks good" });
 
     const back = await ack(server, messageId, false);
@@ -225,7 +236,7 @@ describe("what the agent sees", () => {
     expect(waited.structuredContent.status).toBe("acknowledged");
     expect(waited.structuredContent.acks).toEqual([{ message_id: messageId, label: "Looks good", at: expect.any(String) }]);
     expect(waited.content[0]!.text).toContain("No reply is coming");
-    // Nothing the person sent: the thread still holds the one agent message.
+    // The note that carried it is not listed: the thread still holds the one agent message.
     expect(server.store.thread(threadId)!.messages.map((m) => m.author.kind)).toEqual(["agent"]);
     expect((await windowMessage(server, threadId, messageId)).ack!.seen_at).toEqual(expect.any(String));
     // Without a cursor it answers again; with the cursor it waits.
@@ -270,13 +281,94 @@ describe("what the agent sees", () => {
     expect((await readThread(client, threadId)).structuredContent.thread.messages[0]!.ack ?? null).toBeNull();
   });
 
-  test("no wake: the bridge hands the session nothing, before or after the window", async () => {
-    const { server, messageId } = await setup();
+  test("the wake: nothing inside the window, then one turn naming the message, delivered once", async () => {
+    const { server, client, threadId, messageId } = await setup();
     await ack(server, messageId);
     expect(await poll(server, SESSION)).toEqual([]);
     await Bun.sleep(DELAY + 400);
+    const commands = await poll(server, SESSION);
+    expect(commands).toHaveLength(1);
+    const command = commands[0]!;
+    expect(command).toMatchObject({ type: "reply", thread_id: threadId, reply_to: messageId, ack_of: messageId });
+    expect(command.body).toBe(`The person marked your message 👍 Looks good (${messageId}). No reply needed unless you have a question.`);
+    expect(inboxWakeText(command)).toBe(
+      `Plannotator Inbox: ${command.subject} (${command.id})\nThe person marked your message 👍 Looks good (${messageId}). No reply needed unless you have a question.`,
+    );
+    // Another session is never handed it.
+    expect(await poll(server, "ses_other")).toEqual([]);
+    // Before delivery the window's line has no delivery yet.
+    expect((await windowMessage(server, threadId, messageId)).ack!.delivered_at ?? null).toBeNull();
+    expect((await delivered(server, SESSION, command.id)).status).toBe(200);
+    expect((await delivered(server, SESSION, command.id)).status).toBe(200);
     expect(await poll(server, SESSION)).toEqual([]);
-    expect(server.store.pendingReplies(SESSION)).toEqual([]);
+    expect((await windowMessage(server, threadId, messageId)).ack!.delivered_at).toEqual(expect.any(String));
+    // The note is not a message of the thread, for the window or for read_thread; the row stays Quiet with the 👍.
+    expect(server.store.windowThread(threadId)!.messages.map((m) => m.id)).toEqual([messageId]);
+    expect((await readThread(client, threadId)).structuredContent.thread.messages.map((m) => m.id)).toEqual([messageId]);
+    const row = await rowOf(server, threadId);
+    expect(row.section).toBe("quiet");
+    expect(row.message_count).toBe(1);
+    expect(row.ack).toMatchObject({ label: "Looks good" });
+    // Delivered by the wake: a wait across every thread is not answered by it again.
+    const across = (await client.callTool({ name: "wait_for_reply", arguments: { agent_session: SESSION, timeout_seconds: 1 } })) as { structuredContent: { status: string } };
+    expect(across.structuredContent.status).toBe("waiting");
+  });
+
+  test("a held bridge poll wakes when the window passes", async () => {
+    const { server, messageId } = await setup();
+    const held = poll(server, SESSION, 5_000);
+    await Bun.sleep(30);
+    const started = Date.now();
+    await ack(server, messageId);
+    const commands = await held;
+    expect(commands.map((c) => c.ack_of)).toEqual([messageId]);
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  test("taken back before it went: an Undo inside the window, or the pressed button before delivery, sends nothing", async () => {
+    const inside = await setup();
+    await ack(inside.server, inside.messageId);
+    await ack(inside.server, inside.messageId, false);
+    await Bun.sleep(DELAY + 400);
+    expect(await poll(inside.server, SESSION)).toEqual([]);
+
+    const after = await setup();
+    await ack(after.server, after.messageId);
+    await Bun.sleep(DELAY + 400);
+    expect(await poll(after.server, SESSION)).toHaveLength(1);
+    await ack(after.server, after.messageId, false);
+    expect(await poll(after.server, SESSION)).toEqual([]);
+    expect((await waitForReply(after.client, after.threadId)).structuredContent.status).toBe("waiting");
+    // A new 👍 later is sent again, once.
+    await ack(after.server, after.messageId);
+    await Bun.sleep(DELAY + 400);
+    expect(await poll(after.server, SESSION)).toHaveLength(1);
+  });
+
+  test("wait_for_reply's acknowledged counts as the delivery: the wake never hands the same 👍 again", async () => {
+    const { server, client, threadId, messageId } = await setup();
+    await ack(server, messageId);
+    await Bun.sleep(DELAY + 400);
+    expect((await waitForReply(client, threadId)).structuredContent.status).toBe("acknowledged");
+    expect(await poll(server, SESSION)).toEqual([]);
+    expect((await windowMessage(server, threadId, messageId)).ack!.delivered_at).toEqual(expect.any(String));
+  });
+
+  test("replay: a restart keeps the 👍 delivered once; nothing is handed out again", async () => {
+    const { server, threadId, messageId } = await setup();
+    await ack(server, messageId);
+    await Bun.sleep(DELAY + 400);
+    const [command] = await poll(server, SESSION);
+    await delivered(server, SESSION, command!.id);
+    const dataDir = join(server.store.dir, "..");
+    const before = server.store.windowThread(threadId);
+    server.stop();
+    servers.splice(servers.indexOf(server), 1);
+    const next = await startInboxServer({ dataDir, setAsideDelayMs: DELAY });
+    servers.push(next);
+    await Bun.sleep(DELAY + 200);
+    expect(next.store.pendingReplies(SESSION)).toEqual([]);
+    expect(next.store.windowThread(threadId)).toEqual(before);
   });
 
   test("an ack a stop interrupted inside its window is settled at the next start", async () => {
@@ -291,5 +383,135 @@ describe("what the agent sees", () => {
     await Bun.sleep(100);
     expect(next.store.message(messageId)!.ack!.settled_seq).toEqual(expect.any(Number));
     expect(next.store.thread(threadId)!.messages).toHaveLength(1);
+    // Settled at the start, it is sent then: one command for the session.
+    expect(next.store.pendingReplies(SESSION).map((m) => m.ack_of)).toEqual([messageId]);
   });
+});
+
+describe("a 👍 the window ends after the thread moved on", () => {
+  test("the person replied inside the window: the agent gets the reply, never the 👍; the window says not sent", async () => {
+    const { server, client, threadId, messageId } = await setup();
+    await ack(server, messageId);
+    const replied = await post(server, `/api/inbox/messages/${messageId}/reply`, { serverSession: server.serverSession, idempotency_key: "r-in-window", words: "Wait, also bump the version." });
+    expect(replied.status).toBe(200);
+    const replyId = ((await replied.json()) as { reply: { id: string } }).reply.id;
+    await Bun.sleep(DELAY + 400);
+    expect((await poll(server, SESSION)).map((c) => [c.id, c.ack_of ?? null])).toEqual([[replyId, null]]);
+    expect((await windowMessage(server, threadId, messageId)).ack).toMatchObject({ not_sent: "replied", delivered_at: null });
+    const waited = await waitForReply(client, threadId);
+    expect(waited.structuredContent.status).toBe("replied");
+    expect((await readThread(client, threadId)).structuredContent.thread.messages[0]!.ack ?? null).toBeNull();
+  });
+
+  test("the agent wrote again inside the window: the 👍 is not sent for the older message, and a wait on the newer question keeps waiting", async () => {
+    const { server, client, threadId, messageId, send } = await setup();
+    await ack(server, messageId);
+    await send(QUESTION, messageId);
+    await Bun.sleep(DELAY + 400);
+    expect(await poll(server, SESSION)).toEqual([]);
+    expect((await windowMessage(server, threadId, messageId)).ack).toMatchObject({ not_sent: "wrote_again", delivered_at: null });
+    expect((await waitForReply(client, threadId)).structuredContent.status).toBe("waiting");
+  });
+});
+
+describe("wait_for_reply never answers acknowledged for a 👍 that was not sent", () => {
+  const waitWith = async (client: Client, threadId: string, cursor: number | undefined, seconds = 1) =>
+    (await client.callTool({
+      name: "wait_for_reply",
+      arguments: { thread_id: threadId, agent_session: SESSION, timeout_seconds: seconds, ...(cursor === undefined ? {} : { cursor }) },
+    })) as { structuredContent: { status: string; cursor: number; reply?: { message_id: string } } };
+
+  test("replied, stored: after the reply was returned, a wait past it finds the settled-but-not-sent 👍 and keeps waiting", async () => {
+    const { server, client, threadId, messageId } = await setup();
+    await ack(server, messageId);
+    const replied = await post(server, `/api/inbox/messages/${messageId}/reply`, { serverSession: server.serverSession, idempotency_key: "r-stored", words: "Also bump the version." });
+    const replyId = ((await replied.json()) as { reply: { id: string } }).reply.id;
+    const got = await waitWith(client, threadId, undefined);
+    expect(got.structuredContent.status).toBe("replied");
+    expect(got.structuredContent.reply?.message_id).toBe(replyId);
+    await Bun.sleep(DELAY + 400);
+    // The ack settled after the reply, on the caller's latest message: only `not_sent` keeps it out.
+    // Read the values first: Bun's toMatchObject writes an asymmetric matcher into the object it is given.
+    const settled = { ...server.store.message(messageId)?.ack };
+    expect(settled.not_sent).toBe("replied");
+    expect(settled.settled_seq ?? 0).toBeGreaterThan(got.structuredContent.cursor);
+    expect((await waitWith(client, threadId, got.structuredContent.cursor)).structuredContent.status).toBe("waiting");
+  });
+
+  test("replied, live: a wait held past the reply is not ended by the settle line of the not-sent 👍", async () => {
+    const { server, client, threadId, messageId } = await setup();
+    await ack(server, messageId);
+    const replied = await post(server, `/api/inbox/messages/${messageId}/reply`, { serverSession: server.serverSession, idempotency_key: "r-live", words: "Also bump the version." });
+    expect(replied.status).toBe(200);
+    const got = await waitWith(client, threadId, undefined);
+    expect(got.structuredContent.status).toBe("replied");
+    const held = waitWith(client, threadId, got.structuredContent.cursor, 2);
+    await Bun.sleep(DELAY + 400);
+    expect(server.store.message(messageId)!.ack).toMatchObject({ not_sent: "replied" });
+    expect((await held).structuredContent.status).toBe("waiting");
+  });
+
+  test("wrote again, stored: the agent's newer question is what a wait waits on; the old 👍 never answers it", async () => {
+    const { server, client, threadId, messageId, send } = await setup();
+    await ack(server, messageId);
+    await send(QUESTION, messageId);
+    await Bun.sleep(DELAY + 400);
+    expect(server.store.message(messageId)!.ack).toMatchObject({ not_sent: "wrote_again" });
+    expect((await waitWith(client, threadId, undefined)).structuredContent.status).toBe("waiting");
+    expect((await waitWith(client, threadId, 0)).structuredContent.status).toBe("waiting");
+  });
+
+  test("wrote again, live: a wait held on the newer question keeps waiting through the settle line", async () => {
+    const { server, client, threadId, messageId, send } = await setup();
+    await ack(server, messageId);
+    await send(QUESTION, messageId);
+    const held = waitWith(client, threadId, undefined, 2);
+    await Bun.sleep(DELAY + 400);
+    expect(server.store.message(messageId)!.ack).toMatchObject({ not_sent: "wrote_again" });
+    expect((await held).structuredContent.status).toBe("waiting");
+  });
+});
+
+describe("the Pi and OpenCode wake (agent-link)", () => {
+  for (const host of [
+    { id: "pi", name: "Pi" },
+    { id: "opencode", name: "OpenCode" },
+  ]) {
+    test(`${host.name}: the 👍 is delivered once as a turn after the Undo window, and acknowledged`, async () => {
+      const { server, client } = await setup();
+      const dataDir = join(roots.at(-1)!, "data");
+      const project = join(roots.at(-1)!, "plannotator");
+      const session = `ses-${host.id}`;
+      const sent = (
+        (await client.callTool({
+          name: "send_message",
+          arguments: { project_path: project, agent_session: session, agent_name: host.name, agent_host: host.id, body: "Release notes drafted; nothing needs you." },
+        })) as { structuredContent: { message_id: string; thread_id: string } }
+      ).structuredContent;
+      const connection = new InboxAgentConnection({ dataDir, host: host.id, agentName: host.name, tools: [] });
+      const delivered: { text: string; id: string }[] = [];
+      const wake = new InboxWake(connection, session, { isBusy: () => false, deliver: async (text, command) => void delivered.push({ text, id: command.id }), notify: () => {} }, 50);
+      wake.start();
+      try {
+        await ack(server, sent.message_id);
+        await Bun.sleep(DELAY / 2);
+        expect(delivered).toEqual([]);
+        for (let i = 0; i < 200 && delivered.length === 0; i++) await Bun.sleep(50);
+        expect(delivered).toHaveLength(1);
+        const subject = server.store.threadSubject(sent.thread_id);
+        expect(delivered[0]!.text).toBe(`Plannotator Inbox: ${subject} (${delivered[0]!.id})\n${inboxAckLine(sent.message_id)}`);
+        let shown: string | null = null;
+        for (let i = 0; i < 100 && !shown; i++) {
+          shown = (await windowMessage(server, sent.thread_id, sent.message_id)).ack?.delivered_at ?? null;
+          if (!shown) await Bun.sleep(50);
+        }
+        expect(shown).toEqual(expect.any(String));
+        expect(server.store.message(delivered[0]!.id)!.delivery).toMatchObject({ host: host.id, session });
+        await Bun.sleep(300);
+        expect(delivered).toHaveLength(1);
+      } finally {
+        wake.dispose();
+      }
+    });
+  }
 });

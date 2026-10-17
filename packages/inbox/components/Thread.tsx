@@ -626,26 +626,38 @@ function useThreadAttachments(threadId: string, revision: unknown) {
  */
 const SHOW_NEW_MESSAGE_BUTTON = false;
 
+/** Where a 👍 Looks good is on its way to the agent (amended 2026-10-16: it is sent through). */
+export type AckPillState = 'pending' | 'queued' | 'saved' | 'delivered' | 'not-sent';
+
 /**
- * Under a message the person marked 👍 Looks good: when, that nothing was
- * sent, and later that the agent saw it (it read the thread, or its wait
- * returned the ack). Never "Delivered": nothing was delivered.
+ * The line under a 👍: the toast's Undo window still runs (`pending`), the
+ * Inbox sent it and a connection wakes the agent with it (`queued`, the
+ * message came through a waking connection), it waits for an agent that only
+ * reads the thread (`saved`), or it reached the agent (`delivered`: its turn
+ * was delivered, or the agent read it). Pure, for the tests.
  */
-export function AckPill({ ack, agent }: { ack: NonNullable<InboxMessageWire['ack']>; agent: string }) {
+export function ackPillLine(ack: NonNullable<InboxMessageWire['ack']>, agent: string, wakes: boolean, time: (iso: string) => string = whenTime): { state: AckPillState; text: string } {
+  if (ack.delivered_at) return { state: 'delivered', text: `Delivered to ${agent}, ${time(ack.delivered_at)}` };
+  // The window ended after the person replied, or the agent wrote again: it was not sent.
+  if (ack.not_sent === 'replied') return { state: 'not-sent', text: 'not sent: you replied' };
+  if (ack.not_sent === 'wrote_again') return { state: 'not-sent', text: `not sent: ${agent} wrote again` };
+  const you = `You, ${time(ack.at)} · `;
+  if (ack.settled_seq == null) return { state: 'pending', text: `${you}goes to ${agent} in a few seconds` };
+  // A 👍 settled before it was sent through (no note) never reaches a wake: it waits for a read.
+  if (wakes && ack.note_id) return { state: 'queued', text: `${you}Queued for ${agent}; it gets this as its next turn.` };
+  return { state: 'saved', text: `${you}Saved for ${agent}. It sees it when it next reads this thread.` };
+}
+
+/** Under a message the person marked 👍 Looks good: when, and where it is on its way to the agent. */
+export function AckPill({ ack, agent, wakes = false }: { ack: NonNullable<InboxMessageWire['ack']>; agent: string; wakes?: boolean }) {
+  const line = ackPillLine(ack, agent, wakes);
   return (
-    <p className="ib-ackpill" data-ack-pill={ack.seen_at ? 'seen' : 'not-sent'}>
+    <p className="ib-ackpill" data-ack-pill={line.state}>
       <span className="ib-ackchip">
         <span aria-hidden="true">👍</span> {ack.label}
       </span>
-      <span className="ib-ackwhen" title={fullTime(ack.at)}>
-        You, {whenTime(ack.at)} ·{' '}
-        {ack.seen_at ? (
-          <span title={fullTime(ack.seen_at)}>
-            {agent} saw it, {whenTime(ack.seen_at)}
-          </span>
-        ) : (
-          <>not sent; {agent} sees it when it next reads this thread</>
-        )}
+      <span className="ib-ackwhen" title={line.state === 'delivered' && ack.delivered_at ? `You marked it ${fullTime(ack.at)}; delivered ${fullTime(ack.delivered_at)}` : fullTime(ack.at)}>
+        {line.text}
       </span>
     </p>
   );
@@ -2194,7 +2206,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                   />
                 )}
                 {message.guide && <GuideCard guide={message.guide} onOpen={() => onOpenGuide(message.id)} />}
-                {isAgent && message.ack && <AckPill ack={message.ack} agent={name} />}
+                {isAgent && message.ack && <AckPill ack={message.ack} agent={name} wakes={message.wakes === true} />}
                 {message === lastAgent && liveMessage(lastAgent) && waitingHoldsUp.length > 0 && (
                   <div className="ib-waitfoot">
                     <b>Waiting on this answer</b>
@@ -2395,7 +2407,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
               <Icon name="reply" size={15} />
               {waiting ? 'Edit the reply' : 'Reply'}
             </button>
-            {/* 👍 Looks good beside Reply: silent, nothing sent; hidden while a question waits. */}
+            {/* 👍 Looks good beside Reply: sent to the agent after the Undo window; hidden while a question waits. */}
             {ackOffered && !waiting && (
               <button
                 type="button"
@@ -2406,7 +2418,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                 title={
                   ackOn
                     ? 'Take back Looks good'
-                    : `Not sent to ${agentName(ackTarget!.author)}: it sees it when it next reads this thread. Moves to Quiet until it writes again.`
+                    : `Tells ${agentName(ackTarget!.author)} you read it and need nothing more. Moves to Quiet until it writes again.`
                 }
               >
                 <span className="ib-ack-emoji" aria-hidden="true">

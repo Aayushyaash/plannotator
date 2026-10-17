@@ -506,7 +506,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     (timer as { unref?: () => void }).unref?.();
     setAsideTimers.add(timer);
   };
-  // 👍 Looks good: agents see an ack once the same Undo window has passed with it standing.
+  // 👍 Looks good: once the same Undo window has passed with it standing, the ack is sent to the agent (a note, delivered like a reply).
   const settleAcks = () => {
     try {
       store.settleAcks(setAsideDelayMs);
@@ -1290,7 +1290,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       ...(reply.started_by_person && reply.thread_id === reply.id ? { new_thread: true } : {}),
       ...(continues && !redirected ? { continues_thread: true } : {}),
       // A thread the person started with no name yet, handed to a session that may name it: the wake asks it to.
-      ...(store.canNameThread(reply.thread_id, reply.to?.session ?? recipientOf(reply)) ? { name_thread: true } : {}),
+      ...(!reply.ack_of && store.canNameThread(reply.thread_id, reply.to?.session ?? recipientOf(reply)) ? { name_thread: true } : {}),
+      // The person's 👍 Looks good (amended 2026-10-16): the wake is the one ack line.
+      ...(reply.ack_of ? { ack_of: reply.ack_of } : {}),
     };
   };
 

@@ -71,6 +71,7 @@ import {
 } from "@plannotator/core/inbox-types";
 import { inboxListSections, inboxRowUnread, inboxSectionOf } from "./list";
 import { inboxProjectLabels } from "./project-name";
+import { inboxAckLine } from "./connection";
 import type { QuestionAnswer } from "@plannotator/core/question-block";
 import { sanitizeTag } from "@plannotator/core/project";
 import {
@@ -268,6 +269,11 @@ function refusalError(refusal: InboxAnswerRefusal): InboxError {
 function lastNonNote(messages: readonly InboxMessage[]): InboxMessage | undefined {
   for (let i = messages.length - 1; i >= 0; i--) if (!isInboxNote(messages[i]!)) return messages[i];
   return undefined;
+}
+
+/** The note that carries a 👍 Looks good to the agent (`ack_of`): never listed in a thread, the ack on its message says it. */
+function isAckNote(message: InboxMessage): boolean {
+  return message.author.kind === "person" && typeof message.ack_of === "string" && message.ack_of !== "";
 }
 
 /** The most ids one send may supersede. */
@@ -776,7 +782,10 @@ export class InboxStore {
       subject: this.threadSubject(threadId),
       thread_name: root.thread_name ?? null,
       resolved_at: root.resolved_at,
-      messages: this.threadMessages(threadId).map((m) => this.wire(m)),
+      // The note carrying a 👍 to the agent is not listed: the ack on the message it marks says it.
+      messages: this.threadMessages(threadId)
+        .filter((m) => !isAckNote(m))
+        .map((m) => this.wire(m)),
     };
   }
 
@@ -803,6 +812,8 @@ export class InboxStore {
           ...message,
           ...(seq === undefined ? {} : { seq }),
           ...(message.author.kind === "person" ? { sent_annotations: carried.get(message.id) ?? 0 } : {}),
+          // When the 👍 reached the agent: its note delivered as a turn, or an agent read it.
+          ...(message.ack ? { ack: { ...message.ack, delivered_at: this.ackDeliveredAt(message.ack) } } : {}),
         };
       }),
     };
@@ -811,7 +822,8 @@ export class InboxStore {
   threadSummary(threadId: string): InboxThreadSummary | null {
     const root = this.messages.get(threadId);
     if (!root || root.thread_id !== threadId) return null;
-    const messages = this.threadMessages(threadId);
+    // The note carrying a 👍 is not a message of the thread as the person sees it.
+    const messages = this.threadMessages(threadId).filter((m) => !isAckNote(m));
     const last = messages[messages.length - 1] ?? root;
     // The Inbox's own notes are not the person's reply: the last word is the last other message's.
     const lastWord = lastNonNote(messages) ?? root;
@@ -961,7 +973,7 @@ export class InboxStore {
     const archiveSeq = this.archiveSeq(root.id);
     if (archiveSeq !== null && readSeq <= archiveSeq) return null;
     for (const message of messages) {
-      if (message.set_aside && message.author.kind === "person") continue;
+      if ((message.set_aside || isAckNote(message)) && message.author.kind === "person") continue;
       if ((this.messageSeq.get(message.id) ?? 0) > readSeq) return null;
     }
     return root.person_read_at ?? null;
@@ -1209,12 +1221,13 @@ export class InboxStore {
   }
 
   /**
-   * 👍 Looks good (design record "inbox-acknowledge", approved 2026-10-15),
-   * or take it back (`on: false`: the toast's Undo, the pressed button).
-   * Silent: nothing is sent and no session is woken. It records `ack` on the
-   * agent's latest message and marks the thread read (Quiet until an agent
-   * writes again); taking it back removes the ack and undoes the Mark read it
-   * made. Refused on a person's message, on a message that is not the
+   * 👍 Looks good (design record "inbox-acknowledge", approved 2026-10-15,
+   * amended 2026-10-16), or take it back (`on: false`: the toast's Undo, the
+   * pressed button). It records `ack` on the agent's latest message and marks
+   * the thread read (Quiet until an agent writes again); once the Undo window
+   * passes, `settleAcks` sends it to the agent. Taking it back removes the ack
+   * and undoes the Mark read it made, and a note not delivered yet is then
+   * never delivered. Refused on a person's message, on a message that is not the
    * thread's latest agent message (a newer one arrived), while a question in
    * the thread is open or picked, and on an archived thread. No write when
    * nothing changes.
@@ -1277,8 +1290,16 @@ export class InboxStore {
 
   /**
    * Acks whose Undo window (`afterMs`) has passed while they still stand
-   * become visible to agents: one line each with `settled_seq` (the seq of
-   * that line). Returns the messages settled.
+   * are sent to the agent (amended 2026-10-16: "send looks good through"):
+   * first the ack's line with `settled_seq` (the seq of that line) and
+   * `note_id`, then the note it names, a person's reply to the message whose
+   * body is `inboxAckLine` (`ack_of`), delivered like any reply (the wake,
+   * wait_for_reply's `acknowledged`). The note's line is the one a held
+   * bridge poll wakes on. From then on agents see it in read_thread too.
+   * `ackMessage`'s conditions are checked again here: when the person wrote
+   * back after the message inside the window, or the agent wrote again, the
+   * ack settles with `not_sent` (`replied` / `wrote_again`) and no note, and
+   * no agent ever sees it. Returns the messages settled.
    */
   settleAcks(afterMs: number): InboxMessage[] {
     const now = this.now().getTime();
@@ -1286,12 +1307,73 @@ export class InboxStore {
     for (const message of [...this.messages.values()]) {
       const ack = message.ack;
       if (!ack || ack.settled_seq != null || Date.parse(ack.at) + afterMs > now) continue;
+      const notSent = this.ackNotSentReason(message);
+      if (notSent) {
+        const at = this.stamp();
+        const settled: InboxMessage = { ...message, ack: { ...ack, settled_seq: this.seq + 1, settled_at: at, note_id: null, not_sent: notSent } };
+        this.appendMessage(settled, at);
+        out.push(settled);
+        continue;
+      }
+      const noteId = inboxId("msg");
       const at = this.stamp();
-      const settled: InboxMessage = { ...message, ack: { ...ack, settled_seq: this.seq + 1, settled_at: at } };
+      const settled: InboxMessage = { ...message, ack: { ...ack, settled_seq: this.seq + 1, settled_at: at, note_id: noteId } };
       this.appendMessage(settled, at);
+      const noteAt = this.stamp();
+      const note: InboxMessage = {
+        id: noteId,
+        project_id: message.project_id,
+        thread_id: message.thread_id,
+        reply_to: message.id,
+        author: { kind: "person" },
+        subject: null,
+        body: inboxAckLine(message.id),
+        created_at: noteAt,
+        resolved_at: null,
+        idempotency_key: null,
+        ack_of: message.id,
+      };
+      this.appendMessage(note, noteAt);
       out.push(settled);
     }
     return out;
+  }
+
+  /**
+   * Why a 👍 can no longer go to the agent when its Undo window ends
+   * (`ackMessage`'s rules, again): the agent wrote again after the message
+   * (the 👍 would read as the answer to the newer one), or the person wrote
+   * back after it (their reply is the answer). The Inbox's own notes do not
+   * count. Null when it can go.
+   */
+  private ackNotSentReason(message: InboxMessage): "replied" | "wrote_again" | null {
+    const members = this.threadMessages(message.thread_id);
+    const after = members.slice(members.findIndex((m) => m.id === message.id) + 1);
+    if (after.some((m) => m.author.kind === "agent")) return "wrote_again";
+    if (after.some((m) => m.author.kind === "person" && !isInboxNote(m))) return "replied";
+    return null;
+  }
+
+  /**
+   * Whether the note carrying a 👍 still stands for it: the message it marks
+   * still carries that ack. A 👍 taken back (Undo, the pressed button, Move
+   * back) leaves its note in the log, never delivered.
+   */
+  private ackNoteLive(note: InboxMessage): boolean {
+    return !!note.ack_of && this.messages.get(note.ack_of)?.ack?.note_id === note.id;
+  }
+
+  /** When a 👍 reached the agent: its note delivered as a turn, else when an agent read it; null while it waits. */
+  private ackDeliveredAt(ack: InboxAck): string | null {
+    const note = ack.note_id ? this.messages.get(ack.note_id) : undefined;
+    return note?.delivery?.at ?? ack.seen_at ?? null;
+  }
+
+  /** The note carrying a message's 👍 to the agent, while it stands. */
+  ackNote(messageId: string): InboxMessage | null {
+    const noteId = this.messages.get(messageId)?.ack?.note_id;
+    const note = noteId ? this.messages.get(noteId) : undefined;
+    return note && this.ackNoteLive(note) ? note : null;
   }
 
   /** Acks not settled yet (still inside their Undo window, or a stop interrupted it). */
@@ -1314,20 +1396,29 @@ export class InboxStore {
       messages: thread.messages.map((message) => {
         if (message.ack === undefined) return message;
         const { ack, ...rest } = message;
-        return { ...rest, ack: ack && ack.settled_seq != null ? { label: ack.label, at: ack.at } : null } as InboxMessageWire;
+        return { ...rest, ack: ack && ack.settled_seq != null && !ack.not_sent ? { label: ack.label, at: ack.at } : null } as InboxMessageWire;
       }),
     };
+  }
+
+  /** One message's settled ack was seen by its agent (its note delivered). No write when already seen. */
+  private markAckSeen(messageId: string, at: string): void {
+    const message = this.messages.get(messageId);
+    const ack = message?.ack;
+    if (!message || !ack || ack.settled_seq == null || ack.not_sent || ack.seen_at) return;
+    this.appendMessage({ ...message, ack: { ...ack, seen_at: at } }, at);
   }
 
   /**
    * An agent read the thread's settled acks (read_thread, or wait_for_reply's
    * `acknowledged`): each gets `seen_at`, so the window's pill says "<agent>
-   * saw it". `upToSeq` limits it to acks settled at or before that seq.
+   * saw it". `upToSeq` limits it to acks settled at or before that seq. An
+   * ack that was not sent (`not_sent`) is never seen.
    */
   markAcksSeen(threadId: string, upToSeq = Number.POSITIVE_INFINITY, at = this.stamp()): void {
     for (const message of this.threadMessages(threadId)) {
       const ack = message.ack;
-      if (!ack || ack.settled_seq == null || ack.settled_seq > upToSeq || ack.seen_at) continue;
+      if (!ack || ack.settled_seq == null || ack.not_sent || ack.settled_seq > upToSeq || ack.seen_at) continue;
       this.appendMessage({ ...message, ack: { ...ack, seen_at: at } }, at);
     }
   }
@@ -2621,6 +2712,8 @@ export class InboxStore {
     const out: { message: InboxMessage; seq: number }[] = [];
     for (const message of this.messages.values()) {
       if (message.author.kind !== "person" || message.delivery || !this.isFor(message, session)) continue;
+      // A 👍 taken back before it went is never delivered.
+      if (isAckNote(message) && !this.ackNoteLive(message)) continue;
       const seq = this.messageSeq.get(message.id) ?? 0;
       // A New message, or a reply the person sent to another session, is
       // settled only by its delivery to the session it names (its own
@@ -2647,6 +2740,8 @@ export class InboxStore {
     const delivered: InboxMessage = { ...reply, delivery: { state: "delivered", host: by.host, session: by.session, at } };
     this.appendMessage(delivered, at);
     this.markAgentChecked(reply.thread_id, this.messageSeq.get(reply.id) ?? 0, at);
+    // A 👍 that reached the agent was seen: a later wait on every thread is not answered by it again.
+    if (isAckNote(reply) && reply.ack_of) this.markAckSeen(reply.ack_of, at);
     return delivered;
   }
 

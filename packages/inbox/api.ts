@@ -508,7 +508,7 @@ export const inboxApi = {
   /** Mark read (the thread leaves the top for Quiet, its waiting questions closed) or its Undo. */
   markRead: (threadId: string, read: boolean) =>
     post<{ thread: InboxListRow }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/${read ? 'read' : 'unread'}`, {}),
-  /** 👍 Looks good on the agent's latest message (silent: nothing is sent; the thread is marked read), or its Undo. */
+  /** 👍 Looks good on the agent's latest message (the thread is marked read; sent to the agent after the Undo window), or its Undo. */
   ack: (messageId: string, on: boolean) =>
     post<{ message: InboxMessageWire; thread: InboxListRow }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/ack`, { ack: on }),
   /** The project menu's Mark all as read: Mark read on every thread waiting on the person. */

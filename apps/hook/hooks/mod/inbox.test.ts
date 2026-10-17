@@ -12,7 +12,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { inboxAgentTool, INBOX_MESSAGE_INSTRUCTION, INBOX_NAME_THREAD_LINE, INBOX_NEW_THREAD_INSTRUCTION, INBOX_TOOL_ACTIONS, INBOX_WAKE_INSTRUCTION, inboxRedirectedLine, inboxWakeText, mcpAnswerOf } from './inbox-contract'
+import { inboxAckLine, inboxAgentTool, INBOX_MESSAGE_INSTRUCTION, INBOX_NAME_THREAD_LINE, INBOX_NEW_THREAD_INSTRUCTION, INBOX_TOOL_ACTIONS, INBOX_WAKE_INSTRUCTION, inboxRedirectedLine, inboxWakeText, mcpAnswerOf } from './inbox-contract'
 import { ClaudeSession } from './testing/claude-session'
 import { removeStubbedHtml, stubBuiltHtml } from '../../../../tests/helpers/inbox-world'
 import { inboxEntryOf, isAlive, mustSignalInbox, stopProvenInboxes } from '../../../../tests/helpers/inbox-process'
@@ -269,6 +269,48 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
     const after = await thread(w, asked.thread_id)
     expect(after.messages.at(-1)?.author).toMatchObject({ kind: 'agent', session: 'session-wake' })
     w.proof('thread shows: Replied (the asking session wrote after the delivered reply)')
+    await Bun.sleep(2_500)
+    expect(session.host.submits).toHaveLength(1)
+  }, 90_000)
+
+  test("the person's 👍 Looks good reaches the session once, after the Undo window, as one short turn naming the message; the window says Delivered", async () => {
+    const w = world('12-looks-good-wakes-the-session')
+    startInbox(w)
+    const session = await open(w, 'session-ack')
+    const sent = await send(session, w, 'Merged the refund fix. CI is green on main; nothing needs you here.')
+    const { port } = registry(w)
+    const health = (await (await fetch(`http://127.0.0.1:${port}/api/inbox/health`)).json()) as { serverSession: string }
+    const pressed = Date.now()
+    const response = await fetch(`http://127.0.0.1:${port}/api/inbox/messages/${sent.message_id}/ack`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({ serverSession: health.serverSession }),
+    })
+    expect(response.status).toBe(200)
+    w.proof(`> the person presses 👍 Looks good in the Inbox window on ${sent.message_id}`)
+
+    const turn = await waitFor('the 👍 turn', () => session.turns.find((t) => t.text.includes(inboxAckLine(sent.message_id))), 40_000)
+    // Not before the Undo window (10 s) passed.
+    expect(Date.now() - pressed).toBeGreaterThanOrEqual(9_500)
+    await Bun.sleep(3_000)
+    expect(session.host.submits).toHaveLength(1)
+    const text = session.host.submits[0]!
+    const lines = text.split('\n')
+    expect(lines).toHaveLength(2)
+    const noteId = /\((msg_[0-9A-Z]+)\)$/.exec(lines[0]!)![1]!
+    const subject = (await thread(w, sent.thread_id)).subject
+    expect(lines[0]).toBe(`Plannotator Inbox: ${subject} (${noteId})`)
+    expect(lines[1]).toBe(`The person marked your message 👍 Looks good (${sent.message_id}). No reply needed unless you have a question.`)
+    expect(text).toBe(inboxWakeText({ id: noteId, subject, body: lines[1]!, ack_of: sent.message_id }))
+    w.proof(`turn.start ${turn.id}:\n${turn.text}\n`)
+
+    const ack = await waitFor('the delivered 👍', async () => {
+      const message = (await thread(w, sent.thread_id)).messages.find((m) => m.id === sent.message_id) as ThreadMessage & { ack?: { delivered_at?: string | null } }
+      return message.ack?.delivered_at ? message.ack : null
+    })
+    // The note that carried it is not a message of the thread.
+    expect((await thread(w, sent.thread_id)).messages.map((m) => m.id)).toEqual([sent.message_id])
+    w.proof(`thread shows: 👍 Looks good · Delivered to Claude Code, ${ack.delivered_at}`)
     await Bun.sleep(2_500)
     expect(session.host.submits).toHaveLength(1)
   }, 90_000)

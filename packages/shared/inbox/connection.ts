@@ -472,6 +472,15 @@ export interface InboxReplyCommand {
    * command; an older connection ignores it.
    */
   name_thread?: boolean
+  /**
+   * On the person's 👍 Looks good, delivered once its Undo window passed
+   * (amended 2026-10-16: it reaches the agent): the agent message they
+   * marked. The wake is `inboxAckLine` instead of a reply's instruction and
+   * words. The command stays a `reply`, so an older connection still
+   * delivers it, with its body (the same line) as the person's words.
+   * Absent on every other command.
+   */
+  ack_of?: string
 }
 
 export function parseInboxBridgeCommands(text: string): InboxReplyCommand[] {
@@ -538,10 +547,20 @@ export function inboxRedirectedLine(asker: string, id: string): string {
 }
 
 /**
+ * The whole of a 👍 Looks good wake under its first line, and the body of
+ * the note the Inbox stores for it: the person read the message and needs
+ * nothing more.
+ */
+export function inboxAckLine(messageId: string): string {
+  return `The person marked your message 👍 Looks good (${messageId}). No reply needed unless you have a question.`
+}
+
+/**
  * The turn a reply or a message becomes: `Plannotator Inbox: <subject> (<id>)`,
  * the fixed instruction line for its type (a reply, a New message, or a
  * thread the person started; on a redirected reply, the line
  * saying so under it), then the words verbatim. Never the thread re-sent.
+ * A 👍 Looks good (`ack_of`) is the first line and `inboxAckLine` alone.
  */
 export function inboxWakeText(
   command: Pick<InboxReplyCommand, 'id' | 'subject' | 'body'> & {
@@ -550,8 +569,13 @@ export function inboxWakeText(
     new_thread?: boolean
     continues_thread?: boolean
     name_thread?: boolean
+    ack_of?: string
   },
 ): string {
+  if (typeof command.ack_of === 'string' && command.ack_of !== '') {
+    const ackSubject = (command.subject ?? '').replace(/\s+/g, ' ').trim() || 'a message'
+    return `Plannotator Inbox: ${ackSubject} (${command.id})\n${inboxAckLine(command.ack_of)}`
+  }
   const subject = (command.subject ?? '').replace(/\s+/g, ' ').trim() || (command.type === 'message' ? 'a message' : 'a reply')
   const instruction =
     command.type === 'message' ? (command.new_thread === true ? INBOX_NEW_THREAD_INSTRUCTION : INBOX_MESSAGE_INSTRUCTION) : INBOX_WAKE_INSTRUCTION

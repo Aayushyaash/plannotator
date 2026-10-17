@@ -157,13 +157,22 @@ export type InboxAuthor =
 /** The hosts whose names the Inbox knows, keyed by `author.host`. */
 /**
  * One of the Inbox's own notes to the asking agent: Mark read's set-aside
- * note (`set_aside`) or a late Undo's reopened note (`reopened`). They are
- * stored as the person's messages so they reach the agent like any reply,
- * but they are not the person's reply and not a look: the list's `sent`,
- * `unseen`, the look boundary and "came back" all read past them.
+ * note (`set_aside`), a late Undo's reopened note (`reopened`), or the note
+ * that carries a 👍 Looks good to the agent (`ack_of`). They are stored as
+ * the person's messages so they reach the agent like any reply, but they are
+ * not the person's reply and not a look: the list's `sent`, `unseen`, the
+ * look boundary and "came back" all read past them.
  */
-export function isInboxNote(message: { author: { kind: string }; set_aside?: readonly string[] | null; reopened?: readonly string[] | null }): boolean {
-  return message.author.kind === "person" && ((message.set_aside?.length ?? 0) > 0 || (message.reopened?.length ?? 0) > 0);
+export function isInboxNote(message: {
+  author: { kind: string };
+  set_aside?: readonly string[] | null;
+  reopened?: readonly string[] | null;
+  ack_of?: string | null;
+}): boolean {
+  return (
+    message.author.kind === "person" &&
+    ((message.set_aside?.length ?? 0) > 0 || (message.reopened?.length ?? 0) > 0 || (typeof message.ack_of === "string" && message.ack_of !== ""))
+  );
 }
 
 export const INBOX_HOST_NAMES: Readonly<Record<string, string>> = {
@@ -235,6 +244,16 @@ export interface InboxMessage {
    * again after a set-aside note had named them. Absent on every other message.
    */
   reopened?: string[];
+  /**
+   * On the note that carries a 👍 Looks good to the agent (amended
+   * 2026-10-16): the agent message the person marked. Written once the
+   * ack's Undo window passed (its body is `inboxAckLine`), as a reply to
+   * that message, and delivered like any reply (the wake, wait_for_reply's
+   * `acknowledged`) while the ack still names it (`InboxAck.note_id`). The
+   * window and read_thread do not list it: the ack on the message says it.
+   * Absent on every other message.
+   */
+  ack_of?: string;
   /**
    * On a root: the seq up to which the asking agent has read the person's
    * replies (wait_for_reply returned one, or read_thread read the thread),
@@ -352,9 +371,10 @@ export interface InboxMessage {
   thread_naming?: InboxThreadNaming;
   /**
    * On an agent's message: the person's 👍 Looks good (design record
-   * "inbox-acknowledge", approved 2026-10-15). Silent: nothing is sent, no
-   * session is woken; the thread is marked read. Null after Undo. Absent on
-   * every other message and on older records.
+   * "inbox-acknowledge", approved 2026-10-15, amended 2026-10-16). The thread
+   * is marked read; once the Undo window passes the Inbox sends it to the
+   * agent (a note, `note_id`), delivered like a reply. Null after Undo.
+   * Absent on every other message and on older records.
    */
   ack?: InboxAck | null;
 }
@@ -426,8 +446,28 @@ export interface InboxAck {
    */
   settled_seq?: number | null;
   settled_at?: string | null;
+  /**
+   * The note that carries this 👍 to the agent (`InboxMessage.ack_of`),
+   * written when it settled. The note is delivered only while the ack still
+   * names it, so a 👍 taken back before its delivery never arrives. Absent on
+   * acks settled before the amendment (they were never sent).
+   */
+  note_id?: string | null;
+  /**
+   * Set when the Undo window ended but the 👍 could no longer go: the person
+   * wrote back after the message (`replied`) or the agent wrote again
+   * (`wrote_again`) inside the window. No note is written and no agent sees
+   * it; the window says it was not sent. Absent on every other ack.
+   */
+  not_sent?: "replied" | "wrote_again" | null;
   /** When an agent read it (read_thread, or wait_for_reply returned it). Null until then. */
   seen_at?: string | null;
+  /**
+   * The window's thread only (`GET /api/inbox/threads/:id`): when the 👍
+   * reached the agent (its note delivered as a turn, or an agent read it),
+   * else null. Never stored.
+   */
+  delivered_at?: string | null;
 }
 
 /**

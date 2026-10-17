@@ -1291,11 +1291,12 @@ function Inbox() {
   };
 
   /**
-   * 👍 Looks good (design record "inbox-acknowledge", approved 2026-10-15),
-   * or take it back (the toast's Undo, `Z`, the pressed button). Silent:
-   * nothing is sent and no agent is woken; the ack is recorded on the
-   * agent's latest message and the thread is marked read. The held-order
-   * rules of Mark read apply: with the thread open its row changes in place.
+   * 👍 Looks good (design record "inbox-acknowledge", approved 2026-10-15,
+   * amended 2026-10-16), or take it back (the toast's Undo, `Z`, the pressed
+   * button). The ack is recorded on the agent's latest message and the thread
+   * is marked read; once the Undo window passes the Inbox sends it to the
+   * agent. The held-order rules of Mark read apply: with the thread open its
+   * row changes in place.
    */
   const acknowledge = async (threadId: string, messageId: string, on: boolean, agent: string) => {
     try {
@@ -1315,7 +1316,7 @@ function Inbox() {
     showToast({
       icon: 'thumb',
       lead: 'Looks good',
-      detail: `Moves to Quiet · not sent to ${agent}`,
+      detail: `Moves to Quiet · goes to ${agent} unless you undo`,
       onUndo: () => void acknowledge(threadId, messageId, false, agent),
     });
   };

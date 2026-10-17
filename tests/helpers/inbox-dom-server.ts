@@ -17,8 +17,11 @@
  * you looked"), oldest first in `news`. A JSON line on stdin,
  * `{ "send": { project, session, body, reply_to? } }`, is an agent writing
  * while a test runs; the server answers `{ "sent": <message id> }` on stdout.
- * The set-aside note's delay is a minute, so no note is written while a test
- * runs.
+ * `{ "deliver": { session } }` is that session's connection delivering every
+ * reply waiting for it (the bridge's `delivered`); the server answers
+ * `{ "delivered": [<reply id>] }`. The set-aside note's delay (also the 👍
+ * Looks good Undo window) is a minute, so no note is written while a test
+ * runs, unless `INBOX_DOM_SET_ASIDE_MS` names a shorter one.
  *
  * With a fourth argument `header-files`, each project also gets a thread one
  * session writes three messages in: three files (one changed on disk after it
@@ -181,7 +184,7 @@ const openInLauncher: InboxOpenInLauncher = {
 };
 const server = await startInboxServer({
   dataDir,
-  setAsideDelayMs: 60_000,
+  setAsideDelayMs: Number(process.env.INBOX_DOM_SET_ASIDE_MS) > 0 ? Number(process.env.INBOX_DOM_SET_ASIDE_MS) : 60_000,
   phones: phonesMode,
   ...(phonesMode ? { tailscale, pairingProbes } : {}),
   ...(openInMode ? { openInLauncher, tailscale, publishTailnet: true } : {}),
@@ -323,7 +326,12 @@ process.stdout.write(`${JSON.stringify({ port: server.port, worlds, ...(tailnet 
 // An agent writing while a test runs.
 void (async () => {
   for await (const line of console) {
-    const command = JSON.parse(line) as { send?: { project: string; session: string; body: string; reply_to?: string } };
+    const command = JSON.parse(line) as { send?: { project: string; session: string; body: string; reply_to?: string }; deliver?: { session: string } };
+    if (command.deliver) {
+      const ids = store.pendingReplies(command.deliver.session).map((reply) => store.recordDelivery(reply.id, { host: "claude-code", session: command.deliver!.session }).id);
+      process.stdout.write(`${JSON.stringify({ delivered: ids })}\n`);
+      continue;
+    }
     if (!command.send) continue;
     const { project, session, body, reply_to } = command.send;
     const sent = store.sendMessage({ project_id: project, author: { kind: "agent", host: "claude-code", session, name: "Claude Code" }, body, ...(reply_to ? { reply_to } : {}) });
