@@ -19,6 +19,7 @@ configurePlannotatorUI({
   storageBackend,              // where settings persist
   identityProvider,           // who the current user is
   imageSrcResolver,           // how image paths resolve to URLs
+  uploadTransport,             // where pasted/attached images upload to
   docPreviewFetcher,
   fileTreeBackend,
   draftTransport,
@@ -34,6 +35,8 @@ configurePlannotatorUI({
   identityGenerator,           // sync generator behind the default "tater" name (no identityProvider)
   alertIconRenderer,           // (name) => ReactNode | null for a GitHub alert title line's <!-- icon: name --> (default: null, the type's icon)
   fenceTheme,                  // (colorTheme, mode) => Shiki theme name | undefined for code fences (default: SHIKI_THEME_MAP, else pierre-dark/light)
+  componentTooltips,           // true: ui's own hover text (components/HostTitle) draws as ui's Tooltip, not a native title (ui 0.53.0; default false)
+  loadSettingsFromBackend,     // true: re-hydrate settings from your (synchronous) storageBackend after install, applied last
 });
 ```
 
@@ -350,17 +353,17 @@ Neither prop reaches `CodeAnnotation` cards (the review-editor shape), which
 take no `renderCardFooter` either. See HANDOFF.md § "Annotation card header
 slot and mentions on the edit box (0.45.0)".
 
-- **`compareAnnotations?: (a, b) => number`** (unreleased) — the order of the
+- **`compareAnnotations?: (a, b) => number`** (ui 0.53.0) — the order of the
   comment timeline and of each All-files group, for comments with an order of
   their own (the Inbox sorts a video's comments by the moment they are at).
   Ties keep creation order; replies still thread under their parent. Omit it
   and the panel sorts by creation exactly as before.
 - **`title?`, `titleNote?`, `cardParts?: (annotation) => { quote?, images? }`**
-  (unreleased) — the header's title (default "Annotations") and a quiet note
+  (ui 0.53.0) — the header's title (default "Annotations") and a quiet note
   at its right, and per card whether the built-in quote and image row are
   drawn (the Inbox's video comments draw the moment and the frame in
   `renderCardHeader` instead). Omit them and the panel is as before.
-- **Export: `exportLocation`** (unreleased) — a string a host sets on the
+- **Export: `exportLocation`** (ui 0.53.0) — a string a host sets on the
   COPY of an annotation it hands the exporters (`exportAnnotations`,
   `exportLinkedDocAnnotations`): one line printed under the entry's heading
   (the Inbox's `At 1:42 (102.4 s of 7:41)`). Never stored; an annotation
@@ -418,13 +421,13 @@ See HANDOFF.md § "Question decision toggle and status tag (ui 0.52.0; …)".
 
 See HANDOFF.md § "Decision toggle on any question, and an opener for the host's decision card (ui 0.52.1, …)".
 
-**Questions without decision lines (after ui 0.53.0, core 0.25.13).** `Viewer` `questionDecisionLines?: boolean` (default `true`, today's behaviour). `false` parses every `:::question` card with core's new `{ decisionLines: false }` option (`parseQuestionBlock(kind, body, options?)`, `indexQuestionBlocks(blocks, options?)`): a `Decision:` line is shown as context, and no card gets a decision tag or row from it. The prompt, key, numbering and choices are the default parse's (the line still ends a choice right above it). For a host that records no decisions; the Plannotator Inbox passes it since Decisions were removed there (2026-10). Every decision seam above is unchanged.
+**Questions without decision lines (ui 0.53.0, core 0.25.13).** `Viewer` `questionDecisionLines?: boolean` (default `true`, today's behaviour). `false` parses every `:::question` card with core's new `{ decisionLines: false }` option (`parseQuestionBlock(kind, body, options?)`, `indexQuestionBlocks(blocks, options?)`): a `Decision:` line is shown as context, and no card gets a decision tag or row from it. The prompt, key, numbering and choices are the default parse's (the line still ends a choice right above it). For a host that records no decisions; the Plannotator Inbox passes it since Decisions were removed there (2026-10). Every decision seam above is unchanged.
 
 **Answers without comments (ui 0.53.0).** `Viewer` `answerOnly`: annotation authoring and the document actions (Global comment, Copy) are off as under `readOnly`, while question cards and checkboxes keep their handlers, for a host that shows a message to answer, not a document to annotate. See HANDOFF.md § "Viewer `answerOnly` (ui 0.53.0)".
 
 **Local links decided by the host (ui 0.53.0).** `Viewer` `resolveLocalLink`: the host decides what a link to a local path does (open it itself, or draw it as inert text), markdown and raw HTML alike. See HANDOFF.md § "Viewer `resolveLocalLink` (ui 0.53.0)".
 
-### Diff file tree (`components/DiffFileTree`; next ui release)
+### Diff file tree (`components/DiffFileTree`; ui 0.50.0)
 
 A read-only file tree for a list of changed files, to sit beside a host's own per-file diff list. It is Plannotator's code-review tree, not a lookalike: the builder (`utils/diffFileTree`), the folder open/closed hook (`hooks/useDiffFileTreeExpansion`) and the row atoms moved here from `packages/review-editor`, and the review now renders from them.
 
