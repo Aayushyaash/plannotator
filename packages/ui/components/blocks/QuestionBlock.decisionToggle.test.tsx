@@ -291,3 +291,45 @@ describe('Viewer question host props', () => {
     expect(toggle(cards(el)[0]) === null).toBe(true);
   });
 });
+
+describe('Viewer questionDecisionLines', () => {
+  // What regresses if this fails: a host that records no decisions (the
+  // Plannotator Inbox) still draws a "Records a decision" tag or a decision
+  // link for an older agent's `Decision:` line, or loses the line's text; or
+  // the default (every other host) stops reading the lines.
+  test.skipIf(!hasDom)('false shows each `Decision:` line as context and draws no decision tag or row; the default keeps them', async () => {
+    const Viewer = viewerModule!.Viewer;
+    const blocks = parseMarkdownToBlocks(DOC);
+    const render = (decisionLines?: boolean) => (
+      <Viewer
+        blocks={blocks}
+        markdown={DOC}
+        annotations={[]}
+        onAddAnnotation={() => {}}
+        onSelectAnnotation={() => {}}
+        selectedAnnotationId={null}
+        mode="comment"
+        inputMethod="drag"
+        taterMode={false}
+        stickyActions={false}
+        disableCodePathValidation
+        onAnswerQuestion={() => {}}
+        {...(decisionLines === undefined ? {} : { questionDecisionLines: decisionLines })}
+      />
+    );
+    const el = await mount(render());
+    const keys = cards(el).map((card) => card.dataset.questionKey);
+    expect(cards(el)[0]!.getAttribute('data-question-decision')).toBe('on-answer');
+    expect(cards(el)[1]!.getAttribute('data-question-decision')).toBe('recorded');
+
+    await act(async () => root!.render(render(false)));
+    expect(cards(el).map((card) => card.dataset.questionKey)).toEqual(keys);
+    for (const card of cards(el)) {
+      expect(card.hasAttribute('data-question-decision')).toBe(false);
+      expect(decisionRow(card)).toBeNull();
+      expect(card.querySelector('[data-question-decision-tag], [data-question-decision-toggle]')).toBeNull();
+    }
+    expect(cards(el)[0]!.textContent).toContain('Decision: when answered');
+    expect(cards(el)[1]!.textContent).toContain('Use REST');
+  });
+});

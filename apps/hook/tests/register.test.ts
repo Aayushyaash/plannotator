@@ -412,7 +412,7 @@ describe('register', () => {
     tool('wait_for_reply', { thread_id: { type: 'string' }, timeout_seconds: { type: 'number' }, agent_session: { type: 'string' } }),
     tool('resolve_message', { message_id: { type: 'string' } }),
   ]
-  const DECISION_TOOL = tool('record_decision', { text: { type: 'string' }, project_path: { type: 'string' } })
+  const GUIDE_TOOL = tool('submit_guide', { patch: { type: 'string' }, project_path: { type: 'string' } })
 
   /** An Inbox on port 5150 answering /mcp with `tools`, health, and the bridge from `bridge`. */
   function inbox(tools: unknown[], calls: { url: string; body: any }[], bridge: (path: string, body: any) => unknown = () => ({ commands: [] })) {
@@ -441,7 +441,7 @@ describe('register', () => {
     expect(w.tools.map((t) => t.name)).toEqual(['plannotator_inbox', 'plannotator'])
     const registered = w.tools.find((t) => t.name === 'plannotator_inbox')
     // Every action a real Inbox offers, in the contract's order (INBOX_TOOL_ACTIONS).
-    expect(registered?.inputSchema.properties.action.enum).toEqual(['send_message', 'read_thread', 'wait_for_reply', 'resolve_message', 'list_decisions', 'record_decision', 'submit_guide', 'get_guide_brief'])
+    expect(registered?.inputSchema.properties.action.enum).toEqual(['send_message', 'read_thread', 'wait_for_reply', 'resolve_message', 'submit_guide', 'get_guide_brief'])
     expect(calls).toEqual([])
     expect([...w.files.keys()].filter((path) => path.includes('/inbox'))).toEqual([])
     expect(w.runs.filter((argv) => argv.includes('inbox'))).toEqual([])
@@ -522,24 +522,24 @@ describe('register', () => {
 
   test('an Inbox found: plannotator_inbox carries exactly the tools its /mcp offers, filled arguments left out', async ($: any, on: any) => {
     const calls: { url: string; body: any }[] = []
-    const w = world(on, { files: withRegistry(), fetch: inbox([...TOOLS, DECISION_TOOL], calls) })
+    const w = world(on, { files: withRegistry(), fetch: inbox([...TOOLS, GUIDE_TOOL], calls) })
     await $.session.start(SESSION)
 
     const registered = w.tools.find((t) => t.name === 'plannotator_inbox')
-    expect(registered?.inputSchema.properties.action.enum).toEqual(['send_message', 'read_thread', 'wait_for_reply', 'resolve_message', 'record_decision'])
+    expect(registered?.inputSchema.properties.action.enum).toEqual(['send_message', 'read_thread', 'wait_for_reply', 'resolve_message', 'submit_guide'])
     expect(Object.keys(registered?.inputSchema.properties)).not.toContain('agent_session')
     // project_path is the one filled argument the agent may set (optional): the folder a call is about.
     expect(registered?.inputSchema.properties.project_path?.type).toBe('string')
     expect(registered?.inputSchema.required).toEqual(['action'])
   })
 
-  test('an older Inbox whose /mcp has no record_decision: the tool is registered without it', async ($: any, on: any) => {
+  test('an older Inbox whose /mcp has no submit_guide: the tool is registered without it', async ($: any, on: any) => {
     const w = world(on, { files: withRegistry(), fetch: inbox(TOOLS, []) })
     await $.session.start(SESSION)
 
     const registered = w.tools.find((t) => t.name === 'plannotator_inbox')
     expect(registered?.inputSchema.properties.action.enum).toEqual(['send_message', 'read_thread', 'wait_for_reply', 'resolve_message'])
-    const refused = await $.tool.call({ tool: INBOX_TOOL, action: 'record_decision', text: 'x' })
+    const refused = await $.tool.call({ tool: INBOX_TOOL, action: 'submit_guide', patch: 'x' })
     expect(refused.deny).toContain('update Plannotator')
   })
 

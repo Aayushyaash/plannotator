@@ -16,7 +16,6 @@
  *             Inbox's own notes (set aside, reopened) are not indexed
  *   file      an attachment's name (title) and the last two path segments
  *   guide     a guided review's title
- *   decision  its text (title) and reason
  *   project   its name (title) and root
  *
  * Text rules (normalization, tokens, ranges, snippets) are
@@ -53,7 +52,6 @@ import { withoutInboxSkillsBlock } from "@plannotator/core/skill-reference-block
 import {
   inboxAgentName,
   isInboxNote,
-  type InboxDecision,
   type InboxLine,
   type InboxListRow,
   type InboxMessage,
@@ -74,7 +72,6 @@ export {
   INBOX_SEARCH_RECENT_THREADS,
   INBOX_SEARCH_STATUSES,
   type InboxSearchAnswer,
-  type InboxSearchDecisionRow,
   type InboxSearchFileRow,
   type InboxSearchFrom,
   type InboxSearchGroupId,
@@ -198,12 +195,12 @@ function toMarks(ranges: readonly [number, number][]): [number, number][] {
 
 // ─────────────────────────────── Index ───────────────────────────────
 
-type DocType = "thread" | "message" | "file" | "guide" | "decision" | "project";
+type DocType = "thread" | "message" | "file" | "guide" | "project";
 
 interface Doc {
   key: string;
   type: DocType;
-  /** The record's id (thread root, message, attachment, guide's message, decision, project). */
+  /** The record's id (thread root, message, attachment, guide's message, project). */
   ref: string;
   threadId: string | null;
   projectId: string;
@@ -323,7 +320,6 @@ export class InboxSearchIndex {
 
   private dirtyThreads = new Set<string>();
   private dirtyMessages = new Set<string>();
-  private dirtyDecisions = new Set<string>();
   private dirtyProjects = new Set<string>();
   private unsubscribe: (() => void) | null = null;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -407,9 +403,6 @@ export class InboxSearchIndex {
         if (message) this.dirtyThreads.add(message.thread_id);
         break;
       }
-      case "decision":
-        this.dirtyDecisions.add(line.record.id);
-        break;
       case "annotation":
         return;
     }
@@ -449,7 +442,6 @@ export class InboxSearchIndex {
     this.resetIndex();
     this.dirtyThreads.clear();
     this.dirtyMessages.clear();
-    this.dirtyDecisions.clear();
     this.dirtyProjects.clear();
     const threadIds = this.store.threadIds();
     this.buildTotal = threadIds.length;
@@ -473,10 +465,6 @@ export class InboxSearchIndex {
         if (!(await maybeYield())) return;
       }
       this.indexThread(threadId, false);
-      if (!(await maybeYield())) return;
-    }
-    for (const decision of [...this.store.allDecisions()]) {
-      this.indexDecision(decision as InboxDecision);
       if (!(await maybeYield())) return;
     }
     // Finish a growth of the word table still under way, then give back the arrays' growth slack, each step in a slice of its own.
@@ -537,11 +525,6 @@ export class InboxSearchIndex {
       this.indexThread(threadId, false);
     }
     this.dirtyThreads.clear();
-    for (const id of this.dirtyDecisions) {
-      const decision = this.store.decision(id);
-      if (decision) this.indexDecision(decision);
-    }
-    this.dirtyDecisions.clear();
   }
 
   // ── documents ──
@@ -635,16 +618,6 @@ export class InboxSearchIndex {
   private indexProject(project: InboxProject): void {
     this.projectNames.set(project.id, project.name);
     this.put(`p:${project.id}`, "project", { ref: project.id, threadId: null, projectId: project.id, at: project.created_at, from: null }, { title: [project.name], other: [project.root] }, `${project.name}\u0001${project.root}`);
-  }
-
-  private indexDecision(decision: InboxDecision): void {
-    this.put(
-      `d:${decision.id}`,
-      "decision",
-      { ref: decision.id, threadId: decision.source.thread_id, projectId: decision.project_id, at: decision.changed_at ?? decision.created_at, from: decision.source.kind === "agent" ? "agent" : "me" },
-      { title: [decision.text], other: decision.reason ? [decision.reason] : [] },
-      `${decision.text}\u0001${decision.reason ?? ""}`,
-    );
   }
 
   /** A thread's own document; with `withMessages`, its messages' too (the build). */
@@ -966,10 +939,6 @@ export class InboxSearchIndex {
       }
       case "guide":
         return [this.store.message(doc.ref)?.guide?.title ?? ""];
-      case "decision": {
-        const decision = this.store.decision(doc.ref);
-        return decision ? [decision.text, decision.reason ?? ""] : [];
-      }
       case "project": {
         const project = this.store.project(doc.ref);
         return project ? [project.name, project.root] : [];
@@ -992,7 +961,7 @@ export class InboxSearchIndex {
     if (terms.length === 0 && !filtered) {
       return { ...base, took_ms: this.now() - started, totals: null, groups: null, recent: this.recentThreads(labels) };
     }
-    const groups: Record<InboxSearchGroupId, { doc: number; score: number }[]> = { threads: [], messages: [], files: [], decisions: [], projects: [] };
+    const groups: Record<InboxSearchGroupId, { doc: number; score: number }[]> = { threads: [], messages: [], files: [], projects: [] };
 
     const statusOk = (facts: ThreadFacts | null): boolean => {
       if (!query.status) return true;
@@ -1021,18 +990,12 @@ export class InboxSearchIndex {
         case "guide":
           group = "files";
           break;
-        case "decision":
-          group = "decisions";
-          break;
         case "project":
           // A project has no section and no author: any Status or From hides it.
           if (query.status || query.from) return null;
           return { group: "projects", facts: null };
       }
       const facts = doc.threadId ? this.factsOf(doc.threadId) : null;
-      // A decision recorded from no thread (an agent's record_decision), or whose thread was deleted since, has no
-      // section: it stays searchable, as on the Decisions page, and its row names no thread.
-      if (doc.type === "decision" && !facts) return query.status ? null : fromOk(doc, null) ? { group, facts: null } : null;
       if (doc.threadId && !facts) return null;
       if (!statusOk(facts) || !fromOk(doc, facts)) return null;
       return { group, facts };
@@ -1054,8 +1017,7 @@ export class InboxSearchIndex {
         const doc = this.docs[hit.doc]!;
         const admitted = admit(doc);
         if (!admitted) continue;
-        // A decision ranks as its row reads: archived when replaced or retired, whatever its thread's state.
-        const archived = doc.type === "decision" ? this.store.decision(doc.ref)?.state !== "current" : (admitted.facts?.archived ?? false);
+        const archived = admitted.facts?.archived ?? false;
         groups[admitted.group].push({ doc: hit.doc, score: score(hit.tier, hit.title, archived, !!query.current && doc.projectId === query.current, doc.at) });
       }
     }
@@ -1171,24 +1133,6 @@ export class InboxSearchIndex {
           title: facts.subject || "(no subject)",
           thread_name: facts.threadName,
           at: message.created_at,
-        };
-      }
-      case "decision": {
-        const decision = this.store.decision(doc.ref);
-        if (!decision) return null;
-        return {
-          type: "decision",
-          id: decision.id,
-          ...where,
-          archived: decision.state !== "current",
-          text: decision.text,
-          text_marks: toMarks(inboxSearchRanges(decision.text, terms)),
-          state: decision.state,
-          from: decision.source.kind === "agent" ? "agent" : "me",
-          thread_id: facts ? doc.threadId : null,
-          title: facts ? facts.subject || "(no subject)" : null,
-          thread_name: facts ? facts.threadName : null,
-          at: decision.changed_at ?? decision.created_at,
         };
       }
       case "project": {

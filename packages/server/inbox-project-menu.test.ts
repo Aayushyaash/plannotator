@@ -95,7 +95,7 @@ describe("the project menu's routes", () => {
     // The came-back thread went back to the archive (read made after the line).
     expect(w.store.listRow(w.cameBack)!.back_from_archive).toBe(false);
     for (const id of [w.sent, w.quiet, w.archived, w.other]) expect(after.get(id)).toBe(before.get(id));
-    // The questions closed as skips; no decision.
+    // The questions closed as skips.
     const stoppedQ = w.store.questionsOf(w.stopped)[0]!;
     expect(stoppedQ).toMatchObject({ state: "closed", answer: { skipped: true } });
 

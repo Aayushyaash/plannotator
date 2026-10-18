@@ -3,11 +3,11 @@
  * record (kept privately, not in this repo). A mail client for
  * what agents send: the list in the approved sections (a row is a thread),
  * the thread read as an email with Plannotator's question cards, pick then
- * Send, the project's decisions, and Settings.
+ * Send, and Settings.
  *
- * Routing is the URL hash (`#thread=msg_…`, `#project=prj_…`, `#settings`,
- * `#decisions=prj_…&decision=dec_…`), the same `#thread=` the MCP tools hand
- * agents.
+ * Routing is the URL hash (`#thread=msg_…`, `#project=prj_…`, `#settings`),
+ * the same `#thread=` the MCP tools hand agents. An older link to the removed
+ * Decisions page (`#decisions=…`) opens the list.
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -17,14 +17,13 @@ import { TIP_DELAY_MS } from './components/Tip';
 import { configurePlannotatorUI } from '@plannotator/ui/configure';
 import { storage } from '@plannotator/ui/utils/storage';
 import type { SkillCatalogEntry } from '@plannotator/ui/utils/skillReferences';
-import type { InboxDecision, InboxHealth, InboxListRow, InboxListSection, InboxQuestion, InboxThread } from '@plannotator/core/inbox-types';
+import type { InboxHealth, InboxListRow, InboxListSection, InboxQuestion, InboxThread } from '@plannotator/core/inbox-types';
 import {
   InboxApiError,
   inboxApi,
   setPageSession,
   subscribeInboxEvents,
   type AgentToolHost,
-  type DecisionsModel,
   type ListModel,
   type SettingsModel,
   type UpdateDetails,
@@ -64,7 +63,6 @@ import { NotificationAsk, TabSleptLine } from './components/NotificationAsk';
 import { useInboxNotifications } from './notify';
 import { useInboxSound } from './sound';
 import { notificationLine, SoundIntroDialog } from './components/SoundIntro';
-import { DecisionsPage } from './components/Decisions';
 import { GuidePane } from './components/GuidePane';
 import { AboutBlock, FailedDialog, RestartDialog, UpdateDialog, WhatsNewPage } from './components/Updates';
 import { unsentReply } from './unsent';
@@ -131,13 +129,11 @@ const WHATS_NEW_RETRIES = 15;
 const WHATS_NEW_RETRY_MS = 1000;
 
 interface Route {
-  page: 'inbox' | 'settings' | 'decisions' | 'whats-new' | 'drafts';
+  page: 'inbox' | 'settings' | 'whats-new' | 'drafts';
   /** The release whose notes the What's new page shows (`#whats-new=0.28.12`). */
   version?: string | null;
   project: string | null;
   thread: string | null;
-  /** The decision open beside the Decisions list. */
-  decision?: string | null;
   /** An attachment open beside the thread: `file=att_…`, `v=sent` for the version the agent sent, `at=` an annotation to show. */
   file?: { id: string; version: 'current' | 'sent'; focus: string | null } | null;
   /** The message whose guided review is open over the window (`#thread=…&guide=msg_…`). */
@@ -165,9 +161,6 @@ function routeOf(fullHash: string): Route {
   const params = new URLSearchParams(hash);
   if (params.has('whats-new')) return { page: 'whats-new', project: null, thread: null, version: params.get('whats-new') };
   if (params.has('drafts')) return { page: 'drafts', project: null, thread: null };
-  if (params.has('decisions')) {
-    return { page: 'decisions', project: params.get('decisions') || null, thread: null, decision: params.get('decision') };
-  }
   const thread = params.get('thread');
   const fileId = thread ? params.get('file') : null;
   return {
@@ -186,12 +179,7 @@ function hashOf(route: Route): string {
   if (route.page === 'settings') hash = settingsHash({ section: route.section ?? null, pair: route.pair });
   else if (route.page === 'whats-new') hash = new URLSearchParams({ 'whats-new': route.version ?? '' }).toString();
   else if (route.page === 'drafts') hash = 'drafts';
-  else if (route.page === 'decisions') {
-    const params = new URLSearchParams();
-    params.set('decisions', route.project ?? '');
-    if (route.decision) params.set('decision', route.decision);
-    hash = params.toString();
-  } else {
+  else {
     const params = new URLSearchParams();
     if (route.project) params.set('project', route.project);
     if (route.thread) params.set('thread', route.thread);
@@ -252,21 +240,18 @@ function closeTo(route: Route): void {
 
 /**
  * Which panes cover their list now (a window too narrow for both, stack.ts),
- * kept in step by the window. Closing a covering thread back to the list, or a
- * covering decision back to the Decisions list, is then the browser's Back, as
- * on a phone, so an iPad's swipe back and `‹ Inbox` / `‹ Decisions` agree.
+ * kept in step by the window. Closing a covering thread back to the list is
+ * then the browser's Back, as on a phone, so an iPad's swipe back and
+ * `‹ Inbox` agree.
  * Every other close, and every close beside the list, stays a new entry, as on
  * a desktop.
  */
-const covering = { thread: false, decision: false };
+const covering = { thread: false };
 
 function leavesCoveringPane(route: Route): boolean {
   const from = readRoute();
   if (covering.thread && route.page === 'inbox' && !route.thread) {
     return from.page === 'inbox' && !!from.thread && !from.file && !from.guide;
-  }
-  if (covering.decision && route.page === 'decisions' && !route.decision) {
-    return from.page === 'decisions' && !!from.decision;
   }
   return false;
 }
@@ -358,7 +343,6 @@ function Inbox() {
   /** The list on screen: held until the person acts (the "N new" notice). */
   const [shown, setShown] = useState<InboxListSection[] | null>(null);
   const [thread, setThread] = useState<InboxThread | null>(null);
-  const [threadDecisions, setThreadDecisions] = useState<InboxDecision[]>([]);
   /** The open thread's own list row, from its read: an archived thread has none in the list. */
   const [threadRow, setThreadRow] = useState<InboxListRow | null>(null);
   /**
@@ -369,8 +353,6 @@ function Inbox() {
    * thread carries no seqs (an older Inbox).
    */
   const [look, setLook] = useState<{ threadId: string; seq: number | null; through: number | null } | null>(null);
-  const [decisions, setDecisions] = useState<DecisionsModel | null>(null);
-  const [decisionsError, setDecisionsError] = useState<string | null>(null);
   const [settings, setSettings] = useState<SettingsModel | null>(null);
   /** The agents on this computer (GET /api/inbox/agents): the agent-note dialog and Settings → Agents. Null on an older Inbox. */
   const [agents, setAgentsState] = useState<InboxAgentsModel | null>(null);
@@ -651,7 +633,6 @@ function Inbox() {
       const next = await inboxApi.thread(threadId);
       if (routeRef.current.thread === threadId) {
         setThread(next.thread);
-        setThreadDecisions(next.decisions);
         setThreadRow(next.row ?? null);
         // What is new since the last look, from the first read of this thread:
         // it lands before the window records the look, and is kept until the person leaves the thread.
@@ -661,24 +642,6 @@ function Inbox() {
     } catch (cause) {
       if (cause instanceof InboxApiError && cause.status === 404 && routeRef.current.thread === threadId) setThread(null);
       return null;
-    }
-  }, []);
-
-  /** The Decisions page's project: the route's, else the one with the newest activity. */
-  const decisionsProjectOf = useCallback((route: Route, model: ListModel | null): string | null => {
-    if (route.project) return route.project;
-    const rows = (model?.sections ?? []).flatMap((s) => s.threads).sort((a, b) => b.last_at.localeCompare(a.last_at));
-    return rows[0]?.project.id ?? model?.projects[0]?.id ?? null;
-  }, []);
-
-  const refreshDecisions = useCallback(async (projectId: string | null) => {
-    if (!projectId) return;
-    try {
-      const next = await inboxApi.decisions(projectId);
-      setDecisions(next);
-      setDecisionsError(null);
-    } catch (cause) {
-      setDecisionsError(cause instanceof Error ? cause.message : String(cause));
     }
   }, []);
 
@@ -775,7 +738,6 @@ function Inbox() {
             void refreshList(false).then((next) => next && flushNotifications(next));
             const open = routeRef.current.thread;
             if (open) void refreshThread(open);
-            if (routeRef.current.page === 'decisions') void refreshDecisions(decisionsProjectOf(routeRef.current, latestRef.current));
           }, 80);
         },
         onStatus: (next, nextUpdated) => {
@@ -793,7 +755,7 @@ function Inbox() {
       unsubscribe();
       if (timer) clearTimeout(timer);
     };
-  }, [refreshList, refreshSettings, refreshThread, observeEvent, flushNotifications, refreshDecisions, decisionsProjectOf, setNotifyReach, windowReport, reportWindow]);
+  }, [refreshList, refreshSettings, refreshThread, observeEvent, flushNotifications, setNotifyReach, windowReport, reportWindow]);
 
   // Opening a thread: read it, record the look, and update its row in place.
   // While any thread is open the list holds still (settle.ts): the look
@@ -907,11 +869,6 @@ function Inbox() {
   useEffect(() => {
     if (route.page !== 'settings') setSettingsSidebar(false);
   }, [route.page]);
-
-  const decisionsProject = route.page === 'decisions' ? decisionsProjectOf(route, latest) : null;
-  useEffect(() => {
-    if (decisionsProject) void refreshDecisions(decisionsProject);
-  }, [decisionsProject, refreshDecisions]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1210,8 +1167,7 @@ function Inbox() {
   }, [sidebarHeld, route]);
   useLayoutEffect(() => {
     covering.thread = stack.thread;
-    covering.decision = stack.decision;
-  }, [stack.thread, stack.decision]);
+  }, [stack.thread]);
 
   const openRow = (row: InboxListRow) => go({ page: 'inbox', project: route.project, thread: row.thread_id });
 
@@ -1710,27 +1666,10 @@ function Inbox() {
     for (const project of projects) counts.set(project.id, waitingCount(latestSections, project.id));
     return counts;
   }, [projects, latestSections]);
-  // The Decisions switch's counts: every project's, from the last Decisions read of any project,
-  // so they stay on screen while another project's decisions load.
-  const decisionCounts = useMemo(() => {
-    const list = decisions?.project_counts;
-    return list ? new Map(list.map((c) => [c.project_id, c])) : null;
-  }, [decisions]);
 
   const context: ConnectContext | null = settings
     ? { command: settings.mcp_command, mcpUrl: settings.mcp_url, platform: platformOf() }
     : null;
-
-  const retireDecision = async (decision: InboxDecision) => {
-    await inboxApi.retireDecision(decision.id, decision.version);
-    await refreshDecisions(decision.project_id);
-  };
-
-  const replaceDecision = async (decision: InboxDecision, text: string, reason: string) => {
-    const result = await inboxApi.replaceDecision(decision.id, { version: decision.version, text, reason });
-    await refreshDecisions(decision.project_id);
-    go({ page: 'decisions', project: decision.project_id, thread: null, decision: result.decision.id });
-  };
 
   const filterProject = route.page === 'inbox' && route.project ? projects.find((p) => p.id === route.project) ?? null : null;
   const notice = shown && latest ? heldNotice(filterSections(shown, route.project), filterSections(latest.sections, route.project), openedHere.current, heldOpen()).text : null;
@@ -1762,7 +1701,7 @@ function Inbox() {
   const fileOpen = route.page === 'inbox' && !!route.thread && !!route.file;
   const guideMessage =
     route.guide && thread && thread.thread_id === route.thread ? (thread.messages.find((m) => m.id === route.guide && m.guide) ?? null) : null;
-  // The screen on top, which a phone shows alone (inbox.css): the list, a thread, a file, a decision.
+  // The screen on top, which a phone shows alone (inbox.css): the list, a thread, a file.
   // A thread is on top once it has loaded, so a phone keeps the list until there is a thread to show.
   const view =
     route.page === 'inbox'
@@ -1771,12 +1710,10 @@ function Inbox() {
         : route.thread && thread?.thread_id === route.thread
           ? 'thread'
           : 'list'
-      : route.page === 'decisions' && route.decision
-        ? 'decision'
-        : route.page;
+      : route.page;
   // A screen pushed over a shallower one slides in on a phone (inbox.css `data-enter`); one uncovered by
   // closing what was over it (a file back to its thread) does not slide again.
-  const viewDepth = (v: string) => (v === 'file' ? 2 : v === 'thread' || v === 'decision' ? 1 : 0);
+  const viewDepth = (v: string) => (v === 'file' ? 2 : v === 'thread' ? 1 : 0);
   const lastView = useRef(view);
   const entered = useRef<string | null>(null);
   if (lastView.current !== view) {
@@ -1784,22 +1721,19 @@ function Inbox() {
     lastView.current = view;
   }
 
-  // A thread or a decision that covers its list (stack.ts) takes the focus with it, and gives it back to
+  // A thread that covers the list (stack.ts) takes the focus with it, and gives it back to
   // its row: the list is hidden under it, so focus left on the row clicked (or on the pane's Back) would
   // sit on something nobody can see.
   // The list row that last had focus, and the one to return to on Back (see the resize effect below).
   const listFocus = useRef<string | null>(null);
   const returnRow = useRef<string | null>(null);
-  // The same for the Decisions list's rows.
-  const decisionFocus = useRef<string | null>(null);
-  const returnDecision = useRef<string | null>(null);
-  const focusFrom = useRef<{ view: string; thread: string | null; decision: string | null }>({ view, thread: null, decision: null });
+  const focusFrom = useRef<{ view: string; thread: string | null }>({ view, thread: null });
   // `‹ Inbox` in the thread's header with a file beside it: the thread whose row takes focus once the file
   // has closed and the list is back (the list is not drawn while the file is open, so it waits for the view).
   const backFromFile = useRef<{ thread: string; name: string | null; label: string } | null>(null);
   useEffect(() => {
     const before = focusFrom.current;
-    focusFrom.current = { view, thread: view === 'thread' ? route.thread : null, decision: view === 'decision' ? (route.decision ?? null) : null };
+    focusFrom.current = { view, thread: view === 'thread' ? route.thread : null };
     if (before.view === view) return;
     const fromFile = backFromFile.current;
     backFromFile.current = null;
@@ -1826,18 +1760,12 @@ function Inbox() {
       const row = returnRow.current ?? before.thread;
       returnRow.current = null;
       focusFirst([`.ib-listcol .ib-lbody [data-thread-id="${CSS.escape(row)}"]`, `.ib-listcol .ib-lbody [data-thread-id="${CSS.escape(before.thread)}"]`]);
-    } else if (stack.decision && view === 'decision' && before.view === 'decisions') {
-      focusFirst(['section.ib-dpane [data-stack-back]']);
-    } else if (stack.decision && view === 'decisions' && before.view === 'decision' && before.decision) {
-      const row = returnDecision.current ?? before.decision;
-      returnDecision.current = null;
-      focusFirst([`.ib-dpage [data-decision-id="${CSS.escape(row)}"]`, `.ib-dpage [data-decision-id="${CSS.escape(before.decision)}"]`]);
     }
-  }, [view, route.thread, route.decision, stack.thread, stack.decision, phone]);
+  }, [view, route.thread, stack.thread, phone]);
 
-  // The window resized across the stacking width with a thread or a decision open. Into it: a list row that
+  // The window resized across the stacking width with a thread open. Into it: a list row that
   // had focus is now hidden under the pane (and redrawn), so focus would drop to the page; it goes to the
-  // pane's `‹ Inbox` / `‹ Decisions` instead, and Back returns it to that row. Out of it: the pane's Back is
+  // pane's `‹ Inbox` instead, and Back returns it to that row. Out of it: the pane's Back is
   // gone, so focus goes to the row the person came from, now beside the pane.
   useEffect(() => {
     const onFocusIn = (event: FocusEvent) => {
@@ -1845,8 +1773,6 @@ function Inbox() {
       // A row, or its hover action beside it (`.ib-rw[data-row]`).
       const row = target?.closest?.('.ib-listcol [data-thread-id], .ib-listcol [data-row]');
       listFocus.current = row ? (row.getAttribute('data-thread-id') ?? row.getAttribute('data-row')) : null;
-      const decisionRow = target?.closest?.('.ib-dpage [data-decision-id]');
-      decisionFocus.current = decisionRow ? decisionRow.getAttribute('data-decision-id') : null;
     };
     document.addEventListener('focusin', onFocusIn);
     return () => document.removeEventListener('focusin', onFocusIn);
@@ -1893,10 +1819,10 @@ function Inbox() {
     }
     listOrder.current = body ? [...body.querySelectorAll('[data-thread-id]')].map((el) => el.getAttribute('data-thread-id')!) : [];
   }, [shown]);
-  const stackedBefore = useRef({ thread: stack.thread, decision: stack.decision });
+  const stackedBefore = useRef({ thread: stack.thread });
   useEffect(() => {
     const was = stackedBefore.current;
-    stackedBefore.current = { thread: stack.thread, decision: stack.decision };
+    stackedBefore.current = { thread: stack.thread };
     if (phone) return;
     const active = document.activeElement as HTMLElement | null;
     const lost = !active || active === document.body || active.getClientRects().length === 0 || getComputedStyle(active).visibility === 'hidden';
@@ -1911,19 +1837,8 @@ function Inbox() {
         returnRow.current = null;
         if (row) focusFirst([`.ib-listcol .ib-lbody [data-thread-id="${CSS.escape(row)}"]`]);
       }
-    } else if (view === 'decision' && was.decision !== stack.decision) {
-      if (stack.decision) {
-        if (decisionFocus.current && (lost || active?.closest('.ib-dpage'))) {
-          returnDecision.current = decisionFocus.current;
-          focusFirst(['section.ib-dpane [data-stack-back]']);
-        }
-      } else if (lost) {
-        const row = returnDecision.current ?? route.decision ?? null;
-        returnDecision.current = null;
-        if (row) focusFirst([`.ib-dpage [data-decision-id="${CSS.escape(row)}"]`]);
-      }
     }
-  }, [stack.thread, stack.decision, view, route.thread, route.decision, phone]);
+  }, [stack.thread, view, route.thread, phone]);
 
   // The project compose treats as current: the list's filter, else the open thread's.
   const composeCurrent = (() => {
@@ -1933,7 +1848,6 @@ function Inbox() {
   })();
 
   let main: ReactNode;
-  const decisionsFolder = decisionsProject ? projects.find((p) => p.id === decisionsProject) ?? null : null;
   if (route.page === 'settings') {
     main = (
       <SettingsPage
@@ -2005,27 +1919,6 @@ function Inbox() {
         onUpdate={pressUpdate}
       />
     );
-  } else if (route.page === 'decisions' && decisionsFolder) {
-    main = (
-      <DecisionsPage
-        projects={projects}
-        project={decisionsFolder}
-        model={decisions && decisions.project_id === decisionsFolder.id ? decisions : null}
-        error={decisionsError}
-        openId={route.decision ?? null}
-        onProject={(projectId) => go({ page: 'decisions', project: projectId, thread: null })}
-        onOpen={(decisionId) => (decisionId ? go : close)({ page: 'decisions', project: decisionsFolder.id, thread: null, decision: decisionId })}
-        onOpenThread={(threadId) => go({ page: 'inbox', project: null, thread: threadId })}
-        onRetire={retireDecision}
-        onReplace={replaceDecision}
-        phone={phone}
-        stacked={stack.decision}
-        counts={decisionCounts}
-        home={settings?.home ?? null}
-      />
-    );
-  } else if (route.page === 'decisions') {
-    main = <div className="ib-listcol" />;
   } else if (route.page === 'drafts') {
     main = (
       <DraftsPage
@@ -2116,8 +2009,6 @@ function Inbox() {
             onQuestions={patchQuestions}
             onChanged={afterWrite}
             onClose={() => close({ ...route, thread: null, file: null })}
-            decisions={threadDecisions}
-            onOpenDecisionPage={(decision) => go({ page: 'decisions', project: decision.project_id, thread: null, decision: decision.id })}
             file={route.file ?? null}
             onOpenFile={(file, options) => (file ? writeRoute({ ...routeRef.current, file }, options) : closeTo({ ...routeRef.current, file }))}
             onOpenGuide={(messageId) => go({ ...route, guide: messageId })}
@@ -2169,7 +2060,7 @@ function Inbox() {
       data-pn-tooltip-root=""
       data-view={view}
       data-enter={entered.current ?? undefined}
-      data-stack={stack.thread || stack.file || stack.decision ? [stack.thread && 'thread', stack.file && 'file', stack.decision && 'decision'].filter(Boolean).join(' ') : undefined}
+      data-stack={stack.thread || stack.file ? [stack.thread && 'thread', stack.file && 'file'].filter(Boolean).join(' ') : undefined}
     >
       {/* A file beside the thread takes the sidebar's room (record 2.2): it closes on the same spring, and the person's choice stays as it was. */}
       <SidebarShell
@@ -2188,7 +2079,6 @@ function Inbox() {
             page={route.page}
             projectId={route.project}
             inboxCount={waitingCount(latestSections)}
-            decisionsCount={latest?.decisions_waiting ?? 0}
             projects={projects}
             projectCounts={projectCounts}
             projectsReadable={projectsReadable}
@@ -2203,7 +2093,6 @@ function Inbox() {
             onInbox={() => go({ page: 'inbox', project: null, thread: null })}
             onProject={(projectId) => go({ page: 'inbox', project: projectId, thread: null })}
             onSettings={() => go({ page: 'settings', project: null, thread: null })}
-            onDecisions={() => go({ page: 'decisions', project: null, thread: null })}
             onUpdate={pressUpdate}
             onWhatsNew={openWhatsNew}
             mcpCommand={settings?.mcp_command ?? null}

@@ -38,8 +38,6 @@ const THREE = [
   "",
   "Stopped: the list cannot be built without this.",
   "",
-  "Decision: when answered",
-  "",
   "- [ ] Cards",
   "- [ ] A dense table",
   ":::",
@@ -88,7 +86,6 @@ describe("Mark read", () => {
       expect(q.answer).toMatchObject({ skipped: true, selected: [] });
       expect(q.answer!.by_reply).toBeUndefined();
       expect(q.set_aside_at).toBe("2026-10-11T15:00:00.000Z");
-      expect(q.decision_id).toBeNull();
     }
     // Nothing is sent: no message was written.
     expect(store.thread(asked.id)!.messages).toHaveLength(1);

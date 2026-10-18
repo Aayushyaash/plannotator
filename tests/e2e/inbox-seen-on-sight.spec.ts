@@ -19,7 +19,7 @@
  *   Closed after seeing it: Quiet.
  * - A phone (WebKit, iPhone 15): the same rule; Back shows the row unbolded in
  *   place when seen, and back unread in Waiting when not. An arrival under a
- *   bottom sheet (the decision card's sheet) is not seen until the
+ *   bottom sheet (the reply box's annotations list) is not seen until the
  *   sheet closes.
  *
  * Build the binary first (see inbox.spec.ts), then `bun run test:e2e:inbox`.
@@ -28,7 +28,7 @@
 
 import { devices, expect, test, webkit, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
@@ -54,6 +54,8 @@ interface World {
 }
 
 let world: World;
+/** The phoneSheet message's attached file (its comments wait for the next Send). */
+let sheetFile = '';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -76,19 +78,32 @@ test.beforeAll(async () => {
     seen: 'The refund webhook is wired.',
     phoneSeen: 'The refund webhook is wired.',
     phoneUnseen: LONG,
-    // A question at its end: its "Records a decision" words open the decision card, a bottom sheet on a phone.
+    // A question at its end, and a file with comments waiting: the reply box's annotations list is a bottom sheet on a phone.
     phoneSheet: `${LONG}\n\n:::question\nShould retries go to the dead-letter queue?\n\n- [ ] Yes\n- [ ] No\n:::`,
     other: 'Unrelated.',
   };
   for (const key of ['end', 'up', 'pill', 'short', 'unseen', 'seen', 'phoneSeen', 'phoneUnseen', 'phoneSheet'] as const) {
     const path = scratchProject(join(root, 'src'), `billing-${key}`);
-    const sent = await agent.send({ project_path: path, subject: `Refund events (${key})`, body: bodies[key], agent_session: `ses_${key}` } as Parameters<SimAgent['send']>[0]);
+    if (key === 'phoneSheet') writeFileSync(join(path, 'refund-notes.md'), '# Refund notes\n\nRetries reuse the idempotency key.\n');
+    const attachments = key === 'phoneSheet' ? { attachments: ['refund-notes.md'] } : {};
+    const sent = await agent.send({ project_path: path, subject: `Refund events (${key})`, body: bodies[key], agent_session: `ses_${key}`, ...attachments } as Parameters<SimAgent['send']>[0]);
     projects[key] = { path, id: '', thread: String(sent.thread_id), root: String(sent.message_id) };
+    if (key === 'phoneSheet') sheetFile = String((sent.attachments as { id: string }[])[0]!.id);
   }
   projects.other = { path: scratchProject(join(root, 'src'), 'docs-other'), id: '', thread: '', root: '' };
   const url = started.stdout.trim().replace(/\/$/, '');
   const list = (await (await fetch(`${url}/api/inbox/projects`)).json()) as { projects: { id: string; root: string }[] };
   for (const project of Object.values(projects)) project.id = list.projects.find((p) => p.root === project.path)?.id ?? '';
+  // Comments on the file that wait for the next Send: the reply box's "12 annotations" chip opens their list, a
+  // sheet tall enough (its 72% cap) to cover where an arrival lands at the end of the thread.
+  for (let i = 1; i <= 12; i++) {
+    const saved = await fetch(`${url}/api/inbox/annotations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ attachment_id: sheetFile, version: 'current', annotation: { id: `ann-sheet-${i}`, type: 'COMMENT', text: `Note ${i}: name the queue the retries go to.`, originalText: 'Retries reuse the idempotency key.', blockId: 'block-1', startOffset: 0, endOffset: 0, createdA: i } }),
+    });
+    expect(saved.status).toBe(200);
+  }
   world = { url, agent, projects };
 });
 
@@ -381,10 +396,10 @@ test('phone (WebKit, iPhone 15): seen on sight with the same rule; Back shows it
   }
 });
 
-// The failure this guards: a bottom sheet over the end of the thread (here the decision card, opened from a
-// question's "Records a decision" words; once New message's "not running" sheet) hid the arrival, and it was
-// marked seen anyway. The open question keeps the row bold whatever is seen, so this case reads `unseen`.
-test('phone (WebKit, iPhone 15): an arrival under the decision card\'s sheet is not seen until the sheet closes', async () => {
+// The failure this guards: a bottom sheet over the end of the thread (here the reply box's annotations list;
+// once New message's "not running" sheet, then the removed decision card) hid the arrival, and it was marked
+// seen anyway. The open question keeps the row bold whatever is seen, so this case reads `unseen`.
+test('phone (WebKit, iPhone 15): an arrival under the annotations sheet is not seen until the sheet closes', async () => {
   let own: Browser | null = null;
   let context: BrowserContext | null = null;
   try {
@@ -400,8 +415,9 @@ test('phone (WebKit, iPhone 15): an arrival under the decision card\'s sheet is 
     // At the end of the thread, then the sheet over it.
     const body = page.locator('section.ib-pane .ib-pbody');
     await body.evaluate((b) => (b.scrollTop = b.scrollHeight));
-    await page.locator('section.ib-pane').getByRole('button', { name: 'Records a decision', exact: true }).tap();
-    const sheet = page.locator('[data-decision-card]');
+    await page.locator('section.ib-pane .ib-pfoot').getByRole('button', { name: /^(Reply|Edit the reply)$/ }).tap();
+    await page.locator('section.ib-pane [data-annotations-chip]').tap();
+    const sheet = page.locator('.ib-annpop');
     await expect(sheet).toBeVisible();
     // Back at the end of the thread, the sheet over it. The window learns it is at the end from the scroll
     // event, which fires on a later frame: wait two frames so the arrival never lands before it.
@@ -429,7 +445,7 @@ test('phone (WebKit, iPhone 15): an arrival under the decision card\'s sheet is 
     expect((await storeRow(id)).unseen).toBe(1);
     await article.evaluate((a) => {
       const body = a.closest('.ib-pbody') as HTMLElement;
-      const sheetTop = document.querySelector('[data-decision-card]')!.getBoundingClientRect().top;
+      const sheetTop = document.querySelector('.ib-annpop')!.getBoundingClientRect().top;
       const headTop = (a.querySelector('.ib-fline') ?? a).getBoundingClientRect().top;
       if (headTop < sheetTop + 16) body.scrollTop -= sheetTop + 16 - headTop;
     });
@@ -437,7 +453,7 @@ test('phone (WebKit, iPhone 15): an arrival under the decision card\'s sheet is 
       const view = a.closest('.ib-pbody')!.getBoundingClientRect();
       const r = (a.querySelector('.ib-fline') ?? a).getBoundingClientRect();
       const hit = document.elementFromPoint(r.left + r.width / 2, r.top + 8);
-      return { inView: r.top >= view.top && r.bottom <= view.bottom, covered: hit !== null && hit.closest('[data-decision-card]') !== null };
+      return { inView: r.top >= view.top && r.bottom <= view.bottom, covered: hit !== null && hit.closest('.ib-annpop') !== null };
     });
     expect(under).toEqual({ inView: true, covered: true });
     await shot(page, '10-phone-arrival-under-sheet');

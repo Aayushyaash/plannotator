@@ -4,17 +4,16 @@
  * with non-Latin project folders, two folders named "api", a 54-character
  * project name, right-to-left text, long and near-identical file names, a
  * changed file with comments, a message table and a tall screenshot, a
- * thread over four days and one from last year, a 2,000-character decision,
+ * thread over four days and one from last year,
  * 46 projects and 50 live agent sessions. Every screen is loaded at the
  * widths people use (1440, 1280, 1024, an iPad upright, a phone, a phone on
  * its side, and 200% zoom as 720 by 450) and checked for shapes, not pixels:
  *
  * - the page never scrolls sideways;
  * - a primary button is inside the window;
- * - a decision's text column keeps a readable width;
  * - tiles in one grid keep one height, and a changed file keeps its count;
  * - the list's header stays 60 px with a long project name and folder, and
- *   the sidebar's Inbox and Decisions stay 32 px with 46 projects;
+ *   the sidebar's Inbox stays 32 px with 46 projects;
  * - a shortened name has its full text as its hover text;
  * - project names are the folders' own, times say their day and year.
  *
@@ -28,7 +27,7 @@ import { expect, test, type Browser, type BrowserContext, type Page } from '@pla
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
-import { LiveSessions, LONG_DECISION, seedWorstCase, type WorstCaseWorld } from '../../scripts/inbox-worst-case';
+import { LiveSessions, seedWorstCase, type WorstCaseWorld } from '../../scripts/inbox-worst-case';
 import { inboxScratch, rememberInboxOf, removeInboxScratch } from './inbox-scratch';
 import { NO_BROWSER } from '../helpers/no-browser';
 
@@ -141,7 +140,7 @@ async function shot(page: Page, name: string): Promise<void> {
 
 // Every width in light, and the widest and a phone in dark too.
 for (const [w, scheme] of [...WIDTHS.map((w) => [w, 'light'] as const), [WIDTHS[0]!, 'dark'] as const, [WIDTHS[4]!, 'dark'] as const]) {
-  test(`${w.name}${scheme === 'dark' ? ' dark' : ''}: the list, a thread with files, a message table, Decisions and Settings hold their shapes`, async ({ browser }) => {
+  test(`${w.name}${scheme === 'dark' ? ' dark' : ''}: the list, a thread with files, a message table and Settings hold their shapes`, async ({ browser }) => {
     const { context, page } = await open(browser, w, '', scheme);
     try {
       // The list, and the real project names (rows 1 to 5).
@@ -168,16 +167,6 @@ for (const [w, scheme] of [...WIDTHS.map((w) => [w, 'light'] as const), [WIDTHS[
       await expect(img).toHaveCount(1);
       expect((await img.boundingBox())!.height).toBeLessThanOrEqual(481);
       await shot(page, `${w.name}-${scheme}-kitchen`);
-      // Decisions: the text column keeps a readable width (row 62) and a long decision three lines (row 63).
-      await page.goto(`${world.url}/#decisions=${world.ids.billing}`);
-      await page.waitForSelector('[data-decision-id]');
-      await page.waitForTimeout(300);
-      expect(await shapes(page)).toEqual([]);
-      const text = page.locator('[data-decision-id] .ib-st', { hasText: 'Refunds for partial captures' }).first();
-      expect((await text.boundingBox())!.width, 'a decision has room to read').toBeGreaterThan(Math.min(260, w.width - 140));
-      expect(LONG_DECISION.length).toBe(2000);
-      expect((await text.boundingBox())!.height, 'a long decision shows three lines').toBeLessThan(80);
-      await shot(page, `${w.name}-${scheme}-decisions`);
       // Settings: Storage keeps its sizes and Delete in view (rows 64, 65); Archived keeps Unarchive on its row (row 67).
       await page.goto(`${world.url}/#settings/storage`);
       await page.waitForSelector('[data-store-project]');

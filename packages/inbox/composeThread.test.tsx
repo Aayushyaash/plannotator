@@ -101,8 +101,6 @@ async function render(thread: InboxThread, onChanged: () => Promise<void> = asyn
           onQuestions={() => {}}
           onChanged={onChanged}
           onClose={() => {}}
-          decisions={[]}
-          onOpenDecisionPage={() => {}}
           file={null}
           onOpenFile={() => {}}
           onOpenGuide={() => {}}

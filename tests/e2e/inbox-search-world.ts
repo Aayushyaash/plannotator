@@ -4,7 +4,7 @@
  * person's replies through the window's own routes. Seven projects (two
  * named "api", one Arabic, one Japanese, one 54 characters long), threads in
  * every section, two archived, attachments (a long SPIKE name, an Arabic
- * file name), questions and decisions. Used by inbox-search.spec.ts and by
+ * file name) and questions. Used by inbox-search.spec.ts and by
  * scripts/inbox-search-compare.ts (before and after screenshots).
  */
 
@@ -72,7 +72,6 @@ export async function seedSearchWorld(input: { binary: string; env: Record<strin
   const pagination = await opencode.send({ project_path: projects.apiWork, subject: 'Pagination for /v1/orders', thread: 'orders', body: `Offset pagination breaks when orders arrive while a client pages. Proposal: cursor pagination with opaque cursors.${ask('What is the largest page size?', ['50', '100', '500'])}` });
   await pause();
   await personReply(input.url, msg(pagination), 'Cursor pagination, opaque cursors, 100 at most.');
-  await opencode.recordDecision({ project_path: projects.apiWork, text: 'Cursor pagination with opaque cursors; a page holds 100 orders at most', reason: 'Asked by OpenCode: What is the largest page size?' });
   await pause();
   const cliPagination = await claude.send({ project_path: projects.apiPersonal, subject: 'Pagination bug in the CLI list command', thread: 'cli', body: 'The CLI asks for page 2 with the offset of page 1, so the second page repeats the first 20 rows. Fixed by passing the cursor the server returns.' });
   await pause();
@@ -101,12 +100,11 @@ export async function seedSearchWorld(input: { binary: string; env: Record<strin
       file(projects.northwind, 'docs/spikes/SPIKE-claude-deploy-pipeline-investigation-for-northwind-customer-portal-20261011.md', '# Spike\n'),
     ],
   });
-  // A decision recorded from the person's answer (its row names the thread: a long subject and a long name).
+  // The person answers it (the thread holds a long subject and a long name).
   {
     const question = (northwind.questions as { key: string; kind: string; prompt: string }[])[0]!;
     const answer = { v: 1, key: question.key, kind: question.kind, prompt: question.prompt, selected: ['Yes'] };
     await windowPost(input.url, `/api/inbox/messages/${msg(northwind)}/picks`, { questions: [{ key: question.key, revision: 0, answer }] });
-    await windowPost(input.url, `/api/inbox/messages/${msg(northwind)}/decision`, { key: question.key, recording: true, draft: { text: 'Pin the CDN cache key to the build id for every deploy', reason: null } });
     await windowPost(input.url, `/api/inbox/messages/${msg(northwind)}/reply`, { idempotency_key: 'k-northwind-pin', questions: [{ key: question.key, revision: 1 }] });
   }
   // An unnamed thread (no `thread`): its results carry the subject in the thread chip.
@@ -132,8 +130,6 @@ export async function seedSearchWorld(input: { binary: string; env: Record<strin
     body: `The relay brakes only one thing: creating a mailbox. Cloudflare's ratelimits binding allows 20 creates a minute per IP. Pushes are not limited.${ask('Keep the rate limit at 20 mailbox creates a minute per IP?', ['Keep 20 a minute', 'Raise to 60 a minute', 'No limit'], ['Stopped: the relay deploy waits on this.'])}`,
     attachments: [file(projects.plannotator, 'adr/implementation/relay-rate-limits.md', '# Relay rate limits\n')],
   });
-  await claude.recordDecision({ project_path: projects.plannotator, text: 'Mailbox creation keeps a rate limit of 20 a minute per IP', reason: 'Asked by Claude Code' });
-  await claude.recordDecision({ project_path: projects.plannotator, text: 'Deploy the relay only by hand, never from CI', reason: 'It holds the APNs key' });
 
   // Archived: the release checklist and the drafts migration (and the orders thread, answered).
   await windowPost(input.url, `/api/inbox/messages/${id(release)}/resolve`, { resolved: true });

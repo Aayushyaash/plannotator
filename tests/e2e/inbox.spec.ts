@@ -83,7 +83,7 @@ test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async ({ browser }: { browser: Browser }) => {
   expect(existsSync(builtBinary), `build the binary first: ${builtBinary}`).toBe(true);
-  // Only this spec's own captures: decisions, attachments and guided reviews keep theirs in proof/decisions/, proof/attachments/ and proof/guides/.
+  // Only this spec's own captures: attachments and guided reviews keep theirs in proof/attachments/ and proof/guides/.
   mkdirSync(proofDir, { recursive: true });
   for (const file of readdirSync(proofDir)) if (file.endsWith('.png') || file === 'index.html') rmSync(join(proofDir, file));
   const root = inboxScratch('plannotator-inbox-e2e-');
@@ -351,7 +351,7 @@ test('a project folder filters the list and the sections still apply', async () 
   await expect(page.locator('.ib-lbody [data-thread-id]')).toHaveCount(3);
 });
 
-test('a row opens the thread as an email with the question cards; the decision tag toggles', async () => {
+test('a row opens the thread as an email with the question cards, and no decision tag', async () => {
   const { page } = world;
   await page.locator(`[data-thread-id="${world.threads.stopped}"]`).click();
   const pane = page.locator('section.ib-pane');
@@ -365,33 +365,10 @@ test('a row opens the thread as an email with the question cards; the decision t
   // Opening is a look: the row is no longer new to the person.
   await expect(page.locator(`.ib-nrow[data-thread-id="${world.threads.stopped}"]`)).toHaveAttribute('aria-current', 'true');
 
-  // The tag is on every question (ui 0.52.1, questionDecisionScope "any"):
-  // on where the block says `Decision: when answered`, off on the other. Its
-  // diamond is the switch; its words open the decision card (inbox-decisions.spec.ts).
-  const tags = pane.getByRole('button', { name: 'Record as a decision', exact: true });
-  await expect(tags).toHaveCount(2);
-  await expect(tags.nth(0)).toHaveAttribute('aria-pressed', 'true');
-  await expect(tags.nth(1)).toHaveAttribute('aria-pressed', 'false');
-  // The Inbox draws no "Answering this records a decision" row (the owner, 2026-10-16): the tag says it.
-  await expect(pane.locator('[data-question-decision-row]')).toHaveCount(1);
-  await expect(pane.locator('[data-question-decision-row]').filter({ visible: true })).toHaveCount(0);
+  // Decisions were removed (2026-10): no card carries a decision tag, switch or row.
+  await expect(pane.locator('[data-question-decision], [data-question-decision-tag], [data-question-decision-toggle], [data-question-decision-row]')).toHaveCount(0);
+  await expect(side(page).getByRole('button', { name: /Decisions/ })).toHaveCount(0);
   await shot('2.1-thread');
-
-  await tags.nth(0).click();
-  await tags.nth(1).click();
-  await expect(tags.nth(0)).toHaveAttribute('aria-pressed', 'false');
-  await expect(tags.nth(1)).toHaveAttribute('aria-pressed', 'true');
-  await expect(pane.locator('[data-question-decision-row]').filter({ visible: true })).toHaveCount(0);
-  // Kept on the question record (step 3), so a reload reads it back.
-  await page.reload();
-  const after = page.locator('section.ib-pane').getByRole('button', { name: 'Record as a decision', exact: true });
-  await expect(after.nth(0)).toHaveAttribute('aria-pressed', 'false');
-  await expect(after.nth(1)).toHaveAttribute('aria-pressed', 'true');
-  await shot('3.1-decision-tag-switched');
-  await after.nth(0).click();
-  await after.nth(1).click();
-  await expect(after.nth(0)).toHaveAttribute('aria-pressed', 'true');
-  await expect(after.nth(1)).toHaveAttribute('aria-pressed', 'false');
 });
 
 test('a pick is saved at once and the agent reads it through read_thread', async () => {

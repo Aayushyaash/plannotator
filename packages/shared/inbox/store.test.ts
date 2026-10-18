@@ -24,9 +24,8 @@ import { join } from "node:path";
 import { questionKey, type QuestionAnswer } from "@plannotator/core/question-block";
 import { parseInboxQuestionBlocks } from "@plannotator/core/inbox-questions";
 import { INBOX_SECTIONS, inboxRowOffersMarkRead, inboxThreadNameKey, type InboxListRow, type InboxListSection, type InboxSectionId } from "@plannotator/core/inbox-types";
-// The sidebar's counts and the decisions the Send route records, from the code that computes them.
+// The sidebar's counts, from the code that computes them.
 import { waitingCount } from "../../inbox/held";
-import { recordDecisionsForReply, waitingDecisionCount } from "../../server/inbox-decisions";
 import { inboxArchivedRows, inboxListSections, inboxRowArchived } from "./list";
 import { archiveProject, markProjectRead, unarchiveProject, unmarkProjectRead } from "./project-batch";
 import { InboxError, parseInboxLine } from "./schema";
@@ -159,8 +158,7 @@ function targetOf(op: Op, messageIds: readonly string[]): string | undefined {
 
 /**
  * Run one op as the server's route does; expected refusals (InboxError) are
- * part of the space and write nothing. A Send also records the decisions its
- * answers carry, as POST /messages/:id/reply does after the reply lands.
+ * part of the space and write nothing.
  */
 function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
   const target = targetOf(op, messageIds);
@@ -213,7 +211,6 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
           skip_unanswered: op.skip === true,
         });
         if (result.replayed) return "replayed";
-        recordDecisionsForReply(store, result.reply.id);
         return "ok";
       }
       case "resolve": {
@@ -668,8 +665,8 @@ describe("InboxStore invariants", () => {
 // that predicts every op's outcome and every row's section. After every step
 // the two must agree, and the invariants below must hold on the store's own
 // output, in both list views. The model learns only what a message ASKS from
-// the store (its question records: keys, `Stopped:`, `Holds up:`,
-// `Decision:`); parsing is core's and is tested there.
+// the store (its question records: keys, `Stopped:`, `Holds up:`); parsing
+// is core's and is tested there.
 
 /** Bodies an agent sends in the model runs and the trace fixtures. */
 const STATE_BODIES = {
@@ -677,6 +674,7 @@ const STATE_BODIES = {
   ask: [":::question", "Ship it today?", "", "- [ ] Yes", "- [ ] No", ":::"].join("\n"),
   stop: [":::question", "Which layout should the list use?", "", "Stopped: the list cannot be built without this.", "", "- [ ] Cards", "- [ ] Table", ":::"].join("\n"),
   hold: [":::question", "Should overdue invoices sort first?", "", "Holds up: invoice list; export", "", "- [ ] Yes", "- [ ] No", ":::"].join("\n"),
+  // An older agent's `Decision:` line: the Inbox records no decisions, so it is context, and nothing else changes.
   decide: [":::question", "Which database should we use?", "", "Decision: when answered", "", "- [ ] Postgres", "- [ ] SQLite", ":::"].join("\n"),
   text: [":::question-text", "Anything the empty state should say?", ":::"].join("\n"),
   two: [
@@ -789,13 +787,11 @@ interface ModelQuestion {
   id: string;
   stopped: boolean;
   holds: boolean;
-  decision: boolean;
   answer: ModelAnswer;
   sent: boolean;
   /** Closed by a Mark read (`by`: the step of that Mark read); what an Undo puts back. */
   setAside: { answer: ModelAnswer; sent: boolean; by: number } | null;
   superseded: boolean;
-  decided: boolean;
 }
 
 interface ModelMessage {
@@ -956,19 +952,6 @@ class ThreadStateModel {
     return "quiet";
   }
 
-  decisionsWaiting(): number {
-    let n = 0;
-    for (const t of this.threads.values()) {
-      for (const m of t.messages) {
-        for (const q of m.questions) {
-          const s = this.state(t, m, q);
-          if (q.decision && !q.decided && (s === "open" || s === "picked")) n += 1;
-        }
-      }
-    }
-    return n;
-  }
-
   threadOf(messageId: string): ModelThread | undefined {
     return this.byMessage.get(messageId)?.thread;
   }
@@ -994,12 +977,10 @@ class ThreadStateModel {
         id: `${id}/${q.key}`,
         stopped: q.stopped !== null,
         holds: q.holds_up.length > 0,
-        decision: q.decision_recording,
         answer: null,
         sent: false,
         setAside: null,
         superseded: false,
-        decided: false,
       })),
     };
     thread.messages.push(message);
@@ -1112,11 +1093,7 @@ class ThreadStateModel {
         if (picks.length === 0 && skips.length === 0 && op.words.trim() === "") {
           return op.skip ? "refused:nothing_to_send" : "refused:validation_error";
         }
-        for (const q of picks) {
-          q.sent = true;
-          // The Send route records a decision for a sent pick whose question records one.
-          if (q.decision) q.decided = true;
-        }
+        for (const q of picks) q.sent = true;
         for (const q of skips) {
           q.answer = "skip";
           q.sent = true;
@@ -1407,10 +1384,10 @@ function checkThreadState(world: StateWorld): void {
     // An archived thread never counts.
     if (inboxRowArchived(row)) expect(row.unread).toBe(false);
   }
-  // Counts. The first two follow from the sections by construction (the
+  // Counts. Both follow from the sections by construction (the
   // sidebar counts the rows in Stopped, Holding and Waiting; `unread` is
   // defined from the section), so they guard the counting code more than the
-  // rules. The Decisions count is checked against the model's own account.
+  // rules.
   const inSections = (sections: readonly InboxListSection[], ids: readonly InboxSectionId[]) =>
     sections.filter((s) => ids.includes(s.id)).reduce((n, s) => n + s.threads.length, 0);
   const waiting = rows.filter((r) => SHW.includes(r.section)).length;
@@ -1423,7 +1400,6 @@ function checkThreadState(world: StateWorld): void {
   const unread = rows.filter((r) => r.unread).length;
   expect(inSections(views.include, SHWN)).toBe(unread);
   expect(inSections(views.exclude, SHWN)).toBe(unread);
-  expect(waitingDecisionCount(store)).toBe(model.decisionsWaiting());
   // Replay determinism: the store read again from disk gives the same rows and threads.
   expect(windowView(InboxStore.open(world.dir))).toEqual(windowView(store));
 }
@@ -1601,18 +1577,18 @@ describe("the thread-state model", () => {
     );
   });
 
-  test("Archive then Unarchive loses no message, question, pick or decision", () => {
+  test("Archive then Unarchive loses no message, question or pick", () => {
     fc.assert(
       fc.property(fc.array(stateOpArb, { minLength: 10, maxLength: 30, size: "max" }), (ops) => {
         const world = stateWorld();
         for (const op of ops) stateStep(world, op);
         for (const threadId of [...world.model.threads.keys()]) {
           if (world.store.message(threadId)!.resolved_at !== null) continue;
-          const before = { thread: world.store.windowThread(threadId), row: world.store.listRow(threadId), decisions: [...world.store.allDecisions()] };
+          const before = { thread: world.store.windowThread(threadId), row: world.store.listRow(threadId) };
           const target = rootIndex(world, threadId);
           stateStep(world, { op: "resolve", target, resolved: true });
           stateStep(world, { op: "resolve", target, resolved: false });
-          expect({ thread: world.store.windowThread(threadId), row: world.store.listRow(threadId), decisions: [...world.store.allDecisions()] }).toEqual(before);
+          expect({ thread: world.store.windowThread(threadId), row: world.store.listRow(threadId) }).toEqual(before);
         }
       }),
       { numRuns: 100, seed: 20261014 },
@@ -1959,7 +1935,7 @@ function traceExpect(world: StateWorld, labels: TraceLabels) {
     sections: sections(views.include),
     sections_exclude_archived: sections(views.exclude),
     archived: views.archived.map((r) => labels.threadLabel(r.thread_id)),
-    counts: { waiting: waitingCount(views.exclude), unread: rows.filter((r) => r.unread).length, decisions_waiting: waitingDecisionCount(store) },
+    counts: { waiting: waitingCount(views.exclude), unread: rows.filter((r) => r.unread).length },
     threads: Object.fromEntries(
       byLabel.map((row) => {
         const messages = store.thread(row.thread_id)!.messages;
@@ -2130,7 +2106,7 @@ const HAND_TRACES: TraceDef[] = [
   },
   {
     name: "hand-12-archive-unarchive-keeps-everything",
-    description: "Archive closes the questions (no Mark read, no pick) and Unarchive gives back every pick and the decision waiting; the Send records the decision.",
+    description: "Archive closes the questions (no Mark read, no pick) and Unarchive gives back every pick; the Send sends them.",
     events: [
       ROOT(STATE_BODIES.decide),
       REPLY("m1", STATE_BODIES.ask),

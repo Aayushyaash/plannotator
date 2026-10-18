@@ -2,7 +2,7 @@
   "format": "plannotator-inbox-thread-state",
   "version": 1,
   "name": "hand-12-archive-unarchive-keeps-everything",
-  "description": "Archive closes the questions (no Mark read, no pick) and Unarchive gives back every pick and the decision waiting; the Send records the decision.",
+  "description": "Archive closes the questions (no Mark read, no pick) and Unarchive gives back every pick; the Send sends them.",
   "source": "hand",
   "seed": null,
   "clock": {
@@ -48,8 +48,7 @@
         "archived": [],
         "counts": {
           "waiting": 1,
-          "unread": 1,
-          "decisions_waiting": 1
+          "unread": 1
         },
         "threads": {
           "t1": {
@@ -104,8 +103,7 @@
         "archived": [],
         "counts": {
           "waiting": 1,
-          "unread": 1,
-          "decisions_waiting": 1
+          "unread": 1
         },
         "threads": {
           "t1": {
@@ -158,8 +156,7 @@
         "archived": [],
         "counts": {
           "waiting": 1,
-          "unread": 1,
-          "decisions_waiting": 1
+          "unread": 1
         },
         "threads": {
           "t1": {
@@ -212,8 +209,7 @@
         "archived": [],
         "counts": {
           "waiting": 0,
-          "unread": 1,
-          "decisions_waiting": 1
+          "unread": 1
         },
         "threads": {
           "t1": {
@@ -264,8 +260,7 @@
         ],
         "counts": {
           "waiting": 0,
-          "unread": 0,
-          "decisions_waiting": 0
+          "unread": 0
         },
         "threads": {
           "t1": {
@@ -316,8 +311,7 @@
         ],
         "counts": {
           "waiting": 0,
-          "unread": 0,
-          "decisions_waiting": 0
+          "unread": 0
         },
         "threads": {
           "t1": {
@@ -370,8 +364,7 @@
         ],
         "counts": {
           "waiting": 0,
-          "unread": 0,
-          "decisions_waiting": 0
+          "unread": 0
         },
         "threads": {
           "t1": {
@@ -422,8 +415,7 @@
         "archived": [],
         "counts": {
           "waiting": 0,
-          "unread": 1,
-          "decisions_waiting": 1
+          "unread": 1
         },
         "threads": {
           "t1": {
@@ -478,8 +470,7 @@
         "archived": [],
         "counts": {
           "waiting": 0,
-          "unread": 1,
-          "decisions_waiting": 0
+          "unread": 1
         },
         "threads": {
           "t1": {

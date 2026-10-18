@@ -2,7 +2,7 @@
 
 Date: 2026-10-12. This is the model of where a thread sits in the Inbox list and why it moves. It is written from the code, and the code is checked against it: `packages/shared/inbox/store.test.ts` ("the thread-state model") runs generated and hand-written event sequences against the real store and an independent model of the rules below, and checks every invariant after every step. The phone apps replay the trace fixtures in `packages/shared/inbox/fixtures/thread-state/v1/` (see "Trace fixtures").
 
-Where the rules live: the store (`packages/shared/inbox/store.ts`: `listRow`, `readAt`, `markSeen`, `markRead`, `tellSetAside`, `markAgentChecked`, `resolveThread`, `sendMessage`, `sendReply`, `savePicks`), the sections (`packages/shared/inbox/list.ts`), the routes (`packages/server/inbox.ts`), the counts (`packages/inbox/held.ts` `waitingCount`, `packages/server/inbox-decisions.ts` `waitingDecisionCount`) and the wire (`adr/implementation/inbox-mobile.md`, section 2).
+Where the rules live: the store (`packages/shared/inbox/store.ts`: `listRow`, `readAt`, `markSeen`, `markRead`, `tellSetAside`, `markAgentChecked`, `resolveThread`, `sendMessage`, `sendReply`, `savePicks`), the sections (`packages/shared/inbox/list.ts`), the routes (`packages/server/inbox.ts`), the counts (`packages/inbox/held.ts` `waitingCount`) and the wire (`adr/implementation/inbox-mobile.md`, section 2).
 
 ## Terms
 
@@ -13,7 +13,7 @@ Where the rules live: the store (`packages/shared/inbox/store.ts`: `listRow`, `r
 - **The look.** The person looked at the thread (`POST /api/inbox/threads/:id/seen`): the window records one when the thread opens, and again when an agent message that arrived while it was open has been seen on screen (seen on sight, `packages/inbox/seenOnSight.ts`). The root's `person_seen_seq` becomes the seq of the latest agent message, or, with the optional `through_seq` (the newest message the window showed), of the latest agent message at or below it: a message that landed after the window read the thread stays new. A look never goes back (a cap at or behind the recorded look writes nothing), and a cap past the newest message is the newest message. The person's own reply counts as a look at everything before it. The Inbox's notes are not the person's reply and not a look.
 - **Mark read.** `POST /api/inbox/threads/:id/read`. It writes `person_read_seq` and `person_read_at` on the root, counts as a look, and closes every question still waiting on the person (open, or picked and not sent) as a skip with `set_aside`, which names that Mark read (`set_aside.read_seq`, its `person_read_seq`). It stands while no message but its own set-aside notes came after it.
 - **Undo.** `POST /api/inbox/threads/:id/unread`. It clears the read fields, puts back the look Mark read counted, and reopens the questions that Mark read closed (the root's current `person_read_seq`), as they were (a saved pick included). A question an earlier Mark read closed stays closed (owner ruling 2026-10-12). A record older than `read_seq` is matched by time (`set_aside.at` equals the root's `person_read_at`). With no Mark read on the root (after an Undo, or an Unarchive that dropped it) Undo writes nothing.
-- **Archive.** Resolve (`POST /api/inbox/messages/:id/resolve`, `resolved: true`). The root's `resolved_at` is set. **The archive line** is the seq of the root line that set the current `resolved_at`; it is derived from the log, never written. Messages before the line are **closed by the archive**: their questions read `closed`, and picks, Send and the decision switch on them are refused (`409 thread_resolved`).
+- **Archive.** Resolve (`POST /api/inbox/messages/:id/resolve`, `resolved: true`). The root's `resolved_at` is set. **The archive line** is the seq of the root line that set the current `resolved_at`; it is derived from the log, never written. Messages before the line are **closed by the archive**: their questions read `closed`, and picks and Send on them are refused (`409 thread_resolved`).
 - **Came back.** An agent wrote in an archived thread after the line (`agent_after_archive`), and something there still waits on someone (`back_from_archive`): an agent message after the line the person has not looked at, a live question open or picked, or the person's real reply after the line that no agent has read (notes do not count), unless a Mark read made after it still stands. A Mark read made after the latest post-archive agent message ends "came back": the thread is Archived again at once, even while the person's reply there waits on the agent. The thread stays resolved.
 - **Agent read.** `read_thread` read the thread, or `wait_for_reply` returned the person's reply. The root's `agent_checked_seq` becomes the seq of the latest person message it covered.
 - **A thread the person started.** Compose (`POST /api/inbox/messages`): the root is the person's message (`started_by_person`), addressed to one live session (`to`). It is no session's default thread (routing indexes agent roots only), so only a `reply_to` answer lands in it. Its addressed session's **delivery** (the connection put it into the session as a turn) counts as an agent read up to it.
@@ -114,13 +114,13 @@ Checked after every step of every sequence, on the store's own output:
 2. No thread disappears: the default view holds every thread ever created; the window's view and the archived list together hold every thread, and never the same one twice.
 3. A question still waiting on the person (`open`) keeps its thread in Stopped, Holding or Waiting.
 4. Mark read then Undo, back to back, gives the thread back exactly as it was (section, unseen, questions, picks), whatever an earlier Mark read closed. Undo always clears the read fields; afterwards a question is set aside exactly when an earlier Mark read closed it.
-5. Archive then Unarchive loses no message, question, pick or decision; the row comes back identical.
+5. Archive then Unarchive loses no message, question or pick; the row comes back identical.
 6. An agent message after the archive line brings the thread back into the list while something waits. Mark read on a came-back thread returns it to Archived. Unarchive clears a read made while archived.
-7. Counts. The sidebar's waiting count (`waitingCount`) equals the rows in Stopped, Holding and Waiting, in both views and per project; the folders' unread count equals the rows in Stopped, Holding, Waiting and New; an archived row never counts. The Decisions count (`decisions_waiting`) equals the questions that record a decision once sent, open or picked, with no decision yet.
+7. Counts. The sidebar's waiting count (`waitingCount`) equals the rows in Stopped, Holding and Waiting, in both views and per project; the folders' unread count equals the rows in Stopped, Holding, Waiting and New; an archived row never counts.
 8. Replay: a store reopened from disk gives the same rows and threads.
 9. Sort: the sections in the fixed order; newest first by `last_at` inside each, ties on the thread id; the archived list newest archived first, ties on the thread id. About one generated step in four shares the previous step's clock time, so `last_at` ties happen in the sections; a second property archives every open thread within one clock tick, so `resolved_at` ties happen in the archived list. Each fails if it met no tie. The trace fixtures keep one clock step per event: a thread id ends in random characters, so the order of a tie is not the same from one run to the next.
 
-Invariant 7 is mostly circular for the first two counts: `waitingCount` counts the rows in Stopped, Holding and Waiting, and `unread` is defined from the section, so they check the counting code rather than the rules. The Decisions count is the real check: the model keeps its own account of which questions record a decision and which have one.
+Invariant 7 is circular: `waitingCount` counts the rows in Stopped, Holding and Waiting, and `unread` is defined from the section, so they check the counting code rather than the rules.
 
 The model also predicts every event's outcome (written, nothing to do, a replayed key, or the refusal code), which thread every message lands in, every question's state and every row's section, unseen count, read and came-back flags, `last_at` and `last_agent_at`. The store must match it exactly on every field after every step. (Until A, B and C below were fixed, the model derived each row under two look rules, the store's and the intended one, and recorded the difference; they are one rule now.)
 
@@ -130,7 +130,6 @@ The project menu's batches (design record "inbox-project-menu", approved 2026-10
 
 - **Inbox and folder counts in the sidebar**: rows in Stopped, Holding and Waiting (`waitingCount` in `packages/inbox/held.ts`). New is bold but not counted there.
 - **`projects[].unread`** in the list response: rows in Stopped, Holding, Waiting or New (`unread`, bold).
-- **Decisions**: `decisions_waiting`, questions that record a decision once sent (`Decision: when answered`, or the card's switch), open or picked, with no decision recorded. A question the archive or a Mark read closed does not count. A Send of the pick records the decision and it stops counting.
 - Questions are never counted one by one in the badge.
 
 ## What is window-only and never stored
@@ -141,7 +140,7 @@ The project menu's batches (design record "inbox-project-menu", approved 2026-10
 - **Held order** (`packages/inbox/held.ts`): the rows on screen change only on the person's action; agent activity waits behind "N new". While a thread is open, the person's own writes show in place and never reorder the list. The open thread is never held: its row takes its state in place (bold on an arrival, not bold once seen), it is never in "N new", and when the thread closes it settles where its state puts it, an unseen arrival included (New, or Waiting when it asks).
 - Toasts, the sound's arming and burst state, the sidebar and list widths (cookies), the Grid or Clean look.
 
-Stored, on disk: looks, reads, archives, picks, sends, decisions, annotations and settings.
+Stored, on disk: looks, reads, archives, picks, sends, annotations and settings. (Decisions were removed in 2026-10; an older store's decisions.jsonl is left on disk, kept only so sequence numbers are never reused.)
 
 ## Fixed violations
 

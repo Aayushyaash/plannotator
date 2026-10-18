@@ -1084,6 +1084,7 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
                 ref={viewerRef}
                 blocks={blocks}
                 markdown={view.text}
+                questionDecisionLines={false}
                 annotations={annotations}
                 onAddAnnotation={(annotation) => void save(annotation)}
                 onSelectAnnotation={setSelectedId}

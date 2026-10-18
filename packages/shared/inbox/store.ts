@@ -50,7 +50,6 @@ import {
   type InboxAck,
   type InboxAddressee,
   type InboxAuthor,
-  type InboxDecision,
   type InboxGuideRef,
   type InboxLine,
   type InboxMessage,
@@ -93,7 +92,7 @@ import { pendingInboxUploadBlobs, removeUnusedInboxUploadFiles } from "./uploads
 import { inboxDraftsBytes } from "./drafts";
 import {
   ANNOTATIONS_FILE,
-  DECISIONS_FILE,
+  LEGACY_DECISIONS_FILE,
   INBOX_PROJECTS_DIR,
   SEQ_FLOOR_FILE,
   InboxError,
@@ -286,6 +285,31 @@ export function inboxProjectKey(name: string, root: string, hashLength = 6): str
   return `${base}-${hash}`;
 }
 
+/**
+ * The highest seq in an older store's decisions.jsonl (Decisions were removed
+ * in 2026-10; the file is kept on disk and its records are never read), or 0.
+ * Read leniently: only each line's `seq` counts.
+ */
+function legacySeqFloor(path: string): number {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return 0;
+  }
+  let high = 0;
+  for (const raw of text.split("\n")) {
+    if (!raw.trim()) continue;
+    try {
+      const seq = (JSON.parse(raw) as { seq?: unknown }).seq;
+      if (typeof seq === "number" && Number.isSafeInteger(seq) && seq > high) high = seq;
+    } catch {
+      // A torn line: skipped, as the store skips one.
+    }
+  }
+  return high;
+}
+
 export class InboxStore {
   readonly dir: string;
   private seq = 0;
@@ -329,8 +353,6 @@ export class InboxStore {
    * from taking the name (`threadNameTaken`).
    */
   private readonly personNamed = new Map<string, string[]>();
-  /** Every decision, by id (step 3; the rules are packages/server/inbox-decisions.ts). */
-  private readonly decisions = new Map<string, InboxDecision>();
   /** The person's annotations on attachments, by id. */
   private readonly annotations = new Map<string, InboxAnnotationRecord>();
   /** A guided review's files by its snapshot's sha256 (a blob never changes). */
@@ -368,7 +390,11 @@ export class InboxStore {
     const lines: InboxLine[] = [];
     for (const key of readdirSync(projectsDir)) {
       const folder = join(projectsDir, key);
-      for (const name of [PROJECT_FILE, MESSAGES_FILE, QUESTIONS_FILE, DECISIONS_FILE, ANNOTATIONS_FILE]) {
+      // Decisions were removed (2026-10): an older store's decisions.jsonl is
+      // left on disk and never applied, but its seqs still count, so a seq is
+      // never handed out twice.
+      this.seq = Math.max(this.seq, legacySeqFloor(join(folder, LEGACY_DECISIONS_FILE)));
+      for (const name of [PROJECT_FILE, MESSAGES_FILE, QUESTIONS_FILE, ANNOTATIONS_FILE]) {
         const path = join(folder, name);
         let text: string;
         try {
@@ -465,9 +491,6 @@ export class InboxStore {
         else this.messageQuestions.set(line.record.message_id, new Set([line.record.id]));
         break;
       }
-      case "decision":
-        this.decisions.set(line.record.id, line.record);
-        break;
       case "annotation":
         this.annotations.set(line.record.id, line.record);
         break;
@@ -987,7 +1010,7 @@ export class InboxStore {
    * Mark read (`read`), or move it back (Undo, the pressed button). Mark read
    * moves the thread to Quiet without archiving it: every question still
    * waiting on the person (open, or picked and not sent) is closed as a skip
-   * (`set_aside`, never a decision), and the thread counts as looked at. It
+   * (`set_aside`), and the thread counts as looked at. It
    * comes back when an agent writes again. Moving back reopens the questions
    * that Mark read closed (not an earlier one's) exactly as they were, a
    * saved pick included (its revision goes up by one, so a pick in flight is
@@ -1505,7 +1528,7 @@ export class InboxStore {
         perThread.set(threadId, threadBytes);
       }
       for (const sha256 of projectBlobs) bytes += blobSizes.get(sha256) ?? 0;
-      for (const name of [PROJECT_FILE, MESSAGES_FILE, QUESTIONS_FILE, DECISIONS_FILE, ANNOTATIONS_FILE]) {
+      for (const name of [PROJECT_FILE, MESSAGES_FILE, QUESTIONS_FILE, LEGACY_DECISIONS_FILE, ANNOTATIONS_FILE]) {
         let text: string;
         try {
           text = readFileSync(join(folder, name), "utf8");
@@ -1514,8 +1537,8 @@ export class InboxStore {
         }
         bytes += Buffer.byteLength(text);
         total += Buffer.byteLength(text);
-        // The project line and its decisions count for the project, not a thread.
-        if (name === PROJECT_FILE || name === DECISIONS_FILE) continue;
+        // The project line, and an older store's decisions file, count for the project, not a thread.
+        if (name === PROJECT_FILE || name === LEGACY_DECISIONS_FILE) continue;
         for (const raw of text.split("\n")) {
           const line = parseInboxLine(raw);
           if (!line) continue;
@@ -1765,7 +1788,6 @@ export class InboxStore {
           kind: question.kind,
           prompt: question.prompt,
           parsed: question.parsed,
-          decision_on_answer: question.decision_on_answer,
           stopped: question.stopped,
           holds_up: question.holds_up,
           asked_by_agent_id: input.author.session,
@@ -1775,17 +1797,15 @@ export class InboxStore {
           picked_by: null,
           picked_at: null,
           sent_reply_id: null,
-          decision_id: null,
         },
         at,
       );
     }
     // The superseded questions last, so whoever reads them finds the message
-    // that superseded them. A pick saved on one stays on it, never sent; a
-    // decision drafted on it is dropped.
+    // that superseded them. A pick saved on one stays on it, never sent.
     for (const [questionId, by] of superseding) {
       const record = this.questions.get(questionId)!;
-      this.appendQuestion({ ...record, superseded_by: by, ...(record.decision_draft ? { decision_draft: null } : {}) }, at);
+      this.appendQuestion({ ...record, superseded_by: by }, at);
     }
     // The name, last: the root written again with `thread_name` and
     // `named_by` (append-only; `apply` indexes a name it gains at that line,
@@ -2166,28 +2186,6 @@ export class InboxStore {
     return { reply, questions: this.questionsOf(message.id), replayed: false };
   }
 
-  // ─────────────── decisions (step 3; the rules: packages/server/inbox-decisions.ts) ───────────────
-
-  decision(id: string): InboxDecision | null {
-    return this.decisions.get(id) ?? null;
-  }
-
-  /** A project's decisions, oldest first. */
-  decisionsOf(projectId: string): InboxDecision[] {
-    return [...this.decisions.values()]
-      .filter((d) => d.project_id === projectId)
-      .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
-  }
-
-  /**
-   * Every decision of every project, unordered: for one-pass counts. A live
-   * view of the store's map: iterate it at once, never hold it across a write
-   * or a reload().
-   */
-  allDecisions(): Iterable<Readonly<InboxDecision>> {
-    return this.decisions.values();
-  }
-
   /**
    * Every question record of every project, unordered: for one-pass counts.
    * A live view of the store's map: iterate it at once, never hold it across
@@ -2209,36 +2207,6 @@ export class InboxStore {
     return out.sort(
       (a, b) => (this.messageSeq.get(a.message_id) ?? 0) - (this.messageSeq.get(b.message_id) ?? 0) || a.position - b.position,
     );
-  }
-
-  /** Append one decision snapshot (a new decision, or a retired or replaced one). */
-  writeDecision(record: InboxDecision): void {
-    const project = this.projectsById.get(record.project_id);
-    if (!project) throw new InboxError("project_not_found", `No project ${record.project_id}.`);
-    this.write(join(this.projectFolder(project), DECISIONS_FILE), {
-      v: INBOX_RECORD_VERSION,
-      seq: this.seq + 1,
-      at: this.stamp(),
-      kind: "decision",
-      id: record.id,
-      record,
-    });
-  }
-
-  /**
-   * Change a question's decision fields only (the switch, the card's words,
-   * the recorded decision's id). Never its answer or revision, so a switch
-   * never races a pick.
-   */
-  writeQuestionDecision(
-    id: string,
-    patch: Partial<Pick<InboxQuestionRecord, "decision_recording" | "decision_draft" | "decision_id">>,
-  ): InboxQuestionRecord {
-    const record = this.questions.get(id);
-    if (!record) throw new InboxError("question_not_found", `No question ${id}.`);
-    const next = { ...record, ...patch };
-    this.appendQuestion(next, this.stamp());
-    return next;
   }
 
   /**
@@ -2586,7 +2554,7 @@ export class InboxStore {
 
   /**
    * Delete a thread: its messages, questions and annotations are dropped from
-   * the project's files (its decisions stay: they belong to the project) (each rewritten whole: temp file, then rename), and
+   * the project's files (each rewritten whole: temp file, then rename), and
    * every blob no other record uses is removed. The store is then read again
    * from disk, so what routes and lists next is exactly what a restart reads.
    */
@@ -2661,7 +2629,6 @@ export class InboxStore {
     this.threadMembers.clear();
     this.namedThreads.clear();
     this.personNamed.clear();
-    this.decisions.clear();
     this.annotations.clear();
     this.tornFiles.clear();
     this.load();

@@ -4,9 +4,8 @@ import { Viewer } from '@plannotator/ui/components/Viewer';
 import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
 import { parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 import { getHtmlChromeState, saveHtmlChromeState } from '@plannotator/ui/utils/htmlChrome';
-import type { InboxDecision, InboxDecisionDraft, InboxListRow, InboxMessageWire, InboxProjectRepo, InboxQuestion, InboxThread, InboxUpload } from '@plannotator/core/inbox-types';
+import type { InboxListRow, InboxMessageWire, InboxProjectRepo, InboxQuestion, InboxThread, InboxUpload } from '@plannotator/core/inbox-types';
 import type { IndexedQuestion, QuestionAnswer, QuestionStatus } from '@plannotator/core/question-block';
-import { inboxDecisionWords } from '@plannotator/core/inbox-questions';
 import { isInboxNote, isInboxTextKind, readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachment, type InboxAttachmentState, type InboxInlineImage } from '@plannotator/core/inbox-types';
 import type { LocalLinkResolver } from '@plannotator/ui/components/LocalLinkContext';
 import { NOT_ATTACHED_TITLE, attachmentDeepLink, attachmentDisplayPath, attachmentForLink, openAttachmentTitle, useRefRepo } from '../links';
@@ -20,9 +19,8 @@ import { AnnotationsChip } from './AnnotationsChip';
 import { agentName, clockTime, dayWords, fullTime, plural, whenTime } from '../format';
 import { answerWords, foldSnippet, holdingsOf, isDelivered, isPersonReply, lastNonNote, lookBoundary, newSinceLook, planFolds, snippetText, type FoldSnippet, type Holding } from '../folding';
 import { highlightSearchHits } from '../search/highlight';
-import { AuthorMark, DecisionDiamond, Icon } from '../icons';
+import { AuthorMark, Icon } from '../icons';
 import { PILL_BAND_PX, atEnd, followBy, lookThrough, measureFirstLines, unseenArrivals, useSeenOnSight } from '../seenOnSight';
-import { DecisionCard } from './DecisionCard';
 import { GuideCard } from './GuideCard';
 import { inboxMessageImageBase, inlineImageRefFromSrc, markTallImage } from '../images';
 import { reportUnsentReply } from '../unsent';
@@ -246,9 +244,6 @@ export function MessageBody({
   answers,
   onPick,
   footerFor,
-  recordingOf,
-  onToggleDecision,
-  onOpenDecision,
   renderReplacedCard,
   renderReplacesLine,
 }: {
@@ -265,10 +260,6 @@ export function MessageBody({
   answers: ReadonlyMap<string, QuestionAnswer>;
   onPick: (key: string, answer: QuestionAnswer | null) => void;
   footerFor: (key: string) => string | null;
-  /** The switch's state per question key (the stored one, or a click not yet saved). */
-  recordingOf: (key: string) => boolean | undefined;
-  onToggleDecision: (key: string, next: boolean) => void;
-  onOpenDecision: (key: string, anchor: HTMLElement) => void;
   /** A superseded question's card in place of its answer card (the question's key and number), or undefined to keep it. */
   renderReplacedCard?: (key: string, number: number) => React.ReactNode | undefined;
   /** The "Replaces …" line under a question's prompt, or null. */
@@ -407,14 +398,6 @@ export function MessageBody({
     },
     [footerFor],
   );
-  // Every question carries the tag (the record's 3.1): its switch is kept on
-  // the question record (on by default where the block says `Decision: when
-  // answered`, off elsewhere); a linked decision (`Decision: [statement](url)`)
-  // is already recorded and keeps its own tag.
-  const recording = useCallback(
-    (question: IndexedQuestion) => (question.question.decision ? undefined : recordingOf(question.question.key)),
-    [recordingOf],
-  );
   // Replaced questions: the host's Quiet card in place of the answer card, and
   // the newer card's "Replaces …" line. Kept stable across renders.
   const replacedRef = useRef(renderReplacedCard);
@@ -431,15 +414,6 @@ export function MessageBody({
     [message.questions],
   );
 
-  // Read-only per question: a sent answer's tag is a plain tag while an open
-  // question in the same message keeps its switch and card.
-  const locked = useCallback(
-    (question: IndexedQuestion) => {
-      const wire = message.questions?.find((q) => q.key === question.question.key);
-      return wire !== undefined && (wire.state === 'sent' || wire.decision_id !== null);
-    },
-    [message.questions],
-  );
   // The whole card, per question: only an open or picked question can be
   // answered. A sent one, one a Mark read or the archive closed, and a
   // replaced one draw read-only (no ticks, no Accept recommended, no Skip),
@@ -488,11 +462,8 @@ export function MessageBody({
         questionAnswers={answers}
         onAnswerQuestion={(_blockId, answer, key) => onPick(key, answer)}
         renderQuestionFooter={renderFooter}
-        questionDecisionScope="any"
-        questionDecisionRecording={recording}
-        onToggleQuestionDecisionRecording={onToggleDecision}
-        onOpenQuestionDecision={onOpenDecision}
-        questionDecisionLocked={locked}
+        // The Inbox records no decisions: a `Decision:` line an older agent wrote is context.
+        questionDecisionLines={false}
         questionReadOnly={answerLocked}
         questionStatusLabel={statusLabel}
         renderQuestionCard={renderReplacedCard ? questionCard : undefined}
@@ -518,10 +489,6 @@ export interface ThreadPaneProps {
   /** Something was written (a Send, resolve): read the thread and the list again. */
   onChanged: () => Promise<void>;
   onClose: () => void;
-  /** The decisions this thread's questions recorded (the "Settled: ..." lines). */
-  decisions: readonly InboxDecision[];
-  /** Open a recorded decision on the Decisions page. */
-  onOpenDecisionPage: (decision: InboxDecision) => void;
   /** The attachment open beside the thread (`#…&file=att_…`), its version, and an annotation to show. */
   file: { id: string; version: 'current' | 'sent'; focus: string | null } | null;
   /** `replace`: swap the history entry (stepping between files), so Back returns to the thread in one press. */
@@ -703,7 +670,7 @@ export function AckPill({
   );
 }
 
-export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, decisions, onOpenDecisionPage, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
+export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
   // "Open in" (OpenIn.tsx): apps on this computer; a new tab only through the tailnet or on a phone.
   const openIn: OpenInSurface | undefined = phone || remote === true ? 'tab' : remote === null ? undefined : 'apps';
   const root = thread.messages[0]!;
@@ -739,12 +706,6 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
   const threadRef = useRef(thread);
   threadRef.current = thread;
 
-  /** Switch clicks shown before the server answers, `<message id>/<key>` to on or off. */
-  const [switching, setSwitching] = useState<ReadonlyMap<string, boolean>>(new Map());
-  /** The decision card open on one question, under the tag's words. */
-  const [card, setCard] = useState<{ messageId: string; key: string; anchor: HTMLElement } | null>(null);
-  /** Decisions a Send could not record (the answers stay sent). */
-  const [refused, setRefused] = useState<{ key: string; message: string }[]>([]);
   const [box, setBox] = useState<{ open: boolean; text: string }>({ open: false, text: '' });
   /**
    * Files pasted into the reply box (the owner: "paste in images … if I'm
@@ -1187,9 +1148,6 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
     setBox({ open: false, text: '' });
     replyFiles.reset();
     setError(null);
-    setSwitching(new Map());
-    setCard(null);
-    setRefused([]);
     setNewMessage(null);
     setStale([]);
     setGuard(false);
@@ -1490,54 +1448,6 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
     return null;
   };
 
-  /** The question as the server last answered, with one question replaced. */
-  const patchQuestion = (question: InboxQuestion) => {
-    const message = threadRef.current.messages.find((m) => m.id === question.message_id);
-    if (!message) return;
-    onQuestions(message.id, (message.questions ?? []).map((q) => (q.key === question.key ? question : q)));
-  };
-
-  const recordingOf = (message: InboxMessageWire) => (key: string): boolean | undefined => {
-    const id = `${message.id}/${key}`;
-    if (switching.has(id)) return switching.get(id);
-    return message.questions?.find((q) => q.key === key)?.decision_recording;
-  };
-
-  /** The tag's diamond: saved on the question at once, like a pick. */
-  const toggleDecision = (messageId: string) => (key: string, next: boolean) => {
-    const id = `${messageId}/${key}`;
-    setSwitching((current) => new Map(current).set(id, next));
-    setError(null);
-    void inboxApi
-      .setDecision(messageId, key, { recording: next })
-      .then((result) => patchQuestion(result.question))
-      .catch(async (cause) => {
-        if (!isSuperseded(cause)) setError(cause instanceof InboxApiError ? cause.message : 'The switch was not saved.');
-        await onChanged();
-      })
-      .finally(() =>
-        setSwitching((current) => {
-          if (current.get(id) !== next) return current;
-          const updated = new Map(current);
-          updated.delete(id);
-          return updated;
-        }),
-      );
-  };
-
-  const openDecision = (messageId: string) => (key: string, anchor: HTMLElement) => setCard({ messageId, key, anchor });
-
-  /** Done on the card: keep its words on the question and turn recording on. */
-  const keepDecision = async (messageId: string, key: string, draft: InboxDecisionDraft | null) => {
-    try {
-      const result = await inboxApi.setDecision(messageId, key, { recording: true, draft });
-      patchQuestion(result.question);
-      setCard(null);
-    } catch (cause) {
-      throw new Error(cause instanceof InboxApiError ? cause.message : 'The decision was not kept.');
-    }
-  };
-
   // What a Send carries: every picked, unsent answer, per message. A pick on a
   // superseded question is never one of them (its state is "superseded").
   const picked = thread.messages.flatMap((m) => (m.questions ?? []).filter((q) => q.state === 'picked'));
@@ -1657,7 +1567,6 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
       const contents = JSON.stringify([words, uploads, pendingAnnotations.map((r) => [r.id, r.updated_at])]);
       if (sendContents.current !== null && sendContents.current !== contents) sendKeys.current.set(targets.at(-1)!.message.id, crypto.randomUUID());
       sendContents.current = contents;
-      const notRecorded: { key: string; message: string }[] = [];
       // The words and the annotations ride the last reply, after its picks;
       // the skills they reference ride it too, as one block at its end
       // (skills.ts: a human-only skill's SKILL.md pasted in, its folder named).
@@ -1666,7 +1575,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
       const feedback = withSkillsBlock(annotationsFeedback, skills);
       for (const [index, target] of targets.entries()) {
         const last = index === targets.length - 1;
-        const result = await inboxApi.reply(target.message.id, {
+        await inboxApi.reply(target.message.id, {
           idempotency_key: sendKeys.current.get(target.message.id) ?? crypto.randomUUID(),
           words: last ? words : '',
           questions: target.questions,
@@ -1679,9 +1588,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
           ...(to && target.message.author.kind === 'agent' && target.message.author.session === asking?.session ? { to } : {}),
         });
         went += 1;
-        notRecorded.push(...result.decisions_refused);
       }
-      setRefused(notRecorded);
       sendKeys.current = null;
       sendContents.current = null;
       setRoute(CLOSED_ROUTE);
@@ -2269,33 +2176,9 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
                   answers={answersOf(message)}
                   onPick={(key, answer) => pick(message.id, key, answer)}
                   footerFor={footerFor(message)}
-                  recordingOf={recordingOf(message)}
-                  onToggleDecision={toggleDecision(message.id)}
-                  onOpenDecision={openDecision(message.id)}
                   renderReplacedCard={replacedCard}
                   renderReplacesLine={replacesLine}
                 />
-                {questions.map((q) => {
-                  const decision = q.decision_id ? decisions.find((d) => d.id === q.decision_id) : undefined;
-                  if (!decision) return null;
-                  return (
-                    <p className="ib-settled" key={q.key} data-question-settled={q.key}>
-                      <DecisionDiamond />
-                      <span>
-                        Settled:{' '}
-                        <a
-                          href={`#decisions=${decision.project_id}&decision=${decision.id}`}
-                          onClick={(event) => {
-                            event.preventDefault();
-                            onOpenDecisionPage(decision);
-                          }}
-                        >
-                          {decision.text}
-                        </a>
-                      </span>
-                    </p>
-                  );
-                })}
                 {/* An agent's files, and the person's own (compose): the same tiles and viewers. */}
                 {(message.attachments?.length ?? 0) > 0 && (
                   <AttachmentTiles
@@ -2587,13 +2470,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, deci
             {error}
           </div>
         )}
-        {refused.map((entry) => (
-          <div className="ib-error" role="status" key={entry.key} data-question-decision-refused={entry.key}>
-            Not recorded as a decision: {entry.message.replace(/\.$/, '')}. The answer was sent.
-          </div>
-        ))}
       </div>
-      {card && <ThreadDecisionCard thread={thread} card={card} answersOf={answersOf} onCancel={() => setCard(null)} onDone={keepDecision} />}
     </section>
     {openAttachment && (
       <AttachmentPane
@@ -2683,41 +2560,5 @@ function SkipChip({ count, keepOpen, onToggle }: { count: number; keepOpen: bool
         {keepOpen ? `Skip ${them}` : 'Keep open'}
       </button>
     </span>
-  );
-}
-
-/** The decision card for one question, drafted from its answer as it is now (a pick not yet saved included). */
-function ThreadDecisionCard({
-  thread,
-  card,
-  answersOf,
-  onCancel,
-  onDone,
-}: {
-  thread: InboxThread;
-  card: { messageId: string; key: string; anchor: HTMLElement };
-  answersOf: (message: InboxMessageWire) => Map<string, QuestionAnswer>;
-  onCancel: () => void;
-  onDone: (messageId: string, key: string, draft: InboxDecisionDraft | null) => Promise<void>;
-}) {
-  const message = thread.messages.find((m) => m.id === card.messageId);
-  const question = message?.questions?.find((q) => q.key === card.key);
-  if (!message || !question) return null;
-  const drafted = inboxDecisionWords({
-    answer: answersOf(message).get(card.key) ?? null,
-    prompt: question.prompt,
-    askerName: agentName(message.author),
-    draft: null,
-  });
-  return (
-    <DecisionCard
-      key={`${card.messageId}/${card.key}`}
-      anchor={card.anchor}
-      drafted={drafted}
-      draft={question.decision_draft}
-      projectName={thread.project.name}
-      onCancel={onCancel}
-      onDone={(draft) => onDone(card.messageId, card.key, draft)}
-    />
   );
 }

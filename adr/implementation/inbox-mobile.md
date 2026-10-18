@@ -125,15 +125,15 @@ The allowlist. Each row is the window's handler as it is today, with the request
 | Door route | Window route | Request | Answer | Exchange |
 |---|---|---|---|---|
 | `GET health` | `GET /api/inbox/health` | | `{ ok, app, version, serverSession, pid, update, notify_reach? }` (`notify_reach` additive: whether an open Inbox tab on the computer can show a browser notification); the cheapest read, the phone's reachability probe for 9.2 | 7.4 |
-| `GET threads[?project=prj_...][&archived=include\|exclude]` | `GET /api/inbox/threads` | | the list model: `{ serverSession, version, cursor, update, notice, projects, project, sections, decisions_waiting }`. Archived threads stay in the Quiet section unless the phone asks `archived=exclude` (added 2026-10-12, when the window moved them out of its list into Settings; the default keeps this exchange as it was, so a phone that draws the sections loses no thread). "Archived" means resolved and not come back: an agent's `reply_to` reply after the archive line brings the thread back into the sections while something there waits (as news, Waiting when it asks, Sent after the reply), with the additive row fields `agent_after_archive` and `back_from_archive`, in both modes; once handled it is archived again by itself. Its later messages are answerable without unarchiving (picks, reply, decision switch, annotations, the lock-screen answer), its earlier ones stay closed, and the thread stays resolved | 7.5 |
+| `GET threads[?project=prj_...][&archived=include\|exclude]` | `GET /api/inbox/threads` | | the list model: `{ serverSession, version, cursor, update, notice, projects, project, sections }` (`decisions_waiting` was removed with Decisions, 2026-10). Archived threads stay in the Quiet section unless the phone asks `archived=exclude` (added 2026-10-12, when the window moved them out of its list into Settings; the default keeps this exchange as it was, so a phone that draws the sections loses no thread). "Archived" means resolved and not come back: an agent's `reply_to` reply after the archive line brings the thread back into the sections while something there waits (as news, Waiting when it asks, Sent after the reply), with the additive row fields `agent_after_archive` and `back_from_archive`, in both modes; once handled it is archived again by itself. Its later messages are answerable without unarchiving (picks, reply, annotations, the lock-screen answer), its earlier ones stay closed, and the thread stays resolved | 7.5 |
 | `GET threads/archived[?project=prj_...&offset=n&limit=n]` | `GET /api/inbox/threads/archived` | | `{ serverSession, cursor, project, projects: [{ id, name, archived }], total, offset, limit, threads: [row] }`: the archived threads, newest archived first, a page at a time (`limit` 1 to 200, default 50). An explicit allowlist row (GET, read only), before `threads/:id`; added 2026-10-12, no exchange of its own | |
 | `GET projects` | `GET /api/inbox/projects` | | `{ serverSession, cursor, projects: [{ id, key, name, root, created_at, threads, unread, listed, archived }] }` (`listed` and `archived`, additive: threads the window's list holds and the archived rest; the window hides a project with `listed` 0) | 7.6 |
-| `GET threads/:id` | `GET /api/inbox/threads/:id` | | `{ serverSession, cursor, thread, decisions, row }` (`row`, the thread's list row, and `thread.archive_seq`, the archive line's seq or null, additive since 2026-10-12) | 7.7 |
+| `GET threads/:id` | `GET /api/inbox/threads/:id` | | `{ serverSession, cursor, thread, row }` (`decisions` was removed with Decisions, 2026-10; `row`, the thread's list row, and `thread.archive_seq`, the archive line's seq or null, additive since 2026-10-12) | 7.7 |
 | `POST threads/:id/seen` | same | `{ idempotency_key, through_seq? }` | `{ thread: row }`. `through_seq` (optional, added 2026-10-12 with seen on sight, design record "inbox-new-in-open-thread"; additive, the door forwards it unchanged): an integer, the seq (`thread.messages[].seq`) of the newest message the phone actually showed. The look then covers only the agent messages at or below it, so a message that landed after the phone read the thread stays new. Behind the recorded look (at or below it): no-op, nothing written, the look is never lowered; ahead of the thread's newest message: capped to the newest (the same as no `through_seq`). Absent or `null`: every agent message so far, as before. Anything but a whole number of 0 or more: `422 { "code": "validation_error", "field": "through_seq" }`, nothing written. An Inbox older than the field ignores it and marks everything | 7.8 |
 | `POST threads/:id/read`, `POST threads/:id/unread` | same | `{ idempotency_key }` | `{ thread: row }`: Mark read (the row goes to Quiet, its waiting questions close unanswered; on a thread that came back from the archive it goes back to Archived at once, even while the person's earlier reply there waits on the agent) and its Undo (it reopens only the questions that Mark read closed; one an earlier Mark read closed stays closed); added after section 7, no exchange of its own. Row semantics since 2026-10-12, the wire unchanged: the Inbox's own notes to the agent (person messages carrying `set_aside` or `reopened`) are neither the person's reply nor a look, so a row's `sent`, `unseen`, `waiting_on_person` and `back_from_archive` read past them (and `waiting_on_person` is false while a Mark read stands), and the row gains the additive `last_agent_at` (the latest agent message's time; `last_at` and `last_author` still count the notes). The thread-state model (`adr/implementation/inbox-thread-state.md`) and its trace fixtures say the same | |
 | `GET events[?cursor=n]` | `GET /api/inbox/events` | `Last-Event-ID` or `?cursor=` (a valid `Last-Event-ID` header wins over `?cursor=`) | SSE: `hello`, `record` per store line (`id:` = seq), `status`, a heartbeat every 15 s | 7.9 |
 | `POST messages/:id/picks` | same | `{ idempotency_key, questions: [{ key, revision, answer or null }] }` | `{ message_id, questions, reply: null }` | 7.10 |
-| `POST messages/:id/reply` | same | `{ idempotency_key, words?, questions?, feedback?, annotation_ids?, skip_unanswered?, uploads? }` (`skip_unanswered: true` skips the message's questions left without a pick; a phone sends it only as the window does, see 7.11; `uploads`: `upl_` ids from 7.48, which become attachments on the reply, see 7.57) | `{ message_id, questions, reply, replayed, decisions, decisions_refused }` | 7.11 |
+| `POST messages/:id/reply` | same | `{ idempotency_key, words?, questions?, feedback?, annotation_ids?, skip_unanswered?, uploads? }` (`skip_unanswered: true` skips the message's questions left without a pick; a phone sends it only as the window does, see 7.11; `uploads`: `upl_` ids from 7.48, which become attachments on the reply, see 7.57) | `{ message_id, questions, reply, replayed }` | 7.11 |
 | `POST messages/:id/resolve` | same | `{ idempotency_key, resolved? }` | `{ thread: summary }` | 7.12 |
 | `POST messages/:id/ack` | same | `{ idempotency_key, ack? }` (`ack: false` takes it back) | `{ message, thread: row }`: 👍 Looks good (design record "inbox-acknowledge", 2026-10-15). Silent: nothing is sent, no session is woken, no push. The message gains `ack: { label, at, read_seq, made_read, settled_seq, settled_at, seen_at }` and the thread is marked read (Quiet until an agent writes again); the row gains the additive `ack: { label, at }` while that read holds (draw "👍 Looks good" in place of "Read"). `ack: false` removes it and undoes the Mark read when the 👍 made it (`made_read`); `threads/:id/unread` on that read withdraws the ack too. Only the thread's latest agent message, only while no question in the thread is open or picked and the person has not replied after it: `422 ack_not_allowed` (a person's message), `409 ack_stale` (a newer agent message), `409 ack_after_reply`, `409 question_open`, `409 thread_resolved`. An Inbox before it answers `404 device_route_not_found`. Added 2026-10-15. Amended 2026-10-16 (the owner: "send looks good through"): once the Undo window passes with the 👍 standing, the Inbox delivers it to the agent through a note, a person's message carrying `ack_of: <message id>` (body "The person marked your message 👍 Looks good (<message id>). No reply needed unless you have a question."), and the ack gains `note_id`; when the person replied or the agent wrote again inside the window, the ack settles with `not_sent: "replied" \| "wrote_again"` and no note. **A phone never displays a message with `ack_of`**: the thread route leaves it out, but the relay and the event stream send every store line, so a phone that builds threads from lines must drop it (it is one of the Inbox's own notes, like `set_aside` and `reopened`: not the person's reply, not a look). The window's thread adds `ack.delivered_at` (when it reached the agent) | 7.56 |
 | `POST messages/:id/to` | same | `{ idempotency_key, to: { host?, session } }` | `{ message, row }`: Send to another session, for a person message no session took yet. `409 already_delivered`, `409 thread_resolved`, `422 not_addressed`, `409 session_not_live` pass through. Added 2026-10-15 | 7.41 |
@@ -149,8 +149,6 @@ The allowlist. Each row is the window's handler as it is today, with the request
 | `GET messages/:id/guide` | same | | `{ message_id, guide, snapshot }` | 7.19 |
 | `POST messages/:id/guide/reviewed` | same | `{ idempotency_key, reviewed: boolean[] }` | `{ message_id, reviewed }` | 7.20 |
 | `POST messages/:id/guide/annotations` | same | `{ idempotency_key, annotation }` (the review app's line comment: `id`, `filePath` in the guide's patch, `side` `old`/`new`, `lineStart`/`lineEnd`, `text`); an edit is the same annotation id under a new key | `{ annotation: record }`. Removed through `annotations/:id/remove` (7.18). The window's refusals pass through: `422 validation_error` (a file not in the patch, a bad side, lines not in one hunk), `404 guide_not_found` / `message_not_found`, `409 annotation_closed`, `409 thread_resolved`. Added 2026-10-15 | 7.53 |
-| `POST messages/:id/decision` | same | `{ idempotency_key, key, recording?, draft? }` | `{ question }` | 7.21 |
-| `GET decisions?project=prj_...` | same | | `{ serverSession, cursor, project_id, waiting, decisions, project_counts }` (`project_counts`, added later, is every project's `{ project_id, waiting, settled }`; a phone may ignore it) | 7.22 |
 | `GET threads/:id/sessions` | same | | `{ serverSession, home, project, sessions }` (`?asker=<session>` adds `asker: { session, live, connection }`, `connection` = `{ busy, idle_since, send_now }` while that session's connection polls, else null; each session carries `send_now`) | 7.23 |
 | `POST messages/:id/send-now` | same | `{ idempotency_key }` | `{ message }` with `deliver_now_at`: Send now (2026-10-16). The session the person's reply or message goes to gets it at once, into its running turn when one runs. Offer it only while `asker.connection.send_now` and `busy` are true (draw "Queued · <agent> is working; it gets this when its turn ends"); `409 send_now_unavailable` when that session's connection does not poll now or cannot take it mid-turn, `409 already_delivered`, `422 not_addressed`. A second press writes nothing. An Inbox before it answers `404 device_route_not_found` | 7.58 |
 | `POST threads/:id/message` | same | `{ idempotency_key, session, body }` | `{ message, replayed }` | 7.24 |
@@ -167,7 +165,9 @@ The allowlist. Each row is the window's handler as it is today, with the request
 
 Door routes are written relative to `/api/inbox/device/`; window routes keep their full paths.
 
-What the door never answers, by construction (none is in the allowlist, and the tailnet's listener serves nothing else): `/`, `/favicon.png`, `/mcp`, `/api/inbox/bridge/*`, `/api/inbox/control/*`, `/api/inbox/attachments/:id` (raw bytes; every attachment kind is text and `view` carries it), `/api/inbox/settings`, `/api/inbox/restart`, `/api/inbox/projects/:id/delete`, `/api/inbox/decisions/:id/retire` and `replace`, `/api/inbox/drafts*` (shared drafts: exchanges 7.50 to 7.52 are held for them, not built), `/api/inbox/search/recent` (the phone keeps its own recent searches), `/api/inbox/open-in*` and `/api/inbox/attachments/:id/page`, `/api/inbox/pairing`, `/api/inbox/devices*`, `/api/inbox/tailnet`, `/api/inbox/lan`. The computer chores stay on the computer (decision 5). The bridge and control routes keep their own guards and refuse a device token like any other wrong token (`401 unauthorized`).
+**Decisions removed (2026-10).** The owner removed Decisions from the Inbox (and from Workspaces): the routes `POST messages/:id/decision` (7.21) and `GET decisions` (7.22) are gone from the allowlist and answer `404 device_route_not_found`, 7.54 and 7.55 (retire, replace) will never be built, and these fields left the wire: the list model's `decisions_waiting`, the thread read's `decisions`, a Send's `decisions` and `decisions_refused`, and each question's `decision_on_answer`, `decision_id`, `decision_recording` and `decision_draft`. A `Decision:` line an older agent wrote in a question block is context now. A phone app drops the Decisions screen, the card's decision switch and any reader of those fields.
+
+What the door never answers, by construction (none is in the allowlist, and the tailnet's listener serves nothing else): `/`, `/favicon.png`, `/mcp`, `/api/inbox/bridge/*`, `/api/inbox/control/*`, `/api/inbox/attachments/:id` (raw bytes; every attachment kind is text and `view` carries it), `/api/inbox/settings`, `/api/inbox/restart`, `/api/inbox/projects/:id/delete`, every Decisions route (removed: `/api/inbox/decisions`, `/api/inbox/decisions/:id/retire` and `replace`, `/api/inbox/messages/:id/decision`), `/api/inbox/drafts*` (shared drafts: exchanges 7.50 to 7.52 are held for them, not built), `/api/inbox/search/recent` (the phone keeps its own recent searches), `/api/inbox/open-in*` and `/api/inbox/attachments/:id/page`, `/api/inbox/pairing`, `/api/inbox/devices*`, `/api/inbox/tailnet`, `/api/inbox/lan`. The computer chores stay on the computer (decision 5). The bridge and control routes keep their own guards and refuse a device token like any other wrong token (`401 unauthorized`).
 
 ### Error codes
 
@@ -335,7 +335,7 @@ The cleartext alert shows only if the notification service extension cannot run.
 
 Written in by M5 (2026-10-08): `choice.<n>` names the choice by its index in the summary's `choices`, whatever order the actions are drawn in, so the app reads the label from the summary it stored on the notification. A push no paired device key opens reads "Plannotator" and "Question from an agent". Every notification's category, with or without actions, carries the hidden-preview placeholder "Question from an agent", so with previews hidden the lock screen shows no subject and no agent text. The lock-screen answer goes to the computer directly; when that gets no answer it goes up as a command through the relay (exchange 7.34, sealed under `U`) with the same key, and when the relay says the Inbox is not online the phone says "“Yes” sent. Waiting for your computer.". A refusal on the direct path is reported in a notification of its own ("“Yes” was not sent." and the reason); a Send neither path takes reads "“Yes” may not have been sent", since the direct one may have landed before its connection died. A refusal of a Send carried by the relay comes back as a result item, which the phone reads from M6 on; until then it is not reported. The key is one per message and choice, so a different choice later is a new Send. A push opens only when its sealed `type` is `"push"`, so R1's push vector, sealed before `type` existed, is refused by the app's open, and the app's tests read it as a summary only.
 
-Written in by M6 (2026-10-08; behaviour only, no shape changed): the phone tries its paths in 9.2's order on every return to the front, pull to refresh and push: the Wi-Fi listener (from the QR's `lan` and `fp` only, never from the network), then the tailnet, each asked for `health` with a 3 s wait, then the relay while its switch is on. On the relay it reads `items?after=n`, applies each record whose seq it has not seen to the threads it keeps (records are full snapshots in the thread's shape), reads the list and the open threads as GET commands while `inbox_online` is true (never while it is false, so GETs do not pile up at the relay), and acks through `n` after applying. A command reads back its own result for about 15 s (reads at 0.25 s doubling to 4 s); with no result, or with the Inbox offline, the command is held and a Send shows "Sent. Waiting for your computer" until its reply's `idempotency_key` appears in the thread or its result arrives, on any path: back on the Wi-Fi or the tailnet the phone reads the relay once for the results of its held Sends (a refusal never shows in the thread), and with its relay switch off it posts each held Send again directly with the same key, which the door answers from its log. Only Sends are kept as held: a held pick, resolve, delete or decision switch that the computer refuses shows as the next read of the thread shows it, without words of its own. A `seen` does not wait for its result. The lock-screen answer asks the Wi-Fi and the tailnet at once (3 s), then sends with a 5 s wait directly or to the relay, so it fits the background time an action gets. A `too_large` record draws its words only through the thread's read through the relay answering 413 `result_too_large` (the placeholder names a message the phone does not hold); while the computer is asleep such a message is absent. Reading directly, the phone acks by store cursor once each time it connects (not after every read: a mailbox answers its requests one at a time, and a push would wait behind them). The relay switch is the phone's: on from pairing as R1 registers it (the fallback by default, pick 5 of the iPhone record); 9.2's switch turns carriage off and on again (7.35, with the phone's cursor). Allowing notifications registers the APNs token and changes nothing about carriage (ruled 2026-10-08 on PR 1801).
+Written in by M6 (2026-10-08; behaviour only, no shape changed): the phone tries its paths in 9.2's order on every return to the front, pull to refresh and push: the Wi-Fi listener (from the QR's `lan` and `fp` only, never from the network), then the tailnet, each asked for `health` with a 3 s wait, then the relay while its switch is on. On the relay it reads `items?after=n`, applies each record whose seq it has not seen to the threads it keeps (records are full snapshots in the thread's shape), reads the list and the open threads as GET commands while `inbox_online` is true (never while it is false, so GETs do not pile up at the relay), and acks through `n` after applying. A command reads back its own result for about 15 s (reads at 0.25 s doubling to 4 s); with no result, or with the Inbox offline, the command is held and a Send shows "Sent. Waiting for your computer" until its reply's `idempotency_key` appears in the thread or its result arrives, on any path: back on the Wi-Fi or the tailnet the phone reads the relay once for the results of its held Sends (a refusal never shows in the thread), and with its relay switch off it posts each held Send again directly with the same key, which the door answers from its log. Only Sends are kept as held: a held pick, resolve or delete that the computer refuses shows as the next read of the thread shows it, without words of its own. A `seen` does not wait for its result. The lock-screen answer asks the Wi-Fi and the tailnet at once (3 s), then sends with a 5 s wait directly or to the relay, so it fits the background time an action gets. A `too_large` record draws its words only through the thread's read through the relay answering 413 `result_too_large` (the placeholder names a message the phone does not hold); while the computer is asleep such a message is absent. Reading directly, the phone acks by store cursor once each time it connects (not after every read: a mailbox answers its requests one at a time, and a push would wait behind them). The relay switch is the phone's: on from pairing as R1 registers it (the fallback by default, pick 5 of the iPhone record); 9.2's switch turns carriage off and on again (7.35, with the phone's cursor). Allowing notifications registers the APNs token and changes nothing about carriage (ruled 2026-10-08 on PR 1801).
 
 ## 5. The surface bridge
 
@@ -407,7 +407,6 @@ Every command a phone sends carries one key: `idempotency_key` in the request bo
 | Delete | `POST threads/:id/delete` | body `idempotency_key` |
 | Annotation save, remove | `POST annotations`, `POST annotations/:id/remove` | body `idempotency_key` |
 | Tick | `POST messages/:id/guide/reviewed` | body `idempotency_key` |
-| Decision switch | `POST messages/:id/decision` | body `idempotency_key` |
 | New message | `POST threads/:id/message` | body `idempotency_key` (also the store's own key) |
 | Compose | `POST messages` | body `idempotency_key` (also the store's own key) |
 | Send to another session | `POST messages/:id/to` | body `idempotency_key` (the door's log only) |
@@ -535,8 +534,7 @@ curl -sS "$INBOX/api/inbox/device/threads" -H "Authorization: Bearer $TOKEN"
     { "id": "sent", "label": "Sent", "threads": [] },
     { "id": "new", "label": "New since you looked", "threads": [] },
     { "id": "quiet", "label": "Quiet", "threads": [] }
-  ],
-  "decisions_waiting": 0
+  ]
 }
 ```
 
@@ -589,18 +587,16 @@ curl -sS "$INBOX/api/inbox/device/threads/msg_01K70000000000000000000010" -H "Au
               { "label": "Yes", "description": null, "recommended": true, "settled": false },
               { "label": "No", "description": null, "recommended": false, "settled": false }
             ],
-            "recommendation": "Yes", "suggested_text": null, "decision_on_answer": false,
+            "recommendation": "Yes", "suggested_text": null,
             "stopped": null, "holds_up": [], "asked_by_agent_id": null, "orphaned": false,
             "state": "open", "answer": null, "revision": 0, "sent_revision": 0,
-            "picked_by": null, "picked_at": null, "sent_reply_id": null, "decision_id": null,
-            "message_id": "msg_01K70000000000000000000010",
-            "decision_recording": false, "decision_draft": null
+            "picked_by": null, "picked_at": null, "sent_reply_id": null,
+            "message_id": "msg_01K70000000000000000000010"
           }
         ]
       }
     ]
-  },
-  "decisions": []
+  }
 }
 ```
 
@@ -676,9 +672,7 @@ curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K7000000000000000000001
     "resolved_at": null,
     "idempotency_key": "00000000-0000-4000-8000-000000000003"
   },
-  "replayed": false,
-  "decisions": [],
-  "decisions_refused": []
+  "replayed": false
 }
 ```
 
@@ -824,46 +818,9 @@ curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K7000000000000000000004
 
 `{ "message_id": "msg_01K70000000000000000000040", "reviewed": [true] }`.
 
-### 7.21 The decision switch
+### 7.21, 7.22 (removed)
 
-```sh
-curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000010/decision" \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000009","key":"q-1a2b3c4d","recording":true,"draft":{"text":"Run the retry tests against the test clock before each release.","reason":null}}'
-```
-
-`{ "question": <7.7's question with "decision_recording": true, "decision_draft": { "text": "Run the retry tests against the test clock before each release.", "reason": null }> }`. After the answer was sent: `409 question_already_sent`.
-
-### 7.22 A project's decisions
-
-```sh
-curl -sS "$INBOX/api/inbox/device/decisions?project=prj_01K70000000000000000000002" -H "Authorization: Bearer $TOKEN"
-```
-
-```json
-{
-  "serverSession": "00000000000000000000000000000001",
-  "cursor": 1301,
-  "project_id": "prj_01K70000000000000000000002",
-  "waiting": [],
-  "decisions": [
-    {
-      "id": "dec_01K70000000000000000000030",
-      "project_id": "prj_01K70000000000000000000002",
-      "text": "Run the retry tests against the test clock before each release.",
-      "reason": "Asked by Claude Code: Run the retry tests against the Stripe test clock?",
-      "source": { "kind": "answer", "question_id": "msg_01K70000000000000000000010/q-1a2b3c4d", "message_id": "msg_01K70000000000000000000010", "thread_id": "msg_01K70000000000000000000010", "agent": { "host": "claude-code", "session": "ses_01K70000000000000000000003", "name": null } },
-      "state": "current",
-      "version": 1,
-      "replaces_id": null,
-      "replacement_id": null,
-      "created_at": "2026-10-08T10:52:00.000Z",
-      "changed_at": null,
-      "idempotency_key": null
-    }
-  ]
-}
-```
+The decision switch and a project's decisions: removed with Decisions (2026-10). Both answer `404 device_route_not_found`.
 
 ### 7.23 Live sessions for New message
 
@@ -1090,7 +1047,7 @@ curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K7000000000000000000004
 curl -sS "$INBOX/api/inbox/device/search?q=retry%20budget&status=waiting" -H "Authorization: Bearer $TOKEN"
 ```
 
-The window's answer unchanged (CLAUDE.md, "Search"): `{ "serverSession": "…", "q": "retry budget", "terms": ["retry", "budget"], "took_ms": 4, "indexing": false, "threads": 412, "totals": { "threads": 1, "messages": 2, "files": 0, "decisions": 0, "projects": 0 }, "groups": { "threads": [ { "type": "thread", "id": "msg_01K70000000000000000000040", "...": "" } ], "...": "" }, "recent": null }`. The first search after a start may answer `indexing: true` with `groups: null`: ask again a moment later. A bad parameter: `422`.
+The window's answer unchanged (CLAUDE.md, "Search"): `{ "serverSession": "…", "q": "retry budget", "terms": ["retry", "budget"], "took_ms": 4, "indexing": false, "threads": 412, "totals": { "threads": 1, "messages": 2, "files": 0, "projects": 0 }, "groups": { "threads": [ { "type": "thread", "id": "msg_01K70000000000000000000040", "...": "" } ], "...": "" }, "recent": null }`. The first search after a start may answer `indexing: true` with `groups: null`: ask again a moment later. A bad parameter: `422`.
 
 ### 7.43 Mark a project read
 
@@ -1158,7 +1115,7 @@ curl -sS -X POST "$INBOX/api/inbox/device/markups?idempotency_key=00000000-0000-
 
 ### 7.53 A comment on a guided review's diff
 
-7.50 to 7.52 (shared drafts) and 7.54, 7.55 (decision retire and replace) are held and not built. 7.56 is 👍 Looks good, 7.57 a reply carrying files, 7.58 Send now (below).
+7.50 to 7.52 (shared drafts) are held and not built; 7.54, 7.55 (decision retire and replace) will not be built (Decisions were removed, 2026-10). 7.56 is 👍 Looks good, 7.57 a reply carrying files, 7.58 Send now (below).
 
 ```sh
 curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/guide/annotations" \

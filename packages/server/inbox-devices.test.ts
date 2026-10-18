@@ -255,8 +255,6 @@ describe("the device door, on the binary", () => {
       ["POST", "annotations/ann-1/remove"],
       ["GET", `messages/${threadId}/guide`],
       ["POST", `messages/${threadId}/guide/reviewed`],
-      ["POST", `messages/${threadId}/decision`],
-      ["GET", "decisions"],
       ["GET", `threads/${threadId}/sessions`],
       ["POST", `threads/${threadId}/message`],
       ["GET", "sessions"],
@@ -294,7 +292,7 @@ describe("the device door, on the binary", () => {
     expect(await (await door("health", { token: null })).json()).toEqual({ error: "This request needs the phone's token.", code: "device_token_missing" });
   });
 
-  test("what the door never answers: settings, restart, /mcp, the bridge, control, raw bytes, project delete, drafts, recent searches, decision retire, pairing, the device list, Open in", async () => {
+  test("what the door never answers: settings, restart, /mcp, the bridge, control, raw bytes, project delete, drafts, recent searches, decisions (removed), pairing, the device list, Open in", async () => {
     for (const [method, path] of [
       ["GET", "settings"],
       // Recent searches stay the window's: the phone keeps its own.
@@ -315,8 +313,11 @@ describe("the device door, on the binary", () => {
       ["POST", "drafts/drf_x/delete"],
       // Uploads and drawings are POSTs only (a markup is read by GET markups/<name>).
       ["GET", "uploads"],
+      // Decisions were removed (2026-10): every route that drew, set or changed one is gone.
       ["POST", "decisions/dec_x/retire"],
       ["POST", "decisions/dec_x/replace"],
+      ["GET", "decisions"],
+      ["POST", "messages/msg_x/decision"],
       ["POST", "pairing"],
       ["GET", "devices"],
       ["GET", "messages/x/picks"],
@@ -335,7 +336,7 @@ describe("the device door, on the binary", () => {
 
   test("7.5 to 7.9: the list, projects, a thread, seen (key required), the event stream", async () => {
     const list = (await (await door("threads")).json()) as Json;
-    expect(Object.keys(list).sort()).toEqual(["cursor", "decisions_waiting", "notice", "project", "projects", "sections", "serverSession", "update", "updated", "version"]);
+    expect(Object.keys(list).sort()).toEqual(["cursor", "notice", "project", "projects", "sections", "serverSession", "update", "updated", "version"]);
     expect(list.sections.map((s: Json) => s.id)).toEqual(["stopped", "holding", "waiting", "new", "sent", "quiet"]);
     const row = list.sections.flatMap((s: Json) => s.threads).find((t: Json) => t.thread_id === threadId);
     expect(row).toMatchObject({ section: "waiting", unread: true, questions: { open: 2 } });
@@ -347,7 +348,7 @@ describe("the device door, on the binary", () => {
     expect(Object.keys(projects.projects[0]).sort()).toEqual(["archived", "created_at", "id", "key", "listed", "name", "root", "threads", "unread"]);
 
     const thread = (await (await door(`threads/${threadId}`)).json()) as Json;
-    expect(Object.keys(thread).sort()).toEqual(["cursor", "decisions", "row", "serverSession", "thread"]);
+    expect(Object.keys(thread).sort()).toEqual(["cursor", "row", "serverSession", "thread"]);
     expect(thread.thread.messages[0].questions).toHaveLength(2);
     expect(thread.thread.messages[0].questions[0]).toMatchObject({ kind: "single", state: "open", revision: 0, recommendation: "Yes" });
 
@@ -415,7 +416,7 @@ describe("the device door, on the binary", () => {
     const send = await door(`messages/${threadId}/reply`, { body: { idempotency_key: sendKey, words: "Go ahead.", questions: [{ key: q.key, revision: 1 }] } });
     expect(send.status).toBe(200);
     const sent = (await send.json()) as Json;
-    expect(Object.keys(sent).sort()).toEqual(["decisions", "decisions_refused", "message_id", "questions", "replayed", "reply"]);
+    expect(Object.keys(sent).sort()).toEqual(["message_id", "questions", "replayed", "reply"]);
     expect(sent).toMatchObject({ message_id: threadId, replayed: false, reply: { author: { kind: "person" }, idempotency_key: sendKey } });
     expect(sent.questions[0]).toMatchObject({ key: q.key, state: "sent", sent_revision: 1 });
     const reply = await waiting;
@@ -570,7 +571,7 @@ describe("the device door, on the binary", () => {
     expect(Buffer.from(await phone.arrayBuffer()).equals(ONE_PIXEL_PNG)).toBe(true);
   });
 
-  test("7.19 to 7.24: the guide and a tick, the decision switch, decisions, live sessions, New message", async () => {
+  test("7.19, 7.20, 7.23, 7.24: the guide and a tick, live sessions, New message", async () => {
     const guide = await door(`messages/${guideMessage}/guide`);
     expect(guide.status).toBe(200);
     const g = (await guide.json()) as Json;
@@ -581,15 +582,6 @@ describe("the device door, on the binary", () => {
     expect((await door(`messages/${threadId}/guide`)).status).toBe(404);
 
     const thread = (await (await door(`threads/${threadId}`)).json()) as Json;
-    const open = thread.thread.messages[0].questions[1];
-    const decision = await door(`messages/${threadId}/decision`, {
-      body: { idempotency_key: keys(), key: open.key, recording: true, draft: { text: "Ship behind a flag.", reason: null } },
-    });
-    expect(decision.status).toBe(200);
-    expect(((await decision.json()) as Json).question).toMatchObject({ key: open.key, decision_recording: true, decision_draft: { text: "Ship behind a flag.", reason: null } });
-    const decisions = (await (await door(`decisions?project=${thread.thread.project.id}`)).json()) as Json;
-    expect(Object.keys(decisions).sort()).toEqual(["cursor", "decisions", "project_counts", "project_id", "serverSession", "waiting"]);
-    expect(decisions.waiting.map((d: Json) => d.prompt)).toContain("Ship it behind a flag?");
 
     // No live session yet: New message writes nothing.
     const writer = thread.thread.messages[0].author.session as string;

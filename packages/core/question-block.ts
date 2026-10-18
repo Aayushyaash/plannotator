@@ -60,7 +60,9 @@
  *   only) says the decision exists (`decision`); it replaces the flag, and
  *   when both are present the link wins. Each form is read once per block;
  *   any other `Decision:` value is context prose. A `Decision:` line BEFORE
- *   the prompt is the prompt. Neither form changes the question key.
+ *   the prompt is the prompt. Neither form changes the question key. A host
+ *   with no decisions (the Plannotator Inbox) parses with
+ *   `{ decisionLines: false }`, which reads every `Decision:` line as prose.
  * - Replaces (the Plannotator Inbox): a `Replaces: <message id>/<key>` line
  *   (or a bare `<message id>`, several separated by commas, semicolons or
  *   spaces) names the earlier question(s) this one replaces. Read only when
@@ -461,8 +463,25 @@ const matchRecommendation = (
  * question (wrong kind, no prompt, oversized body): the renderer then shows
  * the ordinary directive callout. Never throws.
  */
-export const parseQuestionBlock = (directiveKind: string | undefined, body: string): ParsedQuestion | null => {
+/** Options for `parseQuestionBlock` and `indexQuestionBlocks`. */
+export interface ParseQuestionBlockOptions {
+  /** Read `Decision:` lines (`decisionOnAnswer`, `decision`). Default true.
+   *  False: a `Decision:` line is ordinary prose (context after the prompt),
+   *  and the result never carries `decisionOnAnswer` or `decision`. A line
+   *  the default parse reads still ends the choice, bullet or recommendation
+   *  above it, so the prompt, key and choices are always the default parse's
+   *  (an answer stored against either parse matches the other). The
+   *  Plannotator Inbox passes false: it records no decisions. */
+  decisionLines?: boolean;
+}
+
+export const parseQuestionBlock = (
+  directiveKind: string | undefined,
+  body: string,
+  options?: ParseQuestionBlockOptions,
+): ParsedQuestion | null => {
   if (!isQuestionDirectiveKind(directiveKind)) return null;
+  const readDecisionLines = options?.decisionLines !== false;
   if (typeof body !== 'string' || body.length > MAX_QUESTION_BODY_CHARS) return null;
   const lines = body.replace(/\r\n?/g, '\n').split('\n');
 
@@ -558,6 +577,10 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
       promptLine = i;
       continue;
     }
+    // A `Decision:` line the default parse reads (the first flag, the first
+    // link) ends the choice, bullet or recommendation before it. Without
+    // decision lines it does exactly the same and is kept as context, so the
+    // choices are always the default parse's (a stored answer still matches).
     const decisionLine = line.match(DECISION_RE);
     if (decisionLine) {
       if (!decisionFlag && DECISION_FLAG_RE.test(decisionLine[1])) {
@@ -565,6 +588,7 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
         lastChoice = -1;
         openBullet = null;
         recommendationOpen = false;
+        if (!readDecisionLines) pushContext(line.trim());
         continue;
       }
       const link = decision ? null : parseDecisionLink(decisionLine[1]);
@@ -573,6 +597,7 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
         lastChoice = -1;
         openBullet = null;
         recommendationOpen = false;
+        if (!readDecisionLines) pushContext(line.trim());
         continue;
       }
     }
@@ -691,7 +716,7 @@ export const parseQuestionBlock = (directiveKind: string | undefined, body: stri
     ...(recommendation ? { recommendation } : {}),
     ...(suggestedText ? { suggestedText } : {}),
     key: questionKey(kind, prompt),
-    ...(decision ? { decision } : decisionFlag ? { decisionOnAnswer: true as const } : {}),
+    ...(!readDecisionLines ? {} : decision ? { decision } : decisionFlag ? { decisionOnAnswer: true as const } : {}),
     ...(replaces.length > 0 ? { replaces } : {}),
   };
 };
@@ -732,12 +757,15 @@ const questionKeyDeduper = (): ((key: string) => string) => {
  * from 1. Keys are de-duplicated with a `-2`, `-3`… suffix so two identical
  * prompts in one document never share an answer.
  */
-export const indexQuestionBlocks = (blocks: ReadonlyArray<QuestionSourceBlock>): IndexedQuestion[] => {
+export const indexQuestionBlocks = (
+  blocks: ReadonlyArray<QuestionSourceBlock>,
+  options?: ParseQuestionBlockOptions,
+): IndexedQuestion[] => {
   const out: IndexedQuestion[] = [];
   const dedupe = questionKeyDeduper();
   for (const block of blocks) {
     if (block.type !== 'directive' || !isQuestionDirectiveKind(block.directiveKind)) continue;
-    const parsed = parseQuestionBlock(block.directiveKind, block.content);
+    const parsed = parseQuestionBlock(block.directiveKind, block.content, options);
     if (!parsed) continue;
     const key = dedupe(parsed.key);
     out.push({

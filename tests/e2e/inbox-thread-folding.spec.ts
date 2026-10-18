@@ -46,8 +46,6 @@ const ASK = [
   ':::question',
   LONG_PROMPT,
   '',
-  'Decision: when answered',
-  '',
   '- [ ] Pagefind',
   '- [ ] Algolia DocSearch',
   '',

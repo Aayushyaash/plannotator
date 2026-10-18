@@ -1,7 +1,7 @@
 /**
  * Inbox search against the brief's worst case (approved "inbox-search",
  * section 11): 4,000 threads, 30,000 messages, about 60 MB of text, 40
- * projects with non-Latin names, questions, attachments and decisions,
+ * projects with non-Latin names, questions and attachments,
  * written straight into a scratch store, then a real Inbox on loopback.
  *
  * It measures what the targets name:
@@ -26,7 +26,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { heapStats } from "bun:jsc";
-import { inboxId, type InboxAuthor, type InboxDecision } from "../packages/core/inbox-types";
+import { inboxId, type InboxAuthor } from "../packages/core/inbox-types";
 import type { InboxAttachment } from "../packages/core/inbox-types";
 import { InboxStore } from "../packages/shared/inbox/store";
 import { refuseRealDataDir } from "../tests/helpers/real-data-dir";
@@ -178,23 +178,6 @@ export function seedInboxSearchWorld(dataDir: string, shape: SeedShape = WORST_C
     }
     if (random() < 0.6) store.markSeen(root!);
     if (random() < 0.25) store.resolveThread(root!, true);
-    if (random() < 0.12) {
-      const decision: InboxDecision = {
-        id: inboxId("dec"),
-        project_id: project.id,
-        text: sentence(7).slice(0, -1),
-        reason: sentence(6),
-        source: { kind: "agent", question_id: null, message_id: root, thread_id: root, agent: null },
-        state: "current",
-        version: 1,
-        replaces_id: null,
-        replacement_id: null,
-        created_at: new Date(clock).toISOString(),
-        changed_at: null,
-        idempotency_key: null,
-      };
-      store.writeDecision(decision);
-    }
   }
   return { store, textChars, threadIds };
 }

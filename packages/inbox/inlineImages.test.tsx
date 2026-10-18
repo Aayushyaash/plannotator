@@ -85,9 +85,6 @@ async function render(body: string, inline: InboxInlineImage[], opened: InboxInl
         answers={new Map()}
         onPick={() => {}}
         footerFor={() => null}
-        recordingOf={() => undefined}
-        onToggleDecision={() => {}}
-        onOpenDecision={() => {}}
       />,
     );
   });

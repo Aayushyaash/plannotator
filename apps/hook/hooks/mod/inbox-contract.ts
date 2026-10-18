@@ -20,8 +20,6 @@ export const INBOX_TOOL_ACTIONS = [
   'read_thread',
   'wait_for_reply',
   'resolve_message',
-  'list_decisions',
-  'record_decision',
   'submit_guide',
   'get_guide_brief',
 ] as const
@@ -147,7 +145,6 @@ export const INBOX_TOOL_HELP_NOTE = "Every field and the full question syntax: `
  * OpenCode request carries it).
  */
 export const INBOX_AGENT_ACTION_LEADS: Readonly<Record<string, string>> = {
-  list_decisions: 'List the decisions that hold in this project (`state`: current, the default, replaced, retired or all).',
   get_guide_brief: "Get Plannotator's method, the guide's JSON shape and the rules for writing a guided review, with a worked submit_guide call.",
 }
 

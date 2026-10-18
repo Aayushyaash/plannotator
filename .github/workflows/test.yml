@@ -144,7 +144,6 @@ jobs:
           packages/inbox/seenOnSight.test.tsx
           packages/inbox/projectList.test.tsx
           packages/inbox/softQuietRows.test.tsx
-          packages/inbox/softDecisionTag.test.tsx
           packages/inbox/sidebarQuiet.test.tsx
           packages/inbox/connectPromptRow.test.tsx
           packages/inbox/soundIntro.test.tsx
@@ -167,7 +166,6 @@ jobs:
           packages/inbox/projectMenu.test.tsx
           packages/inbox/fileBack.test.tsx
           packages/inbox/archived.test.tsx
-          packages/inbox/decisionsPicker.test.tsx
           packages/inbox/openStaysPut.test.tsx
           packages/inbox/phoneList.test.tsx
           packages/inbox/listLabels.test.tsx

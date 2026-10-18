@@ -4,8 +4,7 @@
  * Pure.
  *
  * Mark read moves a thread out of the top to Quiet without archiving it: its
- * questions still waiting on the person close unanswered (each a skip, never
- * a decision), and once the Undo window has passed the asking agent is told
+ * questions still waiting on the person close unanswered (each a skip), and once the Undo window has passed the asking agent is told
  * once not to wait on them. It comes back when an agent writes again.
  */
 

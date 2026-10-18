@@ -147,9 +147,6 @@ test.skipIf(!hasDom)('in a message, an attached file opens beside the thread; an
         answers={new Map()}
         onPick={() => {}}
         footerFor={() => null}
-        recordingOf={() => undefined}
-        onToggleDecision={() => {}}
-        onOpenDecision={() => {}}
       />,
     );
 
@@ -221,9 +218,6 @@ test.skipIf(!hasDom)('with component tooltips off (other hosts), a resolved loca
       answers={new Map()}
       onPick={() => {}}
       footerFor={() => null}
-      recordingOf={() => undefined}
-      onToggleDecision={() => {}}
-      onOpenDecision={() => {}}
     />,
   );
   const mock = host!.querySelector<HTMLAnchorElement>('a[data-local-link="open"]')!;

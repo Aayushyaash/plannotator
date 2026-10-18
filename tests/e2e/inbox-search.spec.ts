@@ -8,7 +8,7 @@
  *    (the one shortcut, an owner exception; from the reply box without eating
  *    typing; again while open goes back to its input), and no other key does;
  *  - an empty query lists the threads looked at last;
- *  - typing groups the results (Threads, Messages, Files, Decisions), the
+ *  - typing groups the results (Threads, Messages, Files), the
  *    matched words semibold, the live region says how many;
  *  - ↓ moves the highlight (`aria-activedescendant`), Enter on a message
  *    lands on it: the thread opens, the message focused and ringed, the
@@ -136,13 +136,13 @@ test('an empty query lists the threads looked at last; typing groups the results
   await input(page).fill('rate lim');
   await settled(page);
   const groups = await palette(page).locator('[data-search-group]').evaluateAll((g) => g.map((x) => x.getAttribute('data-search-group')));
-  expect(groups).toEqual(['threads', 'messages', 'files', 'decisions']);
+  expect(groups).toEqual(['threads', 'messages', 'files']);
   const thread = palette(page).locator(`[data-result="thread"][data-result-id="${world.threads.relay}"]`);
   await expect(thread).toBeVisible();
   await expect(thread.locator('.ib-sp-m')).toHaveText(['rate', 'lim']);
   await expect(thread.locator('.ib-sp-chip')).toHaveText('Stopped');
   await expect(palette(page).locator('[data-result="file"]').first()).toContainText('relay-rate-limits.md');
-  await expect(palette(page).locator('[data-search-live]')).toHaveText(/^\d+ results? in 4 groups$/);
+  await expect(palette(page).locator('[data-search-live]')).toHaveText(/^\d+ results? in 3 groups$/);
   // The first row is highlighted; the input keeps focus.
   const first = await palette(page).locator('[role="option"]').first().getAttribute('id');
   await expect(input(page)).toHaveAttribute('aria-activedescendant', first!);
@@ -337,7 +337,7 @@ test('filters: a chip menu by keyboard, Escape closes the menu before the palett
   await expect(page.locator('.ib-side .ib-sp-entry')).toBeFocused();
 });
 
-test('a message, a file and a decision recorded from an answer draw their thread’s chip; every second line keeps its time', async () => {
+test('a message and a file draw their thread’s chip; every second line keeps its time', async () => {
   await openFromSidebar(page);
   await input(page).fill('retry budget');
   await settled(page);
@@ -355,7 +355,7 @@ test('a message, a file and a decision recorded from an answer draw their thread
   await expect(palette(page).locator('[data-result="file"]').first().locator('.ib-key .ib-keyt')).toHaveText('retry');
   await input(page).fill('CDN cache key');
   await settled(page);
-  for (const kind of ['message', 'decision']) {
+  for (const kind of ['message']) {
     const chip = palette(page).locator(`[data-result="${kind}"]`).first().locator('.ib-key[data-result-thread]');
     await expect(chip.locator('.ib-keyt')).toHaveText('nightly-deploy-investigation-for-the-customer-portal');
     await expect(chip).not.toHaveAttribute('title', /./);

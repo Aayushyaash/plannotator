@@ -36,8 +36,6 @@ const WORKER = [
   '',
   'Stopped: the retry worker cannot ship without this.',
   '',
-  'Decision: when answered',
-  '',
   '- [ ] Retry with the same idempotency key',
   '- [ ] Fail the job and send it to the dead-letter queue',
   '',

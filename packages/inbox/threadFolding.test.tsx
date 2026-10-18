@@ -77,7 +77,6 @@ function questionsOf(messageId: string, body: string): InboxQuestion[] {
     choices: q.parsed.choices,
     recommendation: null,
     suggested_text: null,
-    decision_on_answer: false,
     stopped: q.stopped,
     holds_up: q.holds_up,
     asked_by_agent_id: 'ses_a',
@@ -89,10 +88,7 @@ function questionsOf(messageId: string, body: string): InboxQuestion[] {
     picked_by: null,
     picked_at: null,
     sent_reply_id: null,
-    decision_id: null,
     message_id: messageId,
-    decision_recording: false,
-    decision_draft: null,
     superseded_by: null,
   }));
 }
@@ -195,8 +191,6 @@ function pane(thread: InboxThread, lookSeq?: number | null) {
         onQuestions={() => {}}
         onChanged={async () => {}}
         onClose={() => {}}
-        decisions={[]}
-        onOpenDecisionPage={() => {}}
         file={null}
         onOpenFile={() => {}}
         onOpenGuide={() => {}}
@@ -664,8 +658,6 @@ async function renderWithSent(thread: InboxThread, sent: { at: string; checked_a
           onQuestions={() => {}}
           onChanged={async () => {}}
           onClose={() => {}}
-          decisions={[]}
-          onOpenDecisionPage={() => {}}
           file={null}
           onOpenFile={() => {}}
           onOpenGuide={() => {}}

@@ -2,7 +2,7 @@
  * Replaced questions through the Inbox's real doors: a running Inbox on
  * loopback, the official MCP SDK client for the agent side (send_message's
  * `supersedes` and a `Replaces:` line), and real `fetch` for the window's
- * routes (picks, Send and the decision switch on a superseded question).
+ * routes (picks and Send on a superseded question).
  * Every test uses its own temp data dir.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -145,7 +145,7 @@ describe("send_message supersedes earlier questions", () => {
 });
 
 describe("the window's routes refuse to answer a superseded question (422 question_superseded)", () => {
-  test("picks, Send and the decision switch", async () => {
+  test("picks and Send", async () => {
     const w = await world();
     const first = structured<Sent>(await w.call("send_message", { body: WORKER }));
     const q1 = (await w.thread(first.thread_id)).messages[0]!.questions![0]!;
@@ -163,9 +163,6 @@ describe("the window's routes refuse to answer a superseded question (422 questi
     const body = (await send.json()) as { code: string; superseded_by: { message_id: string; key: string | null } };
     expect(body.code).toBe("question_superseded");
     expect(body.superseded_by.key).not.toBeNull();
-
-    const decision = await w.post(`/api/inbox/messages/${first.message_id}/decision`, { key: q1.key, recording: true });
-    expect(decision.status).toBe(422);
 
     // The pick stays visible on the card, never sent; nothing was written.
     const after = (await w.thread(first.thread_id)).messages;

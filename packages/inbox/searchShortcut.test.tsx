@@ -119,7 +119,6 @@ test.skipIf(!hasDom)('the Search entry shows the keycaps and names the chord', (
           page="inbox"
           projectId={null}
           inboxCount={0}
-          decisionsCount={0}
           projects={[]}
           projectCounts={new Map()}
           update={null}
@@ -128,7 +127,6 @@ test.skipIf(!hasDom)('the Search entry shows the keycaps and names the chord', (
           onInbox={noop}
           onProject={noop}
           onSettings={noop}
-          onDecisions={noop}
           onUpdate={noop}
           onWhatsNew={noop}
           onSearch={noop}

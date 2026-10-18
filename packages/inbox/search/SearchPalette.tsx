@@ -159,7 +159,7 @@ function ThreadChip({ chip }: { chip: RowThreadChip }) {
 /**
  * A result's second line: the thread chip first (where a phone's list row
  * draws it, ahead of what the thread holds), then what the result is (its
- * author, folder, decision state), the project, the section, the time, apart
+ * author or folder), the project, the section, the time, apart
  * by "·" (", " for a screen reader). One line: the project and the chip give way
  * together; the lead, the section and the time keep their place. Each
  * user-written part is a `<bdi dir="auto">` cut at its own end, its whole
@@ -252,20 +252,6 @@ function RowBody({ row, phone, projectName }: { row: InboxSearchRow; phone: bool
         </>
       );
     }
-    case 'decision':
-      return (
-        <>
-          <span className="ib-sp-rs">
-            <Tip content={row.text} cut>
-              <span className="ib-sp-p" dir="auto">
-                <Marked text={row.text} marks={row.text_marks} />
-              </span>
-            </Tip>
-            <MetaLine chip={chip} lead={row.state === 'current' ? 'Settled' : row.state === 'replaced' ? 'Replaced' : 'Retired'} project={projectName} at={searchTime(row.at)} />
-          </span>
-          {row.state !== 'current' && <span className="ib-sp-chip">{row.state === 'replaced' ? 'Replaced' : 'Retired'}</span>}
-        </>
-      );
     case 'project':
       return (
         <span className="ib-sp-rs">
@@ -749,7 +735,7 @@ export default function SearchPalette(props: SearchPaletteProps) {
       );
     }
     if (options.length === 0) {
-      if (!answered.q && !filtered) return <div className="ib-sp-empty ib-sp-quiet">Type to search threads, messages, files and decisions.</div>;
+      if (!answered.q && !filtered) return <div className="ib-sp-empty ib-sp-quiet">Type to search threads, messages and files.</div>;
       const scope = scopeWords(filters, projectName);
       return (
         <div className="ib-sp-empty" data-search-none="">
@@ -901,8 +887,8 @@ export default function SearchPalette(props: SearchPaletteProps) {
           aria-autocomplete="list"
           aria-controls={listId}
           aria-activedescendant={hl !== null && options[hl] ? optionId(hl) : undefined}
-          placeholder="Search threads, messages, files and decisions"
-          aria-label="Search threads, messages, files and decisions"
+          placeholder="Search threads, messages and files"
+          aria-label="Search threads, messages and files"
           dir="auto"
           maxLength={400}
           value={q}

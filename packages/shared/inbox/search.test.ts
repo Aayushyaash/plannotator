@@ -4,14 +4,14 @@
  * open before archived; the current project wins ties only; newest first),
  * filters (project, status, from), archived labels, non-Latin text, the
  * index following the store's lines (a send, a pick, an archive, a replaced
- * question's subject, a decision, a deletion), and a build in slices that
+ * question's subject, a deletion), and a build in slices that
  * yields and survives searches and writes while it runs.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { inboxId, type InboxAuthor, type InboxDecision } from "@plannotator/core/inbox-types";
+import { inboxId, type InboxAuthor } from "@plannotator/core/inbox-types";
 import type { InboxAttachment } from "@plannotator/core/inbox-types";
 import {
   InboxSearchIndex,
@@ -59,24 +59,6 @@ function attachment(name: string, path: string): InboxAttachment {
   return { id: inboxId("att"), path, named_path: null, name, kind: "markdown", sent_sha256: "0".repeat(64), size: 10, sent_at: new Date().toISOString(), sent_mtime: new Date().toISOString() };
 }
 
-function decision(store: InboxStore, projectId: string, text: string, options: { reason?: string; kind?: "answer" | "agent" | "person"; threadId?: string | null; state?: InboxDecision["state"] } = {}): InboxDecision {
-  const record: InboxDecision = {
-    id: inboxId("dec"),
-    project_id: projectId,
-    text,
-    reason: options.reason ?? null,
-    source: { kind: options.kind ?? "agent", question_id: null, message_id: options.threadId ?? null, thread_id: options.threadId ?? null, agent: null },
-    state: options.state ?? "current",
-    version: 1,
-    replaces_id: null,
-    replacement_id: null,
-    created_at: new Date().toISOString(),
-    changed_at: null,
-    idempotency_key: null,
-  };
-  store.writeDecision(record);
-  return record;
-}
 
 describe("text the index reads", () => {
   test("a body: question blocks, images and link targets out; link labels and code kept", () => {
@@ -148,7 +130,7 @@ describe("text the index reads", () => {
 });
 
 describe("groups and rows", () => {
-  test("a thread, its message, its question, its file, its guide, a decision and a project each land in their group", async () => {
+  test("a thread, its message, its question, its file, its guide and a project each land in their group", async () => {
     const store = open();
     const relay = store.ensureProject({ name: "plannotator", root: "/src/plannotator" });
     const root = store.sendMessage({
@@ -159,7 +141,6 @@ describe("groups and rows", () => {
       body: `The relay brakes one thing: creating a mailbox.${ASK("Keep the rate limit at 20 a minute?", ["Keep 20", "Raise to 60"])}`,
       attachments: [attachment("relay-rate-limits.md", "/src/plannotator/adr/implementation/relay-rate-limits.md")],
     }).message;
-    decision(store, relay.id, "Mailbox creation keeps a rate limit of 20 a minute", { kind: "answer", threadId: root.id });
     const index = await built(store);
     const answer = search(index, "rate lim");
     expect(answer.indexing).toBe(false);
@@ -175,8 +156,7 @@ describe("groups and rows", () => {
     const file = answer.groups!.files![0] as InboxSearchFileRow;
     expect(file).toMatchObject({ type: "file", name: "relay-rate-limits.md", folder: "implementation", kind: "md", thread_id: root.id });
     expect(marked(file.name, file.name_marks)).toEqual(["rate", "lim"]);
-    expect(answer.groups!.decisions).toHaveLength(1);
-    expect(answer.totals).toEqual({ threads: 1, messages: 1, files: 1, decisions: 1, projects: 0 });
+    expect(answer.totals).toEqual({ threads: 1, messages: 1, files: 1, projects: 0 });
     expect(search(index, "plannotator").groups!.projects!.map((p) => p.id)).toEqual([relay.id]);
   });
 
@@ -307,20 +287,6 @@ describe("ranking", () => {
     expect(messageIds(search(index, "retry budget", { current: a.id }))).toEqual([inA.id, inB.id, better.id]);
   });
 
-  test("a decision ranks as its row reads: by its own state, not its thread's", async () => {
-    const store = open();
-    const project = store.ensureProject({ name: "api", root: "/w/api" });
-    const archivedThread = store.sendMessage({ project_id: project.id, author: CLAUDE, subject: "Old", thread: "a", body: "Notes." }).message;
-    const openThread = store.sendMessage({ project_id: project.id, author: CLAUDE, subject: "New", thread: "b", body: "Notes." }).message;
-    store.resolveThread(archivedThread.id, true);
-    const current = decision(store, project.id, "Deploy the relay first", { threadId: archivedThread.id });
-    // Newer, but replaced: it reads archived, so it ranks after the current one whatever its thread.
-    const replaced = decision(store, project.id, "Deploy the relay last", { threadId: openThread.id, state: "replaced" });
-    const index = await built(store);
-    const rows = search(index, "deploy relay").groups!.decisions!;
-    expect(rows.map((r) => r.id)).toEqual([current.id, replaced.id]);
-    expect(rows.map((r) => r.archived)).toEqual([false, true]);
-  });
 });
 
 describe("identifiers", () => {
@@ -413,14 +379,17 @@ describe("identifiers", () => {
     const store = open();
     const project = store.ensureProject({ name: "api", root: "/w/api" });
     const [idA, idB] = collidingIds();
-    // The older decision holds idB in its title; the newer holds idA in its title and idB only in its reason.
-    const older = decision(store, project.id, `Pin ${idB} for the release`);
-    const newer = decision(store, project.id, `Pin ${idA} for the release`, { reason: `It replaces ${idB}.` });
+    // The older file holds idB in its name (a title field); the newer holds idA in its name and idB only in its folder.
+    const older = attachment(`pin-${idB}.md`, `/w/api/docs/pin-${idB}.md`);
+    store.sendMessage({ project_id: project.id, author: CLAUDE, subject: "Older", thread: "a", body: "Notes.", attachments: [older] });
+    await Bun.sleep(5);
+    const newer = attachment(`pin-${idA}.md`, `/w/api/${idB}/pin-${idA}.md`);
+    store.sendMessage({ project_id: project.id, author: CLAUDE, subject: "Newer", thread: "b", body: "Notes.", attachments: [newer] });
     const index = await built(store);
-    const rows = (q: string) => search(index, q).groups!.decisions!.map((r) => r.id);
+    const rows = (q: string) => search(index, q).groups!.files!.map((r) => r.id);
     // idB: both, the title match first even though it is older (a bucket match in the newer one's title used to count).
     expect(rows(idB)).toEqual([older.id, newer.id]);
-    // idA: only the decision that holds it.
+    // idA: only the file that holds it.
     expect(rows(idA)).toEqual([newer.id]);
     // As a phrase: "pin <idB>" is a phrase only in the older one, so it ranks first though older (the newer holds both words apart).
     expect(rows(`pin ${idB}`)).toEqual([older.id, newer.id]);
@@ -476,8 +445,6 @@ describe("filters", () => {
     const fresh = store.sendMessage({ project_id: web.id, author: CLAUDE, subject: "Deploy finished", thread: "d", body: "The deploy finished." }).message;
     const archived = store.sendMessage({ project_id: api.id, author: CLAUDE, subject: "Deploy rollback", thread: "e", body: "We rolled the deploy back." }).message;
     store.resolveThread(archived.id, true);
-    decision(store, api.id, "Deploy the relay by hand", { kind: "agent" });
-    decision(store, api.id, "Deploy order: relay first", { kind: "answer", threadId: waiting.id });
     const index = await built(store);
     return { store, index, api, web, waiting, sent, sentReply, quiet, fresh, archived };
   }
@@ -489,9 +456,6 @@ describe("filters", () => {
     expect(threadIds(search(w.index, "deploy", { status: "new" }))).toEqual([w.fresh.id]);
     expect(threadIds(search(w.index, "deploy", { status: "quiet" }))).toEqual([w.quiet.id]);
     expect(threadIds(search(w.index, "deploy", { status: "archived" }))).toEqual([w.archived.id]);
-    // A decision follows its thread's section; one recorded from no thread is left out by any status.
-    expect(search(w.index, "deploy", { status: "waiting" }).groups!.decisions!.map((d) => d.type === "decision" && d.text)).toEqual(["Deploy order: relay first"]);
-    expect(search(w.index, "deploy", { status: "quiet" }).groups!.decisions).toEqual([]);
     // Projects have no section: any status hides them.
     expect(search(w.index, "api", { status: "quiet" }).groups!.projects).toEqual([]);
   });
@@ -502,9 +466,6 @@ describe("filters", () => {
     expect(messageIds(search(w.index, "deploy", { from: "me" }))).toEqual([w.sentReply.id]);
     const agents = search(w.index, "deploy", { from: "agent" });
     expect(messageIds(agents)).not.toContain(w.sentReply.id);
-    // A decision recorded from the person's answer counts as Me; an agent's as Agents.
-    expect(search(w.index, "deploy", { from: "me" }).groups!.decisions!.map((d) => d.type === "decision" && d.text)).toEqual(["Deploy order: relay first"]);
-    expect(agents.groups!.decisions!.map((d) => d.type === "decision" && d.text)).toEqual(["Deploy the relay by hand"]);
     // A thread counts for Me when the person wrote in it.
     expect(threadIds(search(w.index, "deploy", { from: "me" }))).toEqual([w.sent.id]);
   });
@@ -539,7 +500,7 @@ describe("text in every script", () => {
 });
 
 describe("the index follows the store", () => {
-  test("a new message, a pick, an archive, a decision and a deletion show in the next search", async () => {
+  test("a new message, a pick, an archive and a deletion show in the next search", async () => {
     const store = open();
     const project = store.ensureProject({ name: "api", root: "/w/api" });
     const index = await built(store);
@@ -556,14 +517,12 @@ describe("the index follows the store", () => {
     const archived = search(index, "retry storm");
     expect((archived.groups!.threads![0] as InboxSearchThreadRow).archived).toBe(true);
     expect(threadIds(search(index, "retry storm", { status: "archived" }))).toEqual([root.id]);
-    decision(store, project.id, "Retries spread with jitter");
-    expect(search(index, "jitter").totals!.decisions).toBe(1);
     // A deletion re-reads the store: the index notices and rebuilds.
     store.deleteThread(root.id);
     expect(index.ready()).toBe(false);
     await index.ensureBuilt();
     expect(search(index, "retry storm").totals).toMatchObject({ threads: 0, messages: 0 });
-    expect(search(index, "jitter").totals!.decisions).toBe(1);
+    expect(search(index, "jitter").totals!.messages).toBe(0);
   });
 
   test("a second project with the same folder name relabels the first, and its threads are found by the new label", async () => {

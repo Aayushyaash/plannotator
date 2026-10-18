@@ -65,7 +65,6 @@ function questionsOf(messageId: string, body: string): InboxQuestion[] {
     choices: q.parsed.choices,
     recommendation: null,
     suggested_text: null,
-    decision_on_answer: false,
     stopped: q.stopped,
     holds_up: q.holds_up,
     asked_by_agent_id: 'ses_a',
@@ -77,10 +76,7 @@ function questionsOf(messageId: string, body: string): InboxQuestion[] {
     picked_by: null,
     picked_at: null,
     sent_reply_id: null,
-    decision_id: null,
     message_id: messageId,
-    decision_recording: false,
-    decision_draft: null,
     superseded_by: null,
   }));
 }
@@ -138,7 +134,7 @@ beforeEach(() => {
   if (!hasDom) return;
   savedFetch = globalThis.fetch;
   posted = [];
-  replyAnswer = () => Response.json({ reply: {}, questions: [], replayed: false, decisions_refused: [] });
+  replyAnswer = () => Response.json({ reply: {}, questions: [], replayed: false });
   picksAnswer = () => Response.json({ questions: [] });
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
@@ -178,8 +174,6 @@ function pane(thread: InboxThread, onChanged: () => Promise<void> = async () => 
         onQuestions={() => {}}
         onChanged={onChanged}
         onClose={() => {}}
-        decisions={[]}
-        onOpenDecisionPage={() => {}}
         file={null}
         onOpenFile={() => {}}
         onOpenGuide={() => {}}

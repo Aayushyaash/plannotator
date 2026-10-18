@@ -556,7 +556,12 @@ export interface InboxPicker {
   name: string | null;
 }
 
-/** The stored question: one per question block of an agent's message. */
+/**
+ * The stored question: one per question block of an agent's message.
+ * Records written before Decisions were removed (2026-10) also carry
+ * `decision_on_answer`, `decision_id`, `decision_recording` and
+ * `decision_draft`; nothing reads them.
+ */
 export interface InboxQuestionRecord {
   /** `<message id>/<question key>`. */
   id: string;
@@ -567,7 +572,6 @@ export interface InboxQuestionRecord {
   kind: QuestionKind;
   prompt: string;
   parsed: InboxQuestionFacts;
-  decision_on_answer: boolean;
   stopped: string | null;
   holds_up: string[];
   asked_by_agent_id: string | null;
@@ -577,15 +581,6 @@ export interface InboxQuestionRecord {
   picked_by: InboxPicker | null;
   picked_at: string | null;
   sent_reply_id: string | null;
-  decision_id: string | null;
-  /**
-   * The card's "Records a decision" switch, as the person set it. Absent
-   * until they touch it: then a `Decision: when answered` question records
-   * and any other does not (`inboxDecisionRecording`). Added in step 3.
-   */
-  decision_recording?: boolean;
-  /** The decision card's words after Done; null or absent: the drafted words. Added in step 3. */
-  decision_draft?: InboxDecisionDraft | null;
   /**
    * The agent superseded this question with a later message (send_message's
    * `supersedes`, or a `Replaces:` line in a newer block): it can no longer
@@ -595,7 +590,7 @@ export interface InboxQuestionRecord {
   superseded_by?: InboxSupersededBy | null;
   /**
    * The person's Mark read closed this question unanswered: it reads as
-   * `closed` with a skip for its answer, and records no decision. `previous`
+   * `closed` with a skip for its answer. `previous`
    * is the question as it was (a saved pick included), which Undo puts back.
    * Absent or null while it stands. Added for Mark read: older records lack it.
    */
@@ -614,16 +609,6 @@ export interface InboxQuestionSetAside {
    */
   read_seq?: number;
   previous: Pick<InboxQuestionRecord, "answer" | "revision" | "sent_revision" | "picked_by" | "picked_at">;
-}
-
-/**
- * The decision card's words as the person left them on Done. A null field
- * was not edited and keeps following the drafted words (the answer, and
- * "Asked by <agent>: <question>"), so a later pick still drafts anew.
- */
-export interface InboxDecisionDraft {
-  text: string | null;
-  reason: string | null;
 }
 
 /**
@@ -648,7 +633,6 @@ export interface InboxQuestion {
   choices: InboxQuestionChoice[];
   recommendation: string | null;
   suggested_text: string | null;
-  decision_on_answer: boolean;
   stopped: string | null;
   holds_up: string[];
   asked_by_agent_id: string | null;
@@ -660,12 +644,7 @@ export interface InboxQuestion {
   picked_by: InboxPicker | null;
   picked_at: string | null;
   sent_reply_id: string | null;
-  decision_id: string | null;
   message_id: string;
-  /** Whether Send records this answer as a decision (the card's switch, or its default). */
-  decision_recording: boolean;
-  /** The decision card's edited words, or null for the drafted ones. */
-  decision_draft: InboxDecisionDraft | null;
   /** What superseded it (`state: "superseded"`), or null. */
   superseded_by: InboxSupersededBy | null;
   /**
@@ -867,70 +846,15 @@ export interface InboxThread {
   messages: InboxMessageWire[];
 }
 
-// ─────────────────────────────── Decisions ───────────────────────────────
-
-/**
- * A decision's lifecycle (Workspaces' `project_decisions.state`): current
- * holds; replaced points at its replacement; retired no longer holds.
- */
-export type InboxDecisionState = "current" | "replaced" | "retired";
-
-export interface InboxDecisionAgent {
-  host: string | null;
-  session: string | null;
-  name: string | null;
-}
-
-/** Where a decision came from. */
-export interface InboxDecisionSource {
-  /**
-   * `answer`: recorded at Send from the person's answer to a question;
-   * `agent`: an agent's record_decision; `person`: the person wrote it (a
-   * replacement on the Decisions page).
-   */
-  kind: "answer" | "agent" | "person";
-  /** The answered question (`<message id>/<key>`), for `answer`. */
-  question_id: string | null;
-  message_id: string | null;
-  thread_id: string | null;
-  /** The asking agent (`answer`) or the recording one (`agent`). */
-  agent: InboxDecisionAgent | null;
-}
-
-/**
- * One standing decision in a project: Workspaces' decision fields (text,
- * reason, source, state, version, replaces_id, replacement_id), so a later
- * sync maps it. `version` counts changes to this record (a retire or a
- * replace bumps it; a stale version is refused); a replacement is a new
- * record at version 1 that names what it replaces.
- */
-export interface InboxDecision {
-  id: string;
-  project_id: string;
-  text: string;
-  reason: string | null;
-  source: InboxDecisionSource;
-  state: InboxDecisionState;
-  version: number;
-  replaces_id: string | null;
-  replacement_id: string | null;
-  created_at: string;
-  /** When the state last changed (a retire or a replace); null while it was never changed. */
-  changed_at: string | null;
-  /** record_decision's idempotency key, when one was given. */
-  idempotency_key: string | null;
-}
-
 // ─────────────────────────────── Lines ───────────────────────────────
 
-export type InboxRecordKind = "project" | "message" | "question" | "decision" | "annotation";
+export type InboxRecordKind = "project" | "message" | "question" | "annotation";
 
 /** One line of the store: a full snapshot of one record. */
 export type InboxLine =
   | { v: 1; seq: number; at: string; kind: "project"; id: string; record: InboxProject }
   | { v: 1; seq: number; at: string; kind: "message"; id: string; record: InboxMessage }
   | { v: 1; seq: number; at: string; kind: "question"; id: string; record: InboxQuestionRecord }
-  | { v: 1; seq: number; at: string; kind: "decision"; id: string; record: InboxDecision }
   | { v: 1; seq: number; at: string; kind: "annotation"; id: string; record: InboxAnnotationRecord };
 
 // ─────────────────────────────── Health ───────────────────────────────
@@ -1199,21 +1123,23 @@ export type InboxToolCostHost = "pi" | "opencode";
  * measured on the real hosts: apps/pi-extension/inbox.test.ts and
  * apps/opencode-plugin/inbox-v2.test.ts read the request the host sends a
  * scripted model and fail when the tool's entry drifts more than 5% from
- * `bytes`. Tokens depend on the model's tokenizer: the same entry counts
- * 1,661 with o200k_base (GPT-4o and later), and Claude's tokenizer counts
- * JSON and code higher, so `tokens` is a rounded, deliberately high estimate,
- * stated as "roughly". The window states both (`inboxToolCostText`: the
- * first-run screen, Settings → Agents), as does `plannotator inbox --help`.
- * Before the long field descriptions were shortened
- * (INBOX_AGENT_FIELD_DESCRIPTIONS) the entry was 11,736 bytes (2,796 tokens
- * with o200k_base) on both hosts.
+ * `bytes`. Tokens depend on the model's tokenizer: Claude's tokenizer counts
+ * JSON and code higher than o200k_base (GPT-4o and later), so `tokens` is a
+ * rounded, deliberately high estimate, stated as "roughly". The window states
+ * both (`inboxToolCostText`: the first-run screen, Settings → Agents), as does
+ * `plannotator inbox --help`. History on both hosts: 11,736 bytes (2,796
+ * tokens with o200k_base) before the long field descriptions were shortened
+ * (INBOX_AGENT_FIELD_DESCRIPTIONS); 7,058 bytes (1,661 with o200k_base) before
+ * Decisions (list_decisions, record_decision) were removed. The current value
+ * is that measurement less the 668 bytes the two actions took in the entry
+ * (the generated tool JSON before and after), not yet re-measured on the hosts.
  */
 export const INBOX_TOOL_COST: Readonly<Record<InboxToolCostHost, { bytes: number; tokens: number }>> = {
-  pi: { bytes: 7058, tokens: 2000 },
-  opencode: { bytes: 7058, tokens: 2000 },
+  pi: { bytes: 6390, tokens: 1800 },
+  opencode: { bytes: 6390, tokens: 1800 },
 };
 
-/** "about 7 KB, roughly 2,000 tokens" for a host's measured cost. */
+/** "about 6 KB, roughly 1,800 tokens" for a host's measured cost. */
 export function inboxToolCostText(host: InboxToolCostHost): string {
   const cost = INBOX_TOOL_COST[host];
   return `about ${Math.round(cost.bytes / 1000)} KB, roughly ${cost.tokens.toLocaleString("en-US")} tokens`;

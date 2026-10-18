@@ -5,7 +5,7 @@
  * PLANNOTATOR_DATA_DIR. One screen at a time, like a mail app:
  *
  * - no screen scrolls sideways or draws past the window (the list, the
- *   project's list, a thread, an open file, the sheet, Decisions, Settings);
+ *   project's list, a thread, an open file, the sheet, Settings);
  * - the list's rows and the thread's headers hold their parts without one
  *   box over another (the report: the time and the agent's mark overlapped);
  * - the primary actions are at least 44 px and the reply box is 16 px text,
@@ -101,8 +101,6 @@ test.beforeAll(async () => {
     return made;
   };
   const pi = await agent('Pi', 'pi');
-  // A settled decision, for the Decisions page with one open.
-  await pi.recordDecision({ project_path: billing, text: 'Retry a Stripe 409 with the same idempotency key', reason: 'Stripe deduplicates on the key, so a retry can never charge twice.', idempotency_key: 'mobile-decision' });
   const long = await pi.send({
     project_path: docs,
     thread: 'nightly-reconciliation-of-stripe-payouts-against-the-ledger',
@@ -567,16 +565,12 @@ for (const phone of [
       expect(state.height).toBe(state.innerHeight);
     });
 
-    test("small controls keep their look and take a thumb: Keep open, Records a decision, the file's toolstrip, Global comment and Copy file", async () => {
+    test("small controls keep their look and take a thumb: Keep open, the file's toolstrip, Global comment and Copy file", async () => {
       const page = await open();
       await page.emulateMedia({ reducedMotion: 'reduce' });
       await page.goto(`${world.url}#thread=${world.threads.stopped}`);
       const pane = page.locator('section.ib-pane');
       await expect(pane.getByRole('heading', { name: /Stripe 409/ })).toBeVisible();
-      // The question card's "Records a decision" (ui's QuestionBlock): its look is ui's, its hit area 44 px tall.
-      const decision = await shortHitAreas(page, '.ib-body [data-question-decision-toggle], .ib-body [data-question-decision-open]');
-      expect(decision.measured).toBeGreaterThan(0);
-      expect(decision.short).toEqual([]);
       // One of the two questions picked: the reply box's chip offers Keep open for the other.
       await pane.getByText('Retry with the same idempotency key').click();
       await pane.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' }).click();
@@ -680,16 +674,12 @@ for (const phone of [
       await expect(read).toHaveAttribute('aria-pressed', 'false');
     });
 
-    test('Decisions and Settings fit the window', async () => {
+    test('Settings fits the window', async () => {
       const page = await open();
       await page.emulateMedia({ reducedMotion: 'reduce' });
       await page.goto(`${world.url}#settings`);
       await expect(page.locator('.ib-spage h1')).toHaveText('Settings');
       await shot(page, '9-settings');
-      expect(await sideways(page)).toEqual([]);
-      await page.goto(`${world.url}#decisions=`);
-      await expect(page.locator('.ib-dh h1')).toHaveText('Decisions');
-      await shot(page, '10-decisions');
       expect(await sideways(page)).toEqual([]);
     });
   });
@@ -797,24 +787,6 @@ for (const narrow of [
         expect(await page.evaluate(() => window.location.hash)).toBe('');
         await page.goForward();
         await expect(pane.getByRole('heading', { name: /Stripe 409/ })).toBeVisible();
-
-        // An open decision covers the Decisions list (460 px beside it would leave the decision 120 to 210 px).
-        const projects = (await page.evaluate(() => fetch('/api/inbox/projects').then((r) => r.json()))) as { projects: { id: string; name: string }[] };
-        // (A hash change, not page.goto: WebKit's goto to the same document can wait for a load that never comes.)
-        await page.evaluate((hash) => (window.location.hash = hash), `#decisions=${projects.projects.find((p) => p.name === 'billing-svc')!.id}`);
-        await page.locator('.ib-dpage button', { hasText: 'Retry a Stripe 409 with the same idempotency key' }).filter({ visible: true }).first().click();
-        const dpane = page.locator('section.ib-dpane');
-        await expect(dpane.getByRole('heading', { name: 'Retry a Stripe 409 with the same idempotency key' })).toBeVisible();
-        await expect(page.locator('.ib-dpage')).toBeHidden();
-        const [dpaneBox, dmainBox] = await Promise.all([dpane.boundingBox(), page.locator('.ib-main').boundingBox()]);
-        expect(Math.abs(dpaneBox!.width - (dmainBox!.width - 16))).toBeLessThan(2);
-        await page.screenshot({ path: join(proofDir, `${tag}-4-decision.png`) });
-        expect(await sideways(page)).toEqual([]);
-        expect(await overlaps(page, 'section.ib-dpane .ib-phead', '.ib-pback, .ib-dstate')).toEqual([]);
-        await expect(dpane.getByRole('button', { name: 'Close the decision' })).toHaveCount(0);
-        await dpane.getByRole('button', { name: 'Back to Decisions' }).click();
-        await expect(page.locator('.ib-dpage')).toBeVisible();
-        await expect(dpane).toHaveCount(0);
 
         // A file covers the thread, full screen, with its desktop close and Back to the thread.
         await page.evaluate((hash) => (window.location.hash = hash), `#thread=${world.threads.attach}`);
@@ -952,32 +924,6 @@ test.describe('a desktop window', () => {
     await expect(pane.getByRole('heading', { name: /Stripe 409/ })).toBeVisible();
   });
 
-  test('at 900 px an open decision covers its list: focus goes to ‹ Decisions and back to its row, and ‹ Decisions is the browser Back', async ({ page }) => {
-    await page.setViewportSize({ width: 900, height: 800 });
-    await page.goto(world.url);
-    await expect(page.locator('.ib-lbody [data-thread-id]').first()).toBeVisible();
-    const projects = (await page.evaluate(() => fetch('/api/inbox/projects').then((r) => r.json()))) as { projects: { id: string; name: string }[] };
-    const project = projects.projects.find((p) => p.name === 'billing-svc')!.id;
-    await page.evaluate((hash) => (window.location.hash = hash), `#decisions=${project}`);
-    const row = page.locator('.ib-dpage button[data-decision-id]', { hasText: 'Retry a Stripe 409 with the same idempotency key' }).filter({ visible: true }).first();
-    const id = (await row.getAttribute('data-decision-id'))!;
-    await row.click();
-    const dpane = page.locator('section.ib-dpane');
-    await expect(dpane.getByRole('heading', { name: 'Retry a Stripe 409 with the same idempotency key' })).toBeVisible();
-    await expect(page.locator('.ib-dpage')).toBeHidden();
-    // The row clicked is under the decision now: focus moves to the way back.
-    await expect(dpane.locator('[data-stack-back]')).toBeFocused();
-    await page.keyboard.press('Enter');
-    await expect(page.locator('.ib-dpage')).toBeVisible();
-    await expect(dpane).toHaveCount(0);
-    // Back on the list, focus is on the decision's row.
-    await expect(page.locator(`.ib-dpage [data-decision-id="${id}"]`).filter({ visible: true }).first()).toBeFocused();
-    // ‹ Decisions went back in history (no new entry): Forward reopens the decision.
-    expect(await page.evaluate(() => window.location.hash)).toBe(`#decisions=${project}`);
-    await page.goForward();
-    await expect(dpane.getByRole('heading', { name: 'Retry a Stripe 409 with the same idempotency key' })).toBeVisible();
-  });
-
   test('at 900 px, a window that shrinks into stacking with a list row focused never drops focus to the page', async ({ page }) => {
     const rowOf = (id: string) => page.locator(`.ib-lbody [data-thread-id="${id}"]`);
     const onPage = () => page.evaluate(() => document.activeElement === document.body);
@@ -1011,33 +957,6 @@ test.describe('a desktop window', () => {
     await expect(page.locator('.ib-listcol')).toBeVisible();
     expect(await onPage()).toBe(false);
     await expect(rowOf(world.threads.stopped)).toBeFocused();
-
-    // The same for a decision open beside its list (1280), focus on its row: shrinking puts the decision over
-    // the list, focus goes to ‹ Decisions, and Back returns it to the row; growing back out returns it too.
-    await page.setViewportSize({ width: 1280, height: 800 });
-    const projects = (await page.evaluate(() => fetch('/api/inbox/projects').then((r) => r.json()))) as { projects: { id: string; name: string }[] };
-    await page.evaluate((hash) => (window.location.hash = hash), `#decisions=${projects.projects.find((p) => p.name === 'billing-svc')!.id}`);
-    const decisionRow = page.locator('.ib-dpage button[data-decision-id]', { hasText: 'Retry a Stripe 409 with the same idempotency key' }).filter({ visible: true }).first();
-    await decisionRow.click();
-    const dpane = page.locator('section.ib-dpane');
-    await expect(dpane.getByRole('heading', { name: 'Retry a Stripe 409 with the same idempotency key' })).toBeVisible();
-    await expect(page.locator('.ib-dpage')).toBeVisible();
-    await decisionRow.focus();
-    await expect(decisionRow).toBeFocused();
-    await page.setViewportSize({ width: 900, height: 800 });
-    await expect(page.locator('.ib-dpage')).toBeHidden();
-    expect(await onPage()).toBe(false);
-    await expect(dpane.locator('[data-stack-back]')).toBeFocused();
-    await page.keyboard.press('Enter');
-    await expect(page.locator('.ib-dpage')).toBeVisible();
-    await expect(dpane).toHaveCount(0);
-    await expect(decisionRow).toBeFocused();
-    await decisionRow.click();
-    await expect(dpane.locator('[data-stack-back]')).toBeFocused();
-    await page.setViewportSize({ width: 1280, height: 800 });
-    await expect(page.locator('.ib-dpage')).toBeVisible();
-    expect(await onPage()).toBe(false);
-    await expect(decisionRow).toBeFocused();
   });
 
   test('an iPad on its side (1080 px) keeps the list beside a 444 px thread (the panes float in 8 px gutters)', async ({ page }) => {
@@ -1048,7 +967,7 @@ test.describe('a desktop window', () => {
     await expect(page.locator('.ib-listcol.ib-narrow')).toBeVisible();
     expect(Math.round((await pane.boundingBox())!.width)).toBe(1080 - 232 - 380 - 3 * 8);
     await expect(pane.getByRole('button', { name: 'Close the thread' })).toBeVisible();
-    // Neither the thread nor a file stacks there (an open decision would: 460 + 380 px and the gutters need 1096).
+    // Neither the thread nor a file stacks there.
     expect(await page.evaluate(() => document.querySelector('.pn-inbox')!.getAttribute('data-stack') ?? '')).not.toMatch(/thread|file/);
   });
 

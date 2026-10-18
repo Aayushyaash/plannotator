@@ -142,7 +142,6 @@ for (const withMenu of [true, false]) {
         page="inbox"
         projectId={null}
         inboxCount={1}
-        decisionsCount={0}
         projects={[folder(LONG_PROJECT)]}
         projectCounts={new Map([[`prj_${LONG_PROJECT}`, 1]])}
         update={null}
@@ -151,7 +150,6 @@ for (const withMenu of [true, false]) {
         onInbox={noop}
         onProject={noop}
         onSettings={noop}
-        onDecisions={noop}
         onUpdate={noop}
         onWhatsNew={noop}
         onProjectAction={withMenu ? noop : undefined}

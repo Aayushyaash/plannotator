@@ -27,9 +27,9 @@ import { inboxId } from "@plannotator/core/inbox-types";
 import { inboxStatus, type InboxRegistryEntry } from "@plannotator/shared/inbox/registry";
 import { INBOX_MAX_REQUEST_BYTES, inboxRequestTooLargeMessage } from "@plannotator/shared/inbox/connection";
 
-const FILLED_TOOLS = new Set(["send_message", "read_thread", "wait_for_reply", "list_decisions", "record_decision", "submit_guide"]);
+const FILLED_TOOLS = new Set(["send_message", "read_thread", "wait_for_reply", "submit_guide"]);
 /** The tools that record an author, and so take `agent_host` / `agent_name` (their schemas are strict). */
-const AUTHOR_TOOLS = new Set(["send_message", "record_decision", "submit_guide"]);
+const AUTHOR_TOOLS = new Set(["send_message", "submit_guide"]);
 
 /**
  * The hosts whose connections wake a session, with the name each one's

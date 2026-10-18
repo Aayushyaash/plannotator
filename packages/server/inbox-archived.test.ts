@@ -12,8 +12,8 @@
  * - a thread's own read carries its row, an archived thread's too;
  * - a thread that came back (an agent's reply_to after the archive line) is
  *   answerable without unarchiving: the answer reaches the agent's
- *   wait_for_reply, the event stream says its question is open, the
- *   Decisions count includes it, and once handled it is archived again.
+ *   wait_for_reply, the event stream says its question is open, and once
+ *   handled it is archived again.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -207,7 +207,7 @@ describe("archived threads", () => {
     expect(read.row!.resolved_at).not.toBeNull();
   });
 
-  test("a came-back thread is answerable without unarchiving; the answer reaches wait_for_reply; events and Decisions see the question open; handled, it is archived again", async () => {
+  test("a came-back thread is answerable without unarchiving; the answer reaches wait_for_reply; events see the question open; handled, it is archived again", async () => {
     const { server, client, billing, send } = await setup();
     const t = await send(billing, "Release notes");
     await resolve(server, t.thread_id, true);
@@ -218,7 +218,7 @@ describe("archived threads", () => {
         agent_session: "ses_arch",
         agent_name: "Claude Code",
         reply_to: t.thread_id,
-        body: ":::question\nShip it today?\n\nDecision: when answered\n\n- [ ] Yes\n- [ ] No\n:::",
+        body: ":::question\nShip it today?\n\n- [ ] Yes\n- [ ] No\n:::",
       },
     })) as { structuredContent: { message_id: string } };
     const messageId = asked.structuredContent.message_id;
@@ -232,10 +232,6 @@ describe("archived threads", () => {
     controller.abort();
     const questionEvent = text.split("\n").find((line) => line.startsWith("data:") && line.includes('"kind":"question"') && line.includes(messageId))!;
     expect(JSON.parse(questionEvent.slice(5)).question.state).toBe("open");
-
-    // The Decisions count includes the came-back question.
-    const list = await getJson<ListModel & { decisions_waiting: number }>(server, "/api/inbox/threads?archived=exclude");
-    expect(list.decisions_waiting).toBe(1);
 
     // The agent waits; the person answers without unarchiving.
     const waiting = client.callTool({ name: "wait_for_reply", arguments: { thread_id: t.thread_id, agent_session: "ses_arch", timeout_seconds: 20 } });

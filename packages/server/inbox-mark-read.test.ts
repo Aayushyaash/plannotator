@@ -3,8 +3,7 @@
  * and `/unread` on a running Inbox (temp data dir, loopback), the agent side
  * over the official MCP client. Guards as for `/seen`: same origin and the
  * page's serverSession. The set-aside note waits out the Undo window
- * (shortened here) and reaches the agent like a reply; a Send that skips
- * never records a decision.
+ * (shortened here) and reaches the agent like a reply.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -50,8 +49,6 @@ async function setup() {
         "Which layout should the invoice list use?",
         "",
         "Stopped: the list cannot be built without this.",
-        "",
-        "Decision: when answered",
         "",
         "- [ ] Cards",
         "- [ ] A dense table",
@@ -163,7 +160,7 @@ describe("POST /api/inbox/threads/:id/read and /unread", () => {
 });
 
 describe("POST /api/inbox/messages/:id/reply with skip_unanswered", () => {
-  test("a words-only Send skips the question, records no decision, and the row leaves the top", async () => {
+  test("a words-only Send skips the question, and the row leaves the top", async () => {
     const { server, threadId, messageId } = await setup();
     const res = await post(server, `/api/inbox/messages/${messageId}/reply`, {
       idempotency_key: "k-1",
@@ -172,12 +169,11 @@ describe("POST /api/inbox/messages/:id/reply with skip_unanswered", () => {
       skip_unanswered: true,
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { reply: { body: string }; decisions: unknown[]; decisions_refused: unknown[]; questions: InboxQuestion[] };
+    const body = (await res.json()) as { reply: { body: string }; questions: InboxQuestion[] };
     expect(body.reply.body.split("\n")[0]).toBe("Skipped 1 question.");
-    expect(body.questions[0]).toMatchObject({ state: "sent", answer: { skipped: true, by_reply: true }, decision_id: null });
-    // The question said "Decision: when answered", but a skip decides nothing.
-    expect(body.decisions).toEqual([]);
-    expect(body.decisions_refused).toEqual([]);
+    expect(body.questions[0]).toMatchObject({ state: "sent", answer: { skipped: true, by_reply: true } });
+    // Decisions were removed: a Send's answer names none.
+    expect(Object.keys(body).sort()).toEqual(["message_id", "questions", "replayed", "reply"]);
     expect((await rowOf(server, threadId)).section).toBe("sent");
   });
 
@@ -186,7 +182,7 @@ describe("POST /api/inbox/messages/:id/reply with skip_unanswered", () => {
     await post(server, `/api/inbox/threads/${threadId}/read`, {});
     const res = await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-2", questions: [], skip_unanswered: true });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ reply: null, nothing_to_send: true, decisions_refused: [] });
+    expect(await res.json()).toMatchObject({ reply: null, nothing_to_send: true });
     expect(server.store.thread(threadId)!.messages).toHaveLength(1);
     // Without skip_unanswered an empty Send is still refused, as before.
     expect((await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-3", questions: [] })).status).toBe(422);

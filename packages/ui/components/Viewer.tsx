@@ -261,6 +261,11 @@ export interface ViewerProps {
    *  `Decision: when answered`. `'any'`: also a question with no decision
    *  line, when `questionDecisionRecording` returns a boolean for it. */
   questionDecisionScope?: 'when-answered' | 'any';
+  /** Whether `:::question` cards read `Decision:` lines (default true). False
+   *  (a host that records no decisions, such as the Plannotator Inbox): a
+   *  `Decision:` line is shown as context and no question carries a decision
+   *  tag or row from it. The prompt, key and numbering are unchanged. */
+  questionDecisionLines?: boolean;
   /** Makes a question's "Records a decision" tag a toggle button
    *  (`aria-pressed`); a click calls this with the question's key and the
    *  next state, which the host stores and returns from
@@ -713,6 +718,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   renderQuestionFooter,
   questionDecisionRecording,
   questionDecisionScope,
+  questionDecisionLines = true,
   onToggleQuestionDecisionRecording,
   onOpenQuestionDecision,
   questionDecisionLocked,
@@ -804,9 +810,9 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   // annotations that carry `questionAnswer` (matched by question key, so an
   // answer follows its question across re-parses).
   const questionIndex = useMemo(() => {
-    const list = indexQuestionBlocks(blocks);
+    const list = indexQuestionBlocks(blocks, { decisionLines: questionDecisionLines });
     return { byBlock: new Map(list.map((q) => [q.blockId, q])), total: list.length };
-  }, [blocks]);
+  }, [blocks, questionDecisionLines]);
   // A host that keeps answers itself (`questionAnswers`) replaces the
   // annotation-derived map; each entry is validated like any other reader.
   const answersByKey = useMemo(

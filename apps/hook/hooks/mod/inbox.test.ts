@@ -197,7 +197,7 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
     const session = await open(w, 'session-1')
     const names = session.inboxTools?.map((tool) => tool.name)
     // What this Inbox's /mcp lists, asked directly: the tool carries exactly those it can (an older
-    // Inbox without record_decision gets no such action: the engine harness proves that case).
+    // Inbox without submit_guide gets no such action: the engine harness proves that case).
     const listed = await fetch(`http://127.0.0.1:${registry(w).port}/mcp`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
@@ -205,7 +205,8 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
     })
     const offered = mcpAnswerOf(await listed.text())?.result as { tools: { name: string }[] }
     expect(names).toEqual(INBOX_TOOL_ACTIONS.filter((action) => offered.tools.some((tool) => tool.name === action)))
-    expect(names).toContain('record_decision')
+    expect(names).toContain('submit_guide')
+    expect(names).not.toContain('record_decision')
     const spec = inboxAgentTool(session.inboxTools!)!
     const actions = (spec.inputSchema.properties as { action: { enum: string[] } }).action.enum
     expect(actions).toEqual(names!)

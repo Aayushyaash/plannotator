@@ -18,12 +18,10 @@ import { UpdateButton } from './Updates';
 import { openSearchAriaKeys, openSearchHint } from '../search/searchShortcut';
 
 export interface SidebarProps {
-  page: 'inbox' | 'settings' | 'decisions' | 'whats-new' | 'drafts';
+  page: 'inbox' | 'settings' | 'whats-new' | 'drafts';
   projectId: string | null;
   /** Rows waiting on the person, all projects. */
   inboxCount: number;
-  /** Questions that record a decision once answered and sent, all projects. */
-  decisionsCount: number;
   projects: readonly ProjectFolder[];
   /** Rows waiting on the person, per project id. */
   projectCounts: ReadonlyMap<string, number>;
@@ -51,7 +49,6 @@ export interface SidebarProps {
   onInbox: () => void;
   onProject: (projectId: string) => void;
   onSettings: () => void;
-  onDecisions: () => void;
   onUpdate: () => void;
   onWhatsNew: (version: string) => void;
   /**
@@ -170,17 +167,6 @@ export function Sidebar(props: SidebarProps) {
         <Icon name="inbox" />
         Inbox
         {!firstRun && props.inboxCount > 0 && <span className="ib-n">{formatCount(props.inboxCount)}</span>}
-      </button>
-      <button
-        type="button"
-        className={`ib-nav${props.page === 'decisions' ? ' ib-on' : ''}`}
-        onClick={pick(props.onDecisions)}
-        disabled={firstRun}
-        aria-current={props.page === 'decisions' ? 'page' : undefined}
-      >
-        <Icon name="diamond" />
-        Decisions
-        {props.decisionsCount > 0 && <span className="ib-n">{formatCount(props.decisionsCount)}</span>}
       </button>
       {(props.draftsCount ?? 0) > 0 && props.onDrafts && (
         <button

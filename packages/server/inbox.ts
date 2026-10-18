@@ -105,13 +105,6 @@ import { openBrowser } from "./browser";
 import { isAddressInUseError } from "./remote";
 import { createRequestHostGuard } from "./request-host-guard";
 import { createInboxMcpServer } from "./inbox-mcp";
-import {
-  handleInboxDecisionRoute,
-  INBOX_DECISION_ERROR_STATUS,
-  recordDecisionsForReply,
-  threadDecisions,
-  waitingDecisionCount,
-} from "./inbox-decisions";
 import { inboxGuideRoute } from "./inbox-guides";
 import { createInboxRepoCache } from "./inbox-repos";
 import { createInboxProjectRoots, nearestProjectHolding, type InboxGitRunner } from "./inbox-project-root";
@@ -355,7 +348,6 @@ const ERROR_STATUS: Record<string, number> = {
   // The project menu: a batch_id already answered another project or action.
   batch_id_reused: 409,
   config_not_saved: 500,
-  ...INBOX_DECISION_ERROR_STATUS,
   // Attachments and annotations (step 2).
   attachment_not_found: 404,
   attachment_missing: 404,
@@ -689,8 +681,6 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       // Quiet included, and Settings lists them (GET /api/inbox/threads/archived).
       // Without it they stay in Quiet, as an older window and the phone expect.
       sections: inboxListSections(archived === "exclude" ? scoped.filter((row) => !inboxRowArchived(row)) : scoped),
-      /** Questions in every project that record a decision once answered and sent: the sidebar's Decisions count. */
-      decisions_waiting: waitingDecisionCount(store),
     };
   };
 
@@ -1201,8 +1191,6 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       case "question":
         // The store's one question state: a question an agent asked after the archive line is live (notifications, the sound).
         return { seq: line.seq, kind: line.kind, id: line.id, question: store.questionWire(line.record) };
-      case "decision":
-        return { seq: line.seq, kind: line.kind, id: line.id, decision: line.record };
       case "annotation":
         return { seq: line.seq, kind: line.kind, id: line.id, annotation: line.record };
     }
@@ -1748,10 +1736,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         if (store.thread(threadMatch[1]!)) imageCapture.schedule(threadMatch[1]!);
         const thread = store.windowThread(threadMatch[1]!);
         if (!thread) return json({ error: "No such thread.", code: "thread_not_found" }, 404);
-        const decisionIds = thread.messages.flatMap((m) => (m.questions ?? []).map((q) => q.decision_id));
         const withRepo = { ...thread, project: { ...thread.project, repo: repos.get(thread.project.root) } };
         // `row` (additive): the thread's list row, also for an archived thread, which the window's list leaves out.
-        return json({ serverSession, cursor: store.cursor(), thread: withRepo, decisions: threadDecisions(store, decisionIds), row: store.listRow(thread.thread_id) });
+        return json({ serverSession, cursor: store.cursor(), thread: withRepo, row: store.listRow(thread.thread_id) });
       }
 
       const seenMatch = /^\/api\/inbox\/threads\/([A-Za-z0-9_]+)\/seen$/.exec(path);
@@ -1907,23 +1894,18 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
               // A skip-only target whose questions closed meanwhile: a no-op, so
               // the rest of a multi-message Send still goes.
               if (error instanceof InboxError && error.code === "nothing_to_send") {
-                return json({ message_id: messageId, questions: store.questionsOf(messageId), reply: null, replayed: false, nothing_to_send: true, decisions: [], decisions_refused: [] });
+                return json({ message_id: messageId, questions: store.questionsOf(messageId), reply: null, replayed: false, nothing_to_send: true });
               }
               throw error;
             }
             if (result.replayed) removeInboxAttachmentFiles(store.dir, attachments);
             // Sent: the uploads are the reply's attachments now.
             else if (attachments.length > 0) removeInboxUploads(store.dir, uploads.filter((id): id is string => typeof id === "string"));
-            // Step 3: the sent answers whose decision switch is on become
-            // decisions, after the reply landed; a refused one never undoes it.
-            const decisions = recordDecisionsForReply(store, result.reply.id);
             return json({
               message_id: messageId,
               questions: store.questionsOf(messageId),
               reply: result.reply,
               replayed: result.replayed,
-              decisions: decisions.recorded,
-              decisions_refused: decisions.refused,
             });
           }
           case "resolve": {
@@ -1937,16 +1919,6 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
           }
         }
       }
-
-      // ── Step 3: decisions (packages/server/inbox-decisions.ts) ──
-      const decisionResponse = await handleInboxDecisionRoute(req, url, {
-        store,
-        serverSession,
-        readBody,
-        json,
-        staleTab: (body) => (checkServerSession(body, serverSession) === "mismatch" ? json(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409) : null),
-      });
-      if (decisionResponse) return decisionResponse;
 
       if (path === "/" && (req.method === "GET" || req.method === "HEAD")) {
         // One origin: notification permission is per origin (inbox-canonical.ts).

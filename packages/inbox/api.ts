@@ -6,9 +6,6 @@
  */
 
 import type {
-  InboxDecision,
-  InboxDecisionAgent,
-  InboxDecisionDraft,
   InboxGuideRef,
   InboxHealth,
   InboxListRow,
@@ -78,8 +75,6 @@ export interface ListModel {
   projects: ProjectFolder[];
   project: string | null;
   sections: InboxListSection[];
-  /** Questions in every project that record a decision once sent: the sidebar's Decisions count. */
-  decisions_waiting: number;
 }
 
 /** GET /api/inbox/threads/archived: Settings' Archived block, newest archived first, a page at a time. */
@@ -100,48 +95,14 @@ export interface ThreadModel {
   serverSession: string;
   cursor: number;
   thread: InboxThread;
-  /** The decisions this thread's questions recorded, for the "Settled: ..." lines. */
-  decisions: InboxDecision[];
   /** The thread's list row, an archived thread's too (the window's list leaves those out). Absent from an older Inbox. */
   row?: InboxListRow | null;
-}
-
-/** A question that records a decision once answered and sent (the Decisions page's Waiting group). */
-export interface WaitingDecision {
-  question_id: string;
-  message_id: string;
-  thread_id: string;
-  project_id: string;
-  prompt: string;
-  agent: InboxDecisionAgent | null;
-  asked_at: string;
-}
-
-/** One project's counts for the Decisions page's project switch. */
-export interface DecisionProjectCounts {
-  project_id: string;
-  /** Questions that record a decision once answered and sent. */
-  waiting: number;
-  /** Decisions that hold (state `current`). */
-  settled: number;
-}
-
-export interface DecisionsModel {
-  serverSession: string;
-  cursor: number;
-  project_id: string;
-  waiting: WaitingDecision[];
-  decisions: InboxDecision[];
-  /** Every project's counts, for the project switch. Absent from an older Inbox. */
-  project_counts?: DecisionProjectCounts[];
 }
 
 export interface ReplyResult {
   reply: unknown;
   questions: InboxQuestion[];
   replayed: boolean;
-  decisions: InboxDecision[];
-  decisions_refused: { key: string; code: string; message: string }[];
 }
 
 export interface UpdateSwitches {
@@ -566,14 +527,6 @@ export const inboxApi = {
       uploads?: string[];
     },
   ) => post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reply`, input),
-  /** The card's switch and its words on one question: `recording`, and `draft` on Done. */
-  setDecision: (messageId: string, key: string, input: { recording?: boolean; draft?: InboxDecisionDraft | null }) =>
-    post<{ question: InboxQuestion }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/decision`, { key, ...input }),
-  decisions: (projectId: string) => get<DecisionsModel>(`/api/inbox/decisions?project=${encodeURIComponent(projectId)}`),
-  retireDecision: (id: string, version: number) =>
-    post<{ decision: InboxDecision }>(`/api/inbox/decisions/${encodeURIComponent(id)}/retire`, { version }),
-  replaceDecision: (id: string, input: { version: number; text: string; reason: string }) =>
-    post<{ decision: InboxDecision; replaced: InboxDecision }>(`/api/inbox/decisions/${encodeURIComponent(id)}/replace`, input),
   resolve: (messageId: string, resolved: boolean) =>
     post<unknown>(`/api/inbox/messages/${encodeURIComponent(messageId)}/resolve`, { resolved }),
   health: () => get<InboxHealth>('/api/inbox/health'),

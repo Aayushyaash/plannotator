@@ -58,7 +58,7 @@ export function dayWords(iso: string, now: Date = new Date()): string {
   return dayOf(date, now);
 }
 
-/** "Oct 3, 10:42 AM": a moment on the Decisions page ("Sep 2, 2025, 10:42 AM" in another year). */
+/** "Oct 3, 10:42 AM": a day and a time ("Sep 2, 2025, 10:42 AM" in another year). */
 export function dateTime(iso: string, now: Date = new Date()): string {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? '' : `${dayOf(date, now)}, ${TIME.format(date)}`;

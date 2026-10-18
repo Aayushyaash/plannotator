@@ -117,8 +117,6 @@ async function render(value: InboxThread, sent: { at: string; checked_at: string
           onQuestions={() => {}}
           onChanged={onChanged}
           onClose={() => {}}
-          decisions={[]}
-          onOpenDecisionPage={() => {}}
           file={null}
           onOpenFile={() => {}}
           onOpenGuide={() => {}}

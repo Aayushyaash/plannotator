@@ -40,11 +40,11 @@
   /* Colours (the blind rounds; the rows' lines since asked away, see above). */
   --ib-soft-ground: initial;     /* Soft's tinted ground under the panes (today's: the palette's background, the colour today's sidebar paints) */
   --ib-soft-selection: initial;  /* the open row: a neutral fill (today's: the accent's tint) */
-  --ib-soft-rows: ;              /* inbox items part by space, no line between them, as the prototype draws them: the list's rows, the two-line rows, a phone's rows, the Decisions rows (today's: hairlines) */
+  --ib-soft-rows: ;              /* inbox items part by space, no line between them, as the prototype draws them: the list's rows, the two-line rows, a phone's rows (today's: hairlines) */
   --ib-soft-lines: initial;      /* every other line (the thread header's, the foot's, between messages, Settings' rows, the file view, What's new) the faint fill (today's: the palette's hairlines and rules, the owner's ruling) */
   --ib-soft-band: initial;       /* section bands on the raised surface (today's: the muted band) */
   --ib-soft-badges: ;            /* Stopped and Holds up: tinted pills (today's: outlined badges) */
-  --ib-soft-accents: ;           /* fewer accents: the decision tag, links, Reply, a tile's Open (today's: the accent) */
+  --ib-soft-accents: ;           /* fewer accents: links, Reply, a tile's Open (today's: the accent) */
   --ib-soft-card: ;              /* the question card: a raised, borderless surface (today's: ui's card) */
   --ib-soft-nav: ;               /* the sidebar's current page: a lifted card (today's: the accent's tint and text) */
   --ib-soft-quiet: ;             /* quiet text stepped for its surface, on the ground and on raised surfaces (today's: the palette's muted text) */
@@ -418,7 +418,7 @@ button.ib-mut { border-radius: 6px; }
 .pn-inbox :is(.ib-nav, .ib-proj, button.ib-band, .ib-mrow):focus-visible { outline-offset: -2px; }
 .ib-side-label { font-size: var(--ib-lbl-size-s, 11px); font-weight: var(--ib-lbl-550-s, 600); letter-spacing: var(--ib-lbl-track-s, 0.07em); text-transform: var(--ib-lbl-case-s, uppercase); color: var(--muted-foreground); padding: 18px 9px 6px; }
 .ib-projs { overflow-y: auto; min-height: 0; }
-/* Only the project list gives up height when there are many projects: Inbox, Decisions and the foot keep theirs (they
+/* Only the project list gives up height when there are many projects: Inbox and the foot keep theirs (they
    shrank from 32 to 20 px past about 17 projects). The list fades at its foot while there is more to scroll. */
 .ib-side > :not(.ib-projs) { flex-shrink: 0; }
 .ib-projs[data-more] { mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent); }
@@ -575,14 +575,14 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 
 /* main list */
 .ib-main { background: var(--ib-main-bg); display: flex; flex: 1; min-width: 0; height: 100%; padding: var(--ib-gutter); gap: var(--ib-gutter); }
-/* Each pane is a card on the ground: the list, a thread or a decision, a file beside its thread, Settings, What's new. */
+/* Each pane is a card on the ground: the list, a thread, a file beside its thread, Settings, Drafts, What's new. */
 .ib-main > :is(.ib-listcol, .ib-pane, .ib-view, .ib-spage, .ib-dpage, .ib-wn) { border-radius: var(--ib-pane-r); box-shadow: var(--ib-pane-shadow); min-height: 0; }
 /* Each takes the card's colour under the panes switch. Off, today's: the thread pane its own card, a file the
    window's background, and the rest none of their own (an opaque scroller draws its text differently). */
 .ib-main > :is(.ib-listcol, .ib-spage, .ib-dpage, .ib-wn) { background: var(--ib-pane-bg-s, transparent); }
 .ib-main > .ib-view { background: var(--ib-pane-bg-s, var(--background)); }
 /* The list keeps its resize edge in the gutter beside it (never clipped); its scroll box follows the card's corners instead.
-   Settings, Decisions and What's new scroll themselves, which clips them to their corners already. */
+   Settings, Drafts and What's new scroll themselves, which clips them to their corners already. */
 .ib-main > :is(.ib-pane, .ib-view:not(.ib-full)) { overflow: var(--ib-clip-s, visible); }
 .ib-main > .ib-listcol > .ib-lbody { border-radius: 0 0 var(--ib-pane-r) var(--ib-pane-r); }
 .ib-listcol { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -660,18 +660,18 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-nrow.ib-u .ib-l2 .ib-s { color: var(--foreground); font-weight: 600; }
 /* Hover and the selected row (design record "inbox-polish", item 1, variant A · Inset): a pill 3 px inside
    the row (its ::before, radius 8, no border), so the separators run on unbroken and never touch it, and the
-   first row under a band keeps a gap, as the sidebar's active row sits inside its column. The Decisions page's
-   rows take the same rule (.ib-drow, below). Keyboard focus is a 2 px ring on the same pill (item 4). */
-.ib-row, .ib-nrow, button.ib-drow { position: relative; isolation: isolate; }
-:is(.ib-row, .ib-nrow, button.ib-drow)::before { content: ""; position: absolute; inset: 3px 0; border-radius: 8px; z-index: -1; pointer-events: none; }
+   first row under a band keeps a gap, as the sidebar's active row sits inside its column. Keyboard focus is a
+   2 px ring on the same pill (item 4). */
+.ib-row, .ib-nrow { position: relative; isolation: isolate; }
+:is(.ib-row, .ib-nrow)::before { content: ""; position: absolute; inset: 3px 0; border-radius: 8px; z-index: -1; pointer-events: none; }
 /* !important: they win over Show's light (below), an animation, which would otherwise paint over them. */
-:is(.ib-row, .ib-nrow, button.ib-drow):hover::before { background: color-mix(in oklch, var(--muted) 45%, transparent) !important; }
-:is(.ib-row, .ib-nrow, .ib-drow).ib-sel::before { background: var(--ib-sel) !important; }
-:is(.ib-row, .ib-nrow, .ib-drow).ib-sel:hover::before { background: var(--ib-sel-hover) !important; }
+:is(.ib-row, .ib-nrow):hover::before { background: color-mix(in oklch, var(--muted) 45%, transparent) !important; }
+:is(.ib-row, .ib-nrow).ib-sel::before { background: var(--ib-sel) !important; }
+:is(.ib-row, .ib-nrow).ib-sel:hover::before { background: var(--ib-sel-hover) !important; }
 /* The ring is the pill's inset shadow; a transparent outline stays for forced colours (Windows High Contrast
    draws it, and drops the shadow). */
-.pn-inbox :is(.ib-row, .ib-nrow, button.ib-drow):focus-visible { outline: 2px solid transparent; outline-offset: -2px; }
-.pn-inbox :is(.ib-row, .ib-nrow, button.ib-drow):focus-visible::before { box-shadow: inset 0 0 0 2px var(--ring); }
+.pn-inbox :is(.ib-row, .ib-nrow):focus-visible { outline: 2px solid transparent; outline-offset: -2px; }
+.pn-inbox :is(.ib-row, .ib-nrow):focus-visible::before { box-shadow: inset 0 0 0 2px var(--ring); }
 /* After Show (the held list's "N new … Show"): each row it brought in lights up where it landed, on the
    same pill, then fades (App.tsx sets data-lit once the rows have slid into place, for the animation's
    length). It keeps running under the pointer: hover and the selection paint over it (above), and the
@@ -698,8 +698,8 @@ button.ib-band { transition: var(--ib-fade-s, var(--ib-ui-fade)); }
 button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 /* Rows part by space, not rules. */
 .ib-row, .ib-nrow { border-bottom-color: var(--ib-row-line); }
-:is(.ib-row, .ib-nrow, button.ib-drow)::before { border-radius: var(--ib-rl-sm-s, 8px); }
-:is(.ib-row, .ib-nrow, button.ib-drow):hover::before { background: var(--ib-hover) !important; }
+:is(.ib-row, .ib-nrow)::before { border-radius: var(--ib-rl-sm-s, 8px); }
+:is(.ib-row, .ib-nrow):hover::before { background: var(--ib-hover) !important; }
 /* Rows that wait on nobody (Sent, Quiet): the subject steps back. Off, each row keeps today's colour: a wide
    row's subject takes its row's, a narrow row's is quiet text (`.ib-nrow .ib-l2 .ib-s`). */
 .ib-row[data-section="quiet"] .ib-s { color: var(--ib-quiet-dim, currentcolor); }
@@ -1071,19 +1071,9 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 .ib-waitfoot button { display: inline-flex; align-items: center; gap: 4px; font-size: var(--ib-fs-13, 13px); }
 .ib-holds { margin: 0 0 6px; padding-left: 18px; font-size: var(--ib-fs-13-5, 13.5px); color: var(--muted-foreground); }
 
-/* step 3: the decision card (record 3.1), over the thread, under the tag's words */
-.pn-inbox.ib-deccard-layer { height: auto; position: fixed; top: 0; left: 0; z-index: 50; }
-.ib-deccard { position: fixed; width: 400px; background: var(--popover); color: var(--popover-foreground, var(--foreground)); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 18px 50px rgba(0, 0, 0, 0.25); padding: 16px 16px 14px; }
-.ib-deccard h4 { margin: 0 0 12px; font-size: var(--ib-fs-14-5, 14.5px); font-weight: 600; display: flex; align-items: center; gap: 8px; }
-.ib-deccard label, .ib-dform label { display: block; font-size: var(--ib-fs-13, 13px); font-weight: 500; margin: 0 0 6px; }
-.ib-deccard label span, .ib-dform label span { color: var(--muted-foreground); font-weight: 400; }
+/* A comment box (an image's, a video's) */
 .pn-inbox .ib-ta { display: block; width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; font: inherit; font-size: var(--ib-fs-13-5, 13.5px); line-height: 1.5; min-height: 58px; margin: 0 0 12px; background: var(--card); color: var(--foreground); resize: none; field-sizing: content; outline: none; }
 .pn-inbox .ib-ta:focus, .pn-inbox .ib-ta:focus-visible { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 18%, transparent); outline: none; }
-.ib-deccard .ib-in { display: flex; align-items: center; gap: 7px; font-size: var(--ib-fs-12-5, 12.5px); color: var(--muted-foreground); margin: 2px 0 12px; }
-.ib-deccard .ib-bt { display: flex; justify-content: flex-end; gap: 8px; }
-.ib-deccard .ib-error { margin: 0 0 10px; }
-.pn-inbox svg.ib-dm { width: 13px; height: 13px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linejoin: round; }
-.ib-deccard h4 svg.ib-dm { stroke: var(--primary); stroke-width: 2; }
 
 /* The quiet "Skills: …" line under a person's message (components/SkillsLine.tsx): the pasted skills block, folded. */
 .ib-skills { margin: 6px 0 0; font-size: var(--ib-fs-13, 13px); color: var(--muted-foreground); }
@@ -1097,61 +1087,12 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 .ib-skills[open] .ib-skills-t::after { content: 'Hide'; }
 .ib-skills > summary:hover .ib-skills-t::after { text-decoration: underline; text-underline-offset: 2px; }
 .ib-skills-block { margin: 8px 0 0; padding: 10px 12px; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; line-height: 1.55; color: var(--foreground); background: var(--muted); border-radius: 6px; }
-/* "Settled: <text>" under a card whose answer recorded a decision */
-.ib-settled { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0 0; font-size: var(--ib-fs-13-5, 13.5px); }
-.ib-settled svg.ib-dm { margin-top: 4px; color: var(--muted-foreground); }
-.ib-settled a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
 
-/* the project's decisions (record 3.2), a row opening beside the list */
+/* A page beside the sidebar with a heading (Drafts) */
 .ib-dpage { padding: 28px 44px; flex: 1; min-width: 0; overflow-y: auto; }
-.ib-dpage.ib-narrow { flex: none; width: 460px; padding: 28px 22px; border-right: 1px solid var(--ib-pane-line); }
 .ib-dh { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
 .ib-dh h1 { font-size: var(--ib-fs-22, 22px); font-weight: 650; margin: 0; letter-spacing: -0.01em; }
-/* The Decisions page's project switch (DecisionsProjectPicker): a button, then a listbox of every project with its folder and counts. */
-.ib-ppick { position: relative; min-width: 0; flex: 0 1 auto; }
-.pn-inbox .ib-ppick-t { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; height: 32px; padding: 0 9px 0 11px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--foreground); font-size: var(--ib-fs-13-5, 13.5px); text-align: left; }
-.pn-inbox .ib-ppick-t:hover { background: color-mix(in oklch, var(--muted) 45%, var(--card)); }
-.pn-inbox .ib-ppick-t:focus-visible { outline: 2px solid color-mix(in oklch, var(--primary) 60%, transparent); outline-offset: 1px; }
-.pn-inbox .ib-ppick-t[aria-expanded="true"] { border-color: color-mix(in oklch, var(--primary) 45%, var(--border)); }
-.ib-ppick-tn { font-weight: 550; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ib-ppick-tc { color: var(--muted-foreground); font-size: var(--ib-fs-12-5, 12.5px); white-space: nowrap; font-variant-numeric: tabular-nums; }
-.ib-ppick-t > svg { flex: none; color: var(--muted-foreground); }
-.ib-ppick-list { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; width: 400px; max-width: calc(100vw - 24px); max-height: min(440px, 62vh); overflow-y: auto; overscroll-behavior: contain; background: var(--popover); color: var(--popover-foreground, var(--foreground)); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22); padding: 6px; }
-.ib-ppick-o { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 7px; cursor: pointer; font-size: var(--ib-fs-13-5, 13.5px); outline: none; }
-.ib-ppick-o:hover, .ib-ppick-o:focus-visible, .ib-ppick-o:focus { background: color-mix(in oklch, var(--primary) 11%, transparent); }
-.ib-ppick-o[aria-selected="true"] { background: color-mix(in oklch, var(--primary) 7%, transparent); }
-.ib-ppick-o[aria-selected="true"]:focus, .ib-ppick-o[aria-selected="true"]:hover { background: color-mix(in oklch, var(--primary) 14%, transparent); }
-.ib-ppick-ck { width: 16px; flex: none; display: inline-flex; color: var(--primary); }
-.ib-ppick-ot { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-.ib-ppick-ot b { font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ib-ppick-p { font-size: 12px; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: ltr; }
-.ib-ppick-oc { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; flex: none; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.ib-ppick-w { color: var(--foreground); font-weight: 550; }
-.ib-ppick-w::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 1px; transform: rotate(45deg) translateY(-1px); background: var(--primary); }
-.ib-ppick-s, .ib-ppick-none { color: var(--muted-foreground); }
 .ib-dsub { color: var(--muted-foreground); font-size: var(--ib-fs-14, 14px); margin: 0 0 22px; }
-.ib-dpage .ib-group + .ib-group { margin-top: 18px; }
-.ib-drow { display: grid; grid-template-columns: 22px minmax(0, 1fr) 300px 120px 90px; align-items: center; gap: 12px; min-height: 50px; padding: 0 12px; border-bottom: 1px solid var(--ib-hair); font-size: var(--ib-fs-14, 14px); width: 100%; text-align: left; }
-/* A long decision shows three lines; the open decision has all of it. */
-.ib-drow .ib-st { font-weight: 550; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; overflow-wrap: anywhere; }
-.ib-drow .ib-src, .ib-drow .ib-when { color: var(--muted-foreground); font-size: var(--ib-fs-13, 13px); }
-.ib-drow .ib-when { text-align: right; }
-.ib-drow .ib-act { text-align: right; }
-.ib-drow.ib-w svg.ib-dm, .ib-drow.ib-ended svg.ib-dm { color: var(--muted-foreground); }
-.ib-drow.ib-ended .ib-st { font-weight: 450; color: var(--muted-foreground); }
-.ib-drow.ib-dnarrow { grid-template-columns: 22px minmax(0, 1fr) auto; padding: 9px 12px; }
-.ib-drow.ib-dnarrow svg.ib-dm { align-self: start; margin-top: 4px; }
-.ib-dtxt { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.ib-dnone { color: var(--muted-foreground); font-size: var(--ib-fs-13-5, 13.5px); margin: 10px 12px; }
-.ib-dstate { display: inline-flex; align-items: center; gap: 7px; font-size: var(--ib-fs-13, 13px); font-weight: 550; color: var(--muted-foreground); padding-left: 6px; }
-.ib-dfacts { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px 14px; margin: 6px 0 0; font-size: var(--ib-fs-14, 14px); line-height: 1.5; }
-.ib-dfacts dt { color: var(--muted-foreground); font-size: var(--ib-fs-13, 13px); }
-.ib-dfacts dd { margin: 0; }
-.pn-inbox .ib-link { color: var(--primary); font-size: var(--ib-fs-13-5, 13.5px); text-decoration: underline; text-underline-offset: 2px; margin-left: 8px; text-align: left; }
-.ib-dfacts dd > .ib-link:first-child { margin-left: 0; }
-.ib-dform .ib-ta { min-height: 52px; }
-/* A long text scrolls inside its box, so the form's buttons stay in reach. */
-.pn-inbox .ib-dform .ib-ta, .pn-inbox .ib-deccard .ib-ta { max-height: min(30vh, 200px); overflow-y: auto; }
 
 /* attachments (step 2, record 2.1 to 2.8) */
 /* One line, "Changed 6:43 PM": the whole sentence is the hover text (tiles of a grid kept their heights uneven when it wrapped). */
@@ -1932,7 +1873,6 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
 .pn-inbox[data-stack~="thread"] .ib-main { position: relative; }
 .pn-inbox[data-stack~="thread"][data-view="thread"] .ib-listcol { position: absolute; inset: 0; visibility: hidden; }
 .pn-inbox[data-stack~="file"][data-view="file"] .ib-pane.ib-withfile { display: none; }
-.pn-inbox[data-stack~="decision"][data-view="decision"] .ib-dpage { display: none; }
 .pn-inbox .ib-pback { display: inline-flex; align-items: center; gap: 2px; flex: 0 1 auto; min-width: 0; max-width: 40%; height: 30px; padding: 0 9px 0 4px; border-radius: 7px; color: var(--primary); font-size: var(--ib-fs-13-5, 13.5px); font-weight: 550; white-space: nowrap; }
 .pn-inbox .ib-pback:hover { background: color-mix(in oklch, var(--primary) 10%, transparent); }
 .ib-pback-l { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -1965,10 +1905,8 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   .ib-lbody { overflow-anchor: none; }
   .ib-listcol.ib-narrow { flex: 1; width: auto; border-right: 0; }
   .pn-inbox[data-view="file"] .ib-pane.ib-withfile { display: none; }
-  .pn-inbox[data-view="decision"] .ib-dpage { display: none; }
-  .ib-pane.ib-dpane { flex: 1; }
   @media (prefers-reduced-motion: no-preference) {
-    .pn-inbox[data-enter="thread"] .ib-pane, .pn-inbox[data-enter="decision"] .ib-pane { animation: ib-push 240ms cubic-bezier(0.22, 1, 0.36, 1); }
+    .pn-inbox[data-enter="thread"] .ib-pane { animation: ib-push 240ms cubic-bezier(0.22, 1, 0.36, 1); }
     @keyframes ib-push { from { transform: translateX(28px); opacity: 0.4; } }
   }
 
@@ -2062,7 +2000,7 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   .pn-inbox .ib-rchip { height: 32px; }
   .ib-route { padding: 10px 6px 8px; }
   .ib-opt { min-height: 44px; }
-  /* menus are sheets from the bottom edge: New message's sessions, the annotations list, the decision card */
+  /* menus are sheets from the bottom edge: New message's sessions, the annotations list */
   .ib-nmpop, .ib-menu.ib-nmpop, .ib-state.ib-nmpop, .ib-annpop {
     position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: auto; max-height: 72%; overflow-y: auto; z-index: 60;
     border-radius: 16px 16px 0 0; border-bottom: 0; padding-bottom: calc(10px + env(safe-area-inset-bottom));
@@ -2072,7 +2010,6 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   .pn-inbox .ib-menu .ib-mi { min-height: 52px; padding: 10px; }
   .pn-inbox .ib-pane.ib-withfile .ib-annpop { width: auto; }
   .pn-inbox .ib-arow .ib-aa { min-height: 36px; }
-  .ib-deccard { left: 0 !important; right: 0; top: auto !important; bottom: 0; width: auto; max-height: 85%; overflow-y: auto; border-radius: 16px 16px 0 0; padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
 
   /* a file: the whole window, Back to the thread, the comments as a sheet */
   .ib-view.ib-full { z-index: 40; grid-template-rows: calc(48px + env(safe-area-inset-top)) auto minmax(0, 1fr) auto auto; padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
@@ -2112,33 +2049,11 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   .ib-vsep { display: none; }
   .ib-gerror { padding: 12px 16px 0; }
 
-  /* decisions */
+  /* Drafts */
   .ib-dpage { padding: 0 0 calc(24px + env(safe-area-inset-bottom)); }
   .ib-dh { min-height: calc(52px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) 12px 0 4px; gap: 6px; margin-bottom: 6px; }
   .ib-dh h1 { font-size: var(--ib-fs-22, 22px); flex: none; }
-  .ib-ppick { flex: 1 1 0; }
-  .pn-inbox .ib-ppick-t { height: 44px; width: 100%; font-size: var(--ib-fs-15, 15px); }
-  /* the button carries one count, whole (never a cut number); the name gives way (the sheet shows everything) */
-  .pn-inbox .ib-ppick-t .ib-ppick-tn { flex: 0 1 auto; }
-  .pn-inbox .ib-ppick-t .ib-ppick-tc { flex: none; margin-left: auto; }
-  .pn-inbox .ib-ppick-t > svg { margin-left: auto; }
-  .pn-inbox .ib-ppick-t .ib-ppick-tc + svg { margin-left: 0; }
-  /* the list is a sheet from the bottom edge, like New message's sessions and the decision card */
-  .ib-ppick-scrim { position: fixed; inset: 0; z-index: 59; background: rgb(0 0 0 / 0.35); }
-  .ib-ppick-list.ib-ppick-sheet { position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: auto; max-width: none; max-height: 72%; z-index: 60; border-radius: 16px 16px 0 0; border-bottom: 0; padding: 0 8px calc(10px + env(safe-area-inset-bottom)); box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.28); }
-  .ib-ppick-h { position: sticky; top: 0; z-index: 1; height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 0 0 0 8px; font-size: var(--ib-fs-15, 15px); background: var(--popover); border-bottom: 1px solid color-mix(in oklch, var(--border) 60%, transparent); margin-bottom: 4px; }
-  .ib-ppick-h b { font-weight: 600; }
-  .ib-ppick-o { min-height: 56px; padding: 8px 10px; font-size: var(--ib-fs-15, 15px); }
-  .ib-ppick-p { font-size: var(--ib-fs-13, 13px); }
-  .ib-ppick-oc { font-size: var(--ib-fs-13, 13px); }
   .ib-dsub { margin: 0 16px 14px; }
-  .ib-dpage .ib-band { border-radius: 0; padding: 0 16px; }
-  .ib-dpage button.ib-band { height: 44px; }
-  .ib-drow, .ib-drow.ib-dnarrow { min-height: 60px; padding: 10px 16px; }
-  .ib-dnone { margin: 12px 16px; }
-  .ib-dfacts { grid-template-columns: minmax(0, 1fr); gap: 2px; }
-  .ib-dfacts dt { margin-top: 10px; }
-  .pn-inbox .ib-link { min-height: 44px; display: inline-flex; align-items: center; }
 
   /* settings, What's new, the first run */
   .ib-spage { padding: 0 16px calc(32px + env(safe-area-inset-bottom)); }
@@ -2242,16 +2157,12 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   /* The file's reply strip: "ride your next Send" wraps under itself rather than being cut. */
   .ib-vfoot-row .ib-sp { white-space: normal; text-overflow: clip; line-height: 1.25; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
   /* 44 px hit areas for small controls that keep their look: the reply's
-     Keep open / Skip them, the question card's "Records a decision" (ui), and
-     the file's toolstrip, Global comment and Copy file (ui). */
+     Keep open / Skip them, and the file's toolstrip, Global comment and Copy
+     file (ui). */
   .pn-inbox .ib-skipchip button,
-  .ib-body [data-question-decision-toggle],
-  .ib-body [data-question-decision-open],
   .ib-phone .ib-toolstrip button,
   .ib-phone [data-sticky-actions] button { position: relative; }
   .pn-inbox .ib-skipchip button::after,
-  .ib-body [data-question-decision-toggle]::after,
-  .ib-body [data-question-decision-open]::after,
   .ib-phone .ib-toolstrip button::after,
   .ib-phone [data-sticky-actions] button::after {
     content: ''; position: absolute; left: 50%; top: 50%; width: max(100%, 44px); height: max(100%, 44px); transform: translate(-50%, -50%);
@@ -2827,7 +2738,7 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 .pn-inbox .ib-cp-tobtn[data-loading] { cursor: progress; color: var(--muted-foreground); }
 .ib-readdress .ib-routeform { max-width: 460px; }
 
-/* The Drafts page (the Decisions page's frame). */
+/* The Drafts page. */
 .ib-drafts-n { color: var(--muted-foreground); font-size: var(--ib-fs-14, 14px); }
 .ib-drafts-empty { color: var(--muted-foreground); font-size: var(--ib-fs-14, 14px); }
 .ib-draft { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--ib-hair); }
@@ -3134,7 +3045,7 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 .pn-inbox :is(.ib-att-t, .ib-hatts, .ib-readline, .ib-route, .ib-mfold-b > span) { --foreground: var(--ib-sf-fg-s, var(--ib-fg0)); --muted-foreground: var(--ib-sf-mfg-s, var(--ib-mfg0)); color: var(--ib-sf-color-s); }
 .pn-inbox .ib-mfold-b > span { color: var(--ib-sf-color-s, var(--muted-foreground)); }
 @supports (color: oklch(from red calc(0.5 - sign(l - 0.6) * 0.5) 0 h)) {
-  /* The accent's words on the card (Recommended, the decision tag) and the read line: the same step. Accept
+  /* The accent's words on the card (Recommended) and the read line: the same step. Accept
      recommended's words sit on its own tint, so they take a further step (AA on every palette, nord dark
      included). */
   .pn-inbox {
@@ -3161,14 +3072,8 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 .pn-inbox .question-block > div:first-child > span:last-child > .bg-success\/15 { --ib-qt-bg0: color-mix(in oklab, var(--success) 15%, transparent); --ib-qt-fg0: var(--success); }
 .pn-inbox .question-block > div:first-child > span:last-child > .bg-muted { --ib-qt-bg0: var(--muted); }
 .pn-inbox .question-block > div:first-child > span:last-child > .border-dashed { --ib-qt-line0: var(--border); }
-.pn-inbox .question-block > div:first-child > span:last-child > :is(span, button)[aria-pressed="true"],
-.pn-inbox .question-block > div:first-child > span:last-child > [data-question-decision-tag] { color: var(--ib-calm-s, var(--primary)); }
+.pn-inbox .question-block > div:first-child > span:last-child > :is(span, button)[aria-pressed="true"] { color: var(--ib-calm-s, var(--primary)); }
 .pn-inbox .question-block > div:first-child svg { color: var(--ib-qc-svg-s); }
-/* The owner's decision (2026-10-16): no "Answering this records a decision" row in the Inbox; the "Records a
-   decision" tag at the card's top right says it and switches it. A recorded decision's own row (its
-   statement, a link) stays. Other hosts (plan review, Workspaces) keep the row: this is the Inbox's skin, a
-   ruling of its own and not a Soft switch. */
-.pn-inbox .question-block [data-question-decision-row]:not(:has(a)) { display: none; }
 .pn-inbox .question-block label[data-question-option] { border-radius: var(--ib-qc-opt-r-s, 7px); }
 .pn-inbox .question-block label[data-question-option]:hover { background: var(--ib-qc-opt-hover-s, color-mix(in oklab, var(--muted) 45%, transparent)); }
 .pn-inbox .question-block label[data-question-option]:has(input:checked) { background: var(--ib-qc-opt-on-s, color-mix(in oklab, var(--primary) 12%, transparent)); }
@@ -3239,13 +3144,8 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-mfold-b > span { border-color: var(--ib-sf-line-s, var(--border)); background: var(--ib-sf-bg-s, var(--card)); }
 
 /* Every word in the thread reads at AA on the default palette, light and dark, with Soft's quiet text: the "·"
-   between "to you" and what follows is quiet text, not a faded glyph, and the "Records a decision" tag switched
-   off keeps the quiet text colour (ui fades it to 55% inline; its dotted outline and aria-pressed="false" still
-   say off). Off, today's fades. */
+   between "to you" and what follows is quiet text, not a faded glyph. Off, today's fades. */
 .ib-to-sep { opacity: var(--ib-tosep-o-s, 0.6); }
-/* Off is read from the card (`data-question-decision-recording`), never from ui's inline style: React leaves
-   `style=""` behind when the tag is switched back on, and `[style]` would keep it grey. */
-.pn-inbox .question-block[data-question-decision-recording="off"] :is([data-question-decision-tag], [data-question-decision-toggle]) { color: var(--ib-qc-off-s, color-mix(in oklab, var(--muted-foreground) 55%, transparent)) !important; }
 
 /* The way back reads in the text colour (audit 6: the accent is not a link colour here). */
 .pn-inbox .ib-pback { border-radius: var(--ib-r10-s, 7px); color: var(--ib-calm-s, var(--primary)); font-weight: var(--ib-calm-w-s, 550); }
@@ -3256,7 +3156,7 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 }
 
 /* ───────────── The Soft look elsewhere (.product/approved/inbox-soft/): buttons, dialogs, the search
-   palette, compose, Settings, Decisions, Drafts, What's new and a file's chrome ───────────── */
+   palette, compose, Settings, Drafts, What's new and a file's chrome ───────────── */
 /* Appended after the window's own rules. Paint only (owner, 2026-10-16): sizes and spacing stay today's. Each
    declaration is `var(<switch token>, <today's value>)` as in the thread's block. Switches read here: buttons
    (--ib-soft-buttons), the Light / Dark / System control (--ib-soft-segmented), Settings' groups and the
@@ -3322,15 +3222,10 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 .pn-inbox .ib-sback { border-radius: var(--ib-r10-s, 6px); }
 .ib-way-sec h5, .ib-before h5 { font-size: var(--ib-lbl-size-s, 11px); letter-spacing: var(--ib-lbl-track-s, 0.06em); text-transform: var(--ib-lbl-case-s, uppercase); }
 
-/* Decisions and Drafts: Soft rows (the list's pill, below), sections as text headers. */
-.ib-drow { border-bottom-color: var(--ib-row-line); }
+/* Drafts: Soft rows. */
 .ib-draft { border-bottom-color: var(--ib-sep-s, var(--ib-hair)); }
 .pn-inbox .ib-draft-open:hover { background: var(--ib-hover-s, color-mix(in oklch, var(--muted) 30%, transparent)); }
 .ib-draft-mk { border-radius: var(--ib-r11-s, 9px); }
-.pn-inbox .ib-ppick-t { border-color: var(--ib-bt-line-s, var(--border)); border-radius: var(--ib-r10-s, 8px); background: var(--ib-gr-bg-s, var(--card)); }
-.ib-ppick-list { border-color: var(--ib-float-line-s, var(--border)); border-radius: var(--ib-rl-lg-s, 10px); box-shadow: var(--ib-float-s, 0 12px 32px rgba(0, 0, 0, 0.22)); }
-.ib-ppick-o { border-radius: var(--ib-rl-xs-s, 7px); }
-.ib-deccard { border-color: var(--ib-float-line-s, var(--border)); border-radius: var(--ib-rl-xl-s, 12px); box-shadow: var(--ib-float-s, 0 18px 50px rgba(0, 0, 0, 0.25)); }
 
 /* What's new: its bar shares the panes' hairline; the release card is raised. */
 .ib-wn-bar { border-bottom-color: var(--ib-sep-s, var(--border)); }
@@ -3365,11 +3260,11 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 :root.light .pn-inbox .ib-sp-row[aria-selected="true"] { background: var(--ib-sel-s, var(--muted)); }
 .ib-sp-chip { border-radius: var(--ib-pill-s, 4px); }
 
-/* On a phone the rules above keep the phone's own shapes: buttons at 9 px, and the decision card, the
-   annotations list and New message's sessions as bottom sheets (rounded on top, no float around them). */
+/* On a phone the rules above keep the phone's own shapes: buttons at 9 px, and the annotations list and New
+   message's sessions as bottom sheets (rounded on top, no float around them). */
 @media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
   .pn-inbox .ib-btn { border-radius: var(--ib-bt-r-s, 9px); }
   .pn-inbox .ib-pfoot .ib-btn { border-radius: var(--ib-ft-r-s, 9px); }
-  .ib-deccard, .ib-annpop, .ib-nmpop { border-radius: 16px 16px 0 0; }
+  .ib-annpop, .ib-nmpop { border-radius: 16px 16px 0 0; }
   .ib-annpop, .ib-nmpop { box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.28); }
 }

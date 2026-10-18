@@ -48,8 +48,7 @@
         "archived": [],
         "counts": {
           "waiting": 1,
-          "unread": 1,
-          "decisions_waiting": 0
+          "unread": 1
         },
         "threads": {
           "t1": {
@@ -99,8 +98,7 @@
         "archived": [],
         "counts": {
           "waiting": 1,
-          "unread": 1,
-          "decisions_waiting": 0
+          "unread": 1
         },
         "threads": {
           "t1": {
@@ -150,8 +148,7 @@
         "archived": [],
         "counts": {
           "waiting": 1,
-          "unread": 1,
-          "decisions_waiting": 0
+          "unread": 1
         },
         "threads": {
           "t1": {
@@ -211,8 +208,7 @@
         "archived": [],
         "counts": {
           "waiting": 2,
-          "unread": 2,
-          "decisions_waiting": 0
+          "unread": 2
         },
         "threads": {
           "t1": {
@@ -287,8 +283,7 @@
         "archived": [],
         "counts": {
           "waiting": 3,
-          "unread": 3,
-          "decisions_waiting": 0
+          "unread": 3
         },
         "threads": {
           "t1": {
@@ -379,8 +374,7 @@
         "archived": [],
         "counts": {
           "waiting": 4,
-          "unread": 4,
-          "decisions_waiting": 0
+          "unread": 4
         },
         "threads": {
           "t1": {
@@ -478,8 +472,7 @@
         "archived": [],
         "counts": {
           "waiting": 4,
-          "unread": 4,
-          "decisions_waiting": 0
+          "unread": 4
         },
         "threads": {
           "t1": {
@@ -577,8 +570,7 @@
         "archived": [],
         "counts": {
           "waiting": 4,
-          "unread": 4,
-          "decisions_waiting": 0
+          "unread": 4
         },
         "threads": {
           "t1": {
@@ -678,8 +670,7 @@
         ],
         "counts": {
           "waiting": 3,
-          "unread": 3,
-          "decisions_waiting": 0
+          "unread": 3
         },
         "threads": {
           "t1": {
@@ -779,8 +770,7 @@
         ],
         "counts": {
           "waiting": 3,
-          "unread": 3,
-          "decisions_waiting": 0
+          "unread": 3
         },
         "threads": {
           "t1": {
@@ -880,8 +870,7 @@
         ],
         "counts": {
           "waiting": 3,
-          "unread": 3,
-          "decisions_waiting": 0
+          "unread": 3
         },
         "threads": {
           "t1": {
@@ -981,8 +970,7 @@
         ],
         "counts": {
           "waiting": 3,
-          "unread": 3,
-          "decisions_waiting": 0
+          "unread": 3
         },
         "threads": {
           "t1": {
@@ -1082,8 +1070,7 @@
         ],
         "counts": {
           "waiting": 3,
-          "unread": 3,
-          "decisions_waiting": 0
+          "unread": 3
         },
         "threads": {
           "t1": {
@@ -1183,8 +1170,7 @@
         ],
         "counts": {
           "waiting": 3,
-          "unread": 3,
-          "decisions_waiting": 0
+          "unread": 3
         },
         "threads": {
           "t1": {
@@ -1284,8 +1270,7 @@
         ],
         "counts": {
           "waiting": 3,
-          "unread": 3,
-          "decisions_waiting": 0
+          "unread": 3
         },
         "threads": {
           "t1": {
@@ -1385,8 +1370,7 @@
         ],
         "counts": {
           "waiting": 2,
-          "unread": 2,
-          "decisions_waiting": 0
+          "unread": 2
         },
         "threads": {
           "t1": {
@@ -1488,8 +1472,7 @@
         ],
         "counts": {
           "waiting": 1,
-          "unread": 2,
-          "decisions_waiting": 0
+          "unread": 2
         },
         "threads": {
           "t1": {
@@ -1597,8 +1580,7 @@
         ],
         "counts": {
           "waiting": 2,
-          "unread": 3,
-          "decisions_waiting": 1
+          "unread": 3
         },
         "threads": {
           "t1": {
@@ -1718,8 +1700,7 @@
         ],
         "counts": {
           "waiting": 2,
-          "unread": 3,
-          "decisions_waiting": 1
+          "unread": 3
         },
         "threads": {
           "t1": {
@@ -1834,8 +1815,7 @@
         ],
         "counts": {
           "waiting": 2,
-          "unread": 3,
-          "decisions_waiting": 1
+          "unread": 3
         },
         "threads": {
           "t1": {
@@ -1950,8 +1930,7 @@
         ],
         "counts": {
           "waiting": 2,
-          "unread": 3,
-          "decisions_waiting": 1
+          "unread": 3
         },
         "threads": {
           "t1": {
@@ -2066,8 +2045,7 @@
         ],
         "counts": {
           "waiting": 2,
-          "unread": 3,
-          "decisions_waiting": 1
+          "unread": 3
         },
         "threads": {
           "t1": {
@@ -2187,8 +2165,7 @@
         ],
         "counts": {
           "waiting": 3,
-          "unread": 4,
-          "decisions_waiting": 1
+          "unread": 4
         },
         "threads": {
           "t1": {
@@ -2304,8 +2281,7 @@
         ],
         "counts": {
           "waiting": 3,
-          "unread": 4,
-          "decisions_waiting": 1
+          "unread": 4
         },
         "threads": {
           "t1": {

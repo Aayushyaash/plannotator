@@ -220,8 +220,6 @@ function pane({ thread, onSeen, file = null, phone = false, covered = false, loo
         onQuestions={() => {}}
         onChanged={async () => {}}
         onClose={() => {}}
-        decisions={[]}
-        onOpenDecisionPage={() => {}}
         file={file}
         onOpenFile={() => {}}
         onOpenGuide={() => {}}
@@ -373,7 +371,7 @@ describe.skipIf(!hasDom)('seen on sight in the thread pane', () => {
     expect(pill.hasAttribute('data-off')).toBe(true);
   });
 
-  // The failure this guards: a phone's New message sheet (or the decision card,
+  // The failure this guards: a phone's New message sheet (or
   // the annotations list, the Mark read toast) drawn over the end of the thread
   // hid the arrival, and it was still marked seen.
   test('something drawn over the first lines (a sheet) hides them: nothing is seen until it goes, and a cover mid-dwell restarts it', async () => {

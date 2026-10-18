@@ -146,7 +146,7 @@ function viewportWidth(): number {
  * request: never on a pane); only its height follows what is open:
  * - a file covering the thread (full screen, or a window too narrow for
  *   both): 12 px above the file's foot strip;
- * - an open pane (a thread, a decision): 12 px above its foot, so it never
+ * - an open pane (a thread): 12 px above its foot, so it never
  *   covers Reply or New message;
  * - a thread routed whose pane is still loading: pending;
  * - no pane: near the list's bottom;

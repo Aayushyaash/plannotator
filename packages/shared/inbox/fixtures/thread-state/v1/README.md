@@ -47,7 +47,7 @@ Labels: `m1`, `m2`, ... are messages in the order they were written; `t1`, `t2`,
 | `sections` | The default list (`GET /api/inbox/threads`): the six sections in order, each with its thread labels in order. Archived threads are in `quiet` |
 | `sections_exclude_archived` | The window's list (`?archived=exclude`): archived threads are left out |
 | `archived` | The archived list (`GET /api/inbox/threads/archived`), newest archived first |
-| `counts` | `waiting`: the sidebar count (rows in Stopped, Holding, Waiting). `unread`: rows drawn bold (Stopped, Holding, Waiting, New). `decisions_waiting`: the Decisions count |
+| `counts` | `waiting`: the sidebar count (rows in Stopped, Holding, Waiting). `unread`: rows drawn bold (Stopped, Holding, Waiting, New). Files written before Decisions were removed (2026-10) also had `decisions_waiting`; it is gone, so a kit that read it should drop it |
 | `threads` | Per thread: `section`, `unread`, `unseen`, `read` (Mark read stands), `archived`, `agent_after_archive`, `back_from_archive`, `last` (its latest message) and `questions` (each question's state: `open`, `picked`, `sent`, `closed`, `superseded`) |
 
 ## Where they come from

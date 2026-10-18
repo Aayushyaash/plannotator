@@ -147,14 +147,13 @@ describe("the guide against what it describes", () => {
     expect(help).toContain(`\`${join(DATA_DIR, "config.json")}\``);
   });
 
-  test("its Inbox-only question example reads as Stopped, Holds up and a decision to record", () => {
+  test("its Inbox-only question example reads as Stopped and Holds up", () => {
     expect(help).toContain(`\`\`\`markdown\n${INBOX_QUESTION_EXAMPLE}\n\`\`\``);
     const [question, ...rest] = parseInboxQuestionBlocks(INBOX_QUESTION_EXAMPLE);
     expect(rest).toEqual([]);
     expect(question!.prompt).toBe("Which queue should failed webhook deliveries retry on?");
     expect(question!.stopped).toBe("the retry worker cannot start until this is settled");
     expect(question!.holds_up).toEqual(["webhook-retries", "delivery-dashboard"]);
-    expect(question!.decision_on_answer).toBe(true);
     expect(question!.parsed.choices.map((choice) => choice.label)).toEqual(["The existing jobs queue", "A dedicated retries queue"]);
     // The example models the context rule: what the choice affects, plus a link to an attached file.
     expect(question!.parsed.context).toContain("[The load test](load-test.html)");

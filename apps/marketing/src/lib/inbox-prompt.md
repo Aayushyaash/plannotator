@@ -83,5 +83,5 @@ When the reply arrives, quote it back to the person to show the round trip worke
 
 - Where replies go: to the session that asked. Claude Code, Pi and OpenCode 2 get the reply as their next turn once idle. Other agents read it when they call `wait_for_reply`.
 - Notifications: the open Inbox page can show a browser notification when a question arrives while its tab is in the background. It asks once. Change it in the Inbox's Settings.
-- Local only: the Inbox listens on `127.0.0.1`. Threads, answers, attached files and decisions are files in `~/.plannotator/inbox/`. Nothing leaves the machine.
+- Local only: the Inbox listens on `127.0.0.1`. Threads, answers and attached files are files in `~/.plannotator/inbox/`. Nothing leaves the machine.
 - Opening it later: `plannotator inbox`. Agents start a stopped Inbox in the background when they write to it.

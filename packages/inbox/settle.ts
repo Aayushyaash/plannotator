@@ -4,7 +4,7 @@
  * repo). While any thread is open the list holds still: opening a row records
  * the look and unbolds that row in place. The list settles (takes the
  * person's own reads and actions) when the thread is closed, the folder
- * changes, Decisions or Settings open, or Show is pressed.
+ * changes, Settings opens, or Show is pressed.
  *
  * On a wide window the list is beside the thread, so closing it is the
  * moment to settle: the list widens first, then, a beat later, the rows

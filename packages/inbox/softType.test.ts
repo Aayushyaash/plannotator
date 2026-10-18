@@ -91,7 +91,7 @@ test('layout corners are one scale; buttons keep their own', () => {
   }
   expect(CODE).toMatch(/--ib-pane-r-s:\s*var\(--ib-soft-panes\)\s*var\(--ib-lr-pane\);/);
   // The list's row pills, a section band, a tile and a dialog read the scale.
-  expect(CODE).toMatch(/:is\(\.ib-row, \.ib-nrow, button\.ib-drow\)::before \{ border-radius: var\(--ib-rl-sm-s, 8px\); \}/);
+  expect(CODE).toMatch(/:is\(\.ib-row, \.ib-nrow\)::before \{ border-radius: var\(--ib-rl-sm-s, 8px\); \}/);
   expect(CODE).toMatch(/--ib-band-r-s:\s*var\(--ib-soft-band\)\s*var\(--ib-lr-sm\);/);
   expect(CODE).toMatch(/--ib-sf-r14-s:\s*var\(--ib-soft-surfaces\)\s*var\(--ib-lr-lg\);/);
   expect(CODE).toMatch(/dialog\.ib-dlg \{[^}]*border-radius: var\(--ib-rl-xl-s, 12px\)/);
@@ -107,7 +107,6 @@ test('rows part with no line between them in both modes (the prototype\'s rows);
   expect(light).not.toContain('--ib-soft-rows');
   expect(CODE).toMatch(/--ib-row-line-s:\s*var\(--ib-soft-rows\)\s*transparent;/);
   expect(CODE).toMatch(/\.ib-row, \.ib-nrow \{ border-bottom-color: var\(--ib-row-line\); \}/);
-  expect(CODE).toMatch(/\.ib-drow \{ border-bottom-color: var\(--ib-row-line\); \}/);
   // Every other line keeps today's colour: its faint fill has a switch of its own, off.
   expect(CODE).toMatch(/--ib-soft-lines:\s*initial;/);
   expect(CODE).toMatch(/--ib-sep-s:\s*var\(--ib-soft-lines\)\s*var\(--ib-fill\);/);

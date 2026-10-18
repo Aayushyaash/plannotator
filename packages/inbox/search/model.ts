@@ -21,7 +21,6 @@ export const GROUP_LABELS: Readonly<Record<InboxSearchGroupId, { heading: string
   threads: { heading: 'Threads', noun: 'threads' },
   messages: { heading: 'Messages', noun: 'messages' },
   files: { heading: 'Files', noun: 'files' },
-  decisions: { heading: 'Decisions', noun: 'decisions' },
   projects: { heading: 'Projects', noun: 'projects' },
 };
 
@@ -105,8 +104,6 @@ export function resultTarget(row: InboxSearchRow, terms: readonly string[]): { h
       return { hash: `#thread=${enc(row.thread_id)}&file=${enc(row.id)}`, land: null };
     case 'guide':
       return { hash: `#thread=${enc(row.thread_id)}&guide=${enc(row.message_id)}`, land: null };
-    case 'decision':
-      return { hash: `#decisions=${enc(row.project.id)}&decision=${enc(row.id)}`, land: null };
     case 'project':
       return { hash: `#project=${enc(row.id)}`, land: null };
   }
@@ -210,14 +207,12 @@ export interface RowThreadChip {
  *
  * - A thread row: the list's own rule (`threadChipName`): its name, unless its
  *   subject (the row's first line) already starts with it; no name, no chip.
- * - A message, file, guided review or decision recorded from an answer: the
- *   thread's name; with no name, the thread's subject in the chip. That
- *   subject chip is left out only when the row's first line is the subject,
+ * - A message, file or guided review: the thread's name; with no name, the
+ *   thread's subject in the chip. That subject chip is left out only when the row's first line is the subject,
  *   begins with it, or is a start of it at least 12 characters long (a message
  *   whose words became the subject); never for a word or two met inside the
  *   text ("Deploy" in "We should deploy tomorrow").
- * - A project, or a decision with no thread (an agent's `record_decision`, or
- *   its thread deleted): none.
+ * - A project: none.
  */
 export function rowThreadChip(row: InboxSearchRow): RowThreadChip | null {
   if (row.type === 'project') return null;
@@ -228,7 +223,7 @@ export function rowThreadChip(row: InboxSearchRow): RowThreadChip | null {
     return name ? { text: name, kind: 'name', subject } : null;
   }
   if (row.thread_name) return { text: row.thread_name, kind: 'name', subject };
-  const first = sameText(row.type === 'message' ? row.snippet.text : row.type === 'decision' ? row.text : row.name);
+  const first = sameText(row.type === 'message' ? row.snippet.text : row.name);
   const wanted = sameText(subject);
   const shown = wanted.length > 0 && (first.startsWith(wanted) || (first.length >= SHOWN_MIN && wanted.startsWith(first)));
   return shown ? null : { text: subject, kind: 'subject', subject };

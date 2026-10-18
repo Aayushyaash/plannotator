@@ -57,7 +57,6 @@ function render(mcpCommand: readonly string[] | null, foot: { updated?: string |
             page="inbox"
             projectId={null}
             inboxCount={0}
-            decisionsCount={0}
             projects={[]}
             projectCounts={new Map()}
             update={null}
@@ -66,7 +65,6 @@ function render(mcpCommand: readonly string[] | null, foot: { updated?: string |
             onInbox={noop}
             onProject={noop}
             onSettings={noop}
-            onDecisions={noop}
             onUpdate={noop}
             onWhatsNew={noop}
             mcpCommand={command}

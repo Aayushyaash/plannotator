@@ -392,7 +392,7 @@ test.skipIf(!hasDom)('every project hidden with nothing archived (threads delete
     act(() =>
       root!.render(
         <SidebarProvider>
-          <Sidebar page="inbox" projectId={null} inboxCount={0} decisionsCount={0} projects={[{ ...folder, archived }]} projectCounts={new Map()} update={null} restarting={false} updated={null} onInbox={noop} onProject={noop} onSettings={noop} onDecisions={noop} onUpdate={noop} onWhatsNew={noop} onProjectAction={noop} />
+          <Sidebar page="inbox" projectId={null} inboxCount={0} projects={[{ ...folder, archived }]} projectCounts={new Map()} update={null} restarting={false} updated={null} onInbox={noop} onProject={noop} onSettings={noop} onUpdate={noop} onWhatsNew={noop} onProjectAction={noop} />
         </SidebarProvider>,
       ),
     );
