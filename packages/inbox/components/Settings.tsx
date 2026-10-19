@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
-import { INBOX_SOUND_MAX_VOLUME, INBOX_SOUND_MIN_VOLUME } from '@plannotator/core/inbox-types';
+import { INBOX_SOUND_MAX_VOLUME, INBOX_SOUND_MIN_VOLUME, INBOX_TEXT_SIZES } from '@plannotator/core/inbox-types';
 import type { InboxSound } from '../sound';
 import type { AgentToolHost, SettingsModel } from '../api';
 import { formatBytes, formatCount, plural, tildePath } from '../format';
@@ -13,6 +13,7 @@ import { blockedSteps, browserName, isMac, notifyStatusKind, notifyStatusText, r
 import { DevicesSection, devicesNeedAttention, usePhones } from './Devices';
 import { SidebarTrigger } from '../shell/sidebar';
 import { useInboxTheme } from '../theme';
+import { chooseTextSize, useInboxTextSize } from '../textSize';
 import { SETTINGS_SECTION_LABEL, SETTINGS_SECTIONS, settingsHash, type SettingsSection } from '../settingsRoute';
 
 const TOOL_HOSTS: { host: AgentToolHost; name: string }[] = [
@@ -182,6 +183,7 @@ function GeneralSection({
   sound?: InboxSound;
 }) {
   const { mode, shown, choose } = useInboxTheme();
+  const textSize = useInboxTextSize();
   const notificationsOn = settings.notifications.enabled && permission === 'granted';
   const status = notifyStatusKind(settings.notifications.enabled, permission);
   const browser = browserName();
@@ -213,6 +215,31 @@ function GeneralSection({
                     <input type="radio" name="ib-theme" value={choice.id} checked={mode === choice.id} onChange={() => choose(choice.id)} />
                     <Icon name={choice.icon} size={14} />
                     {choice.label}
+                  </label>
+                ))}
+              </span>
+            </span>
+          </div>
+          <div className="ib-prow" data-settings-text-size={textSize}>
+            <span className="ib-txt">
+              <span className="ib-l" id="ib-text-size-label">
+                Text size
+              </span>
+              <span className="ib-desc">{textSize === 14 ? 'The default. Applies to the whole Inbox.' : 'Applies to the whole Inbox; 14 is the default.'}</span>
+            </span>
+            <span className="ib-ctl">
+              <span className="ib-seg" role="radiogroup" aria-labelledby="ib-text-size-label">
+                {INBOX_TEXT_SIZES.map((size) => (
+                  <label key={size} className="ib-seg-o" data-on={textSize === size ? '' : undefined}>
+                    <input
+                      type="radio"
+                      name="ib-text-size"
+                      value={size}
+                      checked={textSize === size}
+                      aria-label={`${size} px`}
+                      onChange={() => void chooseTextSize(size)}
+                    />
+                    {size}
                   </label>
                 ))}
               </span>

@@ -9,8 +9,9 @@
  *    right to left; a screen without hover keeps its room;
  *  - layout corners one step smaller (panes 10, row pills 8, tiles 10), buttons
  *    unchanged;
- *  - the type knob (`--ib-soft-type`, off by default): 14 px base to 13 with
- *    the window and ui's drawing following, nothing under 12 px;
+ *  - the text size (`--inbox-text-size`, the Text size setting, 14 by default):
+ *    13 takes the base to 13 with the window and ui's drawing following,
+ *    nothing under 11 px, and 15 grows every size;
  *  - list rows with no line between them, at today's pitch, light and dark,
  *    beside an open thread and on a phone.
  *
@@ -264,7 +265,7 @@ test('layout corners are one step smaller; buttons keep theirs', async () => {
   expect(await r('.ib-pfoot .ib-btn')).toBe('999px');
 });
 
-test("the type knob is off by default; on, the 14 px base is 13 and every size follows, none under 12 px", async () => {
+test("the text size is 14 by default; at 13 the base is 13 and every size follows, none under 11 px; at 15 every size grows", async () => {
   const { page } = world;
   await page.goto(`${world.url}#thread=${world.thread}`);
   await expect(page.locator('[data-question-part="prompt"]').first()).toBeVisible();
@@ -282,18 +283,24 @@ test("the type knob is off by default; on, the 14 px base is 13 and every size f
   const off = await sizes();
   expect(off.base).toBe('14px');
   expect(off.prompt).toBe('15px');
-  await page.addStyleTag({ content: '.pn-inbox { --ib-soft-type: ; }' });
+  await page.evaluate(() => document.documentElement.style.setProperty('--inbox-text-size', '13'));
   const on = await sizes();
   expect(on.base).toBe('13px');
   expect(parseFloat(on.prompt)).toBeCloseTo(15 * (13 / 14), 1);
   expect(parseFloat(on.subject)).toBeLessThan(parseFloat(off.subject));
-  // One knob: every text that was 12 px or more is still at least 12 px, and none grew.
+  // One knob: every text that was 11 px or more is still at least 11 px, and none grew.
   expect(on.each.length).toBe(off.each.length);
   for (let i = 0; i < off.each.length; i++) {
     expect(on.each[i]!).toBeLessThanOrEqual(off.each[i]! + 0.01);
-    if (off.each[i]! >= 12) expect(on.each[i]!).toBeGreaterThanOrEqual(12);
+    if (off.each[i]! >= 11) expect(on.each[i]!).toBeGreaterThanOrEqual(11);
   }
   await shot(page, '5-type-on');
+  await page.evaluate(() => document.documentElement.style.setProperty('--inbox-text-size', '15'));
+  const big = await sizes();
+  expect(big.base).toBe('15px');
+  expect(big.each.length).toBe(off.each.length);
+  for (let i = 0; i < off.each.length; i++) expect(big.each[i]!).toBeGreaterThanOrEqual(off.each[i]! - 0.01);
+  await page.evaluate(() => document.documentElement.style.removeProperty('--inbox-text-size'));
 });
 
 test('a phone: list rows with no line, a tile keeps its Open with its own room', async ({ browser }) => {

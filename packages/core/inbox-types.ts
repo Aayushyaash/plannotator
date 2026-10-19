@@ -950,6 +950,21 @@ export function isInboxSoundVolume(value: unknown): value is number {
 }
 
 /**
+ * The Inbox window's text size (config.json `inboxTextSize`, through GET and
+ * POST /api/inbox/settings `text_size`): the body size in px the whole type
+ * ramp scales from (packages/inbox/inbox.css `--ib-type`). 14 is the window
+ * as it has always been drawn.
+ */
+export const INBOX_TEXT_SIZES = [12, 13, 14, 15] as const;
+export type InboxTextSize = (typeof INBOX_TEXT_SIZES)[number];
+export const INBOX_TEXT_SIZE_DEFAULT: InboxTextSize = 14;
+
+/** A text size the Inbox keeps: 12, 13, 14 or 15. */
+export function isInboxTextSize(value: unknown): value is InboxTextSize {
+  return typeof value === "number" && (INBOX_TEXT_SIZES as readonly number[]).includes(value);
+}
+
+/**
  * The agents the Inbox connects itself to on `plannotator inbox` (the
  * approved "inbox-agent-awareness" design; packages/server/inbox-agents.ts).
  * Terminal agents and the Claude desktop app; editors keep their one-click

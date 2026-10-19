@@ -45,9 +45,12 @@ import { createMcpHandler } from "@modelcontextprotocol/server";
 import {
   INBOX_APP_ID,
   INBOX_SOUND_DEFAULT_VOLUME,
+  INBOX_TEXT_SIZE_DEFAULT,
   inboxAgentName,
   isInboxId,
   isInboxSoundVolume,
+  isInboxTextSize,
+  type InboxTextSize,
   type InboxHealth,
   type InboxLine,
   type InboxListRow,
@@ -1063,6 +1066,24 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   };
 
   /**
+   * The window's text size (config.json `inboxTextSize`): the body size in px
+   * the Inbox's type ramp scales from, 12 to 15; 14 (the window as it has
+   * always been drawn) while unset or unreadable.
+   */
+  const textSizeState = (): InboxTextSize => {
+    const value = loadConfig().inboxTextSize;
+    return isInboxTextSize(value) ? value : INBOX_TEXT_SIZE_DEFAULT;
+  };
+
+  const saveTextSize = (input: unknown, validateOnly = false): InboxTextSize => {
+    if (!isInboxTextSize(input)) throw new InboxError("validation_error", "text_size: 12, 13, 14 or 15.", { field: "text_size" });
+    if (validateOnly) return textSizeState();
+    saveConfig({ inboxTextSize: input });
+    if (loadConfig().inboxTextSize !== input) throw new InboxError("config_not_saved", "config.json could not be written; nothing changed.");
+    return input;
+  };
+
+  /**
    * The one-time sound dialog, claimed by the page that will show it: a
    * compare-and-set from `dialogDueFor` to `dialogShownFor`, so of several
    * tabs (or a reload) only the first ever gets `show: true`. Only on this
@@ -1144,6 +1165,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     updates: updatesState(),
     /** Plannotator's appearance (config.json `theme`), shared with plan review; null when never chosen. */
     theme: themeState(),
+    /** The window's text size in px (config.json `inboxTextSize`), 14 unless chosen. */
+    text_size: textSizeState(),
     store: store.diskUsage(),
     /** Whether this Inbox serves phones; the window shows the Phones block only then. */
     phones: phonesOn,
@@ -1670,8 +1693,16 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         const body = await readBody(req);
         if (checkServerSession(body, serverSession) === "mismatch") return json(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409);
         const updateSwitches = body.update_check !== undefined || body.auto_update !== undefined;
-        if (body.inbox_tool === undefined && body.notifications === undefined && body.sound === undefined && body.tailscale === undefined && body.theme === undefined && !updateSwitches) {
-          throw new InboxError("validation_error", "body: inbox_tool, notifications, sound, tailscale, theme, update_check or auto_update is required.");
+        if (
+          body.inbox_tool === undefined &&
+          body.notifications === undefined &&
+          body.sound === undefined &&
+          body.tailscale === undefined &&
+          body.theme === undefined &&
+          body.text_size === undefined &&
+          !updateSwitches
+        ) {
+          throw new InboxError("validation_error", "body: inbox_tool, notifications, sound, tailscale, theme, text_size, update_check or auto_update is required.");
         }
         // Updating changes this computer: never from a page that came through the tailnet.
         if (updateSwitches && via === "tailnet") return localOnly();
@@ -1700,6 +1731,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         if (body.inbox_tool !== undefined) saveInboxTool(body.inbox_tool, true);
         if (updateSwitches) saveUpdateSwitches(body, true);
         if (body.theme !== undefined) saveTheme(body.theme, true);
+        if (body.text_size !== undefined) saveTextSize(body.text_size, true);
         const tailnet = tailscaleChange === undefined ? tailscale.state() : tailscale.set(tailscaleChange.on, { via, replaceExposed: tailscaleChange.replaceExposed });
         const notifications = body.notifications === undefined ? notificationsState() : saveNotifications(body.notifications);
         const sound = body.sound === undefined ? soundState() : saveSound(body.sound);
@@ -1707,7 +1739,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         const updateState = updateSwitches ? saveUpdateSwitches(body) : updatesState();
         if (updateSwitches) updates.refresh();
         const theme = body.theme === undefined ? themeState() : saveTheme(body.theme);
-        return json({ inbox_tool: inboxTool, notifications, sound, tailscale: tailnet, updates: updateState, theme });
+        const textSize = body.text_size === undefined ? textSizeState() : saveTextSize(body.text_size);
+        return json({ inbox_tool: inboxTool, notifications, sound, tailscale: tailnet, updates: updateState, theme, text_size: textSize });
       }
       // The one-time sound dialog: the page asks to show it, and only the first ask ever gets `show: true`.
       if (path === "/api/inbox/sound/dialog") {

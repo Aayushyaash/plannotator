@@ -77,6 +77,7 @@ import { installPlainTextPaste } from '@plannotator/ui/utils/pasteInsert';
 import { LIST_MIN_WIDTH, THREAD_BESIDE_FILE_WIDTH, paneGutters, useStack } from './stack';
 import { backTo, pushScreen } from './history';
 import { adoptSavedTheme, inboxThemeSync } from './theme';
+import { adoptSavedTextSize, applyRememberedTextSize } from './textSize';
 import { parseSettingsHash, settingsHash, type SettingsSection } from './settingsRoute';
 import { ComposeDialog, type ComposeRequest, type ComposeSent } from './compose/ComposeDialog';
 import { DraftsPage } from './compose/DraftsPage';
@@ -90,6 +91,9 @@ import type { DraftView } from './api';
 // WebMCP is off.
 // No image uploads either: a comment's image would need an upload route the
 // Inbox does not have, so the composer says so instead of posting nowhere.
+// The text size this browser last showed, on the document before the first render (textSize.ts).
+applyRememberedTextSize();
+
 configurePlannotatorUI({
   serverSync: inboxThemeSync,
   // ui's own hover text (annotation panel and toolbar, question cards, links to attachments) as ui's Tooltip,
@@ -649,6 +653,7 @@ function Inbox() {
     try {
       const next = await inboxApi.settings();
       adoptSavedTheme(next.theme);
+      adoptSavedTextSize(next.text_size);
       setSettings(next);
     } catch (cause) {
       setSettingsError(cause instanceof Error ? cause.message : String(cause));

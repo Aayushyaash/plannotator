@@ -14,6 +14,7 @@ import type {
   InboxProject,
   InboxQuestion,
   InboxSoundSettings,
+  InboxTextSize,
   InboxThread,
   InboxComposeProject,
   InboxDraft,
@@ -187,6 +188,8 @@ export interface SettingsModel {
    * reads too: null when never chosen. Absent from an Inbox that predates it.
    */
   theme?: InboxThemeConfig | null;
+  /** The window's text size in px (config.json `inboxTextSize`): 12 to 15, 14 unless chosen. Absent from an older Inbox. */
+  text_size?: InboxTextSize;
   store: {
     dir: string;
     bytes: number;
@@ -572,6 +575,8 @@ export const inboxApi = {
   claimSoundDialog: () => post<{ show: boolean; sound: InboxSoundSettings }>('/api/inbox/sound/dialog', {}),
   /** Plannotator's appearance, written to config.json `theme` (shared with plan review). */
   saveTheme: (theme: InboxThemeConfig) => post<{ theme: InboxThemeConfig | null }>('/api/inbox/settings', { theme }),
+  /** The window's text size, written to config.json `inboxTextSize`. */
+  saveTextSize: (textSize: InboxTextSize) => post<{ text_size: InboxTextSize }>('/api/inbox/settings', { text_size: textSize }),
   saveTailscale: (on: boolean, replaceExposed = false) =>
     post<{ tailscale: TailscaleSettings }>('/api/inbox/settings', { tailscale: replaceExposed ? { on, replace_exposed: true } : { on } }),
   // Step 2: attachments (by id only), annotations, deleting.

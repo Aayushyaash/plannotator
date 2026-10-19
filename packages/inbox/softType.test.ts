@@ -1,16 +1,18 @@
 /**
- * The Soft look's one type knob, --ib-soft-type (inbox.css, owner 2026-10-17:
- * "tone down the font just one bit down ... base font down"). Every size the
- * window sets goes through one scale token, `var(--ib-fs-N, Npx)` with
- * `--ib-fs-N: max(12px, calc(Npx * var(--ib-type)))`, so the switch moves the
- * whole window together and, off, each size is exactly today's.
+ * The Inbox's one type knob, --ib-type (inbox.css): the window's body size in
+ * px, the person's Settings → General → Text size (12, 13, 14 or 15, 14 by
+ * default; textSize.ts sets `--inbox-text-size` on the document, and nothing
+ * at 14). Every size the window sets goes through one scale token,
+ * `var(--ib-fs-N, Npx)` with `--ib-fs-N: max(<floor>, calc(Npx * var(--ib-type) / 14))`,
+ * so the setting moves the whole window together and, at 14, each size is
+ * exactly today's.
  *
  * What this catches: a rule added with a bare `font-size: 13px` (it would not
- * follow the knob), a token whose number differs from its fallback (off would
- * no longer be today's), a scale token missing or without the 12 px floor, the
- * switch left on by default, and a phone input scaled under 16 px (iOS zooms).
- * The same file holds the layout corners' one scale and the rows' switch,
- * checked at the end.
+ * follow the setting), a token whose number differs from its fallback (14
+ * would no longer be today's), a token without its floor (11 px, or its own
+ * size when that is smaller), a default other than 14, and a phone input
+ * scaled under 16 px (iOS zooms). The same file holds the layout corners' one
+ * scale and the rows' switch, checked at the end.
  */
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -39,43 +41,59 @@ function mediaMask(code: string): boolean[] {
   return mask;
 }
 
-test('the type switch is off by default: today\'s sizes', () => {
-  expect(CODE).toMatch(/--ib-soft-type:\s*initial;/);
-  expect(CODE).not.toMatch(/--ib-soft-type:\s*;/);
-  // The base in px, so each size is N px * base / 14: exact (14 px is 13 px on, N px off).
-  expect(CODE).toMatch(/--ib-type-s:\s*var\(--ib-soft-type\)\s*13;/);
-  expect(CODE).toMatch(/--ib-type:\s*var\(--ib-type-s,\s*14\);/);
+/** A token's definition worked out at body size `type`, in px (the `max(Apx, calc(Bpx * var(--ib-type) / 14))` shape only). */
+function sizeAt(token: string, type: number): number {
+  const def = new RegExp(`${token}:\\s*max\\(([\\d.]+)px,\\s*calc\\(([\\d.]+)px \\* var\\(--ib-type\\) / 14\\)\\);`).exec(CODE);
+  if (!def) throw new Error(`${token} is not a scale token`);
+  return Math.max(Number(def[1]), (Number(def[2]) * type) / 14);
+}
+
+test('the body size is 14 unless the page sets one: today\'s sizes', () => {
+  expect(CODE).toMatch(/--ib-type:\s*var\(--inbox-text-size,\s*14\);/);
+  // The Soft type switch it replaced is gone, so nothing else moves the type.
+  expect(CODE).not.toMatch(/--ib-soft-type/);
 });
 
-test('every size of 12.5 px or more goes through its scale token, and the fallback is the same size', () => {
+test('every size goes through its scale token, and the fallback is the same size', () => {
   const mask = mediaMask(CODE);
   const bare: string[] = [];
   for (const m of CODE.matchAll(/font-size:\s*(\d+(?:\.\d+)?)px(\s*!important)?/g)) {
-    const n = Number(m[1]);
-    if (n < 12.5 || m[2]) continue;
-    // A phone's 16 px stays 16 (iOS zooms into a smaller input); inside @media only.
-    if (n === 16 && mask[m.index!]) continue;
+    if (m[2]) continue;
     bare.push(`${m[0]} at ${CODE.slice(0, m.index).split('\n').length}`);
   }
   expect(bare).toEqual([]);
   const uses = [...CODE.matchAll(/font-size:\s*var\(--ib-fs-([\d-]+),\s*([\d.]+)px\)/g)];
-  expect(uses.length).toBeGreaterThan(300);
+  expect(uses.length).toBeGreaterThan(350);
   for (const use of uses) expect(use[1]!.replace('-', '.')).toBe(use[2]);
+  // A phone's 16 px controls take the token that never goes under 16 px, inside @media only.
+  for (const use of CODE.matchAll(/var\(--ib-fs-16-in, 16px\)/g)) expect(mask[use.index!]).toBe(true);
 });
 
-test('each scale token floors at 12 px and scales its own size', () => {
-  const used = new Set([...CODE.matchAll(/var\(--ib-fs-([\d-]+),/g)].map((m) => m[1]!));
+test('each scale token is its own size at 14, scales with the body size, and never goes under 11 px (or its own size)', () => {
+  const used = new Set([...CODE.matchAll(/var\(--ib-fs-([\d]+(?:-\d+)?),/g)].map((m) => m[1]!));
+  expect(used.size).toBeGreaterThan(15);
   for (const name of used) {
-    const size = name.replace('-', '.');
-    const def = new RegExp(`--ib-fs-${name}:\\s*max\\(12px,\\s*calc\\(${size.replace('.', '\\.')}px \\* var\\(--ib-type\\) / 14\\)\\);`);
-    expect(CODE).toMatch(def);
+    const size = Number(name.replace('-', '.'));
+    expect(sizeAt(`--ib-fs-${name}`, 14)).toBe(size);
+    expect(sizeAt(`--ib-fs-${name}`, 15)).toBeCloseTo((size * 15) / 14, 6);
+    for (const type of [12, 13]) {
+      expect(sizeAt(`--ib-fs-${name}`, type)).toBeCloseTo(Math.max(Math.min(size, 11), (size * type) / 14), 6);
+    }
   }
+  // A timestamp's 12 px is 11 at 12 (floored), 13 px is 12 at 13 (scaled).
+  expect(sizeAt('--ib-fs-12', 12)).toBe(11);
+  expect(sizeAt('--ib-fs-13', 13)).toBeCloseTo(12.07, 2);
+  // Phone inputs: 16 px at 12, 13 and 14, larger at 15.
+  for (const type of [12, 13, 14]) expect(sizeAt('--ib-fs-16-in', type)).toBe(16);
+  expect(sizeAt('--ib-fs-16-in', 15)).toBeGreaterThan(16);
 });
 
 test("ui's drawing follows the knob: Tailwind's type scale and its fixed sizes, in a layer after the utilities", () => {
   for (const [name, rem] of [['sm', '0.875'], ['base', '1'], ['lg', '1.0625'], ['xl', '1.1875'], ['2xl', '1.375']] as const) {
     expect(CODE).toMatch(new RegExp(`--text-${name}:\\s*calc\\(${rem.replace('.', '\\.')}rem \\* var\\(--ib-type\\) / 14\\);`));
   }
+  // text-xs scales too, never under 11 px.
+  expect(CODE).toMatch(/--text-xs:\s*max\(11px,\s*calc\(0\.75rem \* var\(--ib-type\) \/ 14\)\);/);
   // Code blocks (Plannotator's fence, copied here) follow it too.
   expect(CODE).toMatch(/pre code\.pn-code \{[^}]*font-size: var\(--ib-fs-13, 0\.8125rem\);/);
   const layer = /@layer ib-type \{([\s\S]*?)\n\}/.exec(CODE)?.[1] ?? '';

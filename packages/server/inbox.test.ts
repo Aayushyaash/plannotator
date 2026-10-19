@@ -746,6 +746,51 @@ describe("the window's routes: settings, restart, favicon", () => {
     }
   });
 
+  test("the text size saves into config.json `inboxTextSize`: 12 to 15, 14 unless chosen, anything else refused", async () => {
+    const root = tempRoot();
+    const dataDir = join(root, "data");
+    const previous = process.env.PLANNOTATOR_DATA_DIR;
+    process.env.PLANNOTATOR_DATA_DIR = dataDir;
+    try {
+      mkdirSync(dataDir, { recursive: true });
+      // A value no build ever wrote reads as the default, not as itself.
+      writeFileSync(join(dataDir, "config.json"), JSON.stringify({ inboxTextSize: 40, theme: { mode: "dark" } }));
+      const server = await start(dataDir);
+      const read = async () => (await (await fetch(`http://127.0.0.1:${server.port}/api/inbox/settings`)).json()).text_size;
+      const onDisk = () => JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")) as { inboxTextSize?: unknown; theme?: unknown };
+      expect(await read()).toBe(14);
+      for (const bad of [11, 16, 13.5, "13", null, true, { size: 13 }]) {
+        const refused = await post(server, "/api/inbox/settings", { serverSession: server.serverSession, text_size: bad });
+        expect(refused.status).toBe(422);
+        expect((await refused.json()).code).toBe("validation_error");
+      }
+      // A refused part saves nothing, the valid parts beside it included.
+      const mixed = await post(server, "/api/inbox/settings", { serverSession: server.serverSession, theme: { mode: "light" }, text_size: 9 });
+      expect(mixed.status).toBe(422);
+      expect(onDisk().theme).toEqual({ mode: "dark" });
+      const cross = await post(server, "/api/inbox/settings", { text_size: 12 }, { Origin: "https://evil.example" });
+      expect(cross.status).toBe(403);
+      const stale = await post(server, "/api/inbox/settings", { serverSession: "not-this-one", text_size: 12 });
+      expect(stale.status).toBe(409);
+      expect(onDisk().inboxTextSize).toBe(40);
+
+      for (const size of [12, 15, 13]) {
+        const saved = await post(server, "/api/inbox/settings", { serverSession: server.serverSession, text_size: size });
+        expect(saved.status).toBe(200);
+        expect((await saved.json()).text_size).toBe(size);
+        expect(onDisk().inboxTextSize).toBe(size);
+        expect(await read()).toBe(size);
+      }
+      // Another setting's save keeps the size and answers it.
+      const other = await post(server, "/api/inbox/settings", { serverSession: server.serverSession, theme: { mode: "light" } });
+      expect((await other.json()).text_size).toBe(13);
+      expect(onDisk().inboxTextSize).toBe(13);
+    } finally {
+      if (previous === undefined) delete process.env.PLANNOTATOR_DATA_DIR;
+      else process.env.PLANNOTATOR_DATA_DIR = previous;
+    }
+  });
+
   test("the two writing routes refuse a foreign Host before anything is written or stopped", async () => {
     const root = tempRoot();
     const dataDir = join(root, "data");
