@@ -2620,6 +2620,11 @@ dialog.ib-sp::backdrop { background: oklch(0 0 0 / 0.45); }
 .pn-inbox .ib-compose-btn svg.ib-ic { width: 16px; height: 16px; }
 /* A phone's list header (and the Drafts page): the compose icon beside search. */
 .pn-inbox .ib-lhead-compose { display: none; }
+/* A wider window with the main sidebar closed: the list header's New message at its far right, drawn as the
+   header's other icon buttons (the sidebar toggle, the thread's close). Never on a phone (InboxList sets the
+   attribute only off a phone), so the phone's rules below keep their look. */
+.pn-inbox .ib-lhead-compose[data-sidebar-closed] { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 32px; height: 32px; margin-left: auto; padding: 0; border: 0; background: none; border-radius: var(--ib-r10-s, 7px); color: var(--muted-foreground); transition: var(--ib-fade2-s, var(--ib-ui-fade)); }
+.pn-inbox .ib-lhead-compose[data-sidebar-closed]:hover { background: var(--ib-hb-hover-s, var(--muted)); color: var(--foreground); }
 
 /* The dialog: pinned to the upper part of the window like the search palette, 680 px wide. */
 .pn-inbox dialog.ib-cp, dialog.ib-cp {

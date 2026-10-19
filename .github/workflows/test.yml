@@ -157,6 +157,7 @@ jobs:
           packages/inbox/listColumn.test.tsx
           packages/inbox/endedSession.test.tsx
           packages/inbox/compose.test.tsx
+          packages/inbox/listHeaderCompose.test.tsx
           packages/inbox/composeThread.test.tsx
           packages/inbox/sendNow.test.tsx
           packages/inbox/pasteFiles.test.tsx

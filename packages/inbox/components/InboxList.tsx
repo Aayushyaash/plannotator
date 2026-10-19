@@ -37,7 +37,10 @@ export interface InboxListProps {
   scope?: string | null;
   /** Opens search: on a phone, the list header's search icon (inbox.css shows it there only). */
   onSearch?: (opener: HTMLElement) => void;
-  /** Opens compose: on a phone, the list header's compose icon beside search (inbox.css shows it there only). */
+  /**
+   * Opens compose: the list header's compose icon, on a phone beside search, and on a wider window at the
+   * header's far right while the main sidebar (which has its own) is closed.
+   */
   onCompose?: (opener: HTMLElement) => void;
   /** What an empty list says (one project whose threads are all archived). Drawn only while no row shows. */
   empty?: ReactNode;
@@ -304,7 +307,10 @@ export function InboxList(props: InboxListProps) {
   // project (one project's wide row fits any width).
   const twoLine = narrowList && (props.narrow || !props.filtered);
   // The column beside a thread gets the sidebar's resize edge, except on a phone.
-  const { isMobile } = useSidebar();
+  const { isMobile, open: sidebarDocked } = useSidebar();
+  // New message in the header: a phone always has it (its CSS draws it); a wider window only while the
+  // main sidebar, which holds its own New message, is closed (the peek does not count as open).
+  const headerCompose = isMobile || !sidebarDocked;
   const columnId = useId();
   const resizable = props.narrow && !isMobile;
   const visible = props.sections.filter((s) => s.threads.length > 0);
@@ -331,10 +337,21 @@ export function InboxList(props: InboxListProps) {
             <Icon name="search" size={20} />
           </button>
         )}
-        {props.onCompose && (
-          <button type="button" className="ib-lhead-compose" data-open-compose="" aria-label="New message" aria-haspopup="dialog" onClick={(event) => props.onCompose?.(event.currentTarget)}>
-            <Icon name="compose" size={20} />
-          </button>
+        {props.onCompose && headerCompose && (
+          <Tip content="New message">
+            <button
+              type="button"
+              className="ib-lhead-compose"
+              data-open-compose=""
+              // A wider window with the sidebar closed: the list header's own New message, at its far right.
+              data-sidebar-closed={isMobile ? undefined : ''}
+              aria-label="New message"
+              aria-haspopup="dialog"
+              onClick={(event) => props.onCompose?.(event.currentTarget)}
+            >
+              <Icon name="compose" size={isMobile ? 20 : 16} />
+            </button>
+          </Tip>
         )}
       </div>
         <div className="ib-lbody" ref={bodyRef}>
