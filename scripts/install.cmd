@@ -396,8 +396,9 @@ if /i "!VERSION!"=="latest" (
         curl -fsSL "https://api.github.com/repos/!REPO!/releases/latest" -o "!RELEASE_JSON!"
     )
     if !ERRORLEVEL! neq 0 (
-        echo Failed to get latest version >&2
-        exit /b 1
+        REM API unavailable (anonymous rate limit, proxy): the release-page
+        REM redirect fallback below fills TAG instead.
+        del "!RELEASE_JSON!" 2>nul
     )
     REM Drop the local token copies; downloads and git clone are anonymous.
     REM GITHUB_TOKEN / GH_TOKEN themselves remain in the environment exactly
@@ -415,10 +416,23 @@ if /i "!VERSION!"=="latest" (
         set "TAG=%%i"
     )
     set "PLN_RELEASE_JSON="
-    del "!RELEASE_JSON!"
+    del "!RELEASE_JSON!" 2>nul
+
+    REM The API failed (anonymous rate limit of 60/hour per IP, a proxy that
+    REM blocks api.github.com): read the tag from the redirect that
+    REM github.com/<repo>/releases/latest answers with
+    REM (.../releases/tag/vX.Y.Z), which is not rate-limited and needs no
+    REM token or gh. The last path segment is the tag.
+    if "!TAG!"=="" (
+        set "LATEST_URL="
+        for /f "usebackq delims=" %%u in (`curl -fsSLI -o nul -w "%%{url_effective}" "https://github.com/!REPO!/releases/latest"`) do set "LATEST_URL=%%u"
+        if defined LATEST_URL for %%t in ("!LATEST_URL:/=" "!") do set "TAG=%%~t"
+        set "LATEST_URL="
+        if defined TAG if not "!TAG:~0,1!"=="v" set "TAG="
+    )
 
     if "!TAG!"=="" (
-        echo Failed to parse version >&2
+        echo Failed to get latest version ^(check your connection, or pass --version vX.Y.Z^) >&2
         exit /b 1
     )
 ) else (

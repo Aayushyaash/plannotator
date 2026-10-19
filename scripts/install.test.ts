@@ -2011,7 +2011,7 @@ describe("install shared behavior", () => {
     // F7 pin: the failure check must appear BEFORE the token clears in file
     // order - `set` can disturb ERRORLEVEL, so every ERRORLEVEL read stays
     // immediately adjacent to the curl it tests.
-    const cmdFailureCheck = cmdScript.indexOf("Failed to get latest version");
+    const cmdFailureCheck = cmdScript.indexOf("API unavailable (anonymous rate limit, proxy)");
     const cmdTokenClear = cmdScript.lastIndexOf('set "GH_TOKEN_VAL="');
     const cmdHeaderClear = cmdScript.lastIndexOf('set "GH_AUTH_HEADER="');
     expect(cmdFailureCheck).toBeGreaterThan(0);
@@ -2301,7 +2301,10 @@ for a in "$@"; do
   prev="$a"
 done
 case "$url" in
-  */releases/latest) printf '{"tag_name":"v99.9.9"}\\n200' ;;
+  https://github.com/*/releases/latest) printf '%s' "\${STUB_LATEST_URL:-https://github.com/backnotprop/plannotator/releases/tag/v99.9.9}" ;;
+  */releases/latest)
+    if [ -n "$STUB_API_DOWN" ]; then printf '{"message":"API rate limit exceeded"}\\n403'
+    else printf '{"tag_name":"v99.9.9"}\\n200'; fi ;;
   *".sha256") printf '%s  plannotator\\n' "$STUB_CHECKSUM" ;;
   */releases/download/*)
     if [ -n "$STUB_BINARY_SOURCE" ]; then cat "$STUB_BINARY_SOURCE" > "$out"
@@ -2379,6 +2382,29 @@ function runInstallSh(
     out: r.stdout.toString() + r.stderr.toString(),
   };
 }
+
+describe.skipIf(process.platform === "win32" || !Bun.which("node"))(
+  "install.sh latest version without the GitHub API",
+  () => {
+    const args = ["--non-interactive", "--skip-skills"];
+
+    test("falls back to the releases/latest redirect when the API is rate-limited", () => {
+      const sandbox = setupInstallSandbox({ gh: "pass-all" });
+      const result = runInstallSh(sandbox, args, { STUB_API_DOWN: "1" });
+      expect(result.out).toContain("Installing plannotator v99.9.9...");
+    });
+
+    test("fails clearly when neither the API nor the redirect gives a tag", () => {
+      const sandbox = setupInstallSandbox({ gh: "pass-all" });
+      const result = runInstallSh(sandbox, args, {
+        STUB_API_DOWN: "1",
+        STUB_LATEST_URL: "https://github.com/backnotprop/plannotator/releases/latest",
+      });
+      expect(result.code).toBe(1);
+      expect(result.out).toContain("Failed to fetch latest version");
+    });
+  },
+);
 
 describe.skipIf(process.platform === "win32" || !Bun.which("node"))(
   "install.sh optional T3 hook",

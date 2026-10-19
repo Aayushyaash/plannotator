@@ -476,8 +476,22 @@ if [ "$VERSION" = "latest" ]; then
     # in the environment exactly as the user set them.
     unset _gh_token GH_AUTH_HEADER _api_url _api_body _api_code
 
+    # The API failed (anonymous rate limit of 60/hour per IP, a proxy that
+    # blocks api.github.com): read the tag from the redirect that
+    # github.com/<repo>/releases/latest answers with (.../releases/tag/vX.Y.Z),
+    # which is not rate-limited and needs no token or gh.
     if [ -z "$latest_tag" ]; then
-        echo "Failed to fetch latest version" >&2
+        _latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null) || true
+        latest_tag="${_latest_url##*/}"
+        case "$latest_tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) latest_tag="" ;;
+        esac
+        unset _latest_url
+    fi
+
+    if [ -z "$latest_tag" ]; then
+        echo "Failed to fetch latest version (check your connection, or pass --version vX.Y.Z)" >&2
         exit 1
     fi
 else
