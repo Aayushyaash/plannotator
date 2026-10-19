@@ -1,6 +1,40 @@
+import type { ReactNode } from 'react';
 import type { AskKind, TabSlept } from '../notify';
 import { addressOf, browserName } from '../notifyStatus';
 import { Icon } from '../icons';
+
+/**
+ * One line above the list: the icon, the words, the actions. The line is a
+ * size container (inbox.css): beside an open thread the list is a 380 px
+ * column, so the actions go on their own row under the words, lined up with
+ * them, instead of squeezing the words into a narrow column between the icon
+ * and the buttons. Only a wide line puts them side by side.
+ */
+function AskShell({
+  className,
+  icon,
+  label,
+  data,
+  children,
+  actions,
+}: {
+  className: string;
+  icon: 'bell' | 'warn' | 'info';
+  label: string;
+  data: Record<string, string>;
+  children: ReactNode;
+  actions: ReactNode;
+}) {
+  return (
+    <div className={className} role="region" aria-label={label} {...data}>
+      <div className="ib-ask-in">
+        <Icon name={icon} />
+        <p className="ib-ask-text">{children}</p>
+        <div className="ib-ask-acts">{actions}</div>
+      </div>
+    </div>
+  );
+}
 
 /**
  * The line at the top of the list (record 6.1), in words that say why. It
@@ -33,54 +67,63 @@ export function NotificationAsk({
   const browser = browserName();
   if (kind === 'blocked') {
     return (
-      <div className="ib-askline ib-askquiet" role="region" aria-label="Desktop notifications" data-notification-ask={kind}>
-        <Icon name="bell" />
-        <span className="ib-grow ib-mut">
+      <AskShell
+        className="ib-askline ib-askquiet"
+        icon="bell"
+        label="Desktop notifications"
+        data={{ 'data-notification-ask': kind }}
+        actions={
+          <>
+            {onSettings && (
+              <button type="button" className="ib-btn ib-ghost ib-sm" onClick={onSettings}>
+                How to allow
+              </button>
+            )}
+            <button type="button" className="ib-btn ib-ghost ib-sm" onClick={onNotNow}>
+              Hide
+            </button>
+          </>
+        }
+      >
+        <span className="ib-mut">
           {browser === 'this browser' ? 'This browser' : browser} blocks notifications for {window.location.host}, so you get no notice when an agent stops on you.
         </span>
-        {onSettings && (
-          <button type="button" className="ib-btn ib-ghost ib-sm" onClick={onSettings}>
-            How to allow
-          </button>
-        )}
-        <button type="button" className="ib-btn ib-ghost ib-sm" onClick={onNotNow}>
-          Hide
-        </button>
-      </div>
+      </AskShell>
     );
   }
   return (
-    <div
+    <AskShell
       className={kind === 'moved' ? 'ib-askline ib-askmoved' : 'ib-askline'}
-      role="region"
-      aria-label="Desktop notifications"
-      data-notification-ask={kind}
+      icon={kind === 'moved' ? 'warn' : 'bell'}
+      label="Desktop notifications"
+      data={{ 'data-notification-ask': kind }}
+      actions={
+        <>
+          <button type="button" className="ib-btn ib-pri ib-sm" onClick={onTurnOn}>
+            {kind === 'moved' ? 'Allow' : 'Turn on'}
+          </button>
+          <button type="button" className="ib-btn ib-ghost ib-sm" onClick={onNotNow}>
+            Not now
+          </button>
+        </>
+      }
     >
-      <Icon name={kind === 'moved' ? 'warn' : 'bell'} />
-      <span className="ib-grow">
-        {kind === 'ask' ? (
-          <>
-            <b>Get a desktop notice when an agent needs you.</b>{' '}
-            <span className="ib-mut">
-              When an agent starts a thread or asks you something. Your browser asks once.{soundOn && ' Sound is on.'}
-            </span>
-          </>
-        ) : (
-          <>
-            <b>Notifications are off at this address.</b>{' '}
-            <span className="ib-mut">
-              You allowed them at {movedFrom ? addressOf(movedFrom) : 'another address'}; the Inbox is now at {window.location.host}. Allow them again. Reload or close any tab still open on the old address, so notices don't arrive twice.
-            </span>
-          </>
-        )}
-      </span>
-      <button type="button" className="ib-btn ib-pri ib-sm" onClick={onTurnOn}>
-        {kind === 'moved' ? 'Allow' : 'Turn on'}
-      </button>
-      <button type="button" className="ib-btn ib-ghost ib-sm" onClick={onNotNow}>
-        Not now
-      </button>
-    </div>
+      {kind === 'ask' ? (
+        <>
+          <b>Get a desktop notice when an agent needs you.</b>{' '}
+          <span className="ib-mut">
+            When an agent starts a thread or asks you something. Your browser asks once.{soundOn && ' Sound is on.'}
+          </span>
+        </>
+      ) : (
+        <>
+          <b>Notifications are off at this address.</b>{' '}
+          <span className="ib-mut">
+            You allowed them at {movedFrom ? addressOf(movedFrom) : 'another address'}; the Inbox is now at {window.location.host}. Allow them again. Reload or close any tab still open on the old address, so notices don't arrive twice.
+          </span>
+        </>
+      )}
+    </AskShell>
   );
 }
 
@@ -91,17 +134,23 @@ export function NotificationAsk({
 export function TabSleptLine({ slept, onDismiss }: { slept: Exclude<TabSlept, null>; onDismiss: () => void }) {
   const chrome = browserName() === 'Chrome' || browserName() === 'Edge';
   return (
-    <div className="ib-askline ib-askquiet" role="region" aria-label="Notifications paused" data-tab-slept={slept}>
-      <Icon name="info" />
-      <span className="ib-grow ib-mut">
+    <AskShell
+      className="ib-askline ib-askquiet"
+      icon="info"
+      label="Notifications paused"
+      data={{ 'data-tab-slept': slept }}
+      actions={
+        <button type="button" className="ib-btn ib-ghost ib-sm" onClick={onDismiss}>
+          Got it
+        </button>
+      }
+    >
+      <span className="ib-mut">
         {slept === 'discarded'
           ? 'Your browser closed this tab in the background to save memory, so it could not notify you meanwhile.'
           : 'Your browser paused this tab in the background, so notices came late or not at all.'}
         {chrome && ` To keep it running: Settings → Performance → "Always keep these sites active" → add ${window.location.hostname}.`}
       </span>
-      <button type="button" className="ib-btn ib-ghost ib-sm" onClick={onDismiss}>
-        Got it
-      </button>
-    </div>
+    </AskShell>
   );
 }

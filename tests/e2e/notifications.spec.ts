@@ -263,6 +263,24 @@ test('the ask appears when the first thread arrives, never on first paint, and s
   await page.reload();
   await expect(page.locator(`[data-thread-id="${sent.thread_id}"]`)).toBeVisible();
   await expect(page.locator('[data-notification-ask="ask"]')).toBeVisible();
+
+  // Beside an open thread the list is a 380 px column. The words keep the line's width and the buttons go on
+  // a row under them, never squeezing the words into a narrow column between the icon and the buttons.
+  await page.locator(`[data-thread-id="${sent.thread_id}"]`).click();
+  await expect(page.locator('.ib-listcol.ib-narrow')).toBeVisible();
+  const line = page.locator('[data-notification-ask="ask"]');
+  await expect(line).toBeVisible();
+  await expect.poll(async () => (await line.boundingBox())?.width ?? Infinity).toBeLessThan(420);
+  const [lineBox, textBox, actsBox] = await Promise.all([
+    line.boundingBox(),
+    line.locator('.ib-ask-text').boundingBox(),
+    line.locator('.ib-ask-acts').boundingBox(),
+  ]);
+  expect(lineBox!.width).toBeLessThan(420);
+  expect(textBox!.width).toBeGreaterThan(lineBox!.width * 0.7);
+  expect(actsBox!.y).toBeGreaterThanOrEqual(textBox!.y + textBox!.height);
+  await shot('6.1-ask-beside-thread');
+  await page.goto(world.url);
 });
 
 test('one origin: the Inbox opened at 127.0.0.1 lands on localhost, its #thread link kept', async () => {
