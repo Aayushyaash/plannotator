@@ -74,7 +74,7 @@ export const INBOX_DEFAULT_TOOLS: readonly InboxToolInfo[] = [
   },
   {
     "name": "read_thread",
-    "description": "Read one Inbox thread (thread_id or message_id): every message with its questions and the person's answers. A message the person marked 👍 Looks good carries `ack` (they read it and need nothing more; no reply is needed). Without an id, list this project's threads, newest activity first, each with its section in the person's list: only the ones you sent in unless asked_by is \"anyone\", and only open ones unless include_resolved.",
+    "description": "Read one Inbox thread (thread_id or message_id): every message with its questions and the person's answers. A message the person marked 👍 Looks good carries `ack` (they read it and need nothing more; no reply is needed). Without an id, list this project's threads, newest activity first, one short row each (subject, name, section in the person's list, open questions, last author and time, the person's last message, `unread`: the person wrote something you have not read): only the ones you sent in unless asked_by is \"anyone\", and only open ones unless include_resolved.",
     "inputSchema": {
       "type": "object",
       "$schema": "https://json-schema.org/draft/2020-12/schema",

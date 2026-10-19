@@ -16,14 +16,14 @@ import { isAbsolute } from "node:path";
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { QUESTION_AUTHORING_GUIDE } from "@plannotator/core/question-block";
-import { INBOX_NAME_THIS_THREAD_HINT, INBOX_SECTIONS, INBOX_THREAD_NAME_MAX, type InboxGuideRef, type InboxSectionId, type InboxLine, type InboxMessage, type InboxProject } from "@plannotator/core/inbox-types";
+import { INBOX_NAME_THIS_THREAD_HINT, INBOX_SECTIONS, isInboxNote, INBOX_THREAD_NAME_MAX, type InboxGuideRef, type InboxSectionId, type InboxLine, type InboxMessage, type InboxProject } from "@plannotator/core/inbox-types";
 import { INBOX_WAKES_META_KEY } from "@plannotator/shared/inbox/connection";
 import { inboxBodyForAgent } from "@plannotator/shared/inbox/uploads";
 import { bodyShowsLocalImages, captureInboxInlineImages, type InlineImageFailure } from "@plannotator/shared/inbox/inline-images";
 import { inboxMessageRemoteImageRefsInOrder } from "@plannotator/shared/inbox/message-images";
 import { InboxError } from "@plannotator/shared/inbox/schema";
 import type { InboxSendResult, InboxStore } from "@plannotator/shared/inbox/store";
-import type { InboxAttachment } from "@plannotator/core/inbox-types";
+import type { InboxAttachment, InboxListRow, InboxQuestion } from "@plannotator/core/inbox-types";
 import { registerInboxGuideTools } from "./inbox-guides";
 import { isInsideFolder, type InboxProjectRoot } from "./inbox-project-root";
 
@@ -249,6 +249,21 @@ function namingHint(store: InboxStore, threadId: string, session: string | null)
   return store.canNameThread(threadId, session) ? { line: `\n\n${INBOX_NAME_THIS_THREAD_HINT}`, structured: { name_this_thread: true } } : null;
 }
 
+/**
+ * The replied-to message's questions as wait_for_reply carries them: what an
+ * agent acts on (each one's key, state and answer, and which reply sent it),
+ * not the window's full records. The prompts, choices and context are the
+ * agent's own block, and the reply body words every answer already.
+ */
+export function replyQuestions(store: InboxStore, messageId: string): { key: string; state: string; answer: InboxQuestion["answer"]; sent_reply_id?: string }[] {
+  return store.questionsOf(messageId).map((q) => ({
+    key: q.key,
+    state: q.state,
+    answer: q.answer,
+    ...(q.sent_reply_id ? { sent_reply_id: q.sent_reply_id } : {}),
+  }));
+}
+
 function replyResult(store: InboxStore, reply: InboxMessage, base: string, caller: string | null = null): ToolResult {
   const cursor = store.messageCursor(reply.id) ?? store.cursor();
   // A New message reached the session it was addressed to (only that session's
@@ -256,7 +271,7 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string, calle
   if (reply.to) store.recordDelivery(reply.id, { host: reply.to.host, session: reply.to.session });
   // The agent now has this reply (not any later one): a Sent row moves to Quiet.
   store.markAgentChecked(reply.thread_id, cursor);
-  const questions = reply.reply_to ? store.questionsOf(reply.reply_to) : [];
+  const questions = reply.reply_to ? replyQuestions(store, reply.reply_to) : [];
   const subject = store.threadSubject(reply.thread_id);
   // The files the person attached are named with their paths, as the wake names them.
   const body = inboxBodyForAgent(reply);
@@ -326,7 +341,9 @@ export type AgentSendInput = {
 };
 
 /** The project a send lands in: reply_to's, else the one at project_path. */
-export async function sendProject(context: InboxMcpContext, input: { reply_to?: string; project_path?: string }): Promise<InboxProject> {
+export async function sendProject(context: InboxMcpContext, input: { reply_to?: string; project_path?: string; thread?: string }): Promise<InboxProject> {
+  // Before anything resolves (resolving a path makes its project): a refused send writes nothing.
+  refuseIdShapedThread(input.thread, input.reply_to);
   if (input.reply_to) {
     const parent = context.store.message(input.reply_to);
     if (!parent) throw new InboxError("message_not_found", `No message ${input.reply_to}.`);
@@ -447,6 +464,31 @@ export function imagesNotShownText(list: readonly ImageNotShown[]): string {
   return text;
 }
 
+/** A message id (`msg_` and a 26-character ULID), as an agent might pass one as `thread` by mistake. */
+const MESSAGE_ID_SHAPE = /^msg_[0-9A-HJKMNP-TV-Z]{26}$/i;
+
+/**
+ * `thread` is a name. A value shaped like a message id is an agent that meant
+ * reply_to: refused, instead of silently starting a new thread named after
+ * the id. Beside reply_to (which already places the message) it is refused
+ * too, because there `thread` may name a thread the person started, and an id
+ * is never a name; the refusal then says to leave `thread` out.
+ */
+export function refuseIdShapedThread(thread: string | undefined, replyTo?: string): void {
+  const value = thread?.trim();
+  if (!value || !MESSAGE_ID_SHAPE.test(value)) return;
+  if (replyTo?.trim()) {
+    throw new InboxError(
+      "validation_error",
+      `thread: "${value}" is a message id, and thread takes a name. You passed reply_to, which already places this message: leave thread out (or, to name a thread the person started, pass a few words).`,
+    );
+  }
+  throw new InboxError(
+    "validation_error",
+    `thread: "${value}" is a message id, and thread takes a name. To write in an existing thread, pass reply_to ${value} instead.`,
+  );
+}
+
 /** An agent's message into `project`, routed by the store (send_message, submit_guide). */
 export async function sendAgentMessage(
   context: InboxMcpContext,
@@ -456,6 +498,7 @@ export async function sendAgentMessage(
   wakes = false,
 ): Promise<{ structured: Record<string, unknown>; replayed: boolean; questions: number; attachments: number; superseded: number; imagesNotShown: ImageNotShown[]; naming: InboxSendResult["naming"] | null }> {
   const { store } = context;
+  refuseIdShapedThread(input.thread, input.reply_to);
   let attachments: InboxAttachment[] | undefined;
   if (input.attachments && input.attachments.length > 0) {
     if (!context.recordAttachments) throw new InboxError("validation_error", "attachments: not taken by this Inbox.");
@@ -554,6 +597,87 @@ export function namingLine(naming: InboxSendResult["naming"] | null | undefined)
   return " This thread the person started still needs a name from you: pass `thread` (a few words saying what it is about) on a later reply to name it, once.";
 }
 
+/**
+ * One thread in read_thread's list, as an agent reads it: what it needs to
+ * pick a thread to read or wait on, not the window's row (whose `unread` and
+ * section counters are the person's).
+ */
+export interface InboxAgentThreadRow {
+  thread_id: string;
+  subject: string | null;
+  thread_name: string | null;
+  /** Where the thread sits in the person's list (`stopped`, `holding`, `waiting`, `new`, `sent`, `quiet`). */
+  section: InboxListRow["section"];
+  message_count: number;
+  /**
+   * Questions in it still waiting on the person: `open`, and `picked`
+   * (answered in the window, not sent yet); `prompt` is the first open one's.
+   */
+  questions: { open: number; picked: number; prompt: string | null };
+  last_author: InboxListRow["last_author"];
+  last_at: string;
+  /**
+   * The person's last message in the thread (a reply, a New message), or null
+   * when they wrote none. The Inbox's own notes (Mark read's set-aside note,
+   * the reopened note, the 👍 note) are not the person's words and never count.
+   */
+  last_person_at: string | null;
+  last_person_message_id: string | null;
+  /**
+   * The person wrote something in it for you that no agent has read yet: a
+   * reply after the thread's agent-read mark (any agent's read_thread or
+   * wait_for_reply reads it), or a message addressed to you (`to`) not yet
+   * delivered (only your wake or your own wait_for_reply delivers it; a
+   * read_thread does not). The Inbox's own notes never count.
+   */
+  unread: boolean;
+  /**
+   * Only on a resolved (archived) thread: listed with include_resolved, or
+   * listed anyway because an agent wrote in it after the archive.
+   */
+  resolved_at?: string;
+}
+
+/**
+ * Whether the person wrote in the thread for `caller` and no agent read it:
+ * a reply after the thread's agent-read mark, or a message addressed to the
+ * caller (`to`) not yet delivered. The Inbox's 👍 notes are not in the thread.
+ */
+function personFacts(store: InboxStore, threadId: string, caller: string | null): { unread: boolean; last: InboxMessage | null } {
+  const checked = store.message(threadId)?.agent_checked_seq ?? 0;
+  let unread = false;
+  let last: InboxMessage | null = null;
+  for (const message of store.thread(threadId)?.messages ?? []) {
+    // The Inbox's own notes are not the person's words.
+    if (message.author.kind !== "person" || isInboxNote(message)) continue;
+    last = message;
+    if (message.to) {
+      if (message.to.session === caller && !message.delivery) unread = true;
+      continue;
+    }
+    if ((store.messageCursor(message.id) ?? 0) > checked) unread = true;
+  }
+  return { unread, last };
+}
+
+export function agentThreadRow(store: InboxStore, row: InboxListRow, caller: string | null): InboxAgentThreadRow {
+  const person = personFacts(store, row.thread_id, caller);
+  return {
+    thread_id: row.thread_id,
+    subject: row.subject,
+    thread_name: row.thread_name,
+    section: row.section,
+    message_count: row.message_count,
+    questions: { open: row.questions.open, picked: row.questions.picked, prompt: row.questions.prompt },
+    last_author: row.last_author,
+    last_at: row.last_at,
+    last_person_at: person.last?.created_at ?? null,
+    last_person_message_id: person.last?.id ?? null,
+    unread: person.unread,
+    ...(row.resolved_at ? { resolved_at: row.resolved_at } : {}),
+  };
+}
+
 export function createInboxMcpServer(context: InboxMcpContext): McpServer {
   const { store } = context;
   const server = new McpServer(
@@ -600,7 +724,7 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
     {
       title: "Read a thread, or list your threads",
       description:
-        "Read one Inbox thread (thread_id or message_id): every message with its questions and the person's answers. A message the person marked 👍 Looks good carries `ack` (they read it and need nothing more; no reply is needed). Without an id, list this project's threads, newest activity first, each with its section in the person's list: only the ones you sent in unless asked_by is \"anyone\", and only open ones unless include_resolved.",
+        "Read one Inbox thread (thread_id or message_id): every message with its questions and the person's answers. A message the person marked 👍 Looks good carries `ack` (they read it and need nothing more; no reply is needed). Without an id, list this project's threads, newest activity first, one short row each (subject, name, section in the person's list, open questions, last author and time, the person's last message, `unread`: the person wrote something you have not read): only the ones you sent in unless asked_by is \"anyone\", and only open ones unless include_resolved.",
       inputSchema: z
         .object({
           thread_id: z.string().optional(),
@@ -639,11 +763,11 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
         if (!input.include_resolved) threads = threads.filter((t) => t.resolved_at === null || t.agent_after_archive === true);
         const limit = input.limit ?? 20;
         const total = threads.length;
-        // The row's `ack` is the window's: an agent sees a 👍 only once settled, in the thread itself.
-        threads = threads.slice(0, limit).map(({ ack: _ack, ...row }) => row);
+        // One short row per thread: the window's row is the person's view (and its `ack` shows a 👍 before it settles).
+        const rows = threads.slice(0, limit).map((row) => agentThreadRow(store, row, session));
         return ok(`${total} thread${total === 1 ? "" : "s"} in ${project.name}${total > limit ? `, showing ${limit}` : ""}.`, {
           project: { id: project.id, name: project.name, root: project.root },
-          threads,
+          threads: rows,
           total,
         });
       }),

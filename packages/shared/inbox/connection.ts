@@ -331,7 +331,7 @@ export function inboxToolCall(
   return projectPath === undefined ? { name: tool.name, arguments: args } : { name: tool.name, arguments: args, projectPath }
 }
 
-/** An MCP `tools/call` result as the text the agent tool answers with: the text, then any structured content as JSON. */
+/** An MCP `tools/call` result as the text the agent tool answers with: the text, then any structured content as compact JSON (no indentation: it can be most of the bytes the model reads). */
 export function inboxToolResultText(result: unknown): { text: string; isError: boolean } {
   const value = result && typeof result === 'object' ? (result as { content?: unknown; structuredContent?: unknown; isError?: unknown }) : {}
   const text = Array.isArray(value.content)
@@ -340,7 +340,7 @@ export function inboxToolResultText(result: unknown): { text: string; isError: b
         .filter(Boolean)
         .join('\n')
     : ''
-  const structured = value.structuredContent && typeof value.structuredContent === 'object' ? `\n\n${JSON.stringify(value.structuredContent, null, 2)}` : ''
+  const structured = value.structuredContent && typeof value.structuredContent === 'object' ? `\n\n${JSON.stringify(value.structuredContent)}` : ''
   return { text: `${text}${value.isError === true ? '' : structured}`.trim(), isError: value.isError === true }
 }
 

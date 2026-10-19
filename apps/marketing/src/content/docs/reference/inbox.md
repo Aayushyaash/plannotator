@@ -224,8 +224,8 @@ The stdio command fills in the project (its working folder) and a session id for
 | Tool | What it does |
 |------|--------------|
 | `send_message` | Send you a message. It can carry `:::question` blocks and `attachments` (any file it can read, absolute or relative to the project; `.env` refused). `thread` names a thread to join, and `reply_to` answers one of your replies. In a thread you started that has no name you typed, the agent's first reply names it with `thread` (a name another open thread of the project already has is refused, and the agent picks another). `supersedes` (or a `Replaces: <message id>/<key>` line in a new question block) retires earlier questions of the thread, so you can no longer answer them |
-| `read_thread` | Read one thread (with your 👍 Looks good on a message, if any), or list the threads this session wrote in |
-| `wait_for_reply` | Wait for your reply (or your 👍 Looks good on its latest message), up to 50 seconds per call |
+| `read_thread` | Read one thread (with your 👍 Looks good on a message, if any), or list the threads this session wrote in, one short row each (subject, name, where it sits in your list, open questions, last writer and time, your last message, and whether it has a reply from you it has not read) |
+| `wait_for_reply` | Wait for your reply (or your 👍 Looks good on its latest message), up to 50 seconds per call. It returns your reply in full, and each question it answers as its key, state and answer |
 | `resolve_message` | Resolve (archive) or reopen a thread |
 | `get_guide_brief` | Get the brief for writing a guided review, with an example that works as it is |
 | `submit_guide` | Send a guided review: a guide plus its patch, or a snapshot |

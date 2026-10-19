@@ -564,7 +564,7 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
     expect(other.host.submits[0]!.endsWith(`\n\n${words}`)).toBe(true)
     expect(writer.host.submits).toEqual([])
     const waited = await writerWait
-    expect('text' in waited && waited.text).toContain('"status": "waiting"')
+    expect('text' in waited && waited.text).toContain('"status":"waiting"')
     w.proof(`session-writer's wait_for_reply on the same thread kept waiting: ${('text' in waited ? waited.text : waited.deny).split('\n')[0]}`)
     w.proof(`turn.start ${turn.id} in session-other:\n${turn.text}\n\nsession-writer submits: ${writer.host.submits.length}`)
 
