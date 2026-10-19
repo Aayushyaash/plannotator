@@ -1,16 +1,17 @@
 /**
  * The window's one toast (design record "inbox-toast", approved 2026-10-14):
  * its approved words (pure, always run), and under DOM_TESTS=1 (happy-dom,
- * from the test.yml DOM list) its shape, its actions, its place (centered on
- * the window, above the open pane's foot or near the list's bottom), and the
- * phone's short form.
+ * from the test.yml DOM list) its shape, its actions, that a desktop toast
+ * never moves for what is open (its place, the window's bottom center, is
+ * CSS and is measured in tests/e2e/inbox-mark-read.spec.ts), and the phone's
+ * short form.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { InboxListRow } from '@plannotator/core/inbox-types';
 import { markReadToast } from './markRead';
-import { InboxToast, TOAST_FOOT_GAP, TOAST_LIST_GAP, TOAST_PANE_WAIT_MS, toastSpeech, type InboxToastModel } from './components/Toast';
+import { InboxToast, toastSpeech, type InboxToastModel } from './components/Toast';
 
 const hasDom = typeof document !== 'undefined';
 
@@ -100,7 +101,7 @@ function windowWith(thread: boolean): HTMLElement {
   return host;
 }
 
-function show(toast: Omit<InboxToastModel, 'id'>, phone = false, into?: HTMLElement, threadRouted = false): HTMLElement {
+function show(toast: Omit<InboxToastModel, 'id'>, phone = false, into?: HTMLElement): HTMLElement {
   const target = into ?? (() => {
     host = document.createElement('div');
     document.body.appendChild(host);
@@ -109,7 +110,7 @@ function show(toast: Omit<InboxToastModel, 'id'>, phone = false, into?: HTMLElem
   const mount = document.createElement('div');
   target.appendChild(mount);
   root = createRoot(mount);
-  act(() => root!.render(<InboxToast toast={{ id: 1, ...toast }} phone={phone} threadRouted={threadRouted} />));
+  act(() => root!.render(<InboxToast toast={{ id: 1, ...toast }} phone={phone} />));
   return target.querySelector('[data-inbox-toast]') as HTMLElement;
 }
 
@@ -151,18 +152,18 @@ test.skipIf(!hasDom)('desktop warning: one line (icon, lead, detail), Reply and 
   expect([undone, replied]).toEqual([1, 1]);
 });
 
-test.skipIf(!hasDom)('with a thread open beside the list it sits centered on the window (not the pane), 12 px above the pane\'s foot', () => {
-  const win = windowWith(true);
-  const toast = show({ icon: 'check', lead: 'Marked read', detail: 'Moves to Quiet', onUndo: () => {} }, false, win);
-  // The window is 1400 wide: center 700, not the pane's 1010. Foot top 820 in a 900 px window: 80 + 12 from the bottom.
-  expect(toast.style.left).toBe('700px');
-  expect(toast.style.bottom).toBe(`${80 + TOAST_FOOT_GAP}px`);
-  // 520 px at most, and 16 px from each edge of the window.
-  expect(toast.style.maxWidth).toBe('min(520px, 1368px)');
-});
+test.skipIf(!hasDom)('a desktop toast stays where it is whatever opens: a thread, a file beside it, a full-screen file', async () => {
+  const win = windowWith(false);
+  const toast = show({ icon: 'check', lead: 'Moved to Quiet', detail: '“Invoice list layout”', onUndo: () => {} }, false, win);
+  const placed = () => ({ style: toast.getAttribute('style'), className: toast.className });
+  const first = placed();
+  // Nothing measured onto it: the window's bottom center comes from inbox.css alone.
+  expect(first.style).toBeNull();
 
-test.skipIf(!hasDom)('a file beside the thread: still the window\'s center, above whichever foot is higher', async () => {
-  const win = windowWith(true);
+  act(() => win.querySelector('main')!.appendChild(threadPane()));
+  await nextFrame();
+  expect(placed()).toEqual(first);
+
   const view = document.createElement('section');
   view.className = 'ib-view';
   boxAt(view, 620, 0, 780, 900);
@@ -170,125 +171,13 @@ test.skipIf(!hasDom)('a file beside the thread: still the window\'s center, abov
   foot.setAttribute('data-view-foot', '');
   boxAt(foot, 620, 790, 780, 110);
   view.appendChild(foot);
-  win.querySelector('main')!.appendChild(view);
-  const toast = show({ icon: 'check', lead: 'Archived', onUndo: () => {} }, false, win);
-  // The file's strip (top 790) sits above the thread's foot (820): the toast clears it.
-  expect(toast.style.left).toBe('700px');
-  expect(toast.style.bottom).toBe(`${110 + TOAST_FOOT_GAP}px`);
-  expect(toast.classList.contains('ib-toast-file')).toBe(false);
-});
-
-/** An image's comment row inside a file view, from `top` to the given bottom. */
-function commentRow(view: HTMLElement, top: number, bottom: number): HTMLElement {
-  const row = document.createElement('div');
-  row.setAttribute('data-image-composer', '');
-  boxAt(row, 620, top, 780, bottom - top);
-  view.appendChild(row);
-  return row;
-}
-
-test.skipIf(!hasDom)('a file beside the thread with an image\'s comment row: above the row, and it rises as the row grows', async () => {
-  const win = windowWith(true);
-  const view = document.createElement('section');
-  view.className = 'ib-view';
-  boxAt(view, 620, 0, 780, 900);
-  const foot = document.createElement('div');
-  foot.setAttribute('data-view-foot', '');
-  boxAt(foot, 620, 841, 780, 59);
-  view.appendChild(foot);
-  // Two images: the comment row (776..841) sits on the stepping strip, above the thread's foot (820).
-  const row = commentRow(view, 776, 841);
-  win.querySelector('main')!.appendChild(view);
-  const toast = show({ icon: 'check', lead: 'Archived', onUndo: () => {} }, false, win);
-  expect(toast.style.left).toBe('700px');
-  expect(toast.style.bottom).toBe(`${900 - 776 + TOAST_FOOT_GAP}px`);
-
-  // The person types a few lines: the row grows upward (top 715) and the toast follows.
-  boxAt(row, 620, 715, 780, 126);
-  act(() => row.setAttribute('class', 'grown'));
+  act(() => win.querySelector('main')!.appendChild(view));
   await nextFrame();
-  expect(toast.style.bottom).toBe(`${900 - 715 + TOAST_FOOT_GAP}px`);
+  expect(placed()).toEqual(first);
 
-  // One image, no strip: the row alone is the file's foot.
-  foot.remove();
-  boxAt(row, 620, 820, 780, 80);
+  act(() => view.classList.add('ib-full'));
   await nextFrame();
-  expect(toast.style.bottom).toBe(`${80 + TOAST_LIST_GAP}px`);
-});
-
-test.skipIf(!hasDom)('a full-screen file with its strip and an image\'s comment row: above the row, not on it', async () => {
-  const win = windowWith(true);
-  const view = document.createElement('section');
-  view.className = 'ib-view ib-full';
-  boxAt(view, 0, 0, 1400, 900);
-  const foot = document.createElement('div');
-  foot.setAttribute('data-view-foot', '');
-  boxAt(foot, 0, 841, 1400, 59);
-  view.appendChild(foot);
-  const row = commentRow(view, 776, 841);
-  win.querySelector('main')!.appendChild(view);
-  const toast = show({ icon: 'check', lead: 'Archived', onUndo: () => {} }, false, win);
-  expect(toast.style.left).toBe('700px');
-  expect(toast.style.bottom).toBe(`${900 - 776 + TOAST_FOOT_GAP}px`);
-  expect(toast.classList.contains('ib-toast-file')).toBe(true);
-  boxAt(row, 0, 700, 1400, 141);
-  act(() => row.setAttribute('class', 'grown'));
-  await nextFrame();
-  expect(toast.style.bottom).toBe(`${900 - 700 + TOAST_FOOT_GAP}px`);
-});
-
-test.skipIf(!hasDom)('with no thread open it sits centered on the window, near the list\'s bottom; it rises above a thread that opens', async () => {
-  const win = windowWith(false);
-  const toast = show({ icon: 'check', lead: 'Moved to Quiet', detail: '“Invoice list layout”', onUndo: () => {} }, false, win);
-  // The window's center, not the list's (240..1400: 820).
-  expect(toast.style.left).toBe('700px');
-  expect(toast.style.bottom).toBe(`${TOAST_LIST_GAP}px`);
-
-  // A thread opens while the toast is up: same center, now above the pane's foot.
-  act(() => win.querySelector('main')!.appendChild(threadPane()));
-  await nextFrame();
-  expect(toast.style.left).toBe('700px');
-  expect(toast.style.bottom).toBe(`${80 + TOAST_FOOT_GAP}px`);
-});
-
-test.skipIf(!hasDom)('a full-screen file: centered on the window, just above its foot strip, and over the file', () => {
-  const win = windowWith(true);
-  const view = document.createElement('section');
-  view.className = 'ib-view ib-full';
-  boxAt(view, 0, 0, 1400, 900);
-  const foot = document.createElement('div');
-  foot.setAttribute('data-view-foot', '');
-  boxAt(foot, 0, 841, 1400, 59);
-  view.appendChild(foot);
-  win.querySelector('main')!.appendChild(view);
-  const toast = show({ icon: 'check', lead: 'Archived', onUndo: () => {} }, false, win);
-  // The window's center, 59 + 12 above the bottom.
-  expect(toast.style.left).toBe('700px');
-  expect(toast.style.bottom).toBe(`${59 + TOAST_FOOT_GAP}px`);
-  expect(toast.classList.contains('ib-toast-file')).toBe(true);
-});
-
-test.skipIf(!hasDom)('a thread still loading: the toast waits for its pane instead of sitting over the list first', async () => {
-  const win = windowWith(false);
-  const toast = show({ icon: 'check', lead: 'Back in your Inbox', detail: '“Invoice list layout”', onUndo: () => {} }, false, win, true);
-  expect(toast.style.visibility).toBe('hidden');
-  expect(toast.style.left).toBe('');
-  act(() => win.querySelector('main')!.appendChild(threadPane()));
-  await nextFrame();
-  expect(toast.style.visibility).toBe('');
-  expect(toast.style.left).toBe('700px');
-  expect(toast.style.bottom).toBe(`${80 + TOAST_FOOT_GAP}px`);
-});
-
-test.skipIf(!hasDom)('a thread whose pane never comes: after the wait the toast sits over the list', async () => {
-  const win = windowWith(false);
-  const toast = show({ icon: 'check', lead: 'Back in your Inbox', onUndo: () => {} }, false, win, true);
-  expect(toast.style.visibility).toBe('hidden');
-  await act(async () => new Promise((resolve) => setTimeout(resolve, TOAST_PANE_WAIT_MS + 50)));
-  await nextFrame();
-  expect(toast.style.visibility).toBe('');
-  expect(toast.style.left).toBe('700px');
-  expect(toast.style.bottom).toBe(`${TOAST_LIST_GAP}px`);
+  expect(placed()).toEqual(first);
 });
 
 test.skipIf(!hasDom)('a phone: "Read" for "Marked read", no Reply and no Z hint, and Undo undoes', () => {

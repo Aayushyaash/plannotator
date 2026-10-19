@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
+import { useLayoutEffect, useState } from 'react';
 import { Icon, type IconName } from '../icons';
 
 /** `thumb`: 👍 Looks good (the emoji itself, as plan review's button draws it). */
@@ -13,7 +13,7 @@ export interface InboxToastModel {
   lead: string;
   /** What a phone says instead ("Read"). */
   phoneLead?: string;
-  /** The muted rest of the line, cut with "…" (it never wraps). */
+  /** The muted rest of the line; shown whole, wrapping to a second line when it does not fit. */
   detail?: string;
   /** An error: its message stays whole and may wrap. */
   wrap?: boolean;
@@ -41,14 +41,13 @@ export function toastSpeech(toast: Pick<InboxToastModel, 'lead' | 'detail' | 'on
 /**
  * The window's one toast (Mark read, Archive, Unarchive, the sound): one
  * line in the look of Plannotator's other toasts (design record
- * "inbox-toast", approved 2026-10-14): an icon, a bold lead, a muted detail
- * cut with "…", and Undo (`Z` while it is up). No close: it leaves after 7 s.
- * It never takes focus; the window's live region says it. `threadRouted`: a
- * thread is open in the route, so a desktop toast waits for its pane (still
- * loading) rather than sitting over the list and then hopping.
+ * "inbox-toast", approved 2026-10-14): an icon, a bold lead, a muted detail,
+ * and Undo (`Z` while it is up). No close: it leaves after 7 s.
+ * It never takes focus; the window's live region says it. Its words always
+ * show whole: a detail that does not fit one line wraps to a second.
  */
-export function InboxToast({ toast, phone = false, threadRouted = false }: { toast: InboxToastModel; phone?: boolean; threadRouted?: boolean }) {
-  return phone ? <PhoneToast key={toast.id} toast={toast} /> : <DesktopToast key={toast.id} toast={toast} threadRouted={threadRouted} />;
+export function InboxToast({ toast, phone = false }: { toast: InboxToastModel; phone?: boolean }) {
+  return phone ? <PhoneToast key={toast.id} toast={toast} /> : <DesktopToast key={toast.id} toast={toast} />;
 }
 
 function toastClass(toast: InboxToastModel, phone: boolean): string {
@@ -103,174 +102,15 @@ function ToastBody({ toast, phone }: { toast: InboxToastModel; phone: boolean })
   );
 }
 
-interface Anchor {
-  /** The window's center, from the left of the toast's containing block. */
-  x: number;
-  /** From the bottom of the toast's containing block. */
-  bottom: number;
-  /** The window's width (the toast keeps 16 px from each edge). */
-  width: number;
-}
-
-/** How far above an open pane's or file's foot the toast sits. */
-export const TOAST_FOOT_GAP = 12;
-/** How far above the list's bottom the toast sits when no pane is open. */
-export const TOAST_LIST_GAP = 20;
-/** How long a toast waits for the pane of a thread that is still loading before it sits where it can. */
-export const TOAST_PANE_WAIT_MS = 1500;
-
-function shown(el: Element | null): DOMRect | null {
-  if (!el) return null;
-  const box = el.getBoundingClientRect();
-  if (box.width <= 0 || box.height <= 0) return null;
-  return getComputedStyle(el).visibility === 'hidden' ? null : box;
-}
-
-interface Placement {
-  anchor: Anchor | null;
-  /** What to follow: a foot that grows (the reply box), a pane that resizes. */
-  watch: Element[];
-  /** It sits over a file that covers the thread (full screen, or a stacked window). */
-  overFile?: boolean;
-  /** A thread is open but its pane is not there yet (still loading). */
-  pending?: boolean;
-}
-
-/** The window's width, without a classic scrollbar. */
-function viewportWidth(): number {
-  return document.documentElement.clientWidth || window.innerWidth;
-}
-
 /**
- * Where the desktop toast sits. Always centered on the window (owner's
- * request: never on a pane); only its height follows what is open:
- * - a file covering the thread (full screen, or a window too narrow for
- *   both): 12 px above the file's foot strip;
- * - an open pane (a thread): 12 px above its foot, so it never
- *   covers Reply or New message;
- * - a thread routed whose pane is still loading: pending;
- * - no pane: near the list's bottom;
- * - elsewhere (Settings): null, the window's bottom center (inbox.css).
+ * A desktop toast: centered on the window, 16 px from its bottom edge, at
+ * most 520 px wide and 16 px from each side (inbox.css), whatever is open
+ * (owner, 2026-10-18: a toast is brief, so it may cover Reply or a file's
+ * strip for a moment rather than move around them).
  */
-function placeOver(host: HTMLElement, threadRouted: boolean): Placement {
-  const box = host.getBoundingClientRect();
-  const vw = viewportWidth();
-  const at = (edge: number, gap: number): Anchor => ({
-    x: Math.round(vw / 2 - box.left),
-    bottom: Math.round(box.bottom - edge + gap),
-    width: Math.round(vw),
-  });
-  let pane: { el: Element; foot: Element; footBox: DOMRect } | null = null;
-  for (const el of host.querySelectorAll('section.ib-pane')) {
-    const foot = el.querySelector('.ib-pfoot');
-    const footBox = shown(foot);
-    if (shown(el) && footBox) {
-      pane = { el, foot: foot!, footBox };
-      break;
-    }
-  }
-  const view = host.querySelector('.ib-view');
-  const viewBox = shown(view);
-  // The file's foot: whichever is higher of its stepping strip and an image's or a film's comment row
-  // ([data-image-composer], which grows as the person types), else full view's `--ib-fvfoot` (AttachmentPane).
-  const fileFoot = (view: Element, viewBox: DOMRect) => {
-    const foot = view.querySelector('[data-view-foot]');
-    const footBox = shown(foot);
-    const row = view.querySelector('[data-image-composer]');
-    const rowBox = shown(row);
-    const watch = [view, ...(footBox ? [foot!] : []), ...(rowBox ? [row!] : [])];
-    const gap = footBox ? TOAST_FOOT_GAP : TOAST_LIST_GAP;
-    if (rowBox && (!footBox || rowBox.top < footBox.top)) return { top: rowBox.top, gap, watch };
-    if (footBox) return { top: footBox.top, gap, watch };
-    const fvfoot = parseFloat(getComputedStyle(view).getPropertyValue('--ib-fvfoot')) || 0;
-    return { top: viewBox.bottom - fvfoot, gap, watch };
-  };
-  if (view && viewBox && (view.classList.contains('ib-full') || !pane)) {
-    const file = fileFoot(view, viewBox);
-    return { anchor: at(file.top, file.gap), watch: file.watch, overFile: true };
-  }
-  if (pane) {
-    // A file beside the thread: centered on the window the toast may sit over the file, so it clears both feet.
-    const file = view && viewBox ? fileFoot(view, viewBox) : null;
-    const top = file ? Math.min(pane.footBox.top, file.top - file.gap + TOAST_FOOT_GAP) : pane.footBox.top;
-    return { anchor: at(top, TOAST_FOOT_GAP), watch: [pane.el, pane.foot, ...(file?.watch ?? [])] };
-  }
-  if (threadRouted) return { anchor: null, watch: [], pending: true };
-  const list = host.querySelector('.ib-listcol');
-  const listBox = shown(list);
-  if (!listBox) return { anchor: null, watch: [] };
-  return { anchor: at(listBox.bottom, TOAST_LIST_GAP), watch: [list!] };
-}
-
-interface Placed {
-  anchor: Anchor | null;
-  overFile: boolean;
-  /** Not placed yet: waiting for a loading thread's pane. */
-  hidden: boolean;
-}
-
-function useDesktopPlacement(ref: RefObject<HTMLElement | null>, threadRouted: boolean): Placed {
-  const routed = useRef(threadRouted);
-  routed.current = threadRouted;
-  const [placed, setPlaced] = useState<Placed>({ anchor: null, overFile: false, hidden: false });
-  useLayoutEffect(() => {
-    const el = ref.current;
-    // The toast's containing block (.pn-inbox is positioned).
-    const host = el?.closest<HTMLElement>('.pn-inbox') ?? el?.parentElement;
-    if (!el || !host) return;
-    let frame = 0;
-    let patient = true;
-    let watched: Element[] = [];
-    const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => schedule());
-    const measure = () => {
-      frame = 0;
-      const next = placeOver(host, routed.current && patient);
-      if (resize && (next.watch.length !== watched.length || next.watch.some((w, i) => w !== watched[i]))) {
-        resize.disconnect();
-        for (const w of next.watch) resize.observe(w);
-        watched = next.watch;
-      }
-      setPlaced((current) => {
-        // Waiting for a loading pane: stay where it is, or unseen until placed.
-        if (next.pending) return current.anchor || current.hidden ? current : { ...current, hidden: true };
-        const a = current.anchor;
-        const b = next.anchor;
-        const same = a === b || (!!a && !!b && a.x === b.x && a.bottom === b.bottom && a.width === b.width);
-        return same && current.overFile === !!next.overFile && !current.hidden ? current : { anchor: b, overFile: !!next.overFile, hidden: false };
-      });
-    };
-    const schedule = () => {
-      if (!frame) frame = requestAnimationFrame(measure);
-    };
-    measure();
-    // A pane opening or closing, a file going full screen, the reply box opening: the toast follows.
-    const mutations = new MutationObserver(schedule);
-    mutations.observe(host, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
-    window.addEventListener('resize', schedule);
-    const giveUp = setTimeout(() => {
-      patient = false;
-      schedule();
-    }, TOAST_PANE_WAIT_MS);
-    return () => {
-      if (frame) cancelAnimationFrame(frame);
-      clearTimeout(giveUp);
-      mutations.disconnect();
-      resize?.disconnect();
-      window.removeEventListener('resize', schedule);
-    };
-  }, [ref]);
-  return placed;
-}
-
-function DesktopToast({ toast, threadRouted }: { toast: InboxToastModel; threadRouted: boolean }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const { anchor, overFile, hidden } = useDesktopPlacement(ref, threadRouted);
-  const style: CSSProperties = {
-    ...(anchor ? { left: `${anchor.x}px`, bottom: `${anchor.bottom}px`, maxWidth: `min(520px, ${Math.max(anchor.width - 32, 160)}px)` } : {}),
-    ...(hidden ? { visibility: 'hidden' } : {}),
-  };
+function DesktopToast({ toast }: { toast: InboxToastModel }) {
   return (
-    <div ref={ref} className={`${toastClass(toast, false)}${overFile ? ' ib-toast-file' : ''}`} data-inbox-toast="" style={style}>
+    <div className={toastClass(toast, false)} data-inbox-toast="">
       <ToastBody toast={toast} phone={false} />
     </div>
   );

@@ -152,7 +152,20 @@ test('a click: pressed, the line and the toast, nothing sent yet; the row reads 
   await expect(page.locator('[data-ack-pill]')).toContainText('goes to Claude Code in a few seconds');
   const toast = page.locator('[data-inbox-toast]');
   await expect(toast).toContainText('Looks good');
-  await expect(toast).toContainText('goes to Claude Code unless you undo');
+  await expect(toast).toContainText('Goes to Claude Code in 10 s · Moves to Quiet');
+  // A toast's words always show whole: nothing in it is cut (no "…"), and at 1440 and 1024 the 👍 copy
+  // fits one 40 px line with Undo and its Z.
+  for (const width of [1440, 1024]) {
+    await page.setViewportSize({ width, height: 900 });
+    await toast.evaluate((el) => Promise.all(el.getAnimations().map((a) => a.finished)).then(() => undefined));
+    const cut = await toast.evaluate((el) =>
+      [el, ...el.querySelectorAll('*')].filter((node) => node.scrollWidth > node.clientWidth + 0.5).map((node) => node.className || node.tagName),
+    );
+    expect(cut, `cut at ${width}`).toEqual([]);
+    expect(await toast.locator('.ib-tdetail').evaluate((el) => getComputedStyle(el).textOverflow)).not.toBe('ellipsis');
+    expect((await toast.boundingBox())!.height, `one line at ${width}`).toBe(40);
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
   await shot(page, '03-after');
   // The agent's thread still holds its one message (the note that carries the 👍 is never listed).
   const thread = await claude.readThread(threads.merged);

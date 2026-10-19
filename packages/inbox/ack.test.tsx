@@ -214,7 +214,7 @@ test.skipIf(!hasDom)('a click presses the button, the pill and the toast show, t
   expect(pill.textContent).toContain('goes to Claude Code in a few seconds');
   const toast = el.querySelector('.ib-toast') as HTMLElement;
   expect(toast.textContent).toContain('Looks good');
-  expect(toast.textContent).toContain('goes to Claude Code unless you undo');
+  expect(toast.textContent).toContain('Goes to Claude Code in 10 s · Moves to Quiet');
   expect((await serverRow(thread)).section).toBe('quiet');
 
   // Leave the thread: the row settles in Quiet and says Looks good in place of Read.

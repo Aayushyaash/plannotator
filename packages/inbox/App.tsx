@@ -1294,7 +1294,8 @@ function Inbox() {
     showToast({
       icon: 'thumb',
       lead: 'Looks good',
-      detail: `Moves to Quiet · goes to ${agent} unless you undo`,
+      // Short enough for one line at 520 px with Undo and its Z (a toast's words always show whole).
+      detail: `Goes to ${agent} in 10 s · Moves to Quiet`,
       onUndo: () => void acknowledge(threadId, messageId, false, agent),
     });
   };
@@ -2162,7 +2163,7 @@ function Inbox() {
           onClosed={() => setAgentNote('shown')}
         />
       )}
-      {toast && soundDialog !== 'open' && !agentNoteOpen && <InboxToast toast={toast} phone={phone} threadRouted={route.page === 'inbox' && !!route.thread} />}
+      {toast && soundDialog !== 'open' && !agentNoteOpen && <InboxToast toast={toast} phone={phone} />}
       <SearchHost
         mounted={searchMounted}
         open={searchOpen}
