@@ -9,8 +9,12 @@ export interface AnnotationsChipProps {
   attachments: readonly InboxAttachmentState[];
   onEdit: (record: InboxAnnotationRecord, text: string) => Promise<void>;
   onRemove: (record: InboxAnnotationRecord) => Promise<void>;
-  /** The file name: open the file at that annotation. */
+  /** The file name: open the file at that annotation (or, for a comment on a message's text, show that passage). */
   onOpen: (record: InboxAnnotationRecord) => void;
+  /** A comment on a message's text: the row's name ("Claude Code's message, 2:58 PM"). */
+  messageName?: (record: InboxAnnotationRecord) => string;
+  /** Comments whose words were not found where they were made: tagged "Unanchored". */
+  unanchored?: ReadonlySet<string>;
 }
 
 /**
@@ -20,7 +24,7 @@ export interface AnnotationsChipProps {
  * at that place. Escape or a click outside closes it. With none, the chip
  * dims to "No annotations".
  */
-export function AnnotationsChip({ records, attachments, onEdit, onRemove, onOpen }: AnnotationsChipProps) {
+export function AnnotationsChip({ records, attachments, onEdit, onRemove, onOpen, messageName, unanchored }: AnnotationsChipProps) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -82,7 +86,11 @@ export function AnnotationsChip({ records, attachments, onEdit, onRemove, onOpen
   }, [open]);
 
   const name = (record: InboxAnnotationRecord) =>
-    record.guide ? record.path : (attachments.find((a) => a.id === record.attachment_id) ?? attachments.find((a) => a.path === record.path))?.name ?? record.path;
+    record.message
+      ? (messageName?.(record) ?? 'Message')
+      : record.guide
+        ? record.path
+        : (attachments.find((a) => a.id === record.attachment_id) ?? attachments.find((a) => a.path === record.path))?.name ?? record.path;
 
   const run = async (work: () => Promise<void>) => {
     setBusy(true);
@@ -143,6 +151,11 @@ export function AnnotationsChip({ records, attachments, onEdit, onRemove, onOpen
                     {record.guide ? ' (guided review)' : record.version !== 'current' ? ' (sent)' : ''}
                   </button>
                   {tag && <span className="ib-mini">{tag}</span>}
+                  {unanchored?.has(record.id) && (
+                    <span className="ib-mini" data-unanchored="">
+                      Unanchored
+                    </span>
+                  )}
                   {!isEditing && (
                     <>
                       <span className="ib-sp" />

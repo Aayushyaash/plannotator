@@ -15,6 +15,7 @@ import { ThemeProvider } from '@plannotator/ui/components/ThemeProvider';
 import { TooltipProvider } from '@plannotator/ui/components/Tooltip';
 import { TIP_DELAY_MS } from './components/Tip';
 import { configurePlannotatorUI } from '@plannotator/ui/configure';
+import { selectionToolbarShowing } from './selectionToolbar';
 import { storage } from '@plannotator/ui/utils/storage';
 import type { SkillCatalogEntry } from '@plannotator/ui/utils/skillReferences';
 import type { InboxHealth, InboxListRow, InboxListSection, InboxQuestion, InboxThread } from '@plannotator/core/inbox-types';
@@ -886,6 +887,8 @@ function Inbox() {
       if (event.defaultPrevented) return;
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable)) return;
+      // Words selected in a message (approval "inbox-message-comments"): its selection toolbar or label picker owns this Escape.
+      if (selectionToolbarShowing()) return;
       // An open guided review closes first, back to its thread.
       closeTo(routeRef.current.guide ? { ...routeRef.current, guide: null } : { ...routeRef.current, thread: null });
     };
@@ -1432,6 +1435,8 @@ function Inbox() {
   const threadKeyAction = (event: KeyboardEvent, key: 'e' | 'z'): (() => void) | null => {
     if (event.defaultPrevented || isRepeatKey(event) || isComposingKey(event)) return null;
     if (keysRef.current.soundDialog === 'open' || keysRef.current.agentNoteOpen || routeRef.current.guide) return null;
+    // Words selected in a message: its toolbar takes the letters (a comment starting with them).
+    if (selectionToolbarShowing()) return null;
     const target = event.target instanceof HTMLElement ? event.target : null;
     if (target) {
       if (isEditableTarget(target)) return null;

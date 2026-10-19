@@ -149,6 +149,7 @@ The allowlist. Each row is the window's handler as it is today, with the request
 | `GET messages/:id/guide` | same | | `{ message_id, guide, snapshot }` | 7.19 |
 | `POST messages/:id/guide/reviewed` | same | `{ idempotency_key, reviewed: boolean[] }` | `{ message_id, reviewed }` | 7.20 |
 | `POST messages/:id/guide/annotations` | same | `{ idempotency_key, annotation }` (the review app's line comment: `id`, `filePath` in the guide's patch, `side` `old`/`new`, `lineStart`/`lineEnd`, `text`); an edit is the same annotation id under a new key | `{ annotation: record }`. Removed through `annotations/:id/remove` (7.18). The window's refusals pass through: `422 validation_error` (a file not in the patch, a bad side, lines not in one hunk), `404 guide_not_found` / `message_not_found`, `409 annotation_closed`, `409 thread_resolved`. Added 2026-10-15 | 7.53 |
+| `POST messages/:id/annotations` | same | `{ idempotency_key, annotation }` (Plannotator's text-selection annotation on an agent's message: `id`, `type` `"COMMENT"`, `originalText` the words selected, `text`); an edit is the same annotation id under a new key | `{ annotation: record }` with `message: { at }`. Removed through `annotations/:id/remove` (7.18). The window's refusals pass through: `422 annotation_not_allowed` (the person's own message), `422 validation_error`, `404 message_not_found`, `409 annotation_closed`, `409 thread_resolved`. Added 2026-10-19 | 7.59 |
 | `GET threads/:id/sessions` | same | | `{ serverSession, home, project, sessions }` (`?asker=<session>` adds `asker: { session, live, connection }`, `connection` = `{ busy, idle_since, send_now }` while that session's connection polls, else null; each session carries `send_now`) | 7.23 |
 | `POST messages/:id/send-now` | same | `{ idempotency_key }` | `{ message }` with `deliver_now_at`: Send now (2026-10-16). The session the person's reply or message goes to gets it at once, into its running turn when one runs. Offer it only while `asker.connection.send_now` and `busy` are true (draw "Queued · <agent> is working; it gets this when its turn ends"); `409 send_now_unavailable` when that session's connection does not poll now or cannot take it mid-turn, `409 already_delivered`, `422 not_addressed`. A second press writes nothing. An Inbox before it answers `404 device_route_not_found` | 7.58 |
 | `POST threads/:id/message` | same | `{ idempotency_key, session, body }` | `{ message, replayed }` | 7.24 |
@@ -412,6 +413,7 @@ Every command a phone sends carries one key: `idempotency_key` in the request bo
 | Send to another session | `POST messages/:id/to` | body `idempotency_key` (the door's log only) |
 | Project menu, its Undo | `POST projects/:id/read`, `unread`, `resolve` | body `idempotency_key` (the door's log; the window's in-memory `batch_id` is optional) |
 | Guided-review comment | `POST messages/:id/guide/annotations` | body `idempotency_key` (an edit is the same annotation id under a new key) |
+| Comment on a message's text | `POST messages/:id/annotations` | body `idempotency_key` (an edit is the same annotation id under a new key) |
 | Upload | `POST uploads?name=` | query `idempotency_key` (the body is the file) |
 | Drawing | `POST markups` | query `idempotency_key` (the body is the image; its name is its SHA-256, so a replay writes nothing new anyway) |
 
@@ -1115,7 +1117,7 @@ curl -sS -X POST "$INBOX/api/inbox/device/markups?idempotency_key=00000000-0000-
 
 ### 7.53 A comment on a guided review's diff
 
-7.50 to 7.52 (shared drafts) are held and not built; 7.54, 7.55 (decision retire and replace) will not be built (Decisions were removed, 2026-10). 7.56 is 👍 Looks good, 7.57 a reply carrying files, 7.58 Send now (below).
+7.50 to 7.52 (shared drafts) are held and not built; 7.54, 7.55 (decision retire and replace) will not be built (Decisions were removed, 2026-10). 7.56 is 👍 Looks good, 7.57 a reply carrying files, 7.58 Send now, 7.59 a comment on the text of an agent's message (below).
 
 ```sh
 curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/guide/annotations" \
@@ -1158,6 +1160,18 @@ curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K7000000000000000000005
 ```
 
 `{ "message": { "id": "msg_01K70000000000000000000058", "deliver_now_at": "2026-10-16T17:06:00.000Z", "...": "" } }`. The session's connection then puts it into the running turn (Claude Code: a user row; Pi and OpenCode 2: a steer) and records the delivery as usual ("Delivered to <agent>, <time>").
+
+### 7.59 A comment on the text of an agent's message
+
+Added 2026-10-19 (approval "inbox-message-comments"). The window lets the person select words in an agent's message and comment on them, as on an attached file; the door carries the same route. The annotation is Plannotator's text-selection annotation: `type` `"COMMENT"` (a 👍 is a comment with `isQuickLabel: true` and `text: "👍 Looks good"`), `originalText` the exact words selected (1 to 20,000 characters), `text` the comment.
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/annotations" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000059","annotation":{"id":"ann-message-1","blockId":"block-1","startOffset":0,"endOffset":0,"type":"COMMENT","originalText":"two, four and eight seconds","text":"Cap the total wait too.","createdA":1760526000000}}'
+```
+
+`{ "annotation": { "id": "ann-message-1", "message_id": "msg_01K70000000000000000000020", "attachment_id": "", "path": "msg_01K70000000000000000000020", "version": "current", "message": { "at": "<the message's created_at>" }, "sent_reply_id": null, "...": "" } }`. It is listed with the thread's other annotations (7.14's `annotations`), rides the next Send like the window's (`annotation_ids` on 7.11, the feedback text built as the window builds it: the surface's `export_feedback` writes it under "Feedback on your message from <time> (<message id>)", the time in the phone's own time zone from `message.at`, so pass these records to it as they are). Remove with 7.18. An edit is the same annotation id under a new key. The person's own message: `422 annotation_not_allowed`; not a comment, or an id used on a file, a guide or another message: `422 validation_error`; no such message: `404 message_not_found`; a message an archive closed: `409 thread_resolved`; removed or sent: `409 annotation_closed`. The app draws message bodies natively, so it decides how to offer the selection; the window offers it on an agent's message only, never inside a question card.
 
 ## 8. What this contract leaves out
 

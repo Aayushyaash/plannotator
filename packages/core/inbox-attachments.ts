@@ -161,9 +161,22 @@ export interface InboxGuideCommentTarget {
 }
 
 /**
+ * Where a comment on the text of an agent's message sits (approval
+ * "inbox-message-comments", 2026-10-19): the message itself, named by the
+ * record's `message_id`. The annotation is Plannotator's text selection
+ * (`originalText` is the exact words selected). `at` is the message's
+ * `created_at`, kept so a reader (the window, the phone's surface) can name
+ * the message ("your message from 2:58 PM") without looking it up.
+ */
+export interface InboxMessageCommentTarget {
+  /** The message's `created_at`. */
+  at: string;
+}
+
+/**
  * One annotation of the person's, stored until it rides a Send: on an
- * attachment, or (with `guide`) on the diff of the guided review a message
- * carries.
+ * attachment, (with `guide`) on the diff of the guided review a message
+ * carries, or (with `message`) on the text of an agent's message.
  */
 export interface InboxAnnotationRecord {
   /** The annotation's own id (Plannotator's `Annotation.id`). */
@@ -171,7 +184,7 @@ export interface InboxAnnotationRecord {
   project_id: string;
   thread_id: string;
   message_id: string;
-  /** The attachment it is on; empty for a guided-review comment (`guide` set). */
+  /** The attachment it is on; empty for a guided-review comment (`guide` set) and a message comment (`message` set). */
   attachment_id: string;
   /** The attachment's realpath, or a guided-review comment's file as the patch names it: with `version`, the draft's key. */
   path: string;
@@ -179,6 +192,13 @@ export interface InboxAnnotationRecord {
   version: InboxAnnotationVersion;
   /** Set on a comment on a guided review's diff (additive: an older reader sees a record whose attachment it cannot find). */
   guide?: InboxGuideCommentTarget;
+  /**
+   * Set on a comment on the text of an agent's message (additive): then
+   * `attachment_id` is empty, `path` is the message id and `version` is
+   * "current", so an older reader sees a record whose attachment it cannot
+   * find and exports it under the message id.
+   */
+  message?: InboxMessageCommentTarget;
   /** Plannotator's `Annotation` (attachments) or the review app's `CodeAnnotation` (guided reviews), as the viewer made it (opaque to the store beyond the checks). */
   annotation: Record<string, unknown>;
   created_at: string;
@@ -189,6 +209,12 @@ export interface InboxAnnotationRecord {
 }
 
 export const INBOX_ANNOTATION_CURRENT = "current";
+
+/** The most of an agent's message one comment can quote (the words selected), in characters. */
+export const INBOX_MESSAGE_COMMENT_QUOTE_MAX = 20_000;
+
+/** The longest comment on a message's text, in characters. */
+export const INBOX_MESSAGE_COMMENT_TEXT_MAX = 10_000;
 
 /**
  * The largest text the window reads whole (the `view` and raw routes). A

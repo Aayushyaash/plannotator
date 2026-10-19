@@ -170,11 +170,17 @@ test('a word double-clicked in the message (selected, nothing to comment on) doe
     // A double-click on a word of the agent's message selects it, as people do while reading.
     const word = await wordRect(p, 'I checked the 409 row.', 'checked');
     await p.mouse.dblclick(word.x, word.y);
-    expect(await p.evaluate(() => document.getSelection()?.toString().trim() ?? '')).not.toBe('');
+    // The word is drawn as the comment toolbar's pending highlight (approval "inbox-message-comments"):
+    // the toolbar is an offer, so the dictation still follows the reply box.
+    await expect(p.locator('section.ib-pane .ib-body mark.annotation-highlight')).toHaveText('checked');
+    await expect(p.locator('.annotation-toolbar')).toBeVisible();
     await expect(box).not.toBeFocused();
     await dictate(p, 'Then this.');
     await expect(box).toHaveValue('Reading first. Then this.');
     await expect(box).toBeFocused();
+    // The words were left for the field: their pending highlight and toolbar went with them.
+    await expect(p.locator('.annotation-toolbar')).toHaveCount(0);
+    await expect(p.locator('section.ib-pane .ib-body mark.annotation-highlight')).toHaveCount(0);
   } finally {
     await p.close();
   }
@@ -323,6 +329,8 @@ test('text selected in a file to comment on: the paste is not taken to the reply
     await p.locator('section.ib-pane .ib-atts [data-attachment-id]').first().click();
     const text = p.locator('.ib-view').getByText('Retry with the same key');
     await expect(text).toBeVisible();
+    // The pane may still be sliding in: measure once it stands still.
+    await p.evaluate(() => Promise.all(document.getAnimations().filter((a) => a.effect?.getComputedTiming().iterations !== Infinity).map((a) => a.finished.catch(() => undefined))));
     // Drag across the words, as a person selects text to comment on (the rect of the words themselves).
     const rect = await p.evaluate(() => {
       const walker = document.createTreeWalker(document.querySelector('.ib-view')!, NodeFilter.SHOW_TEXT);

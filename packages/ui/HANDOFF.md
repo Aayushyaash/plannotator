@@ -1732,6 +1732,12 @@ Additive, one optional `Viewer` prop; Plannotator passes none, so its render is 
 - Inside, `Viewer` computes `authoringOff = readOnly || answerOnly` and uses it wherever it used `readOnly` for authoring; the question and checkbox handlers still read `readOnly`. Absent or false, every path is the one it was.
 - The article keeps its card padding; a host that wants the bare text (as the Inbox does) overrides it from its own CSS on `[data-print-region="article"]`.
 
+## Viewer `textComments` (after ui 0.53.0)
+
+Additive, one optional `Viewer` prop; Plannotator's plan review and annotate pass none, so their render is unchanged. Added for the Plannotator Inbox (approval "inbox-message-comments", 2026-10-19), where the person comments on the words of an agent's message.
+
+- **`textComments?: boolean`** on `Viewer`, with `answerOnly`: a text selection opens the selection toolbar again, comment-only (the toolbar's `commentOnly`: Comment and the one-click 👍, no Delete, no label picker), with its comment composer, and `annotations` are drawn as highlights (the highlighter is enabled). Question cards (and a host's `renderQuestionCard`) are wrapped `annotation-exclude`, so their words are never commented on. Nothing else of authoring comes back: no pinpoint, code-block toolbar, Global comment, Copy or Vim. Ignored without `answerOnly` and under `readOnly`. Inside, `selectionCommentsOn = !authoringOff || (answerOnly && textComments && !readOnly)` replaces `!authoringOff` for the highlighter and the selection toolbar, its composer and its label picker only.
+
 ## Viewer `resolveLocalLink` (ui 0.53.0)
 
 Additive, one optional `Viewer` prop; Plannotator's plan review and annotate pass none, so their render is unchanged. Added for the Plannotator Inbox, where a link in a message to a file the message attached opens that file beside the thread.

@@ -380,6 +380,18 @@ export function createInboxAttachmentRoutes(context: InboxAttachmentRoutesContex
       return json({ annotation: record });
     }
 
+    // A comment on the text of an agent's message (approval
+    // "inbox-message-comments"): the words the person selected, kept with the
+    // attachments' annotations (removed by the same remove route, sent with
+    // the reply the same way).
+    const messageAnnotation = /^\/api\/inbox\/messages\/([A-Za-z0-9_]+)\/annotations$/.exec(path);
+    if (messageAnnotation) {
+      if (req.method !== "POST") return json({ error: "Use POST." }, 405);
+      const body = await guardedBody(req);
+      if (body instanceof Response) return body;
+      return json({ annotation: store.saveMessageAnnotation(messageAnnotation[1]!, body.annotation) });
+    }
+
     // A comment on the diff of the guided review a message carries: the review
     // app's line comment, kept with the attachments' annotations (removed by
     // the same remove route, sent with the reply the same way).

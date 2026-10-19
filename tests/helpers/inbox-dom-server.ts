@@ -19,7 +19,10 @@
  * while a test runs; the server answers `{ "sent": <message id> }` on stdout.
  * `{ "deliver": { session } }` is that session's connection delivering every
  * reply waiting for it (the bridge's `delivered`); the server answers
- * `{ "delivered": [<reply id>] }`. The set-aside note's delay (also the 👍
+ * `{ "delivered": [<reply id>] }`. `{ "wait": { thread, session } }` is that
+ * agent calling `wait_for_reply` on the thread through the Inbox's own MCP
+ * (`/mcp`, a real MCP client); the server answers `{ "waited": <its
+ * structured result> }`. The set-aside note's delay (also the 👍
  * Looks good Undo window) is a minute, so no note is written while a test
  * runs, unless `INBOX_DOM_SET_ASIDE_MS` names a shorter one.
  *
@@ -47,6 +50,7 @@
  */
 import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startInboxServer } from "../../packages/server/inbox";
 import type { InboxOpenInLauncher } from "../../packages/server/inbox-open-in";
 import { recordInboxAttachments } from "../../packages/shared/inbox/attachments";
@@ -326,7 +330,21 @@ process.stdout.write(`${JSON.stringify({ port: server.port, worlds, ...(tailnet 
 // An agent writing while a test runs.
 void (async () => {
   for await (const line of console) {
-    const command = JSON.parse(line) as { send?: { project: string; session: string; body: string; reply_to?: string }; deliver?: { session: string } };
+    const command = JSON.parse(line) as {
+      send?: { project: string; session: string; body: string; reply_to?: string };
+      deliver?: { session: string };
+      wait?: { thread: string; session: string };
+    };
+    if (command.wait) {
+      const client = new Client({ name: "inbox-dom-server", version: "1.0.0" });
+      await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`)));
+      const result = (await client.callTool({ name: "wait_for_reply", arguments: { thread_id: command.wait.thread, agent_session: command.wait.session, timeout_seconds: 5 } })) as {
+        structuredContent?: unknown;
+      };
+      await client.close();
+      process.stdout.write(`${JSON.stringify({ waited: result.structuredContent ?? null })}\n`);
+      continue;
+    }
     if (command.deliver) {
       const ids = store.pendingReplies(command.deliver.session).map((reply) => store.recordDelivery(reply.id, { host: "claude-code", session: command.deliver!.session }).id);
       process.stdout.write(`${JSON.stringify({ delivered: ids })}\n`);

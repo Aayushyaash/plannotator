@@ -75,6 +75,8 @@ import type { QuestionAnswer } from "@plannotator/core/question-block";
 import { sanitizeTag } from "@plannotator/core/project";
 import {
   INBOX_ANNOTATION_CURRENT,
+  INBOX_MESSAGE_COMMENT_QUOTE_MAX,
+  INBOX_MESSAGE_COMMENT_TEXT_MAX,
   isInboxAnnotationId,
   isInboxAnnotationVersion,
   isInboxAnnotatableKind,
@@ -2369,7 +2371,7 @@ export class InboxStore {
     const existing = this.annotations.get(id);
     // A draft's key is the file's path and the version, so an annotation
     // made through one attachment of a file edits from another of the same file.
-    if (existing && (existing.guide || existing.path !== hit.attachment.path || existing.version !== input.version || existing.thread_id !== hit.message.thread_id)) {
+    if (existing && (existing.guide || existing.message || existing.path !== hit.attachment.path || existing.version !== input.version || existing.thread_id !== hit.message.thread_id)) {
       throw new InboxError("validation_error", "annotation.id: already used on another file or version.", { field: "annotation.id" });
     }
     if (existing && (existing.sent_reply_id !== null || existing.removed_at !== null)) {
@@ -2454,6 +2456,71 @@ export class InboxStore {
       version: message.guide.sha256,
       guide: { title: message.guide.title, file, side, line_start: start as number, line_end: end as number },
       annotation: fields,
+      created_at: existing?.created_at ?? at,
+      updated_at: at,
+      removed_at: null,
+      sent_reply_id: null,
+    };
+    this.appendAnnotation(record, at);
+    return record;
+  }
+
+  /**
+   * Save a comment on the text of an agent's message (a new one, or an edit
+   * of one still waiting; approval "inbox-message-comments", 2026-10-19):
+   * Plannotator's text-selection annotation, `originalText` the exact words
+   * the person selected. Only an agent's message takes one, and only while it
+   * can be answered (an archive closes the messages before its line). The
+   * record's key is the message: `path` is its id, `version` "current", and
+   * `message` names it. Sent with the reply like an attachment's annotation.
+   */
+  saveMessageAnnotation(messageId: string, annotation: unknown): InboxAnnotationRecord {
+    const message = this.messages.get(messageId);
+    if (!message) throw new InboxError("message_not_found", `No message ${messageId}.`);
+    if (message.author.kind !== "agent") {
+      throw new InboxError("annotation_not_allowed", "annotation: only an agent's message takes comments; this one is yours.", { field: "message_id" });
+    }
+    if (!annotation || typeof annotation !== "object" || Array.isArray(annotation)) {
+      throw new InboxError("validation_error", "annotation: an object.", { field: "annotation" });
+    }
+    const fields = annotation as Record<string, unknown>;
+    const id = fields.id;
+    if (!isInboxAnnotationId(id)) throw new InboxError("validation_error", "annotation.id: a short id.", { field: "annotation.id" });
+    // A comment on selected words (a quick label such as 👍 is a comment too); never a deletion or a general comment.
+    if (fields.type !== "COMMENT") throw new InboxError("validation_error", 'annotation.type: "COMMENT" (a comment on the words selected).', { field: "annotation.type" });
+    const quote = fields.originalText;
+    if (typeof quote !== "string" || quote.trim() === "" || quote.length > INBOX_MESSAGE_COMMENT_QUOTE_MAX) {
+      throw new InboxError("validation_error", `annotation.originalText: the words selected (1 to ${INBOX_MESSAGE_COMMENT_QUOTE_MAX} characters).`, { field: "annotation.originalText" });
+    }
+    // The comment itself: a quick label (👍) carries its label as its text, so every comment has words to send.
+    const text = fields.text;
+    if (typeof text !== "string" || text.trim() === "" || text.length > INBOX_MESSAGE_COMMENT_TEXT_MAX) {
+      throw new InboxError("validation_error", `annotation.text: the comment (1 to ${INBOX_MESSAGE_COMMENT_TEXT_MAX} characters).`, { field: "annotation.text" });
+    }
+    // A comment on a message's words is words: no images, no element or page it points at, no reply thread.
+    for (const field of ["images", "elementContext", "pageUrl", "inReplyTo"] as const) {
+      const value = fields[field];
+      if (value !== undefined && value !== null && !(Array.isArray(value) && value.length === 0)) throw new InboxError("validation_error", `annotation.${field}: a comment on a message's text takes none.`, { field: `annotation.${field}` });
+    }
+    if (this.closedByArchive(message)) throw new InboxError("thread_resolved", "This thread is resolved; reopen it to annotate.");
+    const existing = this.annotations.get(id);
+    if (existing && (!existing.message || existing.message_id !== message.id)) {
+      throw new InboxError("validation_error", "annotation.id: already used on another message or file.", { field: "annotation.id" });
+    }
+    if (existing && (existing.sent_reply_id !== null || existing.removed_at !== null)) {
+      throw new InboxError("annotation_closed", "This annotation was already sent or removed.");
+    }
+    const at = this.stamp();
+    const record: InboxAnnotationRecord = {
+      id,
+      project_id: message.project_id,
+      thread_id: message.thread_id,
+      message_id: message.id,
+      attachment_id: "",
+      path: message.id,
+      version: INBOX_ANNOTATION_CURRENT,
+      message: { at: message.created_at },
+      annotation: withoutExportLocation(fields),
       created_at: existing?.created_at ?? at,
       updated_at: at,
       removed_at: null,

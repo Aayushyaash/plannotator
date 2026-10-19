@@ -542,6 +542,9 @@ export const inboxApi = {
   /** A comment on that guide's diff (the review app's line comment), new or edited; removed through `removeAnnotation`. */
   saveGuideAnnotation: (messageId: string, annotation: object) =>
     post<{ annotation: InboxAnnotationRecord }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/guide/annotations`, { annotation }),
+  /** A comment on the text of an agent's message (the words selected), new or edited; removed through `removeAnnotation`. */
+  saveMessageAnnotation: (messageId: string, annotation: object) =>
+    post<{ annotation: InboxAnnotationRecord }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/annotations`, { annotation }),
   restart: () => post<{ ok: true }>('/api/inbox/restart', {}),
   // The update control: the dialogs' facts, Update now, Remind me tomorrow, Check now, What's new.
   updateDetails: () => get<UpdateDetails>('/api/inbox/update'),

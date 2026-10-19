@@ -270,6 +270,7 @@ describe("the device door, on the binary", () => {
       ["POST", "uploads?name=a.txt"],
       ["POST", "markups"],
       ["POST", `messages/${guideMessage}/guide/annotations`],
+      ["POST", `messages/${threadId}/annotations`],
       ["POST", "revoke"],
     ];
     for (const [method, path] of routes) {
@@ -642,6 +643,43 @@ describe("the device door, on the binary", () => {
     expect([noGuide.status, ((await noGuide.json()) as Json).code]).toEqual([404, "guide_not_found"]);
     // Removed through the attachments' remove route (7.18), already on the door; then closed to edits.
     expect((await door("annotations/ann-guide-phone/remove", { body: { idempotency_key: keys() } })).status).toBe(200);
+    const closed = await door(route, { body: { idempotency_key: keys(), annotation: comment() } });
+    expect([closed.status, ((await closed.json()) as Json).code]).toEqual([409, "annotation_closed"]);
+  });
+
+  test("7.59: a comment on the text of an agent's message, replayed by its key; the window's refusals pass through; removed through 7.18's route", async () => {
+    const comment = (overrides: Json = {}) => ({
+      id: "ann-message-phone",
+      blockId: "block-0",
+      startOffset: 0,
+      endOffset: 5,
+      type: "COMMENT",
+      text: "Say which retries.",
+      originalText: "Retry",
+      createdA: 1,
+      ...overrides,
+    });
+    const route = `messages/${threadId}/annotations`;
+    const key = keys();
+    const saved = await door(route, { body: { idempotency_key: key, annotation: comment() } });
+    expect(saved.status).toBe(200);
+    expect(((await saved.json()) as Json).annotation).toMatchObject({
+      message_id: threadId,
+      attachment_id: "",
+      path: threadId,
+      version: "current",
+      message: { at: expect.any(String) },
+      sent_reply_id: null,
+    });
+    // The same key again: the recorded answer; the changed text is not written.
+    const again = await door(route, { body: { idempotency_key: key, annotation: comment({ text: "changed" }) } });
+    expect(again.headers.get("idempotent-replayed")).toBe("true");
+    expect(((await again.json()) as Json).annotation.annotation.text).toBe("Say which retries.");
+    // The window's refusals, unchanged: a deletion is not a comment.
+    const deletion = await door(route, { body: { idempotency_key: keys(), annotation: comment({ id: "ann-message-x", type: "DELETION" }) } });
+    expect([deletion.status, ((await deletion.json()) as Json).field]).toEqual([422, "annotation.type"]);
+    // Removed through the attachments' remove route (7.18); then closed to edits.
+    expect((await door("annotations/ann-message-phone/remove", { body: { idempotency_key: keys() } })).status).toBe(200);
     const closed = await door(route, { body: { idempotency_key: keys(), annotation: comment() } });
     expect([closed.status, ((await closed.json()) as Json).code]).toEqual([409, "annotation_closed"]);
   });

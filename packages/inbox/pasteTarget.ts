@@ -153,14 +153,25 @@ function usable(field: TextField): boolean {
  * selection while its toolbar, Delete, Comment and labels, shows), and so
  * does a browser selection inside an attached file's viewer or a guided
  * review (code selected in its diff opens a comment there). A selection
- * anywhere else (a word double-clicked in a thread message, a choice's label)
- * comments on nothing, so it never turns the paste off.
+ * anywhere else (a choice's label) comments on nothing, so it never turns the
+ * paste off. Neither does words selected in a thread message, though its
+ * toolbar shows (approval "inbox-message-comments"): the toolbar there is an
+ * offer the person may ignore, and a dictation into the reply box (a word
+ * double-clicked first) must still land; a comment begins only once its
+ * composer opens, and that composer is a text field.
  */
 function pageSelection(doc: Document): boolean {
-  for (const toolbar of doc.querySelectorAll('[data-pn-annotation-toolbar-row]')) {
-    if (toolbar.getClientRects().length > 0) return true;
+  if (!messageSelectionPending(doc)) {
+    for (const toolbar of doc.querySelectorAll('[data-pn-annotation-toolbar-row]')) {
+      if (toolbar.getClientRects().length > 0) return true;
+    }
   }
   return fileViewSelection(doc);
+}
+
+/** Words selected in a thread message, drawn as the viewer's pending highlight (a mark not yet a comment). */
+function messageSelectionPending(doc: Document): boolean {
+  return doc.querySelector('.ib-body mark.annotation-highlight:not(.comment):not(.deletion)') !== null;
 }
 
 /** Where text can be selected to comment on it: an attached file's viewer, and a guided review. */
@@ -221,6 +232,9 @@ export function installPasteFollowsField(win: Window = window, mod?: (e: { metaK
     // Read before focus(): a range the person selected earlier, no longer visible, would otherwise
     // be what the paste replaces.
     const caret = carets.get(field);
+    // Words selected in a message, left for the field: their pending highlight and toolbar go, as a
+    // press on the field would close them (ui's toolbar closes on a mousedown outside it).
+    if (messageSelectionPending(doc)) field.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, detail: 1 }));
     field.focus({ preventScroll: true });
     if (doc.activeElement !== field) return;
     if (field instanceof HTMLTextAreaElement || field instanceof HTMLInputElement) {
