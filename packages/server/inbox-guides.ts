@@ -51,7 +51,7 @@ export const GUIDE_RULES = [
 
 /**
  * The brief's worked example: the AUTHORED fixture of guide-cli.test.ts (the
- * `plannotator-guide` skill's worked example) and its two-file patch, as one
+ * `guided-review` skill's worked example) and its two-file patch, as one
  * submit_guide call. The browser proof submits exactly this.
  */
 export const GUIDE_BRIEF_EXAMPLE = {

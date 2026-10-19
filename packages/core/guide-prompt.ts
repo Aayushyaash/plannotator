@@ -74,8 +74,8 @@ export const GUIDE_SCHEMA_JSON = JSON.stringify({
 
 /**
  * The Guided Review methodology. MIRRORED VERBATIM into the standalone
- * `plannotator-guide` agent skill (github.com/plannotator/guides,
- * skills/plannotator-guide/SKILL.md, section "2. Write the guide"), where only
+ * `guided-review` agent skill (github.com/plannotator/guides,
+ * skills/guided-review/SKILL.md, section "2. Write the guide"), where only
  * the mechanics differ (the diff is guide.patch, the output is guide.json).
  * When this text changes, update the skill in the same change: a guide made by
  * an agent must follow the same rules as one made in-app.
