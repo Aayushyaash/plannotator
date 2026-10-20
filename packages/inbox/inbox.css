@@ -617,12 +617,13 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-lbody > .ib-group > .ib-rw { background: var(--card); }
 /* Rows off screen skip style, layout and paint (every row stays in the DOM: find in page, focus, the
    accessibility tree and the scrollbar are unchanged). `auto` keeps the size a row last rendered at, so
-   only a row never on screen uses the estimate: a wide row is 50px, a two-line row about 65px, a phone's 92px.
+   only a row never on screen uses the estimate: a wide row is 50px, a two-line row about 65px, a phone's about
+   94px (the estimate is the content box: the phone row's 24px of padding and border are added to its 70px).
    The containment is on the row's wrapper: everything a row draws (its pill, focus ring, hover action) is
    inside its box, and its tooltips are portaled. */
 .ib-lbody > .ib-group > .ib-rw { content-visibility: auto; contain-intrinsic-size: auto none auto 50px; }
 .ib-lbody > .ib-group > .ib-rw:has(> .ib-nrow) { contain-intrinsic-size: auto none auto 65px; }
-.ib-lbody > .ib-group > .ib-mrow { content-visibility: auto; contain-intrinsic-size: auto none auto 92px; }
+.ib-lbody > .ib-group > .ib-mrow { content-visibility: auto; contain-intrinsic-size: auto none auto 70px; }
 .ib-band { position: relative; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; border-radius: 8px; background: var(--ib-band); font-size: var(--ib-fs-13, 13px); font-weight: 600; width: 100%; text-align: left; }
 .ib-group + .ib-group { margin-top: 12px; }
 .ib-band .ib-n { font-weight: 500; color: var(--muted-foreground); }
