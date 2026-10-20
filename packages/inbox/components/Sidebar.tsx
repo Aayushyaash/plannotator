@@ -47,12 +47,13 @@ export interface SidebarProps {
   draftsCount?: number;
   onDrafts?: () => void;
   /**
-   * Inbox, pressed now, refreshes the list on screen (no thread open): on
-   * hover its icon becomes ↻ with the tooltip "Refresh".
+   * The list is on screen with no thread open: Inbox (when it shows every
+   * project) or the project it shows, pressed now, refreshes it. On hover
+   * its icon becomes ↻ with the tooltip "Refresh".
    */
   refreshes?: boolean;
-  /** A refresh of the whole Inbox just ran: its icon turns once (the key restarts the turn). */
-  refreshSpin?: number | null;
+  /** A refresh just ran (`scope`: the project, or null for Inbox): that row's ↻ turns once (the key restarts the turn). */
+  refreshSpin?: { key: number; scope: string | null } | null;
   onInbox: () => void;
   onProject: (projectId: string) => void;
   onSettings: () => void;
@@ -110,6 +111,8 @@ export function Sidebar(props: SidebarProps) {
   const shown = shownProjects(props.projects, held);
   const [projsRef, moreProjects] = useMoreBelow<HTMLDivElement>(shown.length);
   const inboxRef = useRef<HTMLButtonElement>(null);
+  const inboxRefreshes = props.refreshes === true && props.page === 'inbox' && props.projectId === null;
+  const spinOf = (scope: string | null) => (props.refreshSpin && props.refreshSpin.scope === scope ? props.refreshSpin.key : null);
   const refreshHintId = useId();
   /** The project a menu action ran on: once its row is gone (Archive all hid it), focus goes to Inbox, never the page. */
   const actedOn = useRef<string | null>(null);
@@ -174,21 +177,21 @@ export function Sidebar(props: SidebarProps) {
         </div>
       )}
       {/* On the list it shows, Inbox refreshes it: ↻ on hover with "Refresh", one turn on a click. */}
-      <Tip content="Refresh" when={() => props.refreshes === true}>
+      <Tip content="Refresh" when={() => inboxRefreshes}>
         <button
           ref={inboxRef}
           type="button"
           className={`ib-nav ib-nav-inbox${props.page === 'inbox' && props.projectId === null ? ' ib-on' : ''}`}
           onClick={pick(props.onInbox)}
           aria-current={props.page === 'inbox' && props.projectId === null ? 'page' : undefined}
-          aria-describedby={props.refreshes ? refreshHintId : undefined}
-          data-refreshes={props.refreshes ? '' : undefined}
-          data-refreshing={props.refreshSpin != null ? '' : undefined}
+          aria-describedby={inboxRefreshes ? refreshHintId : undefined}
+          data-refreshes={inboxRefreshes ? '' : undefined}
+          data-refreshing={spinOf(null) != null ? '' : undefined}
           data-inbox-nav=""
         >
           <span className="ib-nav-ics" aria-hidden="true">
             <Icon name="inbox" className="ib-ic-inbox" />
-            <Icon key={props.refreshSpin ?? 'rest'} name="refresh" className="ib-ic-refresh" />
+            <Icon key={spinOf(null) ?? 'rest'} name="refresh" className="ib-ic-refresh" />
           </span>
           Inbox
           {!firstRun && props.inboxCount > 0 && <span className="ib-n">{formatCount(props.inboxCount)}</span>}
@@ -245,6 +248,8 @@ export function Sidebar(props: SidebarProps) {
                 count={n}
                 on={on}
                 held={project.listed === 0}
+                refreshes={on && props.refreshes === true}
+                refreshSpin={spinOf(project.id)}
                 readable={props.projectsReadable?.has(project.id) ?? false}
                 phone={phone}
                 onOpen={pick(() => props.onProject(project.id))}

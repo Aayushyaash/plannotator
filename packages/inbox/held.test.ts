@@ -407,9 +407,27 @@ describe('adoptKeepingOpen', () => {
     expect(next[1]!.threads).toEqual([]);
   });
 
-  test('without the open row on screen, or in the read, it is the read', () => {
+  test('without the open row on screen it is the read', () => {
     const latest = two([at('c', '2026-10-20T11:00:00Z', 'new')], [at('a', '2026-10-20T10:00:00Z', 'quiet')]);
     expect(adoptKeepingOpen(two([], []), latest, 'a')).toEqual(latest);
-    expect(adoptKeepingOpen(two([at('a', '2026-10-20T10:00:00Z', 'new')], []), two([], []), 'a')).toEqual(two([], []));
+  });
+
+  test('it keeps its place between the same neighbours, never re-sorted by its time', () => {
+    // On screen a sits between x and y, though its time is older than y's (held rows keep their places).
+    const shown = two([at('x', '2026-10-20T12:00:00Z', 'new'), at('a', '2026-10-20T08:00:00Z', 'quiet'), at('y', '2026-10-20T10:00:00Z', 'new')], []);
+    const latest = two([at('x', '2026-10-20T12:00:00Z', 'new'), at('y', '2026-10-20T10:00:00Z', 'new')], [at('a', '2026-10-20T08:00:00Z', 'quiet')]);
+    expect(adoptKeepingOpen(shown, latest, 'a')[0]!.threads.map((r) => r.thread_id)).toEqual(['x', 'a', 'y']);
+  });
+
+  // The window reads without archived threads: a thread the person archived while it is open is
+  // not in the read, and its row (drawn Archived by markHeldRowArchived) must not vanish under them.
+  test('an open thread the read leaves out (archived while open) stays as drawn, still Archived', () => {
+    const archivedRow = { ...at('a', '2026-10-20T10:00:00Z', 'quiet'), resolved_at: '2026-10-20T10:05:00Z' } as InboxListRow;
+    const shown = two([at('b', '2026-10-20T11:00:00Z', 'new'), archivedRow, at('c', '2026-10-20T09:00:00Z', 'new')], []);
+    const latest = two([at('d', '2026-10-20T12:00:00Z', 'new'), at('b', '2026-10-20T11:00:00Z', 'new'), at('c', '2026-10-20T09:00:00Z', 'new')], []);
+    const next = adoptKeepingOpen(shown, latest, 'a');
+    expect(next[0]!.threads.map((r) => r.thread_id)).toEqual(['d', 'b', 'a', 'c']);
+    expect(next[0]!.threads[2]).toBe(archivedRow);
+    expect(next[0]!.threads[2]!.resolved_at).toBe('2026-10-20T10:05:00Z');
   });
 });

@@ -86,7 +86,7 @@ async function agentSends(body: string, reply_to?: string): Promise<string> {
   return (JSON.parse(await readLine()) as { sent: string }).sent;
 }
 
-const TESTS = 5;
+const TESTS = 7;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -345,4 +345,36 @@ test.skipIf(!hasDom)('a stale row on screen (an agent replied in a thread the li
   await until(() => rowOf(el, first) !== null && notice(el) === null, 'the refresh');
   expect(sectionOfRow(el, first)).toBe('new');
   expect(rowOf(el, first)!.classList.contains('ib-u')).toBe(true);
+}, 30_000);
+
+// Review of #2027: a second read took the list the first click had already adopted as its
+// "before", brought nothing in, and still cleared the light the first click had put on.
+test.skipIf(!hasDom)('a second click keeps the light the first one put on: back to back, and once the first was adopted', async () => {
+  const el = await renderApp(`#project=${world.project}`);
+  const late = await heldArrival(el);
+  const row = projectRow(el);
+  // Back to back: the second click comes while the first read is in flight, and is ignored.
+  mouseClick(row);
+  mouseClick(row);
+  await until(() => rowOf(el, late) !== null && notice(el) === null, 'the refresh');
+  await wait(SHOW_LIT_AFTER_SLIDE_MS + 60);
+  expect(lit(el)).toEqual([late]);
+  // Once adopted, another click reads again and brings nothing in: the light stays on.
+  mouseClick(row);
+  await until(() => live().includes('refreshed') && !row.hasAttribute('data-refreshing'), 'the second refresh');
+  expect(lit(el)).toEqual([late]);
+}, 30_000);
+
+test.skipIf(!hasDom)('the project the list shows offers the refresh as Inbox does (↻ on the row), and only while no thread is open', async () => {
+  const el = await renderApp(`#project=${world.project}`);
+  const row = projectRow(el);
+  expect(row.hasAttribute('data-refreshes')).toBe(true);
+  expect(row.querySelector('svg.ib-ic-refresh')).not.toBeNull();
+  // Inbox does not refresh this list (a press goes to every project), so it does not offer it.
+  expect(inboxNav(el).hasAttribute('data-refreshes')).toBe(false);
+  mouseClick(row);
+  expect(row.hasAttribute('data-refreshing')).toBe(true);
+  await until(() => live().includes('refreshed'), 'the announcement');
+  await openRow(el, world.news[0]!);
+  expect(projectRow(el).hasAttribute('data-refreshes')).toBe(false);
 }, 30_000);

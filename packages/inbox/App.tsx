@@ -1284,7 +1284,18 @@ function Inbox() {
   useEffect(() => () => {
     if (refreshSpinTimer.current) clearTimeout(refreshSpinTimer.current);
   }, []);
+  /** A refresh is reading: another click waits for it (a second read would light nothing and take the first one's light). */
+  const refreshing = useRef(false);
   const refreshInbox = async (scope: string | null, closeThread: boolean) => {
+    if (refreshing.current) return;
+    refreshing.current = true;
+    try {
+      await refreshInboxNow(scope, closeThread);
+    } finally {
+      refreshing.current = false;
+    }
+  };
+  const refreshInboxNow = async (scope: string | null, closeThread: boolean) => {
     const label = scope ? (projects.find((p) => p.id === scope)?.name ?? 'Project') : 'Inbox';
     // The brief signal plays whether or not anything changed: the icon turns once.
     setRefreshSpin((last) => ({ key: (last?.key ?? 0) + 1, scope }));
@@ -1937,9 +1948,10 @@ function Inbox() {
     showFrom.current = null;
     if (showBefore && shown) {
       const ids = showBroughtIn(showBefore, shown);
-      clearLit();
-      setLit(new Set());
+      // A read that brings nothing in (Show again, a second refresh) leaves the light already on as it is.
       if (ids.size > 0) {
+        clearLit();
+        setLit(new Set());
         const start = from ? SHOW_LIT_AFTER_SLIDE_MS : 0;
         litTimers.current.push(
           setTimeout(() => setLit(ids), start),
@@ -2247,8 +2259,8 @@ function Inbox() {
             onProject={(projectId) =>
               route.page === 'inbox' && route.project === projectId ? void refreshInbox(projectId, route.thread !== null) : go({ page: 'inbox', project: projectId, thread: null })
             }
-            refreshes={route.page === 'inbox' && route.project === null && route.thread === null}
-            refreshSpin={refreshSpin && refreshSpin.scope === null ? refreshSpin.key : null}
+            refreshes={route.page === 'inbox' && route.thread === null}
+            refreshSpin={refreshSpin}
             onSettings={() => go({ page: 'settings', project: null, thread: null })}
             onUpdate={pressUpdate}
             onWhatsNew={openWhatsNew}
