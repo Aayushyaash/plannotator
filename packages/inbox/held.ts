@@ -249,6 +249,29 @@ export function addOwnThreads(shown: readonly InboxListSection[], latest: readon
 }
 
 /**
+ * Everything `latest` says (Show's adopt), except the thread the person has
+ * open: its row keeps the section it has on screen, at its place there, with
+ * its state as it now is, so a refresh beside an open thread (click Inbox to
+ * refresh, the list's title) never takes the selected row out of view (the
+ * look moved it to Quiet, which is folded). It takes its own place when the
+ * thread closes. A thread not on screen, or not in `latest`, changes nothing.
+ */
+export function adoptKeepingOpen(shown: readonly InboxListSection[], latest: readonly InboxListSection[], threadId: string): InboxListSection[] {
+  // The group it is drawn in (a held row's own `section` may already say where it will go).
+  const group = shown.find((section) => section.threads.some((row) => row.thread_id === threadId))?.id;
+  const next = rowsById(latest).get(threadId);
+  if (!group || !next) return latest.map((section) => ({ ...section }));
+  // In the section it had on screen (`next` keeps its own `section`, as refreshHeldRows' rows do), at its place there.
+  return latest.map((section) => {
+    const threads = section.threads.filter((row) => row.thread_id !== threadId);
+    if (section.id !== group) return { ...section, threads };
+    const at = threads.findIndex((row) => newestFirst(next, row) < 0);
+    threads.splice(at < 0 ? threads.length : at, 0, next);
+    return { ...section, threads };
+  });
+}
+
+/**
  * The person archived a thread while its row is on screen (the thread is
  * open). The list the window reads leaves archived threads out, so
  * refreshHeldRows would keep the row as it was; this shows it archived in

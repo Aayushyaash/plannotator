@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { InboxHealth } from '@plannotator/core/inbox-types';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import { ClaudeIcon, CodexIcon, OpenCodeIcon, PiIcon } from '@plannotator/ui/components/icons/AgentIcons';
@@ -46,6 +46,13 @@ export interface SidebarProps {
   /** Drafts not sent: the Drafts row shows only while there are some. */
   draftsCount?: number;
   onDrafts?: () => void;
+  /**
+   * Inbox, pressed now, refreshes the list on screen (no thread open): on
+   * hover its icon becomes ↻ with the tooltip "Refresh".
+   */
+  refreshes?: boolean;
+  /** A refresh of the whole Inbox just ran: its icon turns once (the key restarts the turn). */
+  refreshSpin?: number | null;
   onInbox: () => void;
   onProject: (projectId: string) => void;
   onSettings: () => void;
@@ -103,6 +110,7 @@ export function Sidebar(props: SidebarProps) {
   const shown = shownProjects(props.projects, held);
   const [projsRef, moreProjects] = useMoreBelow<HTMLDivElement>(shown.length);
   const inboxRef = useRef<HTMLButtonElement>(null);
+  const refreshHintId = useId();
   /** The project a menu action ran on: once its row is gone (Archive all hid it), focus goes to Inbox, never the page. */
   const actedOn = useRef<string | null>(null);
   useLayoutEffect(() => {
@@ -165,17 +173,30 @@ export function Sidebar(props: SidebarProps) {
         )}
         </div>
       )}
-      <button
-        ref={inboxRef}
-        type="button"
-        className={`ib-nav${props.page === 'inbox' && props.projectId === null ? ' ib-on' : ''}`}
-        onClick={pick(props.onInbox)}
-        aria-current={props.page === 'inbox' && props.projectId === null ? 'page' : undefined}
-      >
-        <Icon name="inbox" />
-        Inbox
-        {!firstRun && props.inboxCount > 0 && <span className="ib-n">{formatCount(props.inboxCount)}</span>}
-      </button>
+      {/* On the list it shows, Inbox refreshes it: ↻ on hover with "Refresh", one turn on a click. */}
+      <Tip content="Refresh" when={() => props.refreshes === true}>
+        <button
+          ref={inboxRef}
+          type="button"
+          className={`ib-nav ib-nav-inbox${props.page === 'inbox' && props.projectId === null ? ' ib-on' : ''}`}
+          onClick={pick(props.onInbox)}
+          aria-current={props.page === 'inbox' && props.projectId === null ? 'page' : undefined}
+          aria-describedby={props.refreshes ? refreshHintId : undefined}
+          data-refreshes={props.refreshes ? '' : undefined}
+          data-refreshing={props.refreshSpin != null ? '' : undefined}
+          data-inbox-nav=""
+        >
+          <span className="ib-nav-ics" aria-hidden="true">
+            <Icon name="inbox" className="ib-ic-inbox" />
+            <Icon key={props.refreshSpin ?? 'rest'} name="refresh" className="ib-ic-refresh" />
+          </span>
+          Inbox
+          {!firstRun && props.inboxCount > 0 && <span className="ib-n">{formatCount(props.inboxCount)}</span>}
+        </button>
+      </Tip>
+      <span id={refreshHintId} hidden>
+        Refresh the list
+      </span>
       {(props.draftsCount ?? 0) > 0 && props.onDrafts && (
         <button
           type="button"

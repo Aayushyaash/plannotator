@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import type { InboxListRow, InboxListSection } from '@plannotator/core/inbox-types';
-import { addOwnThreads, heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread } from './held';
+import { addOwnThreads, adoptKeepingOpen, heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread } from './held';
 
 function row(id: string, project: string, last_at: string, last_author: 'agent' | 'person'): InboxListRow {
   return { thread_id: id, project: { id: `prj_${project}`, name: project }, last_at, last_author } as InboxListRow;
@@ -384,5 +384,32 @@ describe('addOwnThreads', () => {
     expect(ids(again)).toEqual(['sent:s1']);
     expect(again.find((s) => s.id === 'sent')!.threads[0]).toBe(shown.find((s) => s.id === 'sent')!.threads[0]);
     expect(ids(addOwnThreads(shown, bySection(), ['gone']))).toEqual(['sent:s1']);
+  });
+});
+
+// Click Inbox to refresh: a refresh beside an open thread adopts everything,
+// but the open thread's row stays in the group it is drawn in, so the
+// selection never goes into folded Quiet out of view.
+describe('adoptKeepingOpen', () => {
+  const two = (newRows: InboxListRow[], quiet: InboxListRow[]): InboxListSection[] => [
+    { id: 'new', label: 'New since you looked', threads: newRows },
+    { id: 'quiet', label: 'Quiet', threads: quiet },
+  ];
+  const at = (id: string, time: string, section: 'new' | 'quiet') => ({ ...row(id, 'docs', time, 'agent'), section }) as InboxListRow;
+
+  test('the open row keeps its group, at its place there; everything else is the read', () => {
+    // On screen: a is open (already read, so its own section says quiet), b new.
+    const shown = two([at('a', '2026-10-20T10:00:00Z', 'quiet'), at('b', '2026-10-20T09:00:00Z', 'new')], []);
+    // The read: c arrived, a is in Quiet.
+    const latest = two([at('c', '2026-10-20T11:00:00Z', 'new'), at('b', '2026-10-20T09:00:00Z', 'new')], [at('a', '2026-10-20T10:00:00Z', 'quiet')]);
+    const next = adoptKeepingOpen(shown, latest, 'a');
+    expect(next[0]!.threads.map((r) => r.thread_id)).toEqual(['c', 'a', 'b']);
+    expect(next[1]!.threads).toEqual([]);
+  });
+
+  test('without the open row on screen, or in the read, it is the read', () => {
+    const latest = two([at('c', '2026-10-20T11:00:00Z', 'new')], [at('a', '2026-10-20T10:00:00Z', 'quiet')]);
+    expect(adoptKeepingOpen(two([], []), latest, 'a')).toEqual(latest);
+    expect(adoptKeepingOpen(two([at('a', '2026-10-20T10:00:00Z', 'new')], []), two([], []), 'a')).toEqual(two([], []));
   });
 });
