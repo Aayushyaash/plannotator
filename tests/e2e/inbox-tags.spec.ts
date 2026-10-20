@@ -244,27 +244,46 @@ async function fileCommentTaggingPi(page: Page): Promise<void> {
   const files = await api<{ attachments: { id: string }[] }>(`/api/inbox/threads/${world.tags.ids.t1}/attachments`);
   await page.goto(`${world.url}#thread=${world.tags.ids.t1}&file=${files.attachments[0]!.id}`);
   await expect(page.locator('[data-attachment-pane] .ib-docscroll')).toBeVisible();
-  const box = await page.evaluate((needle) => {
-    const root = document.querySelector('[data-attachment-pane] .ib-docscroll');
-    if (!root) return null;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      const at = node.textContent?.indexOf(needle) ?? -1;
-      if (at < 0) continue;
-      const range = document.createRange();
-      range.setStart(node, at);
-      range.setEnd(node, at + needle.length);
-      const rects = [...range.getClientRects()];
-      return { x1: rects[0]!.left + 1, y1: rects[0]!.top + rects[0]!.height / 2, x2: rects.at(-1)!.right - 1, y2: rects.at(-1)!.top + rects.at(-1)!.height / 2 };
+  // The passage's place once the layout stops moving: opening a file beside the thread hides the list and
+  // springs the sidebar shut, so the pane slides and widens for a few hundred ms after it shows. Measured
+  // mid-slide, the drag lands where the text no longer is (blank space selects nothing, no toolbar opens).
+  const box = await page.evaluate(async (needle) => {
+    const measure = () => {
+      const root = document.querySelector('[data-attachment-pane] .ib-docscroll');
+      if (!root) return null;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const at = node.textContent?.indexOf(needle) ?? -1;
+        if (at < 0) continue;
+        const range = document.createRange();
+        range.setStart(node, at);
+        range.setEnd(node, at + needle.length);
+        const rects = [...range.getClientRects()];
+        return { x1: rects[0]!.left + 1, y1: rects[0]!.top + rects[0]!.height / 2, x2: rects.at(-1)!.right - 1, y2: rects.at(-1)!.top + rects.at(-1)!.height / 2 };
+      }
+      return null;
+    };
+    const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+    const deadline = performance.now() + 10_000;
+    let last = measure();
+    // Still for ten frames in a row.
+    for (let still = 0; still < 10 && performance.now() < deadline; ) {
+      await frame();
+      const next = measure();
+      still = next && last && JSON.stringify(next) === JSON.stringify(last) ? still + 1 : 0;
+      last = next;
     }
-    return null;
+    return last;
   }, 'The handler acks Stripe within 2 s');
   expect(box).not.toBeNull();
   await page.mouse.move(box!.x1, box!.y1);
   await page.mouse.down();
   await page.mouse.move(box!.x2, box!.y2, { steps: 8 });
   await page.mouse.up();
-  await page.locator('.annotation-toolbar button[aria-label="Comment"]').click();
+  // The toolbar opens on the selection; fail here, not after the whole test timeout, when it does not.
+  const comment = page.locator('.annotation-toolbar button[aria-label="Comment"]');
+  await expect(comment).toBeVisible();
+  await comment.click();
   const composer = page.locator('[data-comment-popover] textarea[data-pn-mobile-editable="true"]').last();
   await composer.click();
   await composer.pressSequentially('@Pi');

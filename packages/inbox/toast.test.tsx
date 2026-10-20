@@ -56,6 +56,8 @@ test('toastSpeech: the live region reads the lead and the detail as sentences, a
   const undo = () => {};
   expect(toastSpeech({ lead: 'Marked read', detail: 'Moves to Quiet', onUndo: undo })).toBe('Marked read. Moves to Quiet. Press Z to undo.');
   expect(toastSpeech({ lead: 'Archived', onUndo: undo }, true)).toBe('Archived. Undo is available.');
+  // A toast kept short for one line can say more to a screen reader.
+  expect(toastSpeech({ lead: 'Sent to Pi', detail: 'in ledger', speech: 'Sent to Pi in ledger. It takes it as its next turn.' })).toBe('Sent to Pi in ledger. It takes it as its next turn.');
 });
 
 let root: Root | null = null;
