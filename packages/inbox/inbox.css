@@ -647,6 +647,17 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
    out under the rows sliding past it (they are opaque and sit above it while they move). */
 .ib-lbody > .ib-settle-ghost { position: absolute; margin: 0; z-index: 0; pointer-events: none; background: var(--card); }
 .ib-lbody > .ib-group > .ib-rw { background: var(--card); }
+/* Rows off screen skip style, layout and paint (every row stays in the DOM: find in page, focus, the
+   accessibility tree and the scrollbar are unchanged). `auto` keeps the size a row last rendered at, so
+   only a row never on screen uses the estimate: a wide row is 50px, a two-line row about 65px, a phone's about
+   100px (the estimate is the content box: the phone row's 24px of padding and border are added to its 76px).
+   The containment is on the row's wrapper: everything a row draws (its pill, focus ring, hover action) is
+   inside its box, and its tooltips are portaled. Containment clips painting to the row's box, so the clip
+   reaches 48px past it: the hover Mark read's floating shadow (Soft's 0 16px 40px -10px, 46px below the button)
+   still paints whole on the last row of a section. */
+.ib-lbody > .ib-group > .ib-rw { content-visibility: auto; contain-intrinsic-size: auto none auto 50px; overflow-clip-margin: 48px; }
+.ib-lbody > .ib-group > .ib-rw:has(> .ib-nrow) { contain-intrinsic-size: auto none auto 65px; }
+.ib-lbody > .ib-group > .ib-mrow { content-visibility: auto; contain-intrinsic-size: auto none auto 76px; overflow-clip-margin: 48px; }
 .ib-band { position: relative; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; border-radius: 8px; background: var(--ib-band); font-size: var(--ib-fs-13, 13px); font-weight: 600; width: 100%; text-align: left; }
 .ib-group + .ib-group { margin-top: 12px; }
 .ib-band .ib-n { font-weight: 500; color: var(--muted-foreground); }
