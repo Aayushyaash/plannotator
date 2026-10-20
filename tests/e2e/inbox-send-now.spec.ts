@@ -96,6 +96,11 @@ class Connection {
     }
   }
 
+  /** A turn starts or ends: said on the next poll, as the mod says it (no store line is written). */
+  setBusy(busy: boolean): void {
+    this.busy = busy;
+  }
+
   async deliver(id: string): Promise<void> {
     expect((await this.bridge(INBOX_BRIDGE_EVENT_PATH, { type: 'delivered', id })).status).toBe(200);
   }
@@ -206,7 +211,18 @@ test('Claude Code at work: the reply reads "Queued · … is working" with Send 
   const button = pane.locator('[data-send-now]');
   await expect(button).toBeVisible();
   await expect(button).toHaveText('Send now');
-  await expect(page.locator(`.ib-lbody [data-thread-id="${sent.thread_id}"]`).first()).toContainText('Queued for Claude Code; it gets this as its next turn.');
+  // The list row (approval "inbox-row-delivery", Ticks): its own subject, a clock before the time, the state in
+  // its name, and the thread's line as the tooltip.
+  const row = page.locator(`.ib-lbody [data-thread-id="${sent.thread_id}"]`).first();
+  const tick = row.locator('.ib-tick');
+  await expect(tick).toHaveAttribute('data-tick', 'queued');
+  await expect(tick).toHaveAttribute('aria-label', 'Queued for Claude Code,');
+  await expect(row.locator('.ib-st')).toHaveText('Migration shipped');
+  await tick.hover();
+  // The tooltip is ui's (never a native title) and says what the thread's own line says.
+  await expect(tick).not.toHaveAttribute('title', /./);
+  await expect(page.locator('[data-pn-tooltip]')).toHaveText('Queued · Claude Code is working; it gets this when its turn ends.');
+  await page.mouse.move(0, 0);
   // Handed out without `now` while nobody pressed it.
   await expect.poll(() => connection.commands.length, { timeout: 15_000 }).toBe(1);
   expect(connection.commands[0]!.now).toBeUndefined();
@@ -217,12 +233,15 @@ test('Claude Code at work: the reply reads "Queued · … is working" with Send 
   await expect(line).toHaveText('Sending to Claude Code now…');
   await expect(button).toHaveCount(0);
   await expect.poll(() => connection.commands[0]?.now, { timeout: 15_000 }).toBe(true);
+  await expect(tick).toHaveAttribute('data-tick', 'sending');
   await shot(page, '2-sending-now');
 
   // The connection put it into the running turn.
   await connection.deliver(connection.commands[0]!.id);
   await expect(line).toHaveAttribute('data-delivery', 'delivered');
   await expect(line).toHaveText(/^Delivered to Claude Code, (?:[A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d{2} [AP]M$/);
+  await expect(tick).toHaveAttribute('data-tick', 'delivered');
+  await expect(tick).toHaveAttribute('aria-label', 'Delivered to Claude Code,');
   await shot(page, '3-delivered');
 });
 
@@ -257,7 +276,9 @@ test('an MCP-only agent: "Saved for … It sees it when it next reads this threa
   const line = pane.locator('[data-delivery]');
   await expect(line).toHaveText('Saved for Claude Code. It sees it when it next reads this thread.');
   await expect(pane.locator('[data-send-now]')).toHaveCount(0);
-  await expect(page.locator(`.ib-lbody [data-thread-id="${sent.thread_id}"]`).first()).toContainText('Saved for Claude Code. It sees it when it next reads this thread.');
+  const row = page.locator(`.ib-lbody [data-thread-id="${sent.thread_id}"]`).first();
+  await expect(row.locator('.ib-tick')).toHaveAttribute('data-tick', 'saved');
+  await expect(row.locator('.ib-st')).toHaveText('Docs pass done');
   await shot(page, '5-saved-mcp-only');
   expect(world.errors).toEqual([]);
 });
@@ -289,4 +310,137 @@ test('on a phone: the queued line and Send now fit, and the button has a 44 px t
   } finally {
     await context.close();
   }
+});
+
+// ── The list row's delivery glyph (approval "inbox-row-delivery", "Ticks") ──
+
+/** Where the row-ticks shots go: PLANNOTATOR_ROW_TICKS_SHOTS, else beside the send-now shots. */
+const ticksDir = resolve(process.env.PLANNOTATOR_ROW_TICKS_SHOTS ?? join(proofDir, 'row-ticks'));
+
+/** The window's own routes, from the page (its serverSession from health). */
+async function windowPost(page: Page, path: string, body: Record<string, unknown>): Promise<number> {
+  return page.evaluate(
+    async ({ path, body }) => {
+      const health = (await (await fetch('/api/inbox/health')).json()) as { serverSession: string };
+      const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, serverSession: health.serverSession }) });
+      return res.status;
+    },
+    { path, body },
+  );
+}
+
+const replyApi = (page: Page, messageId: string, words: string) => windowPost(page, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: `k-${messageId}`, words });
+
+async function openQuiet(page: Page): Promise<void> {
+  const band = page.locator('[data-section-id="quiet"] .ib-band');
+  await expect(band).toBeVisible();
+  if ((await band.getAttribute('aria-expanded')) !== 'true') await band.click();
+  await expect(band).toHaveAttribute('aria-expanded', 'true');
+}
+
+async function ticksShot(page: Page, name: string): Promise<void> {
+  mkdirSync(ticksDir, { recursive: true });
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme, reducedMotion: 'reduce' });
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: join(ticksDir, `${name}-${scheme}.png`) });
+  }
+  await page.emulateMedia({ colorScheme: 'light', reducedMotion: 'no-preference' });
+}
+
+test('a turn ending moves the row from queued to sending live: no store line, no reload', async () => {
+  const { page } = world;
+  for (const c of world.connections.splice(0)) await c.stop();
+  const sent = await (await freshAgent()).send({ project_path: world.ledger, subject: 'Flaky test quarantined', body: 'I quarantined the flaky ledger test. Want a ticket for it?' }, { wakes: true });
+  const connection = new Connection(await sessionOf(sent.thread_id), true);
+  world.connections.push(connection);
+  await page.goto(world.url);
+  await page.reload();
+  await expect.poll(() => replyApi(page, sent.message_id, 'Yes, file one.')).toBe(200);
+  const tick = page.locator(`.ib-lbody [data-thread-id="${sent.thread_id}"] .ib-tick`).first();
+  await expect(tick).toHaveAttribute('data-tick', 'queued');
+  await page.evaluate(() => ((window as unknown as { __noReload: boolean }).__noReload = true));
+  connection.setBusy(false);
+  await expect(tick).toHaveAttribute('data-tick', 'sending', { timeout: 10_000 });
+  expect(await page.evaluate(() => (window as unknown as { __noReload?: boolean }).__noReload)).toBe(true);
+  connection.setBusy(true);
+  await expect(tick).toHaveAttribute('data-tick', 'queued', { timeout: 10_000 });
+});
+
+test('the ticks on wide rows, beside a thread and on a phone, light and dark; the dots are still under reduced motion', async ({ browser }) => {
+  const { page } = world;
+  for (const c of world.connections.splice(0)) await c.stop();
+  const make = async (subject: string, body: string, wakes: boolean) => (await freshAgent()).send({ project_path: world.ledger, subject, body }, wakes ? { wakes: true } : {});
+  const queued = await make('Retry policy for the Stripe webhook', 'Exponential, capped at 5 tries?', true);
+  const sending = await make('Visibility timeout for ledger-writes', 'I set it to 90 s. Fine?', true);
+  const saved = await make('App Store screenshots: light or dark?', 'Which ones should I ship?', false);
+  const delivered = await make('Search index for the docs site', 'The index builds in 4 s now.', true);
+  const acked = await make('Invoice PDF renders in 40 ms now', 'The invoice PDF renders in 40 ms.', true);
+  const busy = new Connection(await sessionOf(queued.thread_id), true);
+  const idle = new Connection(await sessionOf(sending.thread_id), false);
+  const done = new Connection(await sessionOf(delivered.thread_id), true);
+  world.connections.push(busy, idle, done);
+
+  await page.goto(world.url);
+  await page.reload();
+  for (const [sent, words] of [
+    [queued, 'Yes, and log each retry.'],
+    [sending, 'Make it 120 s.'],
+    [saved, 'Light, with one dark.'],
+    [delivered, 'Nice. Ship it.'],
+  ] as const) {
+    await expect.poll(() => replyApi(page, sent.message_id, words)).toBe(200);
+  }
+  await expect.poll(() => done.commands.length, { timeout: 15_000 }).toBe(1);
+  await done.deliver(done.commands[0]!.id);
+  await expect.poll(() => windowPost(page, `/api/inbox/messages/${acked.message_id}/ack`, {})).toBe(200);
+
+  const tickOf = (p: Page, threadId: string) => p.locator(`.ib-lbody [data-thread-id="${threadId}"] .ib-tick`).first();
+  const expectStates = async (p: Page) => {
+    await expect(tickOf(p, queued.thread_id)).toHaveAttribute('data-tick', 'queued');
+    await expect(tickOf(p, sending.thread_id)).toHaveAttribute('data-tick', 'sending');
+    await expect(tickOf(p, saved.thread_id)).toHaveAttribute('data-tick', 'saved');
+    await expect(tickOf(p, delivered.thread_id)).toHaveAttribute('data-tick', 'delivered');
+    await expect(tickOf(p, acked.thread_id)).toHaveAttribute('data-tick', 'queued');
+    await expect(tickOf(p, acked.thread_id)).toHaveAttribute('aria-label', 'Looks good, queued for Claude Code,');
+  };
+
+  // Wide rows, 1440.
+  await page.reload();
+  await openQuiet(page);
+  await expectStates(page);
+  // Sent rows keep their own subject.
+  await expect(page.locator(`.ib-lbody [data-thread-id="${saved.thread_id}"] .ib-st`).first()).toHaveText('App Store screenshots: light or dark?');
+  // The dots breathe, and stand still under reduced motion.
+  const dot = tickOf(page, sending.thread_id).locator('.ib-dots i').first();
+  expect(await dot.evaluate((el) => getComputedStyle(el).animationName)).toBe('ib-dots');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  expect(await dot.evaluate((el) => getComputedStyle(el).animationName)).toBe('none');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await ticksShot(page, 'ticks-wide-1440');
+
+  // Beside a thread, 1280: the two-line rows carry the same glyphs.
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(`${world.url}#thread=${queued.thread_id}`);
+  await expect(page.locator('section.ib-pane').getByRole('heading', { name: 'Retry policy for the Stripe webhook' })).toBeVisible();
+  await openQuiet(page);
+  await expectStates(page);
+  await ticksShot(page, 'ticks-beside-thread-1280');
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // A phone.
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, colorScheme: 'light' });
+  try {
+    const phone = await context.newPage();
+    await phone.goto(world.url);
+    await openQuiet(phone);
+    await expectStates(phone);
+    expect(await phone.locator('.ib-mrow .ib-tick').count()).toBeGreaterThanOrEqual(5);
+    await ticksShot(phone, 'ticks-phone');
+    await phone.locator('[data-section-id="quiet"]').scrollIntoViewIfNeeded();
+    await ticksShot(phone, 'ticks-phone-quiet');
+  } finally {
+    await context.close();
+  }
+  expect(world.errors).toEqual([]);
 });
