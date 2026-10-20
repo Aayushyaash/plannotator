@@ -146,6 +146,16 @@ export interface WhatsNewModel {
   release_url: string;
   notes: string;
   skipped: { version: string; text: string }[];
+  /**
+   * The notes' image sources (as written) saved on this computer, loaded from
+   * `whatsNewImageUrl`. Absent from an older Inbox (no image is loaded).
+   */
+  images?: string[];
+}
+
+/** Where the What's new page loads one of the notes' saved images. */
+export function whatsNewImageUrl(version: string, src: string): string {
+  return `/api/inbox/whats-new/image?version=${encodeURIComponent(version)}&src=${encodeURIComponent(src)}`;
 }
 
 /** "Over your tailnet" (packages/server/inbox-tailscale.ts): the switch, the address or why not, and who may open it. */
@@ -565,6 +575,13 @@ export const inboxApi = {
       tags?: { host?: string | null; session: string; label?: string }[];
     },
   ) => post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reply`, input),
+  /**
+   * Re-ask (approval "inbox-reask"): a note asking the session that wrote this
+   * message for its open questions again, in one message. `to`: another live
+   * session, because the one that asked has ended.
+   */
+  reask: (messageId: string, input: { idempotency_key: string; to?: { host: string; session: string } }) =>
+    post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reask`, input),
   resolve: (messageId: string, resolved: boolean) =>
     post<unknown>(`/api/inbox/messages/${encodeURIComponent(messageId)}/resolve`, { resolved }),
   health: () => get<InboxHealth>('/api/inbox/health'),

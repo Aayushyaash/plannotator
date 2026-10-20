@@ -262,6 +262,15 @@ export interface InboxMessage {
    */
   ack_of?: string;
   /**
+   * On the person's Re-ask note (approval "inbox-reask"): the open questions
+   * (`<message id>/<key>`) it asked the agent to ask again, together in one
+   * new message, with `Replaces:` lines for those still needed. It is the
+   * person's reply (never an Inbox note): delivered like one, and while it is
+   * the thread's last message the row sits in Sent. Picks the person had made
+   * but not sent go with it as answers. Absent on every other message.
+   */
+  reask?: string[];
+  /**
    * On a root: the seq up to which the asking agent has read the person's
    * replies (wait_for_reply returned one, or read_thread read the thread),
    * and when. A Sent row moves to Quiet once its reply is checked.
@@ -885,6 +894,12 @@ export interface InboxListRow extends InboxThreadSummary {
    * on its own. Derived. Absent from an older Inbox.
    */
   back_from_archive?: boolean;
+  /**
+   * The thread's last message (the Inbox's notes read past) is the person's
+   * Re-ask note: the row sits in Sent until the agent asks again (owner's
+   * rule, approval "inbox-reask"). Absent from an older Inbox.
+   */
+  reask_pending?: boolean;
   /**
    * Where the person's latest sent item in the thread is (approval
    * "inbox-row-delivery", "Ticks"): their reply or message when it is the

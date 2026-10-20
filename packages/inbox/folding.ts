@@ -175,6 +175,9 @@ export function replyWords(body: string): string {
  */
 export function foldSnippet(message: InboxMessageWire, messages: readonly InboxMessageWire[] = [message]): FoldSnippet {
   if (message.author.kind === 'person') {
+    // A Re-ask note: what the person did, not the instructions the agent got.
+    const reasked = message.reask?.length ?? 0;
+    if (reasked > 0) return { kind: 'words', text: reasked === 1 ? 'Asked to re-ask the open question' : `Asked to re-ask ${reasked} open questions in one message` };
     const words = firstWords(replyWords(message.body));
     if (words) return { kind: 'words', text: words };
     const sent = messages.flatMap((m) => (m.questions ?? []).filter((q) => q.sent_reply_id === message.id && q.answer !== null));

@@ -1118,7 +1118,7 @@ curl -sS -X POST "$INBOX/api/inbox/device/markups?idempotency_key=00000000-0000-
 
 ### 7.53 A comment on a guided review's diff
 
-7.50 to 7.52 (shared drafts) are held and not built; 7.54, 7.55 (decision retire and replace) will not be built (Decisions were removed, 2026-10). 7.56 is 👍 Looks good, 7.57 a reply carrying files, 7.58 Send now, 7.59 a comment on the text of an agent's message, 7.60 tagging agents in a reply (below).
+7.50 to 7.52 (shared drafts) are held and not built; 7.54, 7.55 (decision retire and replace) will not be built (Decisions were removed, 2026-10). 7.56 is 👍 Looks good, 7.57 a reply carrying files, 7.58 Send now, 7.59 a comment on the text of an agent's message, 7.60 tagging agents in a reply, 7.61 Re-ask (below).
 
 ```sh
 curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/guide/annotations" \
@@ -1191,6 +1191,18 @@ curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K7000000000000000000001
 ```
 
 `reply.tags`: `[{ host, session, label?, name?, wakes, delivery?, deliver_now_at?, read_at? }]`, never the owner. Draw one line per recipient under the reply (the owner first, as 7.58 says, then each tag): `delivery` reads "Delivered to <label>, <time>"; a tag with `wakes` and no delivery reads like 7.58 from `GET threads/:id/sessions?recipients=<session>,<session>` (`recipients: { <session>: connection or null }`), and Send now for that one session is 7.58 with `{ idempotency_key, session }`; a tag without `wakes` reads "Saved for <label>. It sees it the next time it reads this thread", or "<label> read this thread, <time>" once `read_at` is set. The list row's `sent.recipients` (`[{ host, session, name?, owner, wakes, delivered_at }]`) and `participants` (`[{ host, session, name? }]`) are additive. Refusals, nothing written: a live session on an older Plannotator `409 tag_needs_update`; a session known under another host than the tag names `409 tag_host_mismatch`; a session that is neither live nor a known MCP agent `409 session_not_live`; a malformed list `422 validation_error`. Replaying the key answers the reply it wrote, its tags as they were.
+
+### 7.61 Re-ask
+
+Added 2026-10-20 (approval "inbox-reask"). The person asks the agent that asked to ask its questions still open in the thread again, together in one new message, with fresh context. Name the latest message of that session that has an open question:
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/reask" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000061"}'
+```
+
+`{ "message_id": "msg_01K70000000000000000000020", "questions": [ … ], "reply": { "id": "msg_…", "author": { "kind": "person" }, "reask": ["msg_…/q-…", "…"], "body": "Please ask your 3 open questions …", "...": "" }, "replayed": false }`. The note (`reply.reask`, the ids it asked about) is the person's reply: it is delivered like one (7.58's lines and Send now apply), and while it is the thread's last message the row is in Sent (`reask_pending: true` on the row). Every question of that session that is open goes in the list; one the person picked and has not sent goes with the note as an answer (its state becomes `sent`). The old questions stay open until the agent's new message replaces them (their `state` becomes `superseded`); draw the note as one line ("You asked <agent> to ask the N open questions again, together in one message. They stay open here until it does."), its body behind a disclosure. Questions from several sessions: one Re-ask per session, each to that session's own message. The session that asked has ended: `{ idempotency_key, to: { host, session } }` names a live session of the project (as 7.11's `to`); not live `409 session_not_live`, nothing written. Nothing left open for that session: `409 nothing_to_reask`; a person's message: `422 validation_error`; a message an archive closed: `409 thread_resolved`. Replaying the key answers the note it wrote.
 
 ## 8. What this contract leaves out
 

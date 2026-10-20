@@ -29,6 +29,7 @@ import {
 import { join } from "node:path";
 import {
   checkInboxAnswer,
+  composeInboxReaskBody,
   composeInboxReplyBody,
   composeInboxReopenedBody,
   composeInboxSetAsideBody,
@@ -68,6 +69,7 @@ import {
   inboxThreadNameKey,
   isInboxNote,
   inboxAgentName,
+  INBOX_HOST_NAMES,
   INBOX_TAGS_MAX,
   type InboxParticipant,
   type InboxSentRecipient,
@@ -244,6 +246,17 @@ export interface InboxReplyInput {
    * (it gets the reply anyway). Absent or empty: nobody is tagged.
    */
   tags?: unknown;
+}
+
+/** The person's Re-ask (approval "inbox-reask"): ask the agent for its open questions again, in one message. */
+export interface InboxReaskInput {
+  idempotency_key: string;
+  /**
+   * Another live session takes the note, because the one that asked has
+   * ended (the window's choice, as for a reply). Null: a session was asked
+   * for but the server found it not live; nothing is written.
+   */
+  to?: InboxAddressee | null;
 }
 
 export interface InboxReplyResult {
@@ -1096,6 +1109,8 @@ export class InboxStore {
       project: { id: project.id, name: this.labeled(project).name },
       thread_name: root.thread_name ?? null,
       answered_not_sent: (root.resolved_at === null || backFromArchive) && summary.questions.open === 0 && summary.questions.picked > 0,
+      // Rule 2a: every open question is in a Re-ask note that still waits (approval "inbox-reask").
+      reask_pending: (root.resolved_at === null || backFromArchive) && this.reaskWaiting(messages),
       waiting_since: waitingSince,
       unseen,
       sent,
@@ -2480,6 +2495,115 @@ export class InboxStore {
       throw error;
     }
     return { reply, questions: this.questionsOf(message.id), replayed: false };
+  }
+
+  /**
+   * The person's Re-ask (approval "inbox-reask"): a note to the session that
+   * wrote `messageId`, asking it to ask its questions still open in this
+   * thread again, together in one new message (with `Replaces:` lines, or
+   * `supersedes` for those that no longer apply). Picks the person made and
+   * did not send go with the note as answers (marked sent with it); the
+   * others stay open until the agent replaces them. The note is the person's
+   * reply: delivered like one, and the row sits in Sent while it is the
+   * thread's last message. One note per session: a thread where several
+   * sessions asked gets one Re-ask per session from the window.
+   */
+  sendReask(messageId: string, input: InboxReaskInput): InboxReplyResult {
+    const key = typeof input.idempotency_key === "string" ? input.idempotency_key.trim() : "";
+    if (!key) throw new InboxError("validation_error", "idempotency_key: required on a Re-ask.", { field: "idempotency_key" });
+    const replayed = this.replyByKey(messageId, key);
+    if (replayed) {
+      if (!replayed.reask?.length) throw new InboxError("idempotency_key_reused", "That idempotency_key already sent a reply, not a Re-ask.");
+      return { reply: replayed, questions: this.questionsOf(messageId), replayed: true };
+    }
+    const message = this.targetMessage(messageId);
+    if (input.to === null) {
+      throw new InboxError("session_not_live", "That session is not live any more: nothing was sent. Pick another session, or leave it for the next agent.");
+    }
+    if (message.author.kind !== "agent") {
+      throw new InboxError("validation_error", "Re-ask goes to an agent's message: the questions it asked.", { field: "message_id" });
+    }
+    // The questions this session asked in the thread (only this message's
+    // when the agent named no session), not one the archive closed.
+    const asker = message.author.session ? message.author : null;
+    const records = this.threadMessages(message.thread_id)
+      .filter((m) =>
+        m.author.kind === "agent" && asker
+          ? m.author.session === asker.session && (m.author.host ?? "") === (asker.host ?? "")
+          : m.id === message.id,
+      )
+      .filter((m) => !this.closedByArchive(m))
+      .flatMap((m) => this.questionRecords(m.id));
+    const picked = records.filter((r) => inboxQuestionState(r, false) === "picked" && r.answer !== null);
+    const open = records.filter((r) => inboxQuestionState(r, false) === "open");
+    if (open.length === 0) throw new InboxError("nothing_to_reask", "No open question is left to ask again.");
+
+    const replyId = inboxId("msg");
+    const at = this.stamp();
+    // The picks go with the note, as a Send would send them.
+    const answered = picked.map(
+      (record) => ({ ...record, sent_revision: record.revision, sent_reply_id: replyId }) satisfies InboxQuestionRecord,
+    );
+    const to = input.to ?? undefined;
+    // Sent to another session because the one that asked ended: the note says whose questions they are.
+    const redirected = to && asker && to.session !== asker.session;
+    const body = composeInboxReaskBody({
+      reask: open,
+      answered: picked.map((record) => ({ record, answer: record.answer as QuestionAnswer })),
+      noteId: replyId,
+      askedBy: redirected ? (INBOX_HOST_NAMES[asker.host ?? ""] ?? "agent") : null,
+    });
+    const note: InboxMessage = {
+      id: replyId,
+      project_id: message.project_id,
+      thread_id: message.thread_id,
+      reply_to: message.id,
+      author: { kind: "person" },
+      subject: null,
+      body,
+      created_at: at,
+      resolved_at: null,
+      idempotency_key: key,
+      reask: open.map((r) => r.id),
+      ...(to ? { to: { host: to.host, session: to.session } } : {}),
+    };
+    try {
+      for (const record of answered) this.appendQuestion(record, at);
+      this.appendMessage(note, at);
+    } catch (error) {
+      for (const record of picked) this.restoreQuestion(record);
+      throw error;
+    }
+    return { reply: note, questions: this.questionsOf(message.id), replayed: false };
+  }
+
+  /**
+   * Rule 2a (approval "inbox-reask"): a thread's messages (in order) sit in
+   * Sent only while every question open in them is listed in a Re-ask note
+   * that still waits. A note waits until the session it went to (its `to`,
+   * else the session of the message it answers) writes again, and only while
+   * one of the questions it lists is still open. Another session's new
+   * question, or the last listed one answered, superseded or closed, ends it.
+   */
+  private reaskWaiting(messages: readonly InboxMessage[]): boolean {
+    // Most threads have no Re-ask note: they cost nothing more.
+    if (!messages.some((m) => m.author.kind === "person" && (m.reask?.length ?? 0) > 0)) return false;
+    const states = new Map<string, string>();
+    for (const m of messages) if (m.author.kind === "agent") for (const q of this.questionsOf(m.id)) states.set(`${m.id}/${q.key}`, q.state);
+    const covered = new Set<string>();
+    messages.forEach((note, index) => {
+      if (note.author.kind !== "person" || (note.reask?.length ?? 0) === 0) return;
+      const asked = note.reply_to ? this.messages.get(note.reply_to) : undefined;
+      const by = note.to ?? (asked?.author.kind === "agent" ? { host: asked.author.host ?? "", session: asked.author.session } : null);
+      if (!by) return;
+      const wrote = messages
+        .slice(index + 1)
+        .some((m) => m.author.kind === "agent" && m.author.session === by.session && (m.author.host ?? "") === (by.host ?? ""));
+      if (wrote) return;
+      for (const id of note.reask!) if (states.get(id) === "open") covered.add(id);
+    });
+    const open = [...states].filter(([, state]) => state === "open").map(([id]) => id);
+    return open.length > 0 && open.every((id) => covered.has(id));
   }
 
   /**

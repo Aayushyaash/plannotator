@@ -30,7 +30,7 @@ import { INBOX_MCP_TOOLS, INBOX_SERVED_TOOLS, INBOX_WAIT_DEFAULT_MS, INBOX_WAIT_
 import { INBOX_BODY_CUT_BYTES, INBOX_EARLIER_PERSON_BYTES, INBOX_THREAD_WINDOW, sizeText } from "@plannotator/server/inbox-mcp-read";
 import { INBOX_AGENT_SEARCH_LIMIT } from "@plannotator/server/inbox-mcp-search";
 import { INBOX_TOOL_DEFAULTS, INBOX_TOOL_HOSTS } from "@plannotator/shared/config";
-import { INBOX_FILLED_ARGUMENTS, INBOX_TAGGED_INSTRUCTION, INBOX_TOOL_NAME } from "@plannotator/shared/inbox/connection";
+import { INBOX_FILLED_ARGUMENTS, INBOX_REASK_INSTRUCTION, INBOX_TAGGED_INSTRUCTION, INBOX_TOOL_NAME } from "@plannotator/shared/inbox/connection";
 import { INBOX_COMMAND_USAGE } from "./cli";
 import { createAgentEnvironment, displayPath, type AgentEnvironment } from "@plannotator/server/inbox-agents";
 import { noteTarget } from "@plannotator/server/inbox-agent-notes";
@@ -333,6 +333,7 @@ export function formatInboxHelp(options: InboxHelpOptions): string {
     "- A reply that answers some of your questions usually skips the ones the person left unanswered: they come back as `Skipped (not answered in this reply)`. Treat them as skipped, and ask again if you still need them.",
     "- A reply that answers none of them (the person only wrote back, or sent annotations) leaves them all open and says so after their words: `No questions answered yet; all N are still open. Don't re-ask them; the person will answer in the Inbox.` Do not ask them again: the answers come in a later reply.",
     "- The person may mark your latest message 👍 Looks good: they read it and need nothing more. About ten seconds later (after the person's Undo window) it reaches you: with a connection that wakes you, as one short message, `Plannotator Inbox: <subject> (<id>)` and then `The person marked your message 👍 Looks good (<message id>). No reply needed unless you have a question.`; otherwise wait_for_reply returns `status: \"acknowledged\"`, and read_thread shows `ack: { label, at }` on that message. Do not answer it; go on, and use `reply_to` only if you have something new for them. Only a message with no open question takes it, so it never answers a question. A wait on every thread you asked (no `thread_id`, no `cursor`) is not answered again by a 👍 you were already given.",
+    `- The person may press Re-ask: you get one message (with a wake: \`Plannotator Inbox: <subject> (<id>)\`, then \`${INBOX_REASK_INSTRUCTION}\`) listing your questions still open in the thread by id. Check each against where the work is now and send ONE message with \`reply_to\` that id: the ones still needed, asked again with the context the person needs today and a \`Replaces: <id>\` line in each block; the ids of those that no longer apply in \`supersedes\`, with a line on why. Answers the person had picked come with it under "Answers to your questions": don't ask those again. Until you do, the old questions stay open and the thread waits on you.`,
     `- The person may mark a thread read without answering: its waiting questions close unanswered, and you get one message from them that starts \`${INBOX_SET_ASIDE_HEADING}\` and lists them. Do not wait on those; ask again if you must.`,
     "",
     QUESTION_AUTHORING_GUIDE.trimEnd(),

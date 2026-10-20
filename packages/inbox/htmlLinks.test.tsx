@@ -57,7 +57,7 @@ function loopback(path: string, method = 'GET', body?: string): Promise<{ status
   });
 }
 
-const TESTS = 7;
+const TESTS = 9;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -193,6 +193,78 @@ test.skipIf(!hasDom)('a sibling page that is not attached opens read-only over t
   await clickLink(el.querySelector<HTMLIFrameElement>('.ib-linkedframe iframe')!, 'SHEET.html');
   await until(() => el.querySelector('[data-linked-page]') === null, 'home');
 });
+
+test.skipIf(!hasDom)('Back takes focus once it is drawn, even when the next frame comes before React draws it', async () => {
+  const el = await renderSheet();
+  // A loaded browser can run the next animation frame before React commits the page a link opened.
+  // Frames run as soon as asked (a microtask, ahead of React's commit); one asked from inside such a
+  // frame waits for a real one, so no loop spins.
+  const realFrame = window.requestAnimationFrame;
+  let inEarlyFrame = false;
+  window.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+    if (inEarlyFrame) return realFrame(cb);
+    queueMicrotask(() => {
+      inEarlyFrame = true;
+      try {
+        cb(performance.now());
+      } finally {
+        inEarlyFrame = false;
+      }
+    });
+    return 0;
+  }) as typeof window.requestAnimationFrame;
+  try {
+    await clickLink(sheetFrame(el), 'B-cards.html');
+    await until(() => el.querySelector('[data-linked-page="B-cards.html"]') !== null, 'the linked page');
+    await until(() => document.activeElement === el.querySelector('[data-linked-back]'), 'focus on Back');
+    // A further page: the same Back button stays mounted, and takes focus again.
+    (document.activeElement as HTMLElement).blur();
+    await clickLink(el.querySelector<HTMLIFrameElement>('.ib-linkedframe iframe')!, 'C-between.html');
+    await until(() => el.querySelector('[data-linked-page="C-between.html"]') !== null, 'the second linked page');
+    await until(() => document.activeElement === el.querySelector('[data-linked-back]'), 'focus on Back again');
+  } finally {
+    window.requestAnimationFrame = realFrame;
+  }
+}, 20_000);
+
+test.skipIf(!hasDom)('a linked page drawn after the person moved into the reply box leaves focus there', async () => {
+  // A deep link names the linked page; its page reads before the file's own view, so Back is drawn late.
+  let releaseView: () => void = () => {};
+  const viewHeld = new Promise<void>((done) => (releaseView = done));
+  let linkedRead = false;
+  const answer = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (/\/attachments\/[^/]+\/view/.test(path)) await viewHeld;
+    const response = await answer(input, init);
+    if (path.includes('/linked-page?')) linkedRead = true;
+    return response;
+  }) as typeof fetch;
+  window.location.hash = `#thread=${world.htmlLinks.thread}&file=${world.htmlLinks.ids['SHEET.html']}&linked=B-cards.html`;
+  host = document.createElement('div');
+  document.body.appendChild(host);
+  act(() => {
+    root = createRoot(host!);
+    root.render(<InboxApp />);
+  });
+  const el = host;
+  await until(() => linkedRead, 'the linked page read');
+  // Meanwhile the person opens the reply box and starts typing.
+  await until(() => [...el.querySelectorAll<HTMLButtonElement>('.ib-pfoot button')].some((b) => b.textContent?.trim() === 'Reply'), 'the Reply button');
+  await act(async () => [...el.querySelectorAll<HTMLButtonElement>('.ib-pfoot button')].find((b) => b.textContent?.trim() === 'Reply')!.click());
+  await until(() => el.querySelector('textarea[aria-label^="Reply to"]') !== null, 'the reply box');
+  const reply = el.querySelector<HTMLTextAreaElement>('textarea[aria-label^="Reply to"]')!;
+  reply.focus();
+  expect(document.activeElement === reply).toBe(true);
+  // The file's view arrives: the linked page is drawn, and focus stays in the reply box.
+  await act(async () => releaseView());
+  await until(() => el.querySelector('[data-linked-page="B-cards.html"] [data-linked-back]') !== null, 'the linked page');
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 100));
+  });
+  expect(document.activeElement?.hasAttribute('data-linked-back') ?? false).toBe(false);
+  expect(document.activeElement === reply).toBe(true);
+}, 20_000);
 
 test.skipIf(!hasDom)('Escape from the pane steps back one linked page, before the rest of the ladder', async () => {
   const el = await renderSheet();

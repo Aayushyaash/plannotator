@@ -158,7 +158,9 @@ export function forEachInboxSearchBodyLine(markdown: string, visit: (line: strin
  * human-only skill's SKILL.md text, which the person did not write; the
  * `$name` they typed stays in their words, so the reply is still found by it).
  */
-export function inboxSearchReplyText(body: string): string {
+export function inboxSearchReplyText(body: string, message?: { reask?: readonly string[] | null }): string {
+  // A Re-ask note carries no words of the person's: its body is the instructions the Inbox wrote for the agent.
+  if ((message?.reask?.length ?? 0) > 0) return "";
   return replyWordsText(withoutInboxSkillsBlock(body));
 }
 
@@ -650,7 +652,7 @@ export class InboxSearchIndex {
     if (message.author.kind === "person") {
       if (isInboxNote(message)) return;
       // A message's body never changes once stored: its length stands for it.
-      this.put(`m:${message.id}`, "message", { ...meta, from: "me" }, { title: [], other: [inboxSearchReplyText(message.body)] }, `${message.body.length}`);
+      this.put(`m:${message.id}`, "message", { ...meta, from: "me" }, { title: [], other: [inboxSearchReplyText(message.body, message)] }, `${message.body.length}`);
       return;
     }
     const questions = this.store.questionsOf(message.id).flatMap(questionTexts);
@@ -931,7 +933,7 @@ export class InboxSearchIndex {
       case "message": {
         const message = this.store.message(doc.ref);
         if (!message) return [];
-        if (message.author.kind === "person") return [inboxSearchReplyText(message.body)];
+        if (message.author.kind === "person") return [inboxSearchReplyText(message.body, message)];
         return [inboxSearchBodyText(message.body), ...this.store.questionsOf(message.id).flatMap(questionTexts), inboxAgentName(message.author)];
       }
       case "file": {
@@ -1151,8 +1153,10 @@ export class InboxSearchIndex {
    */
   private bestMessageText(message: InboxMessage, terms: readonly string[]): { text: string; question: { key: string; replaced: boolean } | null } {
     const candidates: { text: string; question: { key: string; replaced: boolean } | null }[] = [];
-    if (message.author.kind === "person") candidates.push({ text: replyWordsText(nearFirstHit(withoutInboxSkillsBlock(message.body), terms)), question: null });
-    else {
+    if (message.author.kind === "person") {
+      // A Re-ask note's body is the Inbox's words, not the person's: nothing to draw a row from.
+      if ((message.reask?.length ?? 0) === 0) candidates.push({ text: replyWordsText(nearFirstHit(withoutInboxSkillsBlock(message.body), terms)), question: null });
+    } else {
       candidates.push({ text: inboxSearchBodyText(nearFirstHit(message.body, terms)), question: null });
       for (const q of this.store.questionsOf(message.id)) {
         const ref = { key: q.key, replaced: q.state === "superseded" };

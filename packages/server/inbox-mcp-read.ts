@@ -416,7 +416,7 @@ export function agentMessage(message: InboxMessageWire, form: AgentMessageForm =
 
 /** The first words of a message, plain: the person's own words in a reply, else the body's text. */
 function firstWords(message: InboxMessageWire): string {
-  let text = message.author.kind === "person" ? inboxSearchReplyText(message.body) : inboxSearchBodyText(message.body);
+  let text = message.author.kind === "person" ? inboxSearchReplyText(message.body, message) : inboxSearchBodyText(message.body);
   // A message that is only question blocks: its first question's prompt (never ":::question").
   if (!text.trim()) text = [...(message.questions ?? [])].sort((a, b) => a.position - b.position)[0]?.prompt ?? "";
   if (!text.trim()) text = message.body.split("\n").find((line) => line.trim() !== "" && !/^:{3,}/.test(line.trim())) ?? "";

@@ -145,6 +145,8 @@ export function AskerEndedNote({ asking, project, anyLive }: { asking: AskingSes
  * agent". The primary button names the result.
  */
 export function RouteChoice({
+  kind = 'reply',
+  reaskCount = 0,
   name,
   asking,
   project,
@@ -155,6 +157,10 @@ export function RouteChoice({
   onBack,
   onShowAll,
 }: {
+  /** What the choice is for: a reply, or a Re-ask (approval "inbox-reask"), which asks who should ask again. */
+  kind?: 'reply' | 'reask';
+  /** The open questions a Re-ask asks for again. */
+  reaskCount?: number;
   /** The radio group's name, unique per thread. */
   name: string;
   asking: AskingSession;
@@ -180,7 +186,8 @@ export function RouteChoice({
   const selectedRow = selectedIndex >= 0 ? state.rows[selectedIndex] : undefined;
   const hidden = state.rows.length - visible.length;
   const target = state.selected === LEAVE ? null : (selectedRow?.live ?? null);
-  const primary = target ? `Send to ${hostName(target.host)}` : 'Leave it for the next agent';
+  const reask = kind === 'reask';
+  const primary = target ? (reask ? `Ask ${hostName(target.host)} to re-ask` : `Send to ${hostName(target.host)}`) : 'Leave it for the next agent';
   const whyId = `${name}-why`;
   const labelId = `${name}-gl`;
 
@@ -210,9 +217,11 @@ export function RouteChoice({
       }}
     >
       <fieldset className="ib-route" aria-describedby={whyId}>
-        <legend>Where should this reply go?</legend>
+        <legend>{reask ? 'Who should ask again?' : 'Where should this reply go?'}</legend>
         <p className="ib-why" id={whyId}>
-          The {asking.name} session that asked has ended. Your reply stays as you wrote it.
+          {reask
+            ? `The ${asking.name} session that asked has ended. The session you pick reads this thread, then asks the ${reaskCount === 1 ? 'open question' : `${reaskCount} open questions`} again in one message.`
+            : `The ${asking.name} session that asked has ended. Your reply stays as you wrote it.`}
         </p>
         {state.rows.length > 0 && (
           <div className="ib-gl" id={labelId}>
@@ -268,7 +277,7 @@ export function RouteChoice({
           {primary}
         </button>
         <button type="button" className="ib-btn ib-ghost" onClick={onBack}>
-          Back to the reply
+          {reask ? 'Cancel' : 'Back to the reply'}
         </button>
         <span className="ib-sp" />
         <span className="ib-esc">

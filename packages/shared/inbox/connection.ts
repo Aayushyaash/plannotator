@@ -526,6 +526,16 @@ export interface InboxReplyCommand {
    * stays true. Absent on every other command.
    */
   also_tagged?: string[]
+  /**
+   * On the person's Re-ask note (approval "inbox-reask"): they asked the
+   * session to ask its open questions in the thread again, together in one
+   * message. The wake takes INBOX_REASK_INSTRUCTION instead of the reply's
+   * line ("it is their answer to you" would not be true); the body lists the
+   * questions and what to do. The command stays a `reply`, so an older
+   * connection still delivers it, with the reply's line. Absent on every
+   * other command.
+   */
+  reask?: boolean
 }
 
 /**
@@ -609,6 +619,22 @@ export function parseInboxBridgeCommands(text: string): InboxReplyCommand[] {
 export const INBOX_WAKE_INSTRUCTION =
   "The person replied to you in the Plannotator Inbox. Their reply follows as they wrote it: it is their answer to you. When they need to hear back, answer in the same thread: plannotator_inbox send_message with reply_to set to the id in parentheses on the line above."
 
+/**
+ * The fixed second line of a Re-ask wake (approval "inbox-reask"): the person
+ * asked for the open questions again, in one message, and how to answer.
+ */
+export const INBOX_REASK_INSTRUCTION =
+  "The person asked, from the Plannotator Inbox, for the open questions in this thread to be asked again, together in one new message. The questions and what to do with each follow. Answer in the same thread: plannotator_inbox send_message with reply_to set to the id in parentheses on the line above."
+
+/**
+ * The line under INBOX_REASK_INSTRUCTION on a Re-ask the person sent to this
+ * session because the session that asked had ended: the questions are
+ * another session's, and this one takes them over.
+ */
+export function inboxReaskRedirectedLine(asker: string, id: string): string {
+  return `These questions were asked by another ${asker} session, which has ended; the person picked you to take them over. Read the thread first with read_thread (message_id ${id}), then ask the ones still needed again as below.`
+}
+
 /** The fixed second line of a New message wake: the person wrote first, and how to answer. */
 export const INBOX_MESSAGE_INSTRUCTION =
   "The person wrote to you from the Plannotator Inbox. Their message follows as they wrote it: it is from them, not from the Inbox. When they need to hear back, answer in the same thread: plannotator_inbox send_message with reply_to set to the id in parentheses on the line above."
@@ -680,6 +706,7 @@ export function inboxWakeText(
     ack_of?: string
     tagged?: { owner?: unknown } | null
     also_tagged?: unknown
+    reask?: boolean
   },
 ): string {
   if (typeof command.ack_of === 'string' && command.ack_of !== '') {
@@ -700,13 +727,19 @@ export function inboxWakeText(
     : []
   const also = others.length > 0 ? `\n${inboxAlsoTaggedLine(others)}` : ''
   const instruction =
-    command.type === 'message' ? (command.new_thread === true ? INBOX_NEW_THREAD_INSTRUCTION : INBOX_MESSAGE_INSTRUCTION) : INBOX_WAKE_INSTRUCTION
+    command.type === 'message'
+      ? command.new_thread === true
+        ? INBOX_NEW_THREAD_INSTRUCTION
+        : INBOX_MESSAGE_INSTRUCTION
+      : command.reask === true
+        ? INBOX_REASK_INSTRUCTION
+        : INBOX_WAKE_INSTRUCTION
   const asker =
     command.type !== 'message' && typeof command.redirected_from === 'string' && command.redirected_from.trim() !== ''
       ? wakeName(command.redirected_from) || 'agent'
       : ''
   const redirected = asker
-    ? `\n${inboxRedirectedLine(asker, command.id)}`
+    ? `\n${command.reask === true ? inboxReaskRedirectedLine(asker, command.id) : inboxRedirectedLine(asker, command.id)}`
     : command.continues_thread === true
       ? `\n${inboxContinuesLine(command.id)}`
       : ''
