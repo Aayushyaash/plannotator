@@ -1128,6 +1128,59 @@ export interface InboxAgentsModel {
   note_text: string;
   /** A switch's refusal, after POST /api/inbox/agents. */
   error?: string | null;
+  /**
+   * The open sessions of the three Plannotator hosts that poll the Inbox now
+   * (packages/server/inbox-restart.ts), for Settings → Agents' "Open sessions"
+   * row. Absent from an Inbox older than the field.
+   */
+  sessions?: Partial<Record<InboxToolHostId, InboxHostSessions>>;
+}
+
+/** The three hosts that connect through Plannotator's own plugin or extension. */
+export type InboxToolHostId = "claude-code" | "pi" | "opencode";
+
+/**
+ * A polling session runs an older Plannotator plugin than a restart would
+ * load (`fix: "restart"`), or the installed plugin is itself behind this
+ * Inbox's Plannotator, so a restart alone does not help (`fix:
+ * "update_plugin"`; Pi: `"update_extension"`, `pi update --extensions` then
+ * `/reload`). `loaded` is the version the session runs (null when its
+ * connection predates reporting it), `installed` what a restart loads (Pi:
+ * the Inbox's own version, which the extension should match).
+ */
+export interface InboxSessionOutdated {
+  loaded: string | null;
+  installed: string | null;
+  fix: "restart" | "update_plugin" | "update_extension";
+  /** With `update_plugin`: the command that updates the plugin itself. */
+  update_command?: string;
+}
+
+/** One open session as Settings → Agents lists it. */
+export interface InboxOpenSession {
+  session: string;
+  /** The folder's name the session works in, or null when its connection does not say. */
+  project: string | null;
+  /** Its working folder as the window shows it (`~` for the home folder); null when unknown. */
+  folder: string | null;
+  started_at: string;
+  busy: boolean | null;
+  /** The plugin or extension version it loaded; null when it does not say. */
+  plugin: string | null;
+  outdated: InboxSessionOutdated | null;
+  /** `cd <folder> && claude --resume <session>` (Claude Code, with a known folder); null otherwise. */
+  restart_command: string | null;
+}
+
+export interface InboxHostSessions {
+  running: number;
+  /** Sessions with `outdated` set. */
+  outdated: number;
+  /** What a restart loads (Claude Code: the installed plugin's version); null when unknown. */
+  installed: string | null;
+  /** The command that updates the plugin itself, when the installed plugin is behind this Inbox (Claude Code). */
+  update_command: string | null;
+  sessions: InboxOpenSession[];
 }
 
 /** The hosts whose every request carries the `plannotator_inbox` tool in full once it is on (Claude Code defers it behind tool search). */
@@ -1237,4 +1290,58 @@ export interface InboxComposeSession {
 export interface InboxComposeProject {
   project: { id: string | null; name: string; root: string };
   sessions: InboxComposeSession[];
+}
+
+/**
+ * The first Plannotator release whose Claude Code mod reports `plugin` on its
+ * bridge poll (packages/server/inbox-restart.ts). A new mod ALWAYS sends the
+ * field (version or root null when it could not read them), so a poll without
+ * it means a mod older than this. Must merge before the version bump to it.
+ */
+export const INBOX_PLUGIN_REPORTS_LOADED_SINCE = "0.28.24";
+
+/**
+ * The first Plannotator release whose Claude Code mod has Send now (#1968).
+ * A session that loaded this or newer already has Send now, so a missing Send
+ * now there has another cause (its own Ask question holds the turn, the engine
+ * refused a row) and the reply line never blames the plugin for it.
+ */
+export const INBOX_SEND_NOW_SINCE = "0.28.24";
+
+/**
+ * Whether a session that loaded `version` (null: unknown, an older mod)
+ * predates Send now. A version that is not a plain release (a development
+ * build) is taken as having it.
+ */
+export function inboxLoadedPredatesSendNow(version: string | null | undefined): boolean {
+  if (version === null || version === undefined || version === "") return true;
+  const parts = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+  if (!parts) return false;
+  const min = INBOX_SEND_NOW_SINCE.split(".").map(Number);
+  const have = parts.slice(1, 4).map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (have[i]! !== min[i]!) return have[i]! < min[i]!;
+  }
+  return false;
+}
+
+/**
+ * The oldest Claude Code engine the mod offers Send now on (a copy of the
+ * mod's `SESSION_APPEND_MIN_ENGINE`, apps/hook/hooks/mod/inbox.ts; the mod's
+ * send-now-engine test keeps them equal). The restart line under a reply uses
+ * it only to stay quiet where a restart would not bring Send now (an engine
+ * too old for it); the window never says so (owner, 2026-10-19).
+ */
+export const INBOX_SEND_NOW_MIN_ENGINE = "2.1.301";
+
+/** Whether a reported engine version is too old for Send now; false when it is unknown or unreadable. */
+export function inboxEngineTooOldForSendNow(version: string | null | undefined): boolean {
+  const parts = /^(\d+)\.(\d+)\.(\d+)/.exec(typeof version === "string" ? version.trim() : "");
+  if (!parts) return false;
+  const min = INBOX_SEND_NOW_MIN_ENGINE.split(".").map(Number);
+  const have = parts.slice(1, 4).map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (have[i]! !== min[i]!) return have[i]! < min[i]!;
+  }
+  return false;
 }

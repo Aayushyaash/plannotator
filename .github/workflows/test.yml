@@ -161,6 +161,7 @@ jobs:
           packages/inbox/listHeaderCompose.test.tsx
           packages/inbox/composeThread.test.tsx
           packages/inbox/sendNow.test.tsx
+          packages/inbox/restartWarning.test.tsx
           packages/inbox/pasteFiles.test.tsx
           packages/inbox/markRead.test.tsx
           packages/inbox/ack.test.tsx

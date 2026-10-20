@@ -378,6 +378,13 @@ export interface InboxWakeTarget {
    * where it wrote.
    */
   projectPath?(): string | null | undefined | Promise<string | null | undefined>;
+  /**
+   * The version of Plannotator's plugin or extension this process loaded
+   * (Pi: the extension's package.json). Each poll carries it as `plugin:
+   * { version }`, so the Inbox can say when the session runs an older one.
+   * Optional: a host without it sends nothing.
+   */
+  pluginVersion?(): string | null;
 }
 
 /**
@@ -562,6 +569,12 @@ export class InboxWake {
     } catch {
       projectPath = null;
     }
+    let pluginVersion: string | null = null;
+    try {
+      pluginVersion = this.target.pluginVersion?.() ?? null;
+    } catch {
+      pluginVersion = null;
+    }
     const response = await this.connection.bridge(
       INBOX_BRIDGE_POLL_PATH,
       this.sessionId,
@@ -571,6 +584,8 @@ export class InboxWake {
         started_at: this.startedAt,
         ...(this.busy === null ? {} : { busy: this.busy, idle_since: this.idleSince }),
         ...(this.steerable ? { [INBOX_SEND_NOW_POLL_FIELD]: true } : {}),
+        // What this process loaded (additive): the Inbox says when the session runs an older one.
+        ...(pluginVersion ? { plugin: { version: pluginVersion } } : {}),
       },
       signal,
     );

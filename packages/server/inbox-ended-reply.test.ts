@@ -239,7 +239,8 @@ describe("a reply to another session when the asking one has ended", () => {
     await poll(server, "ses-asker", project);
     const model = (await (await fetch(`${base(server)}/api/inbox/threads/${asked.thread_id}/sessions?asker=ses-asker`)).json()) as { asker: unknown };
     // `connection` (additive, Send now): how it is connected now; this poll said nothing of busy or send_now.
-    expect(model.asker).toEqual({ session: "ses-asker", live: true, connection: { busy: null, idle_since: null, send_now: false } });
+    // The restart warning's fields are additive (outdated, engine, restart_command): no plugin registry here, so not outdated.
+    expect(model.asker).toMatchObject({ session: "ses-asker", live: true, connection: { busy: null, idle_since: null, send_now: false, outdated: null, engine: null } });
     const plain = (await (await fetch(`${base(server)}/api/inbox/threads/${asked.thread_id}/sessions`)).json()) as { asker?: unknown };
     expect(plain.asker).toBeUndefined();
   });

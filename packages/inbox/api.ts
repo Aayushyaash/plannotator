@@ -72,6 +72,8 @@ export interface ListModel {
   update: InboxHealth['update'];
   /** This Inbox started on a newer version than the one before it: "What's new in X" for this run. Absent from an older Inbox. */
   updated?: string | null;
+  /** Claude Code sessions a restart would bring up to date: the sidebar's "Restart Claude Code N". Absent from an older Inbox. */
+  restart_claude_code?: number;
   notice: string | null;
   projects: ProjectFolder[];
   project: string | null;
@@ -681,8 +683,11 @@ export function subscribeInboxEvents(
   cursor: number,
   handlers: {
     onRecord: (event: InboxEvent | null) => void;
-    /** `updated` is undefined from an Inbox older than the field (the "What's new in X" link stays as the list said). */
-    onStatus: (update: InboxHealth['update'], updated?: string | null) => void;
+    /**
+     * `updated` is undefined from an Inbox older than the field (the "What's new in X" link stays as the list said);
+     * `restartClaudeCode` too (the sidebar's "Restart Claude Code N" stays as the list said).
+     */
+    onStatus: (update: InboxHealth['update'], updated?: string | null, restartClaudeCode?: number) => void;
     /** Whether a notification can reach the person now (inbox-windows.ts); never called by an older Inbox. */
     onReach?: (reach: InboxNotifyReach) => void;
     /**
@@ -721,8 +726,12 @@ export function subscribeInboxEvents(
   });
   source.addEventListener('status', (event) => {
     try {
-      const data = JSON.parse((event as MessageEvent<string>).data) as { update: InboxHealth['update']; updated?: string | null };
-      handlers.onStatus(data.update, 'updated' in data ? (data.updated ?? null) : undefined);
+      const data = JSON.parse((event as MessageEvent<string>).data) as { update: InboxHealth['update']; updated?: string | null; restart_claude_code?: unknown };
+      handlers.onStatus(
+        data.update,
+        'updated' in data ? (data.updated ?? null) : undefined,
+        typeof data.restart_claude_code === 'number' ? data.restart_claude_code : undefined,
+      );
     } catch {
       // A malformed frame changes nothing.
     }

@@ -129,6 +129,8 @@ const SIDEBAR_OPEN_COOKIE = 'plannotator-inbox-sidebar-open';
 const COMPOSE_LAST_COOKIE = 'plannotator-inbox-compose-last';
 /** How often the Drafts page reads its drafts again, so each chip follows its session. */
 const DRAFTS_REFRESH_MS = 10_000;
+/** Settings → Agents re-reads the agents this often while open, so "Open sessions" follows the sessions as they restart. */
+const AGENTS_SESSIONS_REFRESH_MS = 5_000;
 /** A look seen on sight that the server did not take is sent again this many times, 1 s, 2 s, 4 s… apart. */
 const SEEN_RETRIES = 5;
 const SEEN_RETRY_MS = 1000;
@@ -390,6 +392,8 @@ function Inbox() {
   const [restarting, setRestarting] = useState(false);
   /** This run started on a newer version: the sidebar's "What's new in X" link. */
   const [updated, setUpdated] = useState<string | null>(null);
+  // Claude Code sessions a restart would bring up to date: the sidebar's "Restart Claude Code N" (owner approval "restart-warning").
+  const [restartClaudeCode, setRestartClaudeCode] = useState(0);
   /** The update control's dialogs and what they read (GET /api/inbox/update). */
   const [updateDialog, setUpdateDialog] = useState<null | 'update' | 'restart' | 'failed'>(null);
   const [updateDetails, setUpdateDetails] = useState<UpdateDetails | null>(null);
@@ -569,6 +573,7 @@ function Inbox() {
       if (adopt && slide) armSlide();
       setUpdate(next.update);
       setUpdated(next.updated ?? null);
+      setRestartClaudeCode(next.restart_claude_code ?? 0);
       // Held: the order waits for an action, but each row's own state (a delivery, an agent's read) follows at once.
       setShown((current) => (adopt || current === null || !hasRows(current) ? next.sections : refreshHeldRows(current, next.sections, heldOpen())));
       setLoadError(null);
@@ -714,8 +719,12 @@ function Inbox() {
   }, [refreshAgents]);
   // Settings → Agents reads them again each time it opens: an agent installed meanwhile shows at once.
   const agentsSection = route.page === 'settings' && route.section === 'agents';
+  // While it is open it follows the agent sessions too: a session that restarts leaves "Open sessions" by itself.
   useEffect(() => {
-    if (agentsSection) void refreshAgents();
+    if (!agentsSection) return;
+    void refreshAgents();
+    const timer = setInterval(() => void refreshAgents(), AGENTS_SESSIONS_REFRESH_MS);
+    return () => clearInterval(timer);
   }, [agentsSection, refreshAgents]);
 
   const loadUpdateDetails = useCallback(async () => {
@@ -749,9 +758,10 @@ function Inbox() {
             if (open) void refreshThread(open);
           }, 80);
         },
-        onStatus: (next, nextUpdated) => {
+        onStatus: (next, nextUpdated, nextRestart) => {
           setUpdate(next);
           if (nextUpdated !== undefined) setUpdated(nextUpdated);
+          if (nextRestart !== undefined) setRestartClaudeCode(nextRestart);
         },
         // Whether any open Inbox tab can show a notification (Settings → General).
         onReach: setNotifyReach,
@@ -2112,6 +2122,9 @@ function Inbox() {
             onSettings={() => go({ page: 'settings', project: null, thread: null })}
             onUpdate={pressUpdate}
             onWhatsNew={openWhatsNew}
+            // Not on a page opened over the tailnet: Settings → Agents is local only there.
+            restartClaudeCode={settings && settings.via !== 'tailnet' ? restartClaudeCode : 0}
+            onRestartSessions={() => go({ page: 'settings', project: null, thread: null, section: 'agents' })}
             mcpCommand={settings?.mcp_command ?? null}
           />
         }

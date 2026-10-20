@@ -298,6 +298,8 @@ export interface SessionInfo {
   inboxTools?: readonly InboxToolInfo[]
   /** The session's working folder, read when asked (the Inbox link's polls say where the session works). */
   cwd?: () => Promise<string>
+  /** The session's root folder (`$.session.root()`), read once at the link's start: where `claude --resume` runs. */
+  root?: () => Promise<string>
 }
 
 export class PlannotatorMod {
@@ -354,6 +356,7 @@ export class PlannotatorMod {
             return turn !== null && !this.turns.ownsTurn(turn) ? turn : null
           },
           ...(session.cwd ? { cwd: session.cwd } : {}),
+          ...(session.root ? { root: session.root } : {}),
           instanceId: this.instanceId,
         })
       : null

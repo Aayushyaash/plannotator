@@ -3308,3 +3308,59 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
   .ib-annpop, .ib-nmpop { border-radius: 16px 16px 0 0; }
   .ib-annpop, .ib-nmpop { box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.28); }
 }
+
+/*
+ * A session that needs a restart after an update (owner approval "restart-warning", 2026-10-19):
+ * the line under a reply ("Steps"), the sidebar's "Restart Claude Code N", Settings → Agents' "Open sessions".
+ */
+.ib-rw-note { flex-basis: 100%; display: flex; align-items: flex-start; gap: 6px; color: var(--muted-foreground); font-size: var(--ib-fs-12-5, 12.5px); line-height: 1.5; min-width: 0; }
+.pn-inbox .ib-rw-note > svg.ib-ic { width: 14px; height: 14px; flex: none; margin-top: 2px; }
+.ib-rw-note > span { min-width: 0; overflow-wrap: anywhere; }
+.pn-inbox .ib-rw-lnk { color: var(--primary); font: inherit; font-weight: 550; background: none; border: 0; padding: 0; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; vertical-align: baseline; }
+.pn-inbox .ib-rw-lnk:hover { text-decoration: underline; text-underline-offset: 2px; }
+.pn-inbox .ib-rw-lnk .ib-rw-chev { width: 12px; height: 12px; transition: transform 150ms ease-out; }
+.pn-inbox .ib-rw-lnk[aria-expanded="true"] .ib-rw-chev { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .pn-inbox .ib-rw-lnk .ib-rw-chev { transition: none; } }
+.ib-rw-steps { flex-basis: 100%; margin: 2px 0 0 20px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in oklch, var(--muted) 35%, var(--card)); font-size: var(--ib-fs-12-5, 12.5px); line-height: 1.5; color: var(--foreground); max-width: 640px; min-width: 0; box-sizing: border-box; }
+.ib-rw-steps[hidden] { display: none; }
+.ib-rw-steps ol { margin: 0; padding-left: 18px; list-style: decimal; display: flex; flex-direction: column; gap: 6px; }
+.ib-rw-steps li::marker { color: var(--muted-foreground); }
+.ib-rw-steps code, .ib-rw-cmd code { font-family: var(--font-mono); font-size: var(--ib-fs-12, 12px); }
+.ib-rw-steps .ib-rw-after { margin: 8px 0 0; color: var(--muted-foreground); }
+.ib-rw-cmd { display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 6px 6px 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); min-width: 0; }
+.ib-rw-cmd code { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--foreground); }
+.pn-inbox .ib-rw-copy { flex: none; display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--foreground); font-size: var(--ib-fs-12, 12px); font-weight: 500; cursor: pointer; white-space: nowrap; }
+.pn-inbox .ib-rw-copy .ib-ic { width: 14px; height: 14px; }
+.pn-inbox .ib-rw-copy:hover { background: var(--muted); }
+.pn-inbox .ib-rw-copy[data-copied] { color: var(--success); border-color: color-mix(in oklch, var(--success) 45%, transparent); }
+.pn-inbox :is(.ib-rw-lnk, .ib-rw-copy, .ib-rw-restart):focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 4px; }
+
+/* Settings → Agents: the open sessions row and its list. */
+.ib-rw-sess { grid-column: 2 / -1; margin: 4px 0 2px; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; min-width: 0; }
+.ib-rw-sess[hidden] { display: none; }
+.ib-rw-srow { display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 12px; font-size: var(--ib-fs-12-5, 12.5px); min-width: 0; }
+.ib-rw-sess > li + li .ib-rw-srow { border-top: 1px solid color-mix(in oklch, var(--border) 60%, transparent); }
+.ib-rw-sess { list-style: none; padding: 0; }
+.ib-rw-sw { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ib-rw-srow .ib-rw-sp { font-weight: 550; color: var(--foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ib-rw-srow .ib-rw-sm { color: var(--muted-foreground); min-width: 0; overflow-wrap: anywhere; }
+.ib-agrow .ib-agsub.ib-agwarn code { font-family: var(--font-mono); font-size: var(--ib-fs-12, 12px); }
+
+/* After an update: the sidebar row under What's new. */
+.pn-inbox .ib-rw-restart { color: var(--foreground); }
+.pn-inbox .ib-rw-restart > .ib-rw-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Phones: 44 px targets for the new controls (the Inbox's ::after pattern), nothing past 320 px. */
+@media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
+  .pn-inbox :is(.ib-rw-lnk, .ib-rw-copy) { position: relative; }
+  .pn-inbox .ib-rw-lnk::after { content: ''; position: absolute; inset: -13px -6px; }
+  .pn-inbox .ib-rw-copy { height: 32px; }
+  .pn-inbox .ib-rw-copy::after { content: ''; position: absolute; inset: -6px -4px; }
+  .ib-rw-steps { margin-left: 0; }
+  .ib-rw-sess { grid-column: 1 / -1; }
+  .ib-rw-cmd { flex-wrap: wrap; }
+}
+/* The restart steps: /restart first, the /exit fallback folded under it. */
+.ib-rw-fallback { margin-top: 6px; padding-left: 10px; border-left: 2px solid var(--border); color: var(--muted-foreground); }
+.ib-rw-fallback code { color: var(--foreground); }
+.ib-rw-fallback .ib-rw-warn { margin: 6px 0 0; }

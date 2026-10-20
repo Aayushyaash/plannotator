@@ -35,11 +35,13 @@
  */
 
 import { homedir } from "node:os";
-import type { InboxProject } from "@plannotator/core/inbox-types";
+import { basename } from "node:path";
+import type { InboxHostSessions, InboxOpenSession, InboxProject, InboxSessionOutdated, InboxToolHostId } from "@plannotator/core/inbox-types";
 import { checkServerSession, INBOX_SERVER_SESSION_MISMATCH_ERROR, serverSessionMismatchBody } from "@plannotator/core/server-session";
 import { INBOX_SEND_NOW_POLL_FIELD, INBOX_SESSION_LIVE_MS } from "@plannotator/shared/inbox/connection";
 import { InboxError } from "@plannotator/shared/inbox/schema";
 import type { InboxStore } from "@plannotator/shared/inbox/store";
+import { parseEngine, parseLoadedPlugin, parseSessionFolder, type LoadedPlugin } from "./inbox-restart";
 
 /** One live session as the window reads it. */
 export interface InboxLiveSession {
@@ -67,6 +69,16 @@ export interface InboxRecipientConnection {
   idle_since: string | null;
   /** Send now can be offered: the connection said it can deliver into a running turn. */
   send_now: boolean;
+  /**
+   * The session runs an older Plannotator plugin than a restart would load,
+   * or one the installed plugin is itself behind (packages/server/inbox-restart.ts);
+   * null when it is up to date or the Inbox cannot tell. Additive.
+   */
+  outdated: InboxSessionOutdated | null;
+  /** Claude Code's own version as its poll reported it (`engine`); null when it does not say. Additive. */
+  engine: string | null;
+  /** The command that starts the same session again in its folder (`cd <folder> && claude --resume <id>`); null when unknown. Additive. */
+  restart_command: string | null;
 }
 
 interface SeenSession {
@@ -81,6 +93,18 @@ interface SeenSession {
   idleSince: number | null;
   /** Its poll said it can deliver into a running turn (`send_now`). */
   sendNow: boolean;
+  /** The working folder its poll named (`project_path`), as sent; null when it sent none. */
+  cwd: string | null;
+  /**
+   * Where the session started (`session_folder`, the Claude Code mod's
+   * `$.session.root()` as it was at session start): the folder its
+   * `claude --resume` runs in. Null when its connection sends none.
+   */
+  folder: string | null;
+  /** What its poll said it loaded (`plugin`); null when it sent none (a connection older than the field). */
+  plugin: LoadedPlugin | null;
+  /** Claude Code's version (`engine`); null when it sent none. */
+  engine: string | null;
 }
 
 /**
@@ -98,6 +122,15 @@ export function createInboxLiveSessions(options: {
   serverSession: string;
   resolveRoot: (path: string) => Promise<string>;
   now?: () => number;
+  /**
+   * Whether a session on `host` that loaded `plugin` (null: its poll sent
+   * none) is outdated (packages/server/inbox-restart.ts). Absent: never.
+   */
+  outdatedOf?: (host: string, plugin: LoadedPlugin | null, folder: string | null) => InboxSessionOutdated | null;
+  /** A working folder as the window shows it (the home folder as `~`). */
+  displayFolder?: (path: string) => string;
+  /** The command that restarts a session as itself, in its folder (shown); null for a host without one. */
+  restartCommandOf?: (host: string, folder: string, session: string) => string | null;
 }) {
   const { store, serverSession } = options;
   const now = options.now ?? Date.now;
@@ -162,9 +195,28 @@ export function createInboxLiveSessions(options: {
   const pollStarted = async (session: string, host: string, body: Record<string, unknown>): Promise<() => void> => {
     const at = now();
     const root = await rootOf(body.project_path);
-    const entry = sessions.get(session) ?? { host, root, startedAt: finiteMs(body.started_at) ?? at, lastSeen: at, holding: 0, busy: null, idleSince: null, sendNow: false };
+    const entry: SeenSession = sessions.get(session) ?? {
+      host,
+      root,
+      startedAt: finiteMs(body.started_at) ?? at,
+      lastSeen: at,
+      holding: 0,
+      busy: null,
+      idleSince: null,
+      sendNow: false,
+      cwd: null,
+      folder: null,
+      plugin: null,
+      engine: null,
+    };
     entry.host = host;
     entry.sendNow = body[INBOX_SEND_NOW_POLL_FIELD] === true;
+    // What the session loaded (additive poll fields; an older connection sends neither).
+    entry.plugin = parseLoadedPlugin(body.plugin);
+    entry.engine = parseEngine(body.engine);
+    if (typeof body.project_path === "string" && body.project_path) entry.cwd = body.project_path;
+    const folder = parseSessionFolder(body.session_folder);
+    if (folder) entry.folder = folder;
     if (root !== null) entry.root = root;
     entry.startedAt = finiteMs(body.started_at) ?? entry.startedAt;
     entry.lastSeen = at;
@@ -283,7 +335,65 @@ export function createInboxLiveSessions(options: {
       busy: entry.busy,
       idle_since: entry.busy === false && entry.idleSince !== null ? iso(entry.idleSince) : null,
       send_now: entry.sendNow,
+      outdated: outdatedOf(entry),
+      engine: entry.engine,
+      restart_command: restartCommandOf(session, entry),
     };
+  };
+
+  /** The folder a restart runs in (shown with ~): where the session started, else where it works now. */
+  const folderOf = (entry: SeenSession): string | null => {
+    const path = entry.folder ?? entry.cwd;
+    return path ? (options.displayFolder?.(path) ?? path) : null;
+  };
+  const restartCommandOf = (session: string, entry: SeenSession): string | null => {
+    const folder = folderOf(entry);
+    return folder && options.restartCommandOf ? options.restartCommandOf(entry.host, folder, session) : null;
+  };
+
+  const outdatedOf = (entry: SeenSession): InboxSessionOutdated | null => options.outdatedOf?.(entry.host, entry.plugin, entry.folder ?? entry.cwd) ?? null;
+
+  /**
+   * The live sessions of the three Plannotator hosts, for Settings → Agents'
+   * "Open sessions" row: each with what it loaded and whether a restart (or
+   * an update) would bring it up to date. Newest first.
+   */
+  const hostSessions = (
+    extra: (host: InboxToolHostId) => { installed: string | null; update_command: string | null },
+  ): Partial<Record<InboxToolHostId, InboxHostSessions>> => {
+    const out: Partial<Record<InboxToolHostId, InboxHostSessions>> = {};
+    const hosts: readonly InboxToolHostId[] = ["claude-code", "pi", "opencode"];
+    for (const [session, entry] of [...sessions].sort((a, b) => b[1].startedAt - a[1].startedAt)) {
+      if (!isLive(entry) || !(hosts as readonly string[]).includes(entry.host)) continue;
+      const host = entry.host as InboxToolHostId;
+      const info = extra(host);
+      const group = (out[host] ??= { running: 0, outdated: 0, installed: info.installed, update_command: info.update_command, sessions: [] });
+      const outdated = outdatedOf(entry);
+      const folder = folderOf(entry);
+      const row: InboxOpenSession = {
+        session,
+        project: entry.root ? basename(entry.root) : entry.cwd ? basename(entry.cwd) : null,
+        folder,
+        started_at: iso(entry.startedAt),
+        busy: entry.busy,
+        plugin: entry.plugin?.version ?? null,
+        outdated,
+        restart_command: restartCommandOf(session, entry),
+      };
+      group.running += 1;
+      if (outdated) group.outdated += 1;
+      group.sessions.push(row);
+    }
+    return out;
+  };
+
+  /** Live Claude Code sessions a restart brings up to date: the sidebar's "Restart Claude Code N". */
+  const restartCount = (): number => {
+    let count = 0;
+    for (const entry of sessions.values()) {
+      if (entry.host === "claude-code" && isLive(entry) && outdatedOf(entry)?.fix === "restart") count += 1;
+    }
+    return count;
   };
 
   /** Whether a session is live now (no grace: compose sends only to a session that polls). */
@@ -386,5 +496,20 @@ export function createInboxLiveSessions(options: {
     return store.requestDeliverNow(messageId);
   };
 
-  return { pollStarted, stateChanged, liveFor, askerLive, replyTarget, seenOverMcp, holdOverMcp, route, allLive, isSessionLive, composeTarget, connectionOf };
+  return {
+    pollStarted,
+    stateChanged,
+    liveFor,
+    askerLive,
+    replyTarget,
+    seenOverMcp,
+    holdOverMcp,
+    route,
+    allLive,
+    isSessionLive,
+    composeTarget,
+    connectionOf,
+    hostSessions,
+    restartCount,
+  };
 }

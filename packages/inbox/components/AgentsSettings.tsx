@@ -1,9 +1,147 @@
 import { useId, useState, type ReactNode } from 'react';
-import { INBOX_AGENT_LABELS, inboxToolCostText, type InboxAgentId, type InboxAgentRow, type InboxAgentsModel } from '@plannotator/core/inbox-types';
+import {
+  INBOX_AGENT_LABELS,
+  inboxToolCostText,
+  type InboxAgentId,
+  type InboxAgentRow,
+  type InboxAgentsModel,
+  type InboxHostSessions,
+  type InboxOpenSession,
+  type InboxToolHostId,
+} from '@plannotator/core/inbox-types';
 import { inboxApi } from '../api';
 import { HARNESSES, type ConnectContext } from '../harnesses';
 import { HostMark, Icon } from '../icons';
 import { ConnectPicker } from './ConnectPicker';
+import { CopyCommand, UPDATE_COPIED_ANNOUNCEMENT } from './RestartNote';
+import { clockTime, dayWords, formatCount } from '../format';
+import { usePhone } from '../phone';
+
+/** Whether any host has an open session that needs a restart or an update: Settings' Agents dot. */
+export function agentsNeedRestart(model: InboxAgentsModel | null | undefined): boolean {
+  return Object.values(model?.sessions ?? {}).some((host) => (host?.outdated ?? 0) > 0);
+}
+
+/** "9:14 AM" today, "yesterday, 6:02 PM", "Oct 3, 6:02 PM". */
+function sinceText(iso: string): string {
+  const day = dayWords(iso);
+  const time = clockTime(iso);
+  return day === 'today' ? time : `${day}, ${time}`;
+}
+
+const TWO_WORDS = ['', 'it', 'these two', 'these three'];
+
+/** The head's state when sessions need something: "Connected · 2 need a restart". */
+function sessionsState(id: InboxToolHostId, sessions: InboxHostSessions | undefined): string | null {
+  if (!sessions || sessions.outdated === 0) return null;
+  const n = sessions.outdated;
+  if (id === 'pi') return n === 1 ? '1 needs a reload' : `${n} need a reload`;
+  if (sessions.sessions.some((s) => s.outdated?.fix === 'update_plugin')) return 'plugin needs an update';
+  return n === 1 ? '1 needs a restart' : `${n} need a restart`;
+}
+
+/** Settings → Agents' "Open sessions" row (the approved "restart-warning" mock): count, older ones, and a Copy restart per session. */
+function OpenSessions({ id, label, sessions }: { id: InboxToolHostId; label: string; sessions: InboxHostSessions }) {
+  const phone = usePhone();
+  const [open, setOpen] = useState<boolean | null>(null);
+  const listId = useId();
+  const shown = open ?? !phone;
+  const stale = sessions.sessions.filter((s) => s.outdated);
+  const versions = [...new Set(stale.map((s) => s.plugin))];
+  const what = id === 'pi' ? 'extension' : 'plugin';
+  const older =
+    stale.length === 0
+      ? id === 'opencode'
+        ? ''
+        : ' · up to date'
+      : versions.length === 1 && versions[0]
+        ? ` · ${stale.length} on ${what} ${versions[0]}`
+        : ` · ${stale.length} on an older ${what}`;
+  const runningOnly = id === 'pi' && stale.length === 0 && sessions.sessions[0]?.plugin ? ` · extension ${sessions.sessions[0].plugin}` : '';
+  const listable = id === 'claude-code' && stale.length > 0;
+  const updating = stale.some((s) => s.outdated?.fix === 'update_plugin');
+  let sub: ReactNode = null;
+  if (id === 'claude-code' && stale.length > 0) {
+    const them = TWO_WORDS[stale.length] ?? `these ${stale.length}`;
+    sub = updating ? (
+      <>
+        The installed plugin{sessions.installed ? ` (${sessions.installed})` : ''} is older than this Inbox, so a restart alone loads it again. Update it, then type{' '}
+        <code>/restart</code> in {stale.length === 1 ? 'that Claude Code' : `each of ${them}`} (or <code>/exit</code> and run the command <b>Copy restart</b> gives).
+        {sessions.update_command && (
+          <span className="ib-rw-cmd" data-restart-update="">
+            <code>{sessions.update_command}</code>
+            <CopyCommand text={sessions.update_command} label="Copy the command that updates Plannotator's Claude Code plugin" announcement={UPDATE_COPIED_ANNOUNCEMENT} />
+          </span>
+        )}
+      </>
+    ) : (
+      <>
+        {sessions.installed ? `Plugin ${sessions.installed} is installed. ` : 'A newer plugin is installed. '}Type <code>/restart</code> in{' '}
+        {stale.length === 1 ? 'that Claude Code' : `each of ${them}`} to load it; it keeps the session. If <code>/restart</code> isn&apos;t there, type{' '}
+        <code>/exit</code> and run the command <b>Copy restart</b> gives: {stale.length === 1 ? 'it comes' : 'each comes'} back as the same session.
+      </>
+    );
+  } else if (id === 'pi' && stale.length > 0) {
+    const first = stale[0]!;
+    sub = (
+      <>
+        Run <code>pi update --extensions</code>, then <code>/reload</code> in {stale.length === 1 ? 'that session' : 'each of them'}
+        {stale.length === 1 ? ` (${first.project ?? 'Pi'}, since ${sinceText(first.started_at)})` : ''}.
+      </>
+    );
+  } else if (id === 'opencode' && stale.length > 0) {
+    sub = <>Restart OpenCode to load the newer plugin.</>;
+  }
+  return (
+    <div className="ib-agrow" data-agent-sessions={id}>
+      <span className="ib-agk">Open sessions</span>
+      <span className="ib-agv">
+        {formatCount(sessions.running)} running
+        {older}
+        {runningOnly}
+        {listable && (
+          <button type="button" className="ib-lnk" aria-expanded={shown} aria-controls={listId} onClick={() => setOpen(!shown)} data-sessions-toggle="">
+            {shown ? 'Hide' : 'Show'}
+          </button>
+        )}
+      </span>
+      <span className="ib-agr" />
+      {sub && (
+        <span className="ib-agsub ib-agwarn">
+          <Icon name="refresh" />
+          <span>{sub}</span>
+        </span>
+      )}
+      {listable && (
+        <ul className="ib-rw-sess" id={listId} hidden={!shown} aria-label={`${label} sessions on the older plugin`}>
+          {stale.map((s) => (
+            <li key={s.session}>
+              <SessionRow session={s} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function SessionRow({ session }: { session: InboxOpenSession }) {
+  const state = session.busy === true ? 'working' : session.busy === false ? 'idle' : null;
+  const meta = [`since ${sinceText(session.started_at)}`, state, session.plugin ? `plugin ${session.plugin}` : 'an older plugin'].filter(Boolean).join(' · ');
+  return (
+    <div className="ib-rw-srow" data-session-row={session.session}>
+      <span className="ib-rw-sw">
+        <span className="ib-rw-sp" title={session.folder ?? undefined}>
+          {session.project ?? 'A session'}
+        </span>
+        <span className="ib-rw-sm">{meta}</span>
+      </span>
+      {session.restart_command && (
+        <CopyCommand text={session.restart_command} short="Copy restart" label={`Copy the command that restarts the ${session.project ?? 'Claude Code'} session`} />
+      )}
+    </div>
+  );
+}
 
 type Change = { reach?: boolean; tool?: boolean; reminder?: boolean; note?: boolean };
 
@@ -77,16 +215,21 @@ function AgentGroup({
   onChange,
   pending,
   busy,
+  sessions,
 }: {
   row: InboxAgentRow;
   noteText: string;
   onChange: (change: Change) => void;
   pending: Set<string>;
   busy: boolean;
+  /** Its open sessions that poll the Inbox now (Claude Code, Pi, OpenCode). */
+  sessions?: InboxHostSessions;
 }) {
   const [show, setShow] = useState(false);
   const id = useId();
-  const state = row.detected ? stateOf(row) : { text: 'Not found on this computer', tone: 'off' as const };
+  const base = row.detected ? stateOf(row) : { text: 'Not found on this computer', tone: 'off' as const };
+  const needs = row.id === 'claude-code' || row.id === 'pi' || row.id === 'opencode' ? sessionsState(row.id, sessions) : null;
+  const state = needs ? { text: `${base.text} · ${needs}`, tone: 'bad' as const } : base;
   const next = `${row.label}'s next session`;
   const reach = row.reach;
   const reachValue =
@@ -252,6 +395,9 @@ function AgentGroup({
       ) : NO_NOTE_FILE[row.id] ? (
         <Row k="Note in its instructions" v={NO_NOTE_FILE[row.id]} na />
       ) : null}
+      {sessions && sessions.running > 0 && (row.id === 'claude-code' || row.id === 'pi' || row.id === 'opencode') && (
+        <OpenSessions id={row.id} label={row.label} sessions={sessions} />
+      )}
     </div>
   );
 }
@@ -327,7 +473,15 @@ export function AgentsSettings({ model, onModel, context }: { model: InboxAgents
       )}
       <div className="ib-agents">
         {shown.map((row) => (
-          <AgentGroup key={row.id} row={row} noteText={model.note_text} pending={pending} busy={busy.has(row.id)} onChange={(input) => void change(row.id, input)} />
+          <AgentGroup
+            key={row.id}
+            row={row}
+            noteText={model.note_text}
+            pending={pending}
+            busy={busy.has(row.id)}
+            onChange={(input) => void change(row.id, input)}
+            {...(model.sessions && (row.id === 'claude-code' || row.id === 'pi' || row.id === 'opencode') && model.sessions[row.id] ? { sessions: model.sessions[row.id] } : {})}
+          />
         ))}
         {detected.length === 0 && (
           <div className="ib-agrow ib-agna">

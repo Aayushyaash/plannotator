@@ -13,11 +13,74 @@
  * it when it next reads this thread". Pure: Thread.tsx draws it.
  */
 
+import { inboxEngineTooOldForSendNow, inboxLoadedPredatesSendNow, type InboxSessionOutdated } from '@plannotator/core/inbox-types';
+
 /** How the session the message goes to is connected now (the sessions route's `asker.connection`). */
 export interface RecipientConnection {
   busy: boolean | null;
   idle_since: string | null;
   send_now: boolean;
+  /** It runs an older Plannotator plugin than a restart loads (packages/server/inbox-restart.ts). Absent from an older Inbox. */
+  outdated?: InboxSessionOutdated | null;
+  /** Claude Code's version as its poll said (absent or null: unknown). */
+  engine?: string | null;
+  /** `cd <folder> && claude --resume <id>`, when the Inbox knows the folder. Absent from an older Inbox. */
+  restart_command?: string | null;
+}
+
+/**
+ * Why Send now is not offered for a busy session, and what brings it back
+ * (owner approval "restart-warning", 2026-10-19, the "Steps" line): the
+ * session runs an older plugin than a restart loads (`restart`), or the
+ * installed plugin is itself behind this Inbox (`update_plugin`).
+ */
+export interface RestartNote {
+  text: string;
+  fix: InboxSessionOutdated['fix'];
+  /** The command that brings the session back as itself; null when the Inbox does not know its folder. */
+  command: string | null;
+  /** The plugin update command (`update_plugin`). */
+  updateCommand: string | null;
+}
+
+/**
+ * The restart note for a session that works now and has no Send now
+ * because it runs an older plugin. Only then: an idle session gets the reply
+ * at once anyway, and a session with Send now is not missing anything. An
+ * engine too old for Send now stays quiet (a restart would not bring it; the
+ * owner chose to say nothing about that, 2026-10-19).
+ */
+export function restartNote(name: string, connection: RecipientConnection | null | undefined): RestartNote | null {
+  const outdated = connection?.outdated;
+  if (!connection || !outdated || connection.busy !== true || connection.send_now) return null;
+  if (inboxEngineTooOldForSendNow(connection.engine)) return null;
+  // A session that loaded a plugin with Send now lacks it for another reason (its own Ask question holds the
+  // turn, the engine refused a row): a restart would not change that, so the line never blames the plugin.
+  if (!inboxLoadedPredatesSendNow(outdated.loaded)) return null;
+  const command = connection.restart_command ?? null;
+  if (outdated.fix === 'update_plugin') {
+    const behind = outdated.installed ? ` (${outdated.installed})` : '';
+    return {
+      fix: outdated.fix,
+      command,
+      updateCommand: outdated.update_command ?? null,
+      text: `No Send now here: the Plannotator plugin ${name} has installed${behind} is older than this Inbox. Update the plugin, then restart ${name} to get Send now.`,
+    };
+  }
+  if (outdated.fix !== 'restart') return null;
+  const versions = outdated.loaded && outdated.installed
+    ? outdated.loaded === outdated.installed
+      ? ` (${outdated.installed}, reinstalled since it started)`
+      : ` (${outdated.loaded}; ${outdated.installed} is installed)`
+    : outdated.installed
+      ? ` (${outdated.installed} is installed)`
+      : '';
+  return {
+    fix: outdated.fix,
+    command,
+    updateCommand: null,
+    text: `No Send now here: this ${name} runs an older Plannotator plugin${versions}. Restart it to get Send now.`,
+  };
 }
 
 export type DeliveryLineState = 'delivered' | 'undelivered' | 'saved' | 'queued' | 'sending';

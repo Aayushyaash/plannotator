@@ -27,7 +27,8 @@ import { inboxMessageImageBase, inlineImageRefFromSrc, markTallImage } from '../
 import { reportUnsentReply } from '../unsent';
 import { canToggleRead } from '../markRead';
 import { NewMessageButton, NewMessageComposer, NewMessagePopover, hostName, useLiveSessions, type NewMessageMode } from './NewMessage';
-import { deliveryLine, type DeliveryLine, type RecipientConnection } from '../deliveryLine';
+import { deliveryLine, restartNote, type DeliveryLine, type RecipientConnection } from '../deliveryLine';
+import { RestartLine } from './RestartNote';
 import { SendToAnotherSession } from '../compose/SendToAnotherSession';
 import { ComposeFileTiles, attachedAnnouncement, useComposeFiles } from '../compose/ComposeFiles';
 import {
@@ -1834,6 +1835,10 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
             connection: recipientConnection,
             askerEnded: askerEnded && asking ? { name: asking.name } : null,
           });
+  // No Send now because that session runs an older plugin than a restart loads (the "Steps" line,
+  // owner approval "restart-warning"): only while the reply waits for a working session.
+  const restartName = lastTo ? hostName(lastTo.host) : repliedTo?.author.kind === 'agent' && repliedTo.author.host ? hostName(repliedTo.author.host) : asker;
+  const restart = delivered?.state === 'queued' && !last.deliver_now_at ? restartNote(restartName, recipientConnection) : null;
   const [sendNowState, setSendNowState] = useState<{ id: string; busy: boolean; error: string | null } | null>(null);
   const sendNow = async () => {
     setSendNowState({ id: last.id, busy: true, error: null });
@@ -2379,6 +2384,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
                         </button>
                       </Tip>
                     )}
+                    {restart && <RestartLine note={restart} name={restartName} />}
                   </div>
                 )}
                 {message === last && sendNowError && (
