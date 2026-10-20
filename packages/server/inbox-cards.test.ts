@@ -8,11 +8,12 @@
  * person's moves not reaching the store.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { INBOX_TEXT_COMPLETE_META_KEY, inboxAgentTool, inboxToolCall, inboxToolResultText, parseInboxToolList } from "@plannotator/shared/inbox/connection";
+import { INBOX_CARD_ACTION_ON } from "@plannotator/core/inbox-types";
 import { startInboxServer, type InboxServer } from "./inbox";
 import { INBOX_MCP_TOOLS } from "./inbox-mcp";
 
@@ -44,10 +45,13 @@ async function world() {
   const agent = { project_path: project, agent_session: "ses_a", agent_host: "claude-code", agent_name: "Claude Code" };
   const call = async (name: string, args: Record<string, unknown>) => (await client.callTool({ name, arguments: args })) as Result;
   const card = (args: Record<string, unknown>) => call("card", { ...agent, ...args });
+  // A card call never makes a project: each folder gets one the way it always does, by a message.
+  for (const folder of [project, other]) await call("send_message", { project_path: folder, agent_session: "ses_seed", body: "seed" });
   return { root, project, other, server, base, call, card };
 }
 
-describe("the card tool", () => {
+// Held back with INBOX_CARD_ACTION_ON: skipped while the Inbox does not serve the card tool.
+describe.if(INBOX_CARD_ACTION_ON)("the card tool", () => {
   test("is served, and the agent tool carries it as an action with its fields", async () => {
     const { server } = await world();
     const response = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
@@ -147,7 +151,33 @@ describe("the card tool", () => {
   });
 });
 
-describe("the window's card routes and the event stream", () => {
+// Held back with INBOX_CARD_ACTION_ON: skipped while the Inbox does not serve the card tool.
+describe.if(INBOX_CARD_ACTION_ON)("a card call writes no project, and tolerates a false default", () => {
+  test("list from a folder the Inbox has never seen answers no cards; create refuses; neither makes a project", async () => {
+    const { root, base, card } = await world();
+    const unseen = join(root, "unseen");
+    mkdirSync(unseen);
+    const projects = async () => ((await (await fetch(`${base}/api/inbox/projects`)).json()) as { projects: unknown[] }).projects.length;
+    const before = await projects();
+    const listed = await card({ op: "list", project_path: unseen });
+    expect(listed.isError).toBeUndefined();
+    expect(listed.structuredContent).toEqual({ project: null, cards: [], total: 0 });
+    const made = await card({ op: "create", title: "Somewhere new", project_path: unseen });
+    expect(made.content[0]!.text).toStartWith("card_no_project:");
+    expect(await projects()).toBe(before);
+    expect(readdirSync(join(root, "data", "inbox", "projects"))).toHaveLength(before);
+  });
+
+  test("a field an op does not take is refused, but its `false` default is not", async () => {
+    const { card } = await world();
+    const id = (await card({ op: "create", title: "Defaults" })).structuredContent.card.id as string;
+    expect((await card({ op: "move", card_id: id, column: "designing", include_resolved: false })).isError).toBeUndefined();
+    expect((await card({ op: "move", card_id: id, column: "building", include_resolved: true })).content[0]!.text).toStartWith("validation_error: include_resolved: op move does not take it");
+  });
+});
+
+// Held back with INBOX_CARD_ACTION_ON: skipped while the Inbox does not serve the card tool.
+describe.if(INBOX_CARD_ACTION_ON)("the window's card routes and the event stream", () => {
   test("GET filters by project and column; POST is the person's move, icebox, drop and restore; card lines reach the stream", async () => {
     const { base, card, other, call } = await world();
     const a = (await card({ op: "create", title: "Pricing page", column: "building" })).structuredContent.card;
@@ -156,6 +186,7 @@ describe("the window's card routes and the event stream", () => {
 
     const cursor = ((await (await fetch(`${base}/api/inbox/threads`)).json()) as { cursor: number }).cursor;
     const all = (await (await fetch(`${base}/api/inbox/cards`)).json()) as { cards: { id: string }[] };
+    // (The seed messages made the two projects; the cards made none.)
     expect(all.cards).toHaveLength(3);
     const building = (await (await fetch(`${base}/api/inbox/cards?project=${a.project_id}&column=building,your_review`)).json()) as { cards: { id: string }[] };
     expect(building.cards.map((c) => c.id)).toEqual([a.id]);

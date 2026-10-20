@@ -77,6 +77,25 @@ describe("cards: create", () => {
     expect(card.threads).toEqual([sent.message.thread_id]);
   });
 
+  test("a default title from a thread's subject drops the bidi controls a title refuses (the agent never wrote them)", () => {
+    const { store, project } = world();
+    const sent = store.sendMessage({ project_id: project.id, author: AGENT, body: "body", subject: "Fix \u202eevil\u202c thing\u2066" });
+    expect(store.threadSubject(sent.message.thread_id)).toContain("\u202e");
+    expect(store.createCard({ project_id: project.id, by: AGENT, threads: [sent.message.id] }).card.title).toBe("Fix evil thing");
+    // A title the agent writes itself is still refused, so it learns.
+    expect(refusal(() => store.createCard({ project_id: project.id, by: AGENT, title: "Fix \u202eevil" }))).toBe("validation_error");
+  });
+
+  test("an idempotency_key is trimmed and at most 128 characters, one line", () => {
+    const { store, project } = world();
+    const { card } = store.createCard({ project_id: project.id, by: AGENT, title: "k", idempotency_key: "  " + "k".repeat(128) + " " });
+    expect(card.idempotency_key).toBe("k".repeat(128));
+    expect(store.createCard({ project_id: project.id, by: AGENT, title: "k", idempotency_key: "k".repeat(128) }).replayed).toBe(true);
+    expect(refusal(() => store.createCard({ project_id: project.id, by: AGENT, title: "k", idempotency_key: "k".repeat(129) }))).toBe("validation_error");
+    expect(refusal(() => store.createCard({ project_id: project.id, by: AGENT, title: "k", idempotency_key: "a\nb" }))).toBe("validation_error");
+    expect(refusal(() => store.createCard({ project_id: project.id, by: AGENT, title: "k", idempotency_key: 12 }))).toBe("validation_error");
+  });
+
   test("a person's card belongs to no agent; only the person starts one in the Icebox; nobody starts one Dropped", () => {
     const { store, project } = world();
     const { card } = store.createCard({ project_id: project.id, by: PERSON, title: "Polylane evaluation", column: "icebox" });
@@ -107,7 +126,7 @@ describe("cards: create", () => {
 
   test("text is one line: whitespace collapses; control and bidi characters, empty and over-long text are refused", () => {
     const { store, project } = world();
-    for (const title of ["", "   ", "a\u0007b", "x‮y", "t".repeat(121)]) {
+    for (const title of ["", "   ", "a\u0007b", "x\u202ey", "t".repeat(121)]) {
       expect(refusal(() => store.createCard({ project_id: project.id, by: AGENT, title }))).toBe("validation_error");
     }
     expect(store.createCard({ project_id: project.id, by: AGENT, title: "t".repeat(120) }).card.title).toHaveLength(120);

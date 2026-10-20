@@ -106,6 +106,7 @@ import { inboxDraftsBytes } from "./drafts";
 import { INBOX_CARD_PR_HINT, parseInboxCardPr } from "./cards";
 import {
   INBOX_CARD_COLUMN_LABELS,
+  INBOX_CARD_KEY_MAX,
   INBOX_CARD_LINE_MAX,
   INBOX_CARD_LINKS_MAX,
   INBOX_CARD_REASON_MAX,
@@ -116,6 +117,7 @@ import {
   isInboxCardLiveColumn,
   isInboxCardPersonColumn,
   normalizeInboxCardText,
+  stripInboxCardRefusedChars,
   type InboxCard,
   type InboxCardColumn,
   type InboxCardPr,
@@ -3628,15 +3630,20 @@ export class InboxStore {
     const threads = this.cardThreads(input.threads ?? [], project.id);
     let titleValue = input.title;
     if ((titleValue === undefined || titleValue === null || titleValue === "") && threads.length > 0) {
-      const subject = this.threadSubject(threads[0]!) ?? "";
+      // The agent did not write the subject: characters a title refuses (bidi controls) are dropped, not refused.
+      const subject = stripInboxCardRefusedChars(this.threadSubject(threads[0]!) ?? "");
       titleValue = [...subject.replace(/\s+/g, " ").trim()].slice(0, INBOX_CARD_TITLE_MAX).join("");
     }
     if (titleValue === undefined || titleValue === null || titleValue === "") {
       throw new InboxError("validation_error", "title: a short title (or thread_id, whose subject it takes).", { field: "title" });
     }
     const title = this.cardText(titleValue, "title", INBOX_CARD_TITLE_MAX);
-    const key = input.idempotency_key === undefined || input.idempotency_key === null || input.idempotency_key === "" ? null : input.idempotency_key;
-    if (key !== null && typeof key !== "string") throw new InboxError("validation_error", "idempotency_key: a string.", { field: "idempotency_key" });
+    const rawKey = input.idempotency_key;
+    if (rawKey !== undefined && rawKey !== null && typeof rawKey !== "string") throw new InboxError("validation_error", "idempotency_key: a string.", { field: "idempotency_key" });
+    const key = typeof rawKey === "string" && rawKey.trim() !== "" ? rawKey.trim() : null;
+    if (key !== null && ([...key].length > INBOX_CARD_KEY_MAX || /[\u0000-\u001f\u007f-\u009f]/.test(key))) {
+      throw new InboxError("validation_error", `idempotency_key: at most ${INBOX_CARD_KEY_MAX} characters, one line.`, { field: "idempotency_key" });
+    }
     if (key !== null) {
       const known = this.cardByKey(project.id, key);
       if (known) {

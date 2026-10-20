@@ -21,6 +21,18 @@
 
 import type { InboxAuthor } from "./inbox-types";
 
+/**
+ * Whether the Inbox serves the agents' `card` action (the MCP tool, so the
+ * `plannotator_inbox` action and `plannotator card`). THE one line to change
+ * to hold the action back until the Board page ships: the server stops
+ * registering the tool, the agent guide drops its section, and the stated
+ * tool cost (INBOX_TOOL_COST) goes back to the size without it. After
+ * flipping it, run `bun run scripts/sync-mod-inbox-tools.ts` (the Claude Code
+ * mod's bundled tool list is generated from a real Inbox). The store, the
+ * window's card routes and the event stream are unaffected.
+ */
+export const INBOX_CARD_ACTION_ON: boolean = true;
+
 /** Every column a card can be in, in the Board's order. */
 export const INBOX_CARD_COLUMNS = ["asked", "designing", "your_look", "building", "your_review", "shipped", "icebox", "dropped"] as const;
 
@@ -55,6 +67,8 @@ export const INBOX_CARD_LINE_MAX = 280;
 export const INBOX_CARD_REASON_MAX = 500;
 /** The most threads, and the most PRs, one card links. */
 export const INBOX_CARD_LINKS_MAX = 50;
+/** The longest create `idempotency_key`, in characters (trimmed). */
+export const INBOX_CARD_KEY_MAX = 128;
 
 export function isInboxCardColumn(value: unknown): value is InboxCardColumn {
   return typeof value === "string" && (INBOX_CARD_COLUMNS as readonly string[]).includes(value);
@@ -154,7 +168,17 @@ export function inboxCardColumnIndex(column: InboxCardColumn): number {
 }
 
 // Control characters other than whitespace, and the bidi controls (a line must read as written).
-const REFUSED_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f؜‎‏‪-‮⁦-⁩]/;
+const REFUSED_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+const REFUSED_CHARS_ALL = new RegExp(REFUSED_CHARS.source, "g");
+
+/**
+ * Text the agent did not write (a thread's subject, taken as a default
+ * title) made acceptable instead of refused: the characters
+ * normalizeInboxCardText refuses are removed.
+ */
+export function stripInboxCardRefusedChars(text: string): string {
+  return text.replace(REFUSED_CHARS_ALL, "");
+}
 
 /**
  * A card's one line of text, made one line: every run of whitespace (line

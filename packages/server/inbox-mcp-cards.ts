@@ -22,12 +22,13 @@ import {
   type InboxAuthor,
   type InboxCardColumn,
   type InboxCardWire,
+  type InboxProject,
 } from "@plannotator/core/inbox-types";
 import { InboxError } from "@plannotator/shared/inbox/schema";
 import type { InboxStore } from "@plannotator/shared/inbox/store";
 import { shortTime } from "./inbox-mcp-read";
 import { guarded, okComplete, PROJECT_PATH_DESCRIPTION } from "./inbox-mcp-result";
-import { threadReadScope, type InboxMcpContext } from "./inbox-mcp";
+import type { InboxMcpContext } from "./inbox-mcp";
 
 export const INBOX_CARD_OPS = ["create", "move", "say", "link", "ship", "drop", "list"] as const;
 export type InboxCardOp = (typeof INBOX_CARD_OPS)[number];
@@ -102,17 +103,38 @@ const OP_FIELDS: Record<InboxCardOp, readonly (keyof CardCallInput)[]> = {
 };
 const OP_COMMON = new Set<keyof CardCallInput>(["op", "project_path", "agent_session", "agent_name", "agent_host"]);
 
+/**
+ * The caller's project scope, looked up and never made (as search does): the
+ * project at `project_path`'s root, plus the one an older Inbox kept for the
+ * worktree it lies in. A card call never writes a project; a folder the Inbox
+ * has never seen has no Board yet.
+ */
+async function cardScope(context: InboxMcpContext, path: string): Promise<{ project: InboxProject | null; projectIds: Set<string>; unresolved: boolean }> {
+  const found = context.findProjects ? await context.findProjects(path) : { projects: [], unresolved: false };
+  return { project: found.projects[0] ?? null, projectIds: new Set(found.projects.map((p) => p.id)), unresolved: found.unresolved };
+}
+
 /** Run one card call; throws InboxError on a refusal. */
 export async function runCardCall(context: InboxMcpContext, input: CardCallInput): Promise<{ text: string; structured: Record<string, unknown> }> {
   const { store } = context;
   for (const [field, value] of Object.entries(input) as [keyof CardCallInput, unknown][]) {
-    if (value === undefined || OP_COMMON.has(field)) continue;
+    // `false` is a default (include_resolved: false), not a field the agent meant to set: tolerated, as the plannotator tool contract does.
+    if (value === undefined || value === false || OP_COMMON.has(field)) continue;
     if (!OP_FIELDS[input.op].includes(field)) {
       throw new InboxError("validation_error", `${field}: op ${input.op} does not take it (it takes ${OP_FIELDS[input.op].join(", ")}).`, { field });
     }
   }
   if (!input.project_path) throw new InboxError("validation_error", "project_path: required (the connection fills it).", { field: "project_path" });
-  const { project, projectIds } = await threadReadScope(context, input.project_path);
+  const { project, projectIds, unresolved } = await cardScope(context, input.project_path);
+  if (unresolved) {
+    throw new InboxError("project_unresolved", "git did not answer in time, so this folder's project is not known yet. Nothing was changed; try the same call again.");
+  }
+  if (!project && input.op !== "list") {
+    throw new InboxError(
+      "card_no_project",
+      "This folder's project has no Board yet: the Inbox has never had a message from it. Send one with send_message first, or pass the project_path of a project the Inbox knows.",
+    );
+  }
   const session = input.agent_session?.trim() || null;
   const by: InboxAuthor = { kind: "agent", host: input.agent_host?.trim() || null, session, name: input.agent_name?.trim() || null };
   const answer = (verb: string, wire: InboxCardWire, extra: Record<string, unknown> = {}) => ({
@@ -121,6 +143,9 @@ export async function runCardCall(context: InboxMcpContext, input: CardCallInput
   });
 
   if (input.op === "list") {
+    if (!project) {
+      return { text: "No cards: the Inbox has never had a message from this folder's project.", structured: { project: null, cards: [], total: 0 } };
+    }
     const askedBy = input.asked_by ?? (session ? "me" : "anyone");
     if (askedBy === "me" && !session) throw new InboxError("validation_error", "asked_by: \"me\" needs agent_session.", { field: "asked_by" });
     const columns = new Set<InboxCardColumn>(input.include_resolved ? INBOX_CARD_COLUMNS : [...INBOX_CARD_LIVE_COLUMNS, "icebox"]);
@@ -135,7 +160,7 @@ export async function runCardCall(context: InboxMcpContext, input: CardCallInput
   }
 
   if (input.op === "create") {
-    let projectId = project.id;
+    let projectId = project!.id;
     if (input.thread_id) {
       const message = store.message(input.thread_id.trim());
       if (!message) throw new InboxError("thread_not_found", `No thread or message ${input.thread_id.trim()}.`);

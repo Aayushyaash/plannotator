@@ -17,7 +17,7 @@
 import type { QuestionAnswer, QuestionKind } from "./question-block";
 import type { InboxAnnotationRecord, InboxAttachment, InboxAttachmentKind, InboxInlineImage } from "./inbox-attachments";
 import type { InboxRowDelivery } from "./inbox-delivery";
-import type { InboxCard } from "./inbox-cards";
+import { INBOX_CARD_ACTION_ON, type InboxCard } from "./inbox-cards";
 
 // The attachment shapes and file rules (step 2) live in their own module and
 // reach the Inbox through this published entry, so core's export map is unchanged.
@@ -1308,11 +1308,13 @@ export type InboxToolCostHost = "pi" | "opencode";
  * current value adds the Board's `card` action (approval "inbox-board"):
  * 8,503 bytes, 2,047 tokens with o200k_base, computed from the generated
  * entry in Pi's request shape (that computation gives 7,325 for the entry Pi
- * measured at 7,328); the Pi and OpenCode cost tests hold it to 5%.
+ * measured at 7,328); the Pi and OpenCode cost tests hold it to 5%. While the
+ * card action is held back (INBOX_CARD_ACTION_ON false), the size without it.
  */
+const INBOX_TOOL_COST_NOW = INBOX_CARD_ACTION_ON ? { bytes: 8503, tokens: 2400 } : { bytes: 7328, tokens: 2000 };
 export const INBOX_TOOL_COST: Readonly<Record<InboxToolCostHost, { bytes: number; tokens: number }>> = {
-  pi: { bytes: 8503, tokens: 2400 },
-  opencode: { bytes: 8503, tokens: 2400 },
+  pi: INBOX_TOOL_COST_NOW,
+  opencode: INBOX_TOOL_COST_NOW,
 };
 
 /** "about 7 KB, roughly 2,000 tokens" for a host's measured cost. */

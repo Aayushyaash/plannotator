@@ -404,6 +404,7 @@ const ERROR_STATUS: Record<string, number> = {
   upload_not_found: 404,
   // The Board's cards (approval "inbox-board"): who may move a card.
   card_not_found: 404,
+  card_no_project: 404,
   card_other_project: 422,
   card_icebox_person_only: 403,
   card_iceboxed: 409,
