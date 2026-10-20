@@ -9,6 +9,7 @@
  *   with the component tooltip "Refresh" (no native title); a click turns the
  *   icon once (a running animation, then gone), the live region says "Inbox
  *   refreshed", the message comes in and "1 new" goes, focus stays on Inbox.
+ * - The project the list shows: the same ↻ after its name and "Refresh".
  * - A phone (WebKit, iPhone 15): a tap on the list's title does the same.
  * - Reduced motion: the click still gives the signal, with nothing animated.
  *
@@ -124,6 +125,27 @@ for (const scheme of ['light', 'dark'] as const) {
     await expect(row(page, id)).toHaveAttribute('data-lit', '');
     await page.mouse.move(1000, 600);
     await page.screenshot({ path: join(shotsDir, `desktop-${scheme}-4-after.png`) });
+  });
+}
+
+for (const scheme of ['light', 'dark'] as const) {
+  test(`desktop ${scheme}: the project the list shows offers the same ↻ and "Refresh"`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    const list = (await (await fetch(`${world.url}/api/inbox/projects`)).json()) as { projects: { id: string; root: string }[] };
+    const id = list.projects[0]!.id;
+    await page.goto(`${world.url}/#project=${id}`);
+    await expect(page.locator('.ib-lbody [data-thread-id]').first()).toBeVisible();
+    const row = page.locator(`.ib-side [data-project="${id}"] .ib-proj`);
+    await expect(row).toHaveAttribute('data-refreshes', '');
+    const icon = row.locator('svg.ib-ic-refresh');
+    expect(await icon.evaluate((el) => getComputedStyle(el).visibility)).toBe('hidden');
+    await row.hover();
+    expect(await icon.evaluate((el) => getComputedStyle(el).visibility)).toBe('visible');
+    await expect(page.locator('[data-pn-tooltip]')).toHaveText('Refresh');
+    await page.screenshot({ path: join(shotsDir, `desktop-${scheme}-5-project-hover.png`) });
+    await row.click();
+    await expect(row).toHaveAttribute('data-refreshing', '');
+    await expect(live(page)).toHaveText('docs-site refreshed');
   });
 }
 
