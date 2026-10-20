@@ -1495,8 +1495,12 @@ function checkThreadState(world: StateWorld): void {
       thread.messages.some((note, i) => {
         if (!note.reask?.includes(id)) return false;
         const asked = thread.messages.find((m) => m.id === note.reply_to);
-        const session = note.to?.session ?? (asked?.author.kind === "agent" ? asked.author.session : undefined);
-        return !thread.messages.slice(i + 1).some((m) => m.author.kind === "agent" && m.author.session === session);
+        const by = note.to ?? (asked?.author.kind === "agent" ? { host: asked.author.host ?? "", session: asked.author.session } : null);
+        if (!by) return false;
+        // Host and session, as the store compares them.
+        return !thread.messages
+          .slice(i + 1)
+          .some((m) => m.author.kind === "agent" && m.author.session === by.session && (m.author.host ?? "") === (by.host ?? ""));
       });
     if (openIds.some((id) => !inWaitingNote(id))) expect(SHW).toContain(row.section);
     expect(row.reask_pending === true).toBe(!model.archived(t) && model.reaskPending(t));

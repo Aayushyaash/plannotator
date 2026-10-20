@@ -2403,6 +2403,8 @@ export class InboxStore {
    * question, or the last listed one answered, superseded or closed, ends it.
    */
   private reaskWaiting(messages: readonly InboxMessage[]): boolean {
+    // Most threads have no Re-ask note: they cost nothing more.
+    if (!messages.some((m) => m.author.kind === "person" && (m.reask?.length ?? 0) > 0)) return false;
     const states = new Map<string, string>();
     for (const m of messages) if (m.author.kind === "agent") for (const q of this.questionsOf(m.id)) states.set(`${m.id}/${q.key}`, q.state);
     const covered = new Set<string>();
