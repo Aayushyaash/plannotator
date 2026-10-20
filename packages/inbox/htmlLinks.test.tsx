@@ -54,7 +54,7 @@ function loopback(path: string, method = 'GET', body?: string): Promise<{ status
   });
 }
 
-const TESTS = 6;
+const TESTS = 7;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -190,6 +190,39 @@ test.skipIf(!hasDom)('a sibling page that is not attached opens read-only over t
   await clickLink(el.querySelector<HTMLIFrameElement>('.ib-linkedframe iframe')!, 'SHEET.html');
   await until(() => el.querySelector('[data-linked-page]') === null, 'home');
 });
+
+test.skipIf(!hasDom)('Back takes focus once it is drawn, even when the next frame comes before React draws it', async () => {
+  const el = await renderSheet();
+  // A loaded browser can run the next animation frame before React commits the page a link opened.
+  // Frames run as soon as asked (a microtask, ahead of React's commit); one asked from inside such a
+  // frame waits for a real one, so no loop spins.
+  const realFrame = window.requestAnimationFrame;
+  let inEarlyFrame = false;
+  window.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+    if (inEarlyFrame) return realFrame(cb);
+    queueMicrotask(() => {
+      inEarlyFrame = true;
+      try {
+        cb(performance.now());
+      } finally {
+        inEarlyFrame = false;
+      }
+    });
+    return 0;
+  }) as typeof window.requestAnimationFrame;
+  try {
+    await clickLink(sheetFrame(el), 'B-cards.html');
+    await until(() => el.querySelector('[data-linked-page="B-cards.html"]') !== null, 'the linked page');
+    await until(() => document.activeElement === el.querySelector('[data-linked-back]'), 'focus on Back');
+    // A further page: the same Back button stays mounted, and takes focus again.
+    (document.activeElement as HTMLElement).blur();
+    await clickLink(el.querySelector<HTMLIFrameElement>('.ib-linkedframe iframe')!, 'C-between.html');
+    await until(() => el.querySelector('[data-linked-page="C-between.html"]') !== null, 'the second linked page');
+    await until(() => document.activeElement === el.querySelector('[data-linked-back]'), 'focus on Back again');
+  } finally {
+    window.requestAnimationFrame = realFrame;
+  }
+}, 20_000);
 
 test.skipIf(!hasDom)('Escape from the pane steps back one linked page, before the rest of the ladder', async () => {
   const el = await renderSheet();
