@@ -1302,14 +1302,17 @@ export type InboxToolCostHost = "pi" | "opencode";
  * tokens with o200k_base) before the long field descriptions were shortened
  * (INBOX_AGENT_FIELD_DESCRIPTIONS); 7,058 bytes (1,661 with o200k_base) before
  * Decisions (list_decisions, record_decision) were removed; about 6,390 bytes
- * after (estimated from the generated entry, never re-measured). The current
- * value is measured on Pi with the read_thread window's fields (`expand`,
- * `before`, `after`, `format`) and the `search` action added: 7,328 bytes,
- * 1,732 tokens with o200k_base.
+ * after (estimated from the generated entry, never re-measured); 7,328 bytes
+ * (1,732 with o200k_base) measured on Pi with the read_thread window's fields
+ * (`expand`, `before`, `after`, `format`) and the `search` action added. The
+ * current value adds the Board's `card` action (approval "inbox-board"):
+ * 8,503 bytes, 2,047 tokens with o200k_base, computed from the generated
+ * entry in Pi's request shape (that computation gives 7,325 for the entry Pi
+ * measured at 7,328); the Pi and OpenCode cost tests hold it to 5%.
  */
 export const INBOX_TOOL_COST: Readonly<Record<InboxToolCostHost, { bytes: number; tokens: number }>> = {
-  pi: { bytes: 7328, tokens: 2000 },
-  opencode: { bytes: 7328, tokens: 2000 },
+  pi: { bytes: 8503, tokens: 2400 },
+  opencode: { bytes: 8503, tokens: 2400 },
 };
 
 /** "about 7 KB, roughly 2,000 tokens" for a host's measured cost. */
