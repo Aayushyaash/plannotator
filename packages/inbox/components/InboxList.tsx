@@ -11,6 +11,8 @@ import { ListColumnEdge } from '../shell/ListColumnEdge';
 import { SidebarTrigger, useSidebar } from '../shell/sidebar';
 import { offersRowMarkRead } from '../markRead';
 import { useNarrowerThan } from '../narrower';
+import { ThreadRowMenu } from './RowMenu';
+import type { RowMenuAction } from '../rowMenu';
 
 export interface InboxListProps {
   title: string;
@@ -51,6 +53,11 @@ export interface InboxListProps {
    * agent): each lights up briefly where it landed (`data-lit`, inbox.css).
    */
   lit?: ReadonlySet<string>;
+  /**
+   * The row's right-click menu (Copy link, Copy thread ID, Mark read or
+   * Move back, Archive). Absent: no menu, the browser's own.
+   */
+  onRowAction?: (row: InboxListRow, action: RowMenuAction) => void;
 }
 
 /**
@@ -197,10 +204,10 @@ function WideRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow; 
  * never opens the thread. The action is the row's sibling (a button cannot
  * hold a button).
  */
-function RowWithAction({ row, onMarkRead, children }: { row: InboxListRow; onMarkRead?: (row: InboxListRow) => void; children: ReactNode }) {
+function RowWithAction({ row, menu, onMarkRead, children }: { row: InboxListRow; menu: boolean; onMarkRead?: (row: InboxListRow) => void; children: ReactNode }) {
   const offer = onMarkRead && offersRowMarkRead(row);
   return (
-    <div className="ib-rw" data-row={row.thread_id}>
+    <div className="ib-rw" data-row={row.thread_id} data-menu={menu ? '' : undefined}>
       {children}
       {offer && (
         <Tip content={`Mark read (E): out of the top until ${agentName(rowAgent(row))} writes again`}>
@@ -257,7 +264,7 @@ function NarrowRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow
  * badge, the thread's name, the question count, the guided review mark),
  * which wraps rather than pushing anything off the row.
  */
-function PhoneRow({ row, filtered, lit, onOpen }: { row: InboxListRow; filtered: boolean; lit: boolean; onOpen: () => void }) {
+function PhoneRow({ row, filtered, lit, menu, onOpen }: { row: InboxListRow; filtered: boolean; lit: boolean; menu: boolean; onOpen: () => void }) {
   const badge = badgeOf(row);
   const count = countOf(row);
   const guide = row.guide && row.section !== 'sent';
@@ -268,6 +275,7 @@ function PhoneRow({ row, filtered, lit, onOpen }: { row: InboxListRow; filtered:
       className={`ib-mrow${row.unread ? ' ib-u' : ''}${row.section === 'sent' ? ' ib-sent' : ''}`}
       onClick={onOpen}
       data-thread-id={row.thread_id}
+      data-menu={menu ? '' : undefined}
       data-section={row.section}
       data-lit={lit ? '' : undefined}
     >
@@ -325,6 +333,16 @@ export function InboxList(props: InboxListProps) {
   const resizable = props.narrow && !isMobile;
   const visible = props.sections.filter((s) => s.threads.length > 0);
   const lit = (row: InboxListRow) => props.lit?.has(row.thread_id) === true;
+  // The row whose right-click menu is open: a muted background, as the project row's.
+  const [menuRow, setMenuRow] = useState<string | null>(null);
+  const rowOf = (threadId: string) => {
+    for (const section of props.sections) {
+      const row = section.threads.find((r) => r.thread_id === threadId);
+      if (row) return row;
+    }
+    return null;
+  };
+  const onRowAction = props.onRowAction;
   return (
     <section
       ref={listRef}
@@ -364,7 +382,15 @@ export function InboxList(props: InboxListProps) {
           </Tip>
         )}
       </div>
-        <div className="ib-lbody" ref={bodyRef}>
+        <ThreadRowMenu
+          ref={bodyRef}
+          className="ib-lbody"
+          rowOf={rowOf}
+          canMarkRead={props.onMarkRead !== undefined}
+          onTarget={setMenuRow}
+          onAction={(row, action) => onRowAction?.(row, action)}
+          disabled={!onRowAction}
+        >
           {props.ask}
           {props.notice && (
             <button type="button" className="ib-notice" onClick={props.onShowNew} data-inbox-notice="">
@@ -393,9 +419,9 @@ export function InboxList(props: InboxListProps) {
                   section.threads.map((row) =>
                     // A phone's row has no hover action (a hover on a touch screen is a first tap): Mark read is in the thread's header there.
                     props.phone ? (
-                      <PhoneRow key={row.thread_id} row={row} filtered={props.filtered} lit={lit(row)} onOpen={() => props.onOpen(row)} />
+                      <PhoneRow key={row.thread_id} row={row} filtered={props.filtered} lit={lit(row)} menu={menuRow === row.thread_id} onOpen={() => props.onOpen(row)} />
                     ) : (
-                      <RowWithAction key={row.thread_id} row={row} onMarkRead={props.onMarkRead}>
+                      <RowWithAction key={row.thread_id} row={row} menu={menuRow === row.thread_id} onMarkRead={props.onMarkRead}>
                         {twoLine ? (
                           <NarrowRow row={row} filtered={props.filtered} lit={lit(row)} selected={row.thread_id === props.selectedThreadId} onOpen={() => props.onOpen(row)} />
                         ) : (
@@ -407,7 +433,7 @@ export function InboxList(props: InboxListProps) {
               </div>
             );
           })}
-        </div>
+        </ThreadRowMenu>
       {resizable && <ListColumnEdge controls={columnId} />}
     </section>
   );
