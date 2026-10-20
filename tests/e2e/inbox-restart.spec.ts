@@ -187,7 +187,7 @@ test.afterAll(async () => {
 const OLD = () => ({ version: '0.28.23', root: world.pluginFolder('0.28.23'), loaded_at: Date.parse('2026-10-16T09:14:00Z') });
 const CURRENT = () => ({ version: '0.28.25', root: world.pluginFolder('0.28.25'), loaded_at: Date.now() });
 
-test('a working Claude Code on an older plugin: the reason under the reply, then "How to restart": /restart first, the /exit fallback with the resume command and Copy', async () => {
+test('a working Claude Code on an older plugin: the reason under the reply, then "How to restart": /exit and the resume command with Copy, /restart as a shortcut', async () => {
   const { page } = world;
   const sent = await world.agent.send(
     {
@@ -227,10 +227,9 @@ test('a working Claude Code on an older plugin: the reason under the reply, then
   await expect(toggle).toHaveAccessibleName('Hide steps');
   const steps = line.locator('[data-restart-steps]');
   await expect(steps).toBeVisible();
-  await expect(steps.locator('ol > li').first()).toContainText('Type /restart in that Claude Code. It restarts and keeps the session.');
-  const fallback = steps.locator('[data-restart-fallback]');
-  await expect(fallback).toContainText("If /restart isn't there: type /exit, then run:");
-  await expect(fallback).toContainText('Exiting now stops the turn it is working on; to keep it, wait until it finishes.');
+  await expect(steps.locator('ol > li').first()).toContainText('Type /exit in that Claude Code, then run:');
+  await expect(steps.locator('ol > li').first()).toContainText('Exiting now stops the turn it is working on; to keep it, wait until it finishes.');
+  await expect(steps.locator('[data-restart-shortcut]')).toHaveText('If your Claude Code has /restart, that does the same and keeps the session.');
   await expect(steps.locator('.ib-rw-cmd code')).toHaveText(`cd ~/code/billing-api && claude --resume ${BILLING_SESSION}`);
   await expect(steps).toContainText('Your reply waits here and reaches it once it is back.');
   await shot(page, '1-reply-steps-open-desktop');
@@ -254,7 +253,7 @@ test('the sidebar: "Restart Claude Code 2" under the What\'s new spot opens Sett
   const sessions = page.locator('[data-agent-sessions="claude-code"]');
   await expect(sessions).toContainText('2 running · 2 on plugin 0.28.23');
   await expect(sessions).toContainText(
-    "Plugin 0.28.25 is installed. Type /restart in each of these two to load it; it keeps the session. If /restart isn't there, type /exit and run the command Copy restart gives: each comes back as the same session.",
+    "Plugin 0.28.25 is installed. To load it, type /exit in each of these two and run the command Copy restart gives: each comes back as the same session. If your Claude Code has /restart, that does the same.",
   );
   await expect(page.locator('[data-agent="claude-code"] .ib-agstate')).toHaveText('Connected · 2 need a restart');
   await expect(sessions.locator(`[data-session-row="${BILLING_SESSION}"]`)).toContainText('working · plugin 0.28.23');

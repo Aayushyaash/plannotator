@@ -3436,10 +3436,9 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
   .ib-rw-sess { grid-column: 1 / -1; }
   .ib-rw-cmd { flex-wrap: wrap; }
 }
-/* The restart steps: /restart first, the /exit fallback folded under it. */
-.ib-rw-fallback { margin-top: 6px; padding-left: 10px; border-left: 2px solid var(--border); color: var(--muted-foreground); }
-.ib-rw-fallback code { color: var(--foreground); }
-.ib-rw-fallback .ib-rw-warn { margin: 6px 0 0; }
+/* The restart steps: /exit and the resume command; /restart only as a shortcut. */
+.ib-rw-steps .ib-rw-warn { margin: 6px 0 0; color: var(--muted-foreground); }
+.ib-rw-steps .ib-rw-shortcut { margin: 8px 0 0; color: var(--muted-foreground); }
 
 /* A sent reply's tag chip carries its agent's mark over the `@` (approved shot 5): the `@` is drawn clear and the mark sits in its place, in a layer of the message's own (tagHighlight.ts). */
 ::highlight(ib-tag-at) { color: transparent; }

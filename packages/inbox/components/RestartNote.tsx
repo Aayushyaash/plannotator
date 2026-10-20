@@ -4,10 +4,11 @@
  * repo). Two pieces:
  *  - `RestartLine`: under the person's reply, when the session it goes to is
  *    working and has no Send now because it runs an older plugin ("Steps"):
- *    the reason, then "How to restart" folded open on click: type `/restart`
- *    (Claude Code 2.1.304+, keeps the session), and folded under it the
- *    fallback for when it isn't there: `/exit` (which stops the turn it is
- *    working on), then a copyable `cd <folder> && claude --resume <id>`; and
+ *    the reason, then "How to restart" folded open on click: type `/exit`
+ *    (which stops the turn it is working on), then run a copyable
+ *    `cd <folder> && claude --resume <id>`; `/restart` only as a shortcut
+ *    where Claude Code has it (amended 2026-10-20: `/restart` is behind a
+ *    per-account rollout, so the steps lead with what always works); and
  *    that the reply waits here.
  *  - `CopyCommand`: the Copy button both places use. A copy says so in a
  *    polite live region ("Restart command copied.").
@@ -96,24 +97,23 @@ export function RestartLine({ note, name }: { note: RestartNote; name: string })
             </li>
           )}
           <li>
-            Type <code>/restart</code> in that {name}. It restarts and keeps the session.
-            {/* The fallback, folded under it: /restart is behind a setting, and refuses while background work runs,
-                in a background session and in the agents view (Claude Code 2.1.304). */}
-            <div className="ib-rw-fallback" data-restart-fallback="">
-              {note.command ? (
-                <>
-                  If <code>/restart</code> isn&apos;t there: type <code>/exit</code>, then run:
-                  <CommandLine text={note.command} label={`Copy the command that restarts this ${name} session`} />
-                </>
-              ) : (
-                <>
-                  If <code>/restart</code> isn&apos;t there: type <code>/exit</code>, then run <code>claude --resume</code> in its folder and pick the session.
-                </>
-              )}
-              <p className="ib-rw-warn">Exiting now stops the turn it is working on; to keep it, wait until it finishes.</p>
-            </div>
+            {note.command ? (
+              <>
+                Type <code>/exit</code> in that {name}, then run:
+                <CommandLine text={note.command} label={`Copy the command that restarts this ${name} session`} />
+              </>
+            ) : (
+              <>
+                Type <code>/exit</code> in that {name}, then run <code>claude --resume</code> in its folder and pick the session.
+              </>
+            )}
+            <p className="ib-rw-warn">Exiting now stops the turn it is working on; to keep it, wait until it finishes.</p>
           </li>
         </ol>
+        {/* Only a shortcut: /restart (Claude Code 2.1.304+) is behind a per-account rollout and a setting. */}
+        <p className="ib-rw-shortcut" data-restart-shortcut="">
+          If your {name} has <code>/restart</code>, that does the same and keeps the session.
+        </p>
         <p className="ib-rw-after">Your reply waits here and reaches it once it is back.</p>
       </div>
     </>
