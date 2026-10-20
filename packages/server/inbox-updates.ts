@@ -57,6 +57,7 @@ import {
   type ManualUpdateOutcome,
 } from "./auto-update";
 import { listSessions as defaultListSessions, type SessionInfo } from "./sessions";
+import { fetchReleaseImagesFor, storedReleaseImageSources } from "./inbox-whats-new-images";
 
 /** While an install runs, the binary is probed this often (the design's 2 s). */
 export const INBOX_UPDATING_TICK_MS = 2_000;
@@ -105,6 +106,12 @@ export interface WhatsNew {
   since: string | null;
   /** One-line highlights of the releases between `since` and this one, newest first. */
   skipped: ReleaseHighlight[];
+  /**
+   * The image sources (as the notes write them) saved on this computer, which
+   * the page loads from /api/inbox/whats-new/image. Any other image in the
+   * notes is drawn as its alt text, never fetched. Additive.
+   */
+  images: string[];
 }
 
 export interface InboxUpdatesOptions {
@@ -120,6 +127,8 @@ export interface InboxUpdatesOptions {
   fetchReleaseTag?: (version: string) => Promise<FetchReleaseResult>;
   /** How long the What's new route waits for those notes (WHATS_NEW_WAIT_MS). */
   whatsNewWaitMs?: number;
+  /** The fetch the release notes' images go through (inbox-whats-new-images.ts). Default: global fetch. */
+  fetchImage?: typeof fetch;
   launchInstaller?: (launch: InstallerLaunch) => void;
   isManaged?: () => boolean;
   listSessions?: () => SessionInfo[];
@@ -303,6 +312,28 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
     return job;
   };
 
+  // The images a release's saved notes show, copied beside them once per
+  // version at a time (inbox-whats-new-images.ts: GitHub's hosts only, the
+  // release check's claim and back-off, never while update checks are off).
+  const imagesInFlight = new Map<string, Promise<void>>();
+  const ensureImages = (version: string): Promise<void> => {
+    const running = imagesInFlight.get(version);
+    if (running) return running;
+    if (!fetchableVersion(version)) return Promise.resolve();
+    const job = fetchReleaseImagesFor({
+      version,
+      dataDir: options.dataDir,
+      now,
+      enabled: checksOn,
+      ...(options.fetchImage && { fetchImpl: options.fetchImage }),
+    })
+      .then(() => undefined)
+      .catch(() => undefined)
+      .finally(() => imagesInFlight.delete(version));
+    imagesInFlight.set(version, job);
+    return job;
+  };
+
   /** The link shows while the notes are saved, being fetched, or can be fetched now. */
   const computeUpdatedLink = (): string | null => {
     if (!updated) return null;
@@ -389,6 +420,11 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
         // The "What's new" link's notes, when this run started on a newer
         // version and they are still missing (throttled per version).
         if (updated && !hasReleaseNotesContent(readReleaseNotes(updated, options.dataDir))) await ensureNotes(updated);
+        // Their images, off the tick (a release's images can take a while).
+        // A no-op once stored, and throttled per version when not.
+        for (const version of new Set([knownLatestRelease(readUpdateState(options.dataDir))?.version, updated])) {
+          if (version && hasReleaseNotesContent(readReleaseNotes(version, options.dataDir))) void ensureImages(version);
+        }
       }
       refresh();
     } catch {
@@ -500,12 +536,15 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
     async whatsNew(version: string, waitMs: number = options.whatsNewWaitMs ?? WHATS_NEW_WAIT_MS): Promise<WhatsNewAnswer> {
       const v = normalizeStableVersion(version);
       if (!v) return { kind: "missing" };
-      if (!hasReleaseNotesContent(readReleaseNotes(v, options.dataDir))) {
-        const job = ensureNotes(v);
+      const deadline = Date.now() + waitMs;
+      const waitFor = async (job: Promise<void>) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
-        await Promise.race([job, new Promise<void>((resolve) => (timer = setTimeout(resolve, waitMs)))]);
+        await Promise.race([job, new Promise<void>((resolve) => (timer = setTimeout(resolve, Math.max(0, deadline - Date.now()))))]);
         clearTimeout(timer);
-      }
+      };
+      if (!hasReleaseNotesContent(readReleaseNotes(v, options.dataDir))) await waitFor(ensureNotes(v));
+      // The notes' images, within the same wait; past it the page shows what is stored.
+      if (hasReleaseNotesContent(readReleaseNotes(v, options.dataDir))) await waitFor(ensureImages(v));
       const notes = readReleaseNotes(v, options.dataDir);
       if (!hasReleaseNotesContent(notes) && notesInFlight.has(v)) return { kind: "loading" };
       if (!notes) return { kind: "missing" };
@@ -527,6 +566,7 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
           skipped: from
             ? notes.highlights.filter((h) => isNewerStableVersion(h.version, from) && isNewerStableVersion(v, h.version))
             : [],
+          images: storedReleaseImageSources(v, notes.notes, options.dataDir),
         },
       };
     },

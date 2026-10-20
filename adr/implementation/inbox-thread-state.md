@@ -39,6 +39,7 @@ The six sections, shown in this fixed order: Stopped on you, Holding up work, Wa
 |---|---|---|
 | 1 | Archived: resolved and not came back | Quiet |
 | 2 | Mark read stands (made after the archive line when the thread is resolved) | Quiet ("Read") |
+| 2a | Every open question is listed in a Re-ask note that still waits (approval "inbox-reask"). A note waits until the session it went to (its `to`, else the asker) writes again, and only while a question it lists is still open | Sent |
 | 3 | An open question carries `Stopped:` | Stopped on you |
 | 4 | An open question carries `Holds up:` | Holding up work |
 | 5 | Any other open question | Waiting on you |
@@ -70,6 +71,7 @@ A came-back thread is in the sections in both views and is not in the archived l
 | Supersede | `supersedes: [...]` or a `Replaces:` line | The message, then `superseded_by` on each named question that is open or picked. Anything else named refuses the whole send (`invalid_supersedes`) |
 | Open (seen) | `POST /api/inbox/threads/:id/seen`, optional `through_seq` | `person_seen_seq` when an agent message (at or below `through_seq`, when given) is unseen; else nothing |
 | Pick | `POST /api/inbox/messages/:id/picks` | The answer, revision + 1 |
+| Re-ask | `POST /api/inbox/messages/:id/reask` | One person note (`reask`: that session's open questions) as a reply to the message; that session's picks not sent marked sent with it. Refused with nothing of that session open (`nothing_to_reask`), on a person's message, before the archive line. Idempotent on its key (a reply's key: `idempotency_key_reused`). Rule 2a holds while every open question is in a note that waits: another session's new question, the last listed question answered, superseded or closed, or the noted session writing again ends it |
 | Send | `POST /api/inbox/messages/:id/reply` | The listed picks as sent, then one person reply. Idempotent on its key |
 | The Send that skips | the same, `skip_unanswered: true` | Also every open question of that message without a pick, as a sent skip (`by_reply`). With Keep open the window sends `false` |
 | Mark read | `POST /api/inbox/threads/:id/read` | The read fields and the look on the root; `set_aside` on each waiting question |
@@ -112,7 +114,7 @@ Checked after every step of every sequence, on the store's own output:
 
 1. Every thread is in exactly one section, in each of the two list views.
 2. No thread disappears: the default view holds every thread ever created; the window's view and the archived list together hold every thread, and never the same one twice.
-3. A question still waiting on the person (`open`) keeps its thread in Stopped, Holding or Waiting.
+3. Every open question is either in a Re-ask note that still waits (its session has not written since), or keeps its thread in Stopped, Holding or Waiting. Checked against the questions and the notes themselves, never the row's flag.
 4. Mark read then Undo, back to back, gives the thread back exactly as it was (section, unseen, questions, picks), whatever an earlier Mark read closed. Undo always clears the read fields; afterwards a question is set aside exactly when an earlier Mark read closed it.
 5. Archive then Unarchive loses no message, question or pick; the row comes back identical.
 6. An agent message after the archive line brings the thread back into the list while something waits. Mark read on a came-back thread returns it to Archived. Unarchive clears a read made while archived.
