@@ -64,13 +64,17 @@ export function reaskTargets(messages: readonly InboxMessageWire[], live: (messa
     const at = messages.indexOf(note);
     return messages.slice(at + 1).some((m) => m.author.kind === 'agent' && m.author.session === by.session && (m.author.host ?? '') === (by.host ?? ''));
   };
+  // Ids are built from the message that holds each question, never from the
+  // question's own `message_id`, so a question record without one (or a stale
+  // one) can never point a rule at a message that is not there.
   const openIds = new Set(
-    messages.flatMap((m) => (m.author.kind === 'agent' && live(m) ? (m.questions ?? []).filter((q) => q.state === 'open').map((q) => `${q.message_id}/${q.key}`) : [])),
+    messages.flatMap((m) => (m.author.kind === 'agent' && live(m) ? (m.questions ?? []).filter((q) => q.state === 'open').map((q) => `${m.id}/${q.key}`) : [])),
   );
   const targets: ReaskTarget[] = [];
   for (const group of groups.values()) {
     const ids = new Set(group.map((m) => m.id));
-    const first = group[0]!;
+    const first = group[0];
+    if (!first) continue;
     const author = first.author.kind === 'agent' ? first.author : null;
     const own = { host: author?.host ?? null, session: author?.session ?? null };
     // A note to this session (an answer to one of its messages), or one sent to it from an ended session.
@@ -78,26 +82,31 @@ export function reaskTargets(messages: readonly InboxMessageWire[], live: (messa
     // A note waits until its session wrote again, and only while a question it lists is still open (rule 2a).
     const waits = (note: InboxMessageWire) =>
       !wroteAfter(note, note.to && note.to.session !== own.session ? { host: note.to.host, session: note.to.session } : own) &&
-      note.reask!.some((id) => openIds.has(id));
+      (note.reask ?? []).some((id) => openIds.has(id));
     if (notes.some(waits)) continue;
-    const waiting = group.flatMap((m) => (m.questions ?? []).filter((q) => q.state === 'open' || q.state === 'picked'));
-    if (waiting.length === 0) continue;
+    // The session's messages that still hold a question waiting on the person
+    // (open, or picked and not sent), in thread order. Every rule below reads
+    // these messages, not the questions' `message_id`, so the message a rule
+    // names is always one of the session's own.
+    const isWaiting = (q: InboxQuestion) => q.state === 'open' || q.state === 'picked';
+    const holders = group.filter((m) => (m.questions ?? []).some(isWaiting));
+    const target = holders.at(-1);
+    if (!target) continue;
+    const waiting = holders.flatMap((m) => (m.questions ?? []).filter(isWaiting));
     const open = waiting.filter((q) => q.state === 'open').length;
-    const target = [...group].reverse().find((m) => (m.questions ?? []).some((q) => q.state === 'open' || q.state === 'picked'))!;
     const base = { message: target, session: own.session, host: own.host, name: agentName(first.author), open, picked: waiting.length - open };
     if (open === 0) {
       // Only picks: a plain reply per message carries them (owner's rule: picks go, never stranded).
-      const replies = group
+      const replies = holders
         .map((m) => ({ message: m, questions: (m.questions ?? []).filter((q) => q.state === 'picked').map((q) => ({ key: q.key, revision: q.revision })) }))
         .filter((r) => r.questions.length > 0);
       targets.push({ ...base, kind: 'picks', replies });
       continue;
     }
-    // Just answered a note: everything still waiting is in that one message.
-    const holders = new Set(waiting.map((q) => q.message_id));
-    if (holders.size === 1) {
-      const holder = group.find((m) => holders.has(m.id))!;
-      const answers = holder.reply_to ? messages.find((m) => m.id === holder.reply_to) : undefined;
+    // Just answered a note: everything still waiting is in that one message,
+    // and that message replies to the note.
+    if (holders.length === 1) {
+      const answers = target.reply_to ? messages.find((m) => m.id === target.reply_to) : undefined;
       if (answers && isReaskNote(answers)) continue;
     }
     targets.push({ ...base, kind: 'reask', replies: [] });
@@ -147,9 +156,22 @@ export function reaskNoteSentence(agent: string, asked: number, picks: number): 
   return picks > 0 ? `${head} Your ${plural(picks, 'pick')} went with it.` : head;
 }
 
-/** The note a question was last asked again in, while it is still open. */
-export function reaskedIn(messages: readonly InboxMessageWire[], question: Pick<InboxQuestion, 'message_id' | 'key' | 'state'>): InboxMessageWire | null {
+/**
+ * The note a question was last asked again in, while it is still open.
+ * `messageId`: the message that holds the question (not the question's own
+ * `message_id`, which a record may lack).
+ */
+export function reaskedIn(
+  messages: readonly InboxMessageWire[],
+  messageId: string,
+  question: Pick<InboxQuestion, 'key' | 'state'>,
+): InboxMessageWire | null {
   if (question.state !== 'open') return null;
-  const id = `${question.message_id}/${question.key}`;
-  return [...messages].reverse().find((m) => isReaskNote(m) && m.reask!.includes(id)) ?? null;
+  const id = `${messageId}/${question.key}`;
+  return [...messages].reverse().find((m) => isReaskNote(m) && (m.reask ?? []).includes(id)) ?? null;
+}
+
+/** Who a Re-ask note went to: the agent of the message it answers, else `fallback` (the thread's asker). */
+export function reaskNoteAgent(answered: InboxMessageWire['author'] | undefined, fallback: string): string {
+  return answered?.kind === 'agent' ? agentName(answered) : fallback;
 }

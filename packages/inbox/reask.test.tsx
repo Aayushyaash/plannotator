@@ -13,7 +13,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { parseInboxQuestionBlocks } from '@plannotator/core/inbox-questions';
 import type { InboxAuthor, InboxMessageWire, InboxProject, InboxQuestion, InboxThread } from '@plannotator/core/inbox-types';
-import { reaskNoteSentence, reaskOffered, reaskTargets, reaskTooltip } from './reask';
+import { reaskedIn, reaskNoteSentence, reaskOffered, reaskTargets, reaskTooltip } from './reask';
 
 const hasDom = typeof document !== 'undefined';
 const { ThreadPane } = (hasDom ? await import('./components/Thread') : {}) as typeof import('./components/Thread');
@@ -172,6 +172,32 @@ describe('the rules (reask.ts)', () => {
     const gone = msgs.map((m) => ({ ...m, questions: m.questions!.map((q) => (`${q.message_id}/${q.key}` === q1 ? { ...q, state: 'superseded' as const } : q)) }));
     expect(reaskTargets([...msgs, note([q1!])]).map((t) => t.session)).toEqual([]);
     expect(reaskTargets([...gone, note([q1!])]).map((t) => [t.session, t.open])).toEqual([['ses_a', 2]]);
+  });
+
+  test('a question record that does not name its message (one that arrived while the thread was open) never throws, and the rules read its holder', () => {
+    // The shape that blanked the thread: every waiting question in one message, and the
+    // question's own `message_id` missing (or naming another message), so no message matched it.
+    const strip = (m: InboxMessageWire, to?: string): InboxMessageWire => ({
+      ...m,
+      questions: m.questions!.map((q) => ({ ...q, message_id: to as unknown as string })),
+    });
+    const arrived = strip(agent(M2, BODY2, '2026-10-20T10:45:00.000Z'));
+    const thread1 = [agent(M1, 'Starting the migration.', '2026-10-20T10:42:00.000Z'), arrived];
+    let targets: ReturnType<typeof reaskTargets> = [];
+    expect(() => (targets = reaskTargets(thread1))).not.toThrow();
+    expect(targets.map((t) => [t.kind, t.message.id, t.open])).toEqual([['reask', M2, 1]]);
+    expect(reaskOffered(targets, thread1)).toBe(false);
+    // A stale `message_id` (another message's) is read the same way.
+    expect(reaskTargets([thread1[0]!, strip(agent(M2, BODY2, '2026-10-20T10:45:00.000Z'), M3)]).map((t) => t.message.id)).toEqual([M2]);
+    // Several open in that one message, answering a note: the session just answered it, so it is left out.
+    const msgs = base();
+    const answered = strip(agent(M5, `${block('Backfill ledger first?')}\n\n${block('Keep the old webhook?')}`, '2026-10-20T10:55:00.000Z', A, { reply_to: NOTE }));
+    const old = msgs.map((m) => ({ ...m, questions: m.questions!.map((q) => ({ ...q, state: 'superseded' as const })) }));
+    expect(reaskTargets([...old, note(openIds(msgs)), answered])).toEqual([]);
+    // "Asked again" reads the holding message's id, not the record's.
+    const listed = note([`${M2}/${arrived.questions![0]!.key}`]);
+    expect(reaskedIn([...thread1, listed], M2, arrived.questions![0]!)?.id).toBe(NOTE);
+    expect(reaskedIn([...thread1, listed], M1, arrived.questions![0]!)).toBeNull();
   });
 
   test("the note's line", () => {

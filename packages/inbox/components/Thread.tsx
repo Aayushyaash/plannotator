@@ -48,7 +48,7 @@ import {
   type RouteState,
 } from './ReplyRoute';
 import { ReaskNote } from './ReaskNote';
-import { reaskedIn, reaskOffered, reaskTargets, reaskTooltip } from '../reask';
+import { reaskedIn, reaskNoteAgent, reaskOffered, reaskTargets, reaskTooltip } from '../reask';
 import { ChangedNotice, ReplacedQuestionCard, ReplacesLine, StaleGuard, replacedBy, replacementOf, type JumpTarget } from './ReplacedQuestion';
 import { InboxComposerField } from './ComposerField';
 import { SkillsLine } from './SkillsLine';
@@ -1648,7 +1648,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     if (q.state === 'closed' && q.set_aside_at) return `Closed unanswered when you marked it read · ${whenTime(q.set_aside_at)}`;
     if (q.state === 'picked' && q.picked_at) return `Picked ${whenTime(q.picked_at)}, not sent`;
     // Re-ask: the person asked the agent for it again; it stays open until the agent replaces it.
-    const reaskedBy = reaskedIn(thread.messages, q);
+    const reaskedBy = reaskedIn(thread.messages, message.id, q);
     if (reaskedBy) return `Asked again ${whenTime(reaskedBy.created_at)}`;
     return null;
   };
@@ -2522,7 +2522,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
                 {(message.reask?.length ?? 0) > 0 ? (
                   <ReaskNote
                     message={message}
-                    agent={message.to ? toName(message, message.to) : askedBy(message)?.author.kind === 'agent' ? agentName(askedBy(message)!.author) : asker}
+                    agent={message.to ? toName(message, message.to) : reaskNoteAgent(askedBy(message)?.author, asker)}
                     picks={thread.messages.reduce((n, m) => n + (m.questions ?? []).filter((q) => q.sent_reply_id === message.id).length, 0)}
                   />
                 ) : (
