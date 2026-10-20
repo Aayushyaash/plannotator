@@ -132,11 +132,37 @@ function ToastBody({ toast, phone, onDismiss }: { toast: InboxToastModel; phone:
 function DesktopToast({ toast, onDismiss, onHold }: { toast: InboxToastModel; onDismiss?: () => void; onHold?: (held: boolean) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const swipe = useSwipeAway(ref, onDismiss, onHold);
+  useRoomForClose(ref, !!onDismiss && !!toast.onUndo);
   return (
     <div ref={ref} className={toastClass(toast, false, !!onDismiss)} data-inbox-toast="" {...swipe}>
       <ToastBody toast={toast} phone={false} onDismiss={onDismiss} />
     </div>
   );
+}
+
+/**
+ * The × must never make a toast's words wrap (a toast's copy is kept to one
+ * line at 520 px). When the line would wrap with Undo's `Z` hint beside the
+ * ×, the toast is marked `data-tight` and the hint is not drawn (`Z` still
+ * undoes, and Undo still says its key). Decided before paint, again on each
+ * window resize: the mark is taken off, the words measured, and put back only
+ * when they would take a second line.
+ */
+function useRoomForClose(ref: RefObject<HTMLDivElement | null>, applies: boolean) {
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || !applies) return;
+    const fit = () => {
+      el.removeAttribute('data-tight');
+      const say = el.querySelector<HTMLElement>('.ib-tsay');
+      if (!say) return;
+      const line = parseFloat(getComputedStyle(say).lineHeight) || 20;
+      if (say.getBoundingClientRect().height > line * 1.5) el.setAttribute('data-tight', '');
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, [ref, applies]);
 }
 
 /**

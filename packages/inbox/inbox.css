@@ -1965,6 +1965,11 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
    520 px line before the × still does. */
 .ib-toast.ib-toast-closable { padding-right: 4px; }
 .ib-toast.ib-toast-closable .ib-tacts { padding-left: 0; }
+/* Where the line would wrap with the ×, Undo drops its Z hint instead and the gaps close by 2 px (Toast.tsx,
+   useRoomForClose): more room than the × takes, so a line that fit without the × still fits. Z still undoes. */
+.ib-toast[data-tight] { gap: 8px; }
+.ib-toast[data-tight] .ib-tundo kbd { display: none; }
+.pn-inbox .ib-toast[data-tight] .ib-tundo { padding: 0 8px; }
 .pn-inbox .ib-toast .ib-tclose { width: 24px; height: 24px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; flex: none; color: var(--muted-foreground); }
 .pn-inbox .ib-toast .ib-tclose:hover { background: var(--muted); color: var(--foreground); }
 /* Swipe it away: a horizontal drag is the toast's, a vertical one stays the page's. */

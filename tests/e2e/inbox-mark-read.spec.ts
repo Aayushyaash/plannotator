@@ -348,7 +348,9 @@ test('the toast closes early: the × (focus back, Z no longer undoes), a mouse s
   expect(Math.round(closeBox!.height)).toBe(24);
 
   // The × never makes a toast wrap: the widest toasts take the same lines (and stay within 520 px) with the ×
-  // as without it. The live toast, copied with each one's words and actions.
+  // as without it, Undo dropping its Z hint where the line would wrap (data-tight, the component's own rule;
+  // the fonts on another machine decide which copies need it). The live toast, copied with each one's words
+  // and actions.
   const heights = await toast.evaluate((el) => {
     // [lead, detail, the actions before the ×]: the real copy of the widest one-line toasts.
     const copies: [string, string, ('reply' | 'undo' | 'drafts')[]][] = [
@@ -368,8 +370,13 @@ test('the toast closes early: the × (focus back, Z no longer undoes), a mouse s
       copy.style.visibility = 'hidden';
       copy.querySelector('.ib-tlead')!.textContent = lead;
       copy.querySelector('.ib-tdetail')!.textContent = detail;
+      copy.removeAttribute('data-tight');
       el.parentElement!.appendChild(copy);
+      const say = copy.querySelector('.ib-tsay') as HTMLElement;
+      const line = parseFloat(getComputedStyle(say).lineHeight) || 20;
+      if (say.getBoundingClientRect().height > line * 1.5) copy.setAttribute('data-tight', '');
       const box = copy.getBoundingClientRect();
+      copy.removeAttribute('data-tight');
       copy.querySelector('[data-toast-dismiss]')!.remove();
       copy.classList.remove('ib-toast-closable');
       const without = copy.getBoundingClientRect();
@@ -383,6 +390,83 @@ test('the toast closes early: the × (focus back, Z no longer undoes), a mouse s
   }
   // The approved one-line copies (👍 Looks good, the stopped warning) are one 40 px line.
   expect(heights.filter((h) => h.lead === 'Looks good' || h.lead === 'Marked read').map((h) => h.height)).toEqual([40, 40]);
+
+  // The guarantee behind that, whatever the fonts: for a toast with Undo, the words grown until they JUST fit one
+  // line WITHOUT the × (one more word would wrap) still fit one line with it, by the tight rule. (A toast with no
+  // Undo has no Z hint to give up: its copy keeps room for the ×, as the real copies above show.)
+  const edge = await toast.evaluate((el) => {
+    const out: { acts: string; without: number; withClose: number }[] = [];
+    for (const acts of [['undo'], ['reply', 'undo']] as string[][]) {
+      const copy = el.cloneNode(true) as HTMLElement;
+      const reply = copy.querySelector('[data-toast-reply]')!;
+      if (acts.includes('drafts')) reply.textContent = 'Drafts';
+      else if (!acts.includes('reply')) reply.remove();
+      if (!acts.includes('undo')) copy.querySelector('[data-toast-undo]')!.remove();
+      copy.removeAttribute('data-inbox-toast');
+      copy.removeAttribute('data-tight');
+      copy.style.animation = 'none';
+      copy.style.visibility = 'hidden';
+      copy.querySelector('.ib-tlead')!.textContent = 'Looks good';
+      const detail = copy.querySelector('.ib-tdetail') as HTMLElement;
+      detail.textContent = 'Goes';
+      const close = copy.querySelector('[data-toast-dismiss]')!;
+      const acts2 = close.parentElement!;
+      el.parentElement!.appendChild(copy);
+      const say = copy.querySelector('.ib-tsay') as HTMLElement;
+      const line = parseFloat(getComputedStyle(say).lineHeight) || 20;
+      const oneLine = () => say.getBoundingClientRect().height <= line * 1.5;
+      // Without the ×: grow to the last length that fits.
+      close.remove();
+      copy.classList.remove('ib-toast-closable');
+      let words = 0;
+      while (words < 200) {
+        detail.textContent += ' a';
+        if (!oneLine()) {
+          detail.textContent = detail.textContent!.slice(0, -2);
+          break;
+        }
+        words++;
+      }
+      const without = Math.round(copy.getBoundingClientRect().height);
+      // With the ×, by the component's rule.
+      acts2.appendChild(close);
+      copy.classList.add('ib-toast-closable');
+      if (!oneLine() && copy.querySelector('[data-toast-undo]')) copy.setAttribute('data-tight', '');
+      out.push({ acts: acts.join('+') || 'none', without, withClose: Math.round(copy.getBoundingClientRect().height) });
+      copy.remove();
+    }
+    return out;
+  });
+  for (const e of edge) expect(e.withClose, `${e.acts}: a line that fit without the × fits with it`).toBe(e.without);
+
+  // The live toast does it itself: words grown until the line just wraps with the Z hint and the × (whatever
+  // the fonts), then a resize lets the toast decide again: it drops the hint and is one 40 px line, its Undo
+  // still named for Z. Put back as it was after.
+  const tight = await toast.evaluate((el) => {
+    const detail = el.querySelector('.ib-tdetail') as HTMLElement;
+    const say = el.querySelector('.ib-tsay') as HTMLElement;
+    const before = detail.textContent;
+    const line = parseFloat(getComputedStyle(say).lineHeight) || 20;
+    el.removeAttribute('data-tight');
+    let grown = 0;
+    while (say.getBoundingClientRect().height <= line * 1.5 && grown < 80) {
+      detail.textContent += ' a';
+      grown++;
+    }
+    const wrapped = say.getBoundingClientRect().height > line * 1.5;
+    window.dispatchEvent(new Event('resize'));
+    const result = {
+      wrapped,
+      tight: el.hasAttribute('data-tight'),
+      height: Math.round(el.getBoundingClientRect().height),
+      kbd: getComputedStyle(el.querySelector('.ib-tundo kbd')!).display,
+      keys: el.querySelector('[data-toast-undo]')!.getAttribute('aria-keyshortcuts'),
+    };
+    detail.textContent = before;
+    window.dispatchEvent(new Event('resize'));
+    return { ...result, back: el.hasAttribute('data-tight') };
+  });
+  expect(tight).toEqual({ wrapped: true, tight: true, height: 40, kbd: 'none', keys: 'Z', back: false });
 
   // Focus moves from Mark read onto the × (the toast sits at the end of the page, past the thread, so this
   // stands in for the Tabs); Enter on it: the toast goes, focus is back on Mark read, and Z has nothing to undo.
