@@ -177,7 +177,7 @@ export const WIDE_ROWS_MIN_LIST_WIDTH = 900;
  * row has one, leads the subject cell, so a row starts at the list's left edge
  * instead of after an empty block.
  */
-function WideRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow; selected: boolean; filtered: boolean; lit: boolean; onOpen: () => void }) {
+function WideRow({ row, selected, filtered, lit, keys, onOpen }: { row: InboxListRow; selected: boolean; filtered: boolean; lit: boolean; keys?: string; onOpen: () => void }) {
   const badge = badgeOf(row);
   const sent = row.section === 'sent';
   const badgeEl = badge && <span className={badgeClass(row)}>{badge}</span>;
@@ -188,6 +188,8 @@ function WideRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow; 
       onClick={onOpen}
       aria-current={selected ? 'true' : undefined}
       data-thread-id={row.thread_id}
+      // The row's menu (RowMenu.tsx); a click opens the thread, so no aria-haspopup.
+      aria-keyshortcuts={keys}
       data-section={row.section}
       data-lit={lit ? '' : undefined}
     >
@@ -238,7 +240,7 @@ function RowWithAction({ row, menu, onMarkRead, children }: { row: InboxListRow;
   );
 }
 
-function NarrowRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow; selected: boolean; filtered: boolean; lit: boolean; onOpen: () => void }) {
+function NarrowRow({ row, selected, filtered, lit, keys, onOpen }: { row: InboxListRow; selected: boolean; filtered: boolean; lit: boolean; keys?: string; onOpen: () => void }) {
   const badge = badgeOf(row);
   const count = countOf(row);
   return (
@@ -248,6 +250,8 @@ function NarrowRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow
       onClick={onOpen}
       aria-current={selected ? 'true' : undefined}
       data-thread-id={row.thread_id}
+      // The row's menu (RowMenu.tsx); a click opens the thread, so no aria-haspopup.
+      aria-keyshortcuts={keys}
       data-section={row.section}
       data-lit={lit ? '' : undefined}
     >
@@ -274,7 +278,7 @@ function NarrowRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow
  * badge, the thread's name, the question count, the guided review mark),
  * which wraps rather than pushing anything off the row.
  */
-function PhoneRow({ row, filtered, lit, menu, onOpen }: { row: InboxListRow; filtered: boolean; lit: boolean; menu: boolean; onOpen: () => void }) {
+function PhoneRow({ row, filtered, lit, menu, keys, onOpen }: { row: InboxListRow; filtered: boolean; lit: boolean; menu: boolean; keys?: string; onOpen: () => void }) {
   const badge = badgeOf(row);
   const count = countOf(row);
   const guide = row.guide && row.section !== 'sent';
@@ -285,6 +289,8 @@ function PhoneRow({ row, filtered, lit, menu, onOpen }: { row: InboxListRow; fil
       className={`ib-mrow${row.unread ? ' ib-u' : ''}${row.section === 'sent' ? ' ib-sent' : ''}`}
       onClick={onOpen}
       data-thread-id={row.thread_id}
+      // The row's menu (RowMenu.tsx); a click opens the thread, so no aria-haspopup.
+      aria-keyshortcuts={keys}
       data-menu={menu ? '' : undefined}
       data-section={row.section}
       data-lit={lit ? '' : undefined}
@@ -355,6 +361,8 @@ export function InboxList(props: InboxListProps) {
     return null;
   };
   const onRowAction = props.onRowAction;
+  // Shift+F10 opens a row's menu (the context-menu key too), named on each row for assistive technology.
+  const rowKeys = onRowAction ? 'Shift+F10' : undefined;
   return (
     <section
       ref={listRef}
@@ -431,13 +439,13 @@ export function InboxList(props: InboxListProps) {
                   section.threads.map((row) =>
                     // A phone's row has no hover action (a hover on a touch screen is a first tap): Mark read is in the thread's header there.
                     props.phone ? (
-                      <PhoneRow key={row.thread_id} row={row} filtered={props.filtered} lit={lit(row)} menu={menuRow === row.thread_id} onOpen={() => props.onOpen(row)} />
+                      <PhoneRow key={row.thread_id} row={row} filtered={props.filtered} lit={lit(row)} menu={menuRow === row.thread_id} keys={rowKeys} onOpen={() => props.onOpen(row)} />
                     ) : (
                       <RowWithAction key={row.thread_id} row={row} menu={menuRow === row.thread_id} onMarkRead={props.onMarkRead}>
                         {twoLine ? (
-                          <NarrowRow row={row} filtered={props.filtered} lit={lit(row)} selected={row.thread_id === props.selectedThreadId} onOpen={() => props.onOpen(row)} />
+                          <NarrowRow row={row} filtered={props.filtered} lit={lit(row)} keys={rowKeys} selected={row.thread_id === props.selectedThreadId} onOpen={() => props.onOpen(row)} />
                         ) : (
-                          <WideRow row={row} filtered={props.filtered} lit={lit(row)} selected={row.thread_id === props.selectedThreadId} onOpen={() => props.onOpen(row)} />
+                          <WideRow row={row} filtered={props.filtered} lit={lit(row)} keys={rowKeys} selected={row.thread_id === props.selectedThreadId} onOpen={() => props.onOpen(row)} />
                         )}
                       </RowWithAction>
                     ),

@@ -143,6 +143,23 @@ test('the keyboard: Shift+F10 on a focused row opens the menu, Escape and Tab gi
   expect(page.url()).not.toContain('thread=');
 });
 
+test('focus held elsewhere (Search): Escape and Copy put it on the row, not back on Search', async () => {
+  const { page, threads } = world;
+  const search = page.locator('[data-open-search]').first();
+  await search.focus();
+  await rowButton(page, threads.search).click({ button: 'right' });
+  await expect(menu(page)).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(menu(page)).toHaveCount(0);
+  await expect(rowButton(page, threads.search)).toBeFocused();
+  await search.focus();
+  await rowButton(page, threads.search).click({ button: 'right' });
+  await page.locator('[data-row-action="copy-id"]').click();
+  await expect(rowButton(page, threads.search)).toBeFocused();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(threads.search);
+  await expect(rowButton(page, threads.search)).toHaveAttribute('aria-keyshortcuts', 'Shift+F10');
+});
+
 test('Mark read from the menu moves the row to Quiet with its toast', async () => {
   const { page, threads } = world;
   await rowButton(page, threads.news).click({ button: 'right' });

@@ -61,7 +61,7 @@ async function serverSections(): Promise<Map<string, string>> {
   return new Map(model.sections.flatMap((s) => s.threads.map((r) => [r.thread_id, s.id] as const)));
 }
 
-const TESTS = 7;
+const TESTS = 11;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -333,4 +333,103 @@ test.skipIf(!hasDom)('a touch never opens it, and outside the rows the browser k
   });
   expect(menu()).toBeNull();
   expect(onBand.defaultPrevented).toBe(false);
+});
+
+/** A sidebar control that holds focus before the right-click: focus must not go back there. */
+async function focusElsewhere(): Promise<HTMLElement> {
+  const search = document.querySelector<HTMLElement>('[data-open-search]')!;
+  act(() => search.focus());
+  expect(document.activeElement).toBe(search);
+  return search;
+}
+
+test.skipIf(!hasDom)('focus was elsewhere: Escape, Copy and Tab each put it on the row, never back where it was', async () => {
+  await renderApp();
+  const search = await focusElsewhere();
+  await openMenu(ids.waiting);
+  await act(async () => {
+    (document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+  await until(() => !menu(), 'the menu to close on Escape');
+  await until(() => document.activeElement === rowButton(ids.waiting), 'focus on the row after Escape');
+
+  act(() => search.focus());
+  await openMenu(ids.waiting);
+  await choose('copy-id');
+  await until(() => !menu(), 'the menu to close on Copy');
+  await until(() => document.activeElement === rowButton(ids.waiting), 'focus on the row after Copy');
+  expect(clipboard).toEqual([ids.waiting]);
+
+  act(() => search.focus());
+  await openMenu(ids.waiting);
+  await act(async () => {
+    menu()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+  });
+  await until(() => !menu(), 'the menu to close on Tab');
+  await until(() => document.activeElement === rowButton(ids.waiting), 'focus on the row after Tab');
+});
+
+test.skipIf(!hasDom)('Archive with no thread open: the row leaves and focus goes to the row now in its slot', async () => {
+  await renderApp();
+  await focusElsewhere();
+  const order = [...document.querySelectorAll('.ib-lbody [data-thread-id]')].map((el) => el.getAttribute('data-thread-id')!);
+  const next = order[order.indexOf(ids.waiting) + 1]!;
+  await openMenu(ids.waiting);
+  await choose('archive');
+  await until(() => !rowButton(ids.waiting), 'the row to leave');
+  await until(() => document.activeElement === rowButton(next), 'focus on the row in its slot');
+});
+
+test.skipIf(!hasDom)('the context-menu key: the keyup `contextmenu` (Chromium on Windows) is cancelled while the menu is open; rows name Shift+F10', async () => {
+  await renderApp();
+  const row = rowButton(ids.stopped)!;
+  expect(row.getAttribute('aria-keyshortcuts')).toBe('Shift+F10');
+  expect(row.hasAttribute('aria-haspopup')).toBe(false);
+  act(() => row.focus());
+  await act(async () => {
+    row.dispatchEvent(new KeyboardEvent('keydown', { key: 'ContextMenu', bubbles: true, cancelable: true }));
+  });
+  await until(() => menu()?.getAttribute('data-row-menu') === ids.stopped, 'the menu');
+  // The keyup, then the browser's own `contextmenu` on whatever holds focus now.
+  const focused = (document.activeElement ?? document.body) as HTMLElement;
+  focused.dispatchEvent(new KeyboardEvent('keyup', { key: 'ContextMenu', bubbles: true }));
+  const native = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 5, clientY: 5 });
+  await act(async () => {
+    focused.dispatchEvent(native);
+  });
+  expect(native.defaultPrevented).toBe(true);
+  expect(menu()?.getAttribute('data-row-menu')).toBe(ids.stopped);
+  await act(async () => {
+    (document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+  await until(() => !menu(), 'the menu to close');
+  // The guard went with that one event: the next right-click outside the rows is the browser's again.
+  const later = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 5, clientY: 5 });
+  await act(async () => {
+    document.querySelector<HTMLElement>('.ib-band')!.dispatchEvent(later);
+  });
+  expect(later.defaultPrevented).toBe(false);
+});
+
+test.skipIf(!hasDom)('with a thread open: Archive from another row keeps it in place shown archived, the toast names it, and Undo brings it back in place', async () => {
+  await renderApp(`#thread=${ids.stopped}`);
+  await until(() => !!document.querySelector('section.ib-pane'), 'the thread');
+  const placed = () => [...document.querySelectorAll('.ib-listcol [data-row]')].map((el) => el.getAttribute('data-row'));
+  const before = placed();
+  const subject = rowButton(ids.waiting)!.querySelector('.ib-st')!.textContent!;
+  await openMenu(ids.waiting);
+  await choose('archive');
+  await until(() => toast()?.textContent?.includes('Archived') === true, 'the toast');
+  expect(toast()!.textContent).toContain(`“${subject}”`);
+  expect(posted.some((p) => p.path === `/api/inbox/messages/${ids.waiting}/resolve` && p.body.resolved === true)).toBe(true);
+  // The list holds still while the thread is open: the row stays where it was, shown archived.
+  await until(() => rowButton(ids.waiting)?.querySelector('.ib-c')?.textContent === 'Archived', 'the row shown archived');
+  expect(placed()).toEqual(before);
+  expect(window.location.hash).toContain(`thread=${ids.stopped}`);
+  await act(async () => {
+    toast()!.querySelector<HTMLButtonElement>('[data-toast-undo]')!.click();
+  });
+  await until(async () => (await serverSections()).get(ids.waiting) === 'waiting', 'the thread unarchived');
+  await until(() => rowButton(ids.waiting)?.querySelector('.ib-c')?.textContent !== 'Archived', 'the row no longer shown archived');
+  expect(placed()).toEqual(before);
 });
