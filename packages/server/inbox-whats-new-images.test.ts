@@ -100,6 +100,17 @@ describe("which URLs are fetched", () => {
     expect(ok("https://github.com/user-attachments/assets/0b1c-uuid")).toBe(true);
     expect(ok("https://private-user-images.githubusercontent.com/1/2.png?jwt=x")).toBe(true);
     expect(ok("https://user-images.githubusercontent.com/1/2.png")).toBe(true);
+    // Only the hosts release attachments use: not gist., objects., camo. or others.
+    expect(ok("https://gist.githubusercontent.com/u/abc/raw/a.png")).toBe(false);
+    expect(ok("https://objects.githubusercontent.com/a.png")).toBe(false);
+    expect(ok("https://camo.githubusercontent.com/abc")).toBe(false);
+    expect(ok("https://avatars.githubusercontent.com/u/1")).toBe(false);
+    expect(ok("https://githubusercontent.com/a.png")).toBe(false);
+    // An empty label never passes.
+    expect(ok("https://.githubusercontent.com/a.png")).toBe(false);
+    expect(ok("https://private-user-images..githubusercontent.com/a.png")).toBe(false);
+    expect(ok("https://private-user-images.githubusercontent.com./a.png")).toBe(false);
+    expect(ok("https://github.com./user-attachments/assets/a")).toBe(false);
     expect(ok("https://raw.githubusercontent.com/backnotprop/plannotator/main/a.png")).toBe(true);
     // raw only for this repository; github.com only for attachments.
     expect(ok("https://raw.githubusercontent.com/someone/else/main/a.png")).toBe(false);

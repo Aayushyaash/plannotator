@@ -9,10 +9,11 @@
  * loads them from `GET /api/inbox/whats-new/image?version=X&src=<as written>`.
  *
  * The rules:
- *  - Only `https:` URLs on GitHub's hosts are fetched
- *    (`allowedReleaseImageUrl`): `github.com/user-attachments/assets/*`, any
- *    `*.githubusercontent.com`, and `raw.githubusercontent.com` for this
- *    repository only. Redirects are followed by hand, at most 5, and only to
+ *  - Only `https:` URLs on the hosts release attachments use are fetched
+ *    (`allowedReleaseImageUrl`): `github.com/user-attachments/assets/*`,
+ *    `private-user-images.githubusercontent.com`,
+ *    `user-images.githubusercontent.com`, and `raw.githubusercontent.com`
+ *    for this repository only. Redirects are followed by hand, at most 5, and only to
  *    those hosts. No credentials, no cookies.
  *  - Each image: at most 10 MB and 50 megapixels (code review's caps), its
  *    type sniffed from the bytes, one 15 s deadline across its redirects and
@@ -34,7 +35,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { MAX_REVIEW_IMAGE_PREVIEW_BYTES, MAX_REVIEW_IMAGE_PREVIEW_PIXELS } from "@plannotator/shared/diff-paths";
 import { inboxMessageRemoteImageRefsInOrder } from "@plannotator/shared/inbox/message-images";
@@ -62,6 +63,8 @@ export const RELEASE_IMAGE_REDIRECTS_MAX = 5;
 export const RELEASE_IMAGE_SRC_MAX = 2048;
 
 const REPO_RAW_PREFIX = "/backnotprop/plannotator/";
+/** The githubusercontent hosts release attachments use (user-attachments redirects to the first). */
+const IMAGE_HOSTS = new Set(["private-user-images.githubusercontent.com", "user-images.githubusercontent.com"]);
 const USER_AGENT = "plannotator-update-check";
 /** How many versions `releaseImagesFetch` remembers. */
 const FETCH_REMEMBERED = 10;
@@ -99,9 +102,11 @@ function loopbackOverrideOrigin(env: NodeJS.ProcessEnv): string | null {
 
 /**
  * The URL to fetch a release image from, or null when it is not one the
- * Inbox fetches: `https:` on the default port, no credentials, and
- * `github.com/user-attachments/assets/*`, `raw.githubusercontent.com` for
- * this repository, or another `*.githubusercontent.com` host.
+ * Inbox fetches: `https:` on the default port, no credentials, no empty
+ * host label, and `github.com/user-attachments/assets/*`,
+ * `private-user-images.githubusercontent.com`,
+ * `user-images.githubusercontent.com`, or `raw.githubusercontent.com` for
+ * this repository.
  */
 export function allowedReleaseImageUrl(raw: string | URL, env: NodeJS.ProcessEnv = process.env): URL | null {
   let url: URL;
@@ -115,9 +120,12 @@ export function allowedReleaseImageUrl(raw: string | URL, env: NodeJS.ProcessEnv
   if (override && url.origin === override) return url;
   if (url.protocol !== "https:" || url.port !== "") return null;
   const host = url.hostname.toLowerCase();
+  // No empty label (`.githubusercontent.com`, `a..b`) and no trailing dot.
+  if (host.split(".").some((label) => label === "")) return null;
   if (host === "github.com") return url.pathname.startsWith("/user-attachments/assets/") ? url : null;
   if (host === "raw.githubusercontent.com") return url.pathname.startsWith(REPO_RAW_PREFIX) ? url : null;
-  if (host.endsWith(".githubusercontent.com")) return url;
+  // Where release attachments are served from; never gist., objects., camo. or any other subdomain.
+  if (IMAGE_HOSTS.has(host)) return url;
   return null;
 }
 
@@ -177,7 +185,14 @@ export function readReleaseImages(version: string, dataDir?: string): Record<str
 function writeAtomic(path: string, data: string | Uint8Array): void {
   const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   writeFileSync(tmp, data);
-  renameSync(tmp, path);
+  try {
+    renameSync(tmp, path);
+  } catch (err) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {}
+    throw err;
+  }
 }
 
 /** The srcs of `notes` that have a stored file: what the page may load. */
