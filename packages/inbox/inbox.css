@@ -683,7 +683,7 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
    length). It keeps running under the pointer: hover and the selection paint over it (above), and the
    focus ring stays on top. Only a colour fades, so reduced motion keeps it. */
 @keyframes ib-lit { 0%, 40% { background-color: var(--ib-lit); } 100% { background-color: transparent; } }
-:is(.ib-row, .ib-nrow)[data-lit]::before { animation: ib-lit 1500ms cubic-bezier(0.23, 1, 0.32, 1) both; }
+:is(.ib-row, .ib-nrow)[data-lit]::before { animation: ib-lit 3000ms ease-in-out both; }
 .ib-nrow.ib-sent .ib-p, .ib-nrow.ib-sent .ib-l2 .ib-s { color: var(--muted-foreground); font-weight: 400; }
 /* The Soft paint on the list (owner, 2026-10-16: Soft modernizes today's Inbox, it does not relayout it). Every
    rule here changes colour, surface, radius or face only: rows, bands, chips and badges keep today's sizes,
@@ -1986,7 +1986,7 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   .ib-m3 .ib-key { max-width: 100%; }
   /* No hover on a phone, so no tooltip: the thread's name wraps to two lines instead of being cut on one. */
   .ib-m3 .ib-key > .ib-keyt { max-width: none; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-  .ib-mrow[data-lit] { animation: ib-lit 1500ms cubic-bezier(0.23, 1, 0.32, 1) both; }
+  .ib-mrow[data-lit] { animation: ib-lit 3000ms ease-in-out both; }
   .ib-m3 .ib-c, .ib-m3 .ib-att { font-size: var(--ib-fs-12-5, 12.5px); color: var(--muted-foreground); white-space: nowrap; }
 
   /* a thread: Back on the left, the actions on the right, the reply at the foot above the keyboard */

@@ -72,7 +72,7 @@ export const SETTLE_EASE_OUT = 'cubic-bezier(0.23, 1, 0.32, 1)';
  * fade), lasts its hold and its fade, and is then taken off.
  */
 export const SHOW_LIT_AFTER_SLIDE_MS = Math.max(SETTLE_MOVE_MS, SETTLE_ENTER_DELAY_MS + SETTLE_ENTER_MS);
-export const SHOW_LIT_MS = 1500;
+export const SHOW_LIT_MS = 3000;
 /** The id every settle animation carries, so a new settle can cancel the last one's. */
 export const SETTLE_ANIMATION_ID = 'ib-settle';
 
