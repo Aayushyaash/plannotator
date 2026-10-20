@@ -13,7 +13,7 @@
  * DOM-gated: runs under DOM_TESTS=1 (happy-dom), from the test.yml DOM list.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:test';
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
@@ -24,6 +24,7 @@ import type { InboxListSection } from '@plannotator/core/inbox-types';
 const hasDom = typeof document !== 'undefined';
 const { InboxApp } = (hasDom ? await import('./App') : {}) as typeof import('./App');
 const { threadLink, rowMenuActions } = await import('./rowMenu');
+const { ThreadRowMenu } = (hasDom ? await import('./components/RowMenu') : {}) as typeof import('./components/RowMenu');
 
 const SERVER_SCRIPT = resolve(import.meta.dir, '../../tests/helpers/inbox-dom-server.ts');
 
@@ -61,7 +62,7 @@ async function serverSections(): Promise<Map<string, string>> {
   return new Map(model.sections.flatMap((s) => s.threads.map((r) => [r.thread_id, s.id] as const)));
 }
 
-const TESTS = 11;
+const TESTS = 14;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -432,4 +433,94 @@ test.skipIf(!hasDom)('with a thread open: Archive from another row keeps it in p
   await until(async () => (await serverSections()).get(ids.waiting) === 'waiting', 'the thread unarchived');
   await until(() => rowButton(ids.waiting)?.querySelector('.ib-c')?.textContent !== 'Archived', 'the row no longer shown archived');
   expect(placed()).toEqual(before);
+});
+
+/** A mouse press, as a person's: App reads its pointerdown as the last input. */
+async function press(el: HTMLElement) {
+  await act(async () => {
+    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }));
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+    el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerType: 'mouse' }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+    el.click();
+  });
+}
+
+test.skipIf(!hasDom)('with a thread open, Archive from the menu then a mouse close of the thread: focus is not moved to the old slot', async () => {
+  await renderApp(`#thread=${ids.stopped}`);
+  await until(() => !!document.querySelector('section.ib-pane'), 'the thread');
+  const order = [...document.querySelectorAll('.ib-lbody [data-thread-id]')].map((el) => el.getAttribute('data-thread-id')!);
+  const next = order[order.indexOf(ids.waiting) + 1]!;
+  await openMenu(ids.waiting);
+  await choose('archive');
+  await until(() => rowButton(ids.waiting)?.querySelector('.ib-c')?.textContent === 'Archived', 'the row shown archived');
+  // A mouse close moves nothing (App's rule); the list settles and the archived row leaves.
+  await press(document.querySelector<HTMLElement>('[aria-label="Close the thread"]')!);
+  await until(() => !rowButton(ids.waiting), 'the archived row to leave once the thread closed');
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 300));
+  });
+  expect(document.activeElement).not.toBe(rowButton(next));
+});
+
+test.skipIf(!hasDom)('after the context-menu key, a pointer press drops the keyup guard: a right-click is not swallowed', async () => {
+  await renderApp();
+  const row = rowButton(ids.picked)!;
+  act(() => row.focus());
+  await act(async () => {
+    row.dispatchEvent(new KeyboardEvent('keydown', { key: 'ContextMenu', bubbles: true, cancelable: true }));
+  });
+  await until(() => menu()?.getAttribute('data-row-menu') === ids.picked, 'the menu');
+  const inside = item('copy-link')!;
+  inside.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 2, pointerType: 'mouse' }));
+  const right = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 400, clientY: 300 });
+  // Seen at the window, before anything in the page could cancel it.
+  let seen: boolean | null = null;
+  const look = (event: Event) => (seen = event.defaultPrevented);
+  window.addEventListener('contextmenu', look);
+  try {
+    await act(async () => {
+      inside.dispatchEvent(right);
+    });
+  } finally {
+    window.removeEventListener('contextmenu', look);
+  }
+  expect(seen).toBe(false);
+});
+
+test.skipIf(!hasDom)('the row leaves while its menu is open: focus goes to the row in its slot, from the order when the menu opened', async () => {
+  const rowOf = (id: string) =>
+    ({ thread_id: id, subject: id, section: 'new', unseen: 0, answered_not_sent: false, resolved_at: null, read_at: null }) as unknown as import('@plannotator/core/inbox-types').InboxListRow;
+  let setRows: (rows: string[]) => void = () => {};
+  function Harness() {
+    const [rows, set] = useState(['a', 'b', 'c']);
+    setRows = set;
+    return (
+      <div className="pn-inbox">
+        <ThreadRowMenu className="ib-lbody" rowOf={(id) => (rows.includes(id) ? rowOf(id) : null)} canMarkRead={false} held={false} onAction={() => {}} onTarget={() => {}}>
+          <button type="button" className="ib-band">Quiet</button>
+          {rows.map((id) => (
+            <div key={id} data-row={id}>
+              <button type="button" data-thread-id={id}>{id}</button>
+            </div>
+          ))}
+        </ThreadRowMenu>
+      </div>
+    );
+  }
+  host = document.createElement('div');
+  document.body.appendChild(host);
+  act(() => {
+    root = createRoot(host!);
+    root.render(<Harness />);
+  });
+  const b = document.querySelector<HTMLElement>('[data-thread-id="b"]')!;
+  await rightClick(b);
+  await until(() => menu()?.getAttribute('data-row-menu') === 'b', 'the menu');
+  // Another tab archives it: the row leaves the list while its menu is open.
+  await act(async () => {
+    setRows(['a', 'c']);
+  });
+  await until(() => !menu(), 'the menu to close');
+  await until(() => document.activeElement === document.querySelector('[data-thread-id="c"]'), 'focus on the row in its slot');
 });

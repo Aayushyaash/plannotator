@@ -410,6 +410,7 @@ export function InboxList(props: InboxListProps) {
           onTarget={setMenuRow}
           onAction={(row, action) => onRowAction?.(row, action)}
           disabled={!onRowAction}
+          held={props.selectedThreadId !== null}
         >
           {props.ask}
           {props.notice && (

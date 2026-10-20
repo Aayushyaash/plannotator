@@ -17,6 +17,11 @@ export interface ThreadRowMenuProps {
   onTarget: (threadId: string | null) => void;
   /** No menu (the host gave no actions): the browser's own. */
   disabled?: boolean;
+  /**
+   * A thread is open, so the list holds still (held.ts): a row written from the menu stays in place, and
+   * where focus goes when the thread closes is App's rule, not the menu's.
+   */
+  held: boolean;
   children: ReactNode;
 }
 
@@ -63,7 +68,14 @@ export const ThreadRowMenu = forwardRef<HTMLDivElement, ThreadRowMenuProps>(func
   /** The row focus goes back to. Kept after the menu closes: Base UI asks for it once the close has begun. */
   const focusId = useRef<string | null>(null);
   /** A write (Mark read, Move back, Archive) on a row that may leave the rows on screen: where focus goes then. */
-  const pendingFocus = useRef<{ id: string; order: string[]; until: number } | null>(null);
+  const pendingFocus = useRef<{ id: string; order: string[]; until: number; state: string } | null>(null);
+  /** What a write changes on a row: once it differs, the write has landed. */
+  const rowState = (id: string) => {
+    const row = props.rowOf(id);
+    return row ? `${row.section}|${row.read_at ?? ''}|${row.resolved_at ?? ''}` : '';
+  };
+  /** The rows' order when the menu opened: the slot to fall back to if the row leaves while it is open. */
+  const openOrder = useRef<string[]>([]);
   /** The guard against the browser's own menu for the key's keyup (Chromium on Windows), while ours is open. */
   const keyGuard = useRef<(() => void) | null>(null);
   const lastTouch = useRef(0);
@@ -102,11 +114,16 @@ export const ThreadRowMenu = forwardRef<HTMLDivElement, ThreadRowMenuProps>(func
   useLayoutEffect(() => {
     const pending = pendingFocus.current;
     if (!pending) return;
-    if (Date.now() > pending.until) {
+    // A thread opened, or time ran out: never move focus later, out of the blue.
+    if (props.held || Date.now() > pending.until) {
       pendingFocus.current = null;
       return;
     }
-    if (buttonFor(pending.id)) return;
+    if (buttonFor(pending.id)) {
+      // The write landed and the row is still on screen: nothing to do.
+      if (rowState(pending.id) !== pending.state) pendingFocus.current = null;
+      return;
+    }
     pendingFocus.current = null;
     const active = document.activeElement;
     if (active && active !== document.body && active.isConnected) return;
@@ -130,9 +147,13 @@ export const ThreadRowMenu = forwardRef<HTMLDivElement, ThreadRowMenuProps>(func
     const done = () => {
       clearTimeout(timer);
       window.removeEventListener('contextmenu', swallow, true);
+      window.removeEventListener('pointerdown', done, true);
       if (keyGuard.current === done) keyGuard.current = null;
     };
     window.addEventListener('contextmenu', swallow, true);
+    // A pointer press first means the next `contextmenu` is a right-click (macOS and Safari send no keyup
+    // one): the guard goes, so it never swallows it.
+    window.addEventListener('pointerdown', done, true);
     keyGuard.current = done;
   };
   const actions = target ? rowMenuActions(target, props.canMarkRead) : [];
@@ -146,7 +167,10 @@ export const ThreadRowMenu = forwardRef<HTMLDivElement, ThreadRowMenuProps>(func
       data-row-action={action}
       onClick={() => {
         if (!target) return;
-        if (action !== 'copy-link' && action !== 'copy-id') pendingFocus.current = { id: target.thread_id, order: rowOrder(), until: Date.now() + 5000 };
+        // With a thread open the row stays in place: nothing to follow.
+        if (action !== 'copy-link' && action !== 'copy-id' && !props.held) {
+          pendingFocus.current = { id: target.thread_id, order: rowOrder(), until: Date.now() + 5000, state: rowState(target.thread_id) };
+        }
         props.onAction(target, action);
       }}
     >
@@ -207,6 +231,7 @@ export const ThreadRowMenu = forwardRef<HTMLDivElement, ThreadRowMenuProps>(func
             event.stopPropagation();
             return;
           }
+          openOrder.current = rowOrder();
           aim(row.thread_id);
         }}
       >
@@ -219,7 +244,7 @@ export const ThreadRowMenu = forwardRef<HTMLDivElement, ThreadRowMenuProps>(func
             aria-label={target?.subject ?? 'Thread'}
             data-row-menu={target?.thread_id}
             // Focus goes back to the row (Escape, Tab, an item), never where it was before the right-click.
-            finalFocus={() => focusTarget(focusId.current, rowOrder()) ?? true}
+            finalFocus={() => focusTarget(focusId.current, openOrder.current) ?? true}
             onKeyDown={(event) => {
               // Tab leaves the menu for the row it came from (Base UI keeps focus in a context menu).
               if (event.key !== 'Tab') return;
