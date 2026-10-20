@@ -297,6 +297,16 @@ in 0.42.0 (proven by diffing the mounted `outerHTML` against the base commit).
   in a plain-text body, so the first person you list owns every occurrence of
   it; and a restored draft has no chips (and reports no ids) until the author
   picks again. No source → no overlay element at all.
+- **Agents in the `@` picker** (unreleased, after 0.53.0; the Plannotator
+  Inbox's agent tags): `MentionSource.kinds?: ('user' | 'agent')[]` (absent →
+  users only, as before) lets a host offer agents; `MentionSource.matchDetail?:
+  boolean` (absent → true) keeps a query from matching the `detail` line;
+  `MentionPerson.group?: string` draws consecutive people of one group under a
+  heading, each run a `role="group"` labelled by it (absent on every person →
+  the flat list); `MentionSource.renderNotice?: (tagged) => ReactNode` draws a
+  host line under the composer field from the people the draft still tags
+  (`CommentPopover`). All optional; a host passing none renders exactly as
+  before.
 - **`Viewer` / `HtmlViewer` `mentionSource`** (0.43.1): the same prop on the two
   viewers, forwarded to every comment composer each of them mounts, so a host
   wires mentions once per surface instead of per composer. The ids the author

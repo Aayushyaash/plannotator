@@ -150,6 +150,8 @@ const ALLOWLIST: readonly DoorRoute[] = [
   // A comment on the text of an agent's message (7.59), new or edited (same annotation id); removed through annotations/:id/remove.
   { method: "POST", route: /^messages\/([^/]+)\/annotations$/, window: (m) => `/api/inbox/messages/${m[1]}/annotations` },
   { method: "GET", route: /^threads\/([^/]+)\/sessions$/, window: (m) => `/api/inbox/threads/${m[1]}/sessions` },
+  // Tags (7.60): who the person can tag with `@`; the tags ride the reply's `tags`, forwarded unchanged.
+  { method: "GET", route: /^threads\/([^/]+)\/taggable$/, window: (m) => `/api/inbox/threads/${m[1]}/taggable` },
   { method: "POST", route: /^threads\/([^/]+)\/message$/, window: (m) => `/api/inbox/threads/${m[1]}/message` },
   // Compose (7.39, 7.40): every live session, and a thread the person starts (the body's key is also the store's own).
   { method: "GET", route: /^sessions$/, window: () => "/api/inbox/sessions" },

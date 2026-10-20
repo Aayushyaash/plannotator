@@ -67,6 +67,11 @@ import {
   type InboxThreadNaming,
   inboxThreadNameKey,
   isInboxNote,
+  inboxAgentName,
+  INBOX_TAGS_MAX,
+  type InboxParticipant,
+  type InboxSentRecipient,
+  type InboxTag,
 } from "@plannotator/core/inbox-types";
 import { inboxListSections, inboxRowUnread, inboxSectionOf } from "./list";
 import { inboxProjectLabels } from "./project-name";
@@ -205,6 +210,13 @@ export interface InboxReplyInput {
    * thread carries its files, and a reply of files alone is a reply.
    */
   attachments?: InboxAttachment[];
+  /**
+   * The agent sessions the person tagged with `@` (approval "inbox-tag-agents"),
+   * as the server resolved them (live, or an MCP agent it knows): each one is
+   * handed this reply too and records its own delivery. The owner is dropped
+   * (it gets the reply anyway). Absent or empty: nobody is tagged.
+   */
+  tags?: unknown;
 }
 
 export interface InboxReplyResult {
@@ -275,6 +287,53 @@ function lastNonNote(messages: readonly InboxMessage[]): InboxMessage | undefine
 /** The note that carries a 👍 Looks good to the agent (`ack_of`): never listed in a thread, the ack on its message says it. */
 function isAckNote(message: InboxMessage): boolean {
   return message.author.kind === "person" && typeof message.ack_of === "string" && message.ack_of !== "";
+}
+
+/** A person's reply that tags agents (`tags`, approval "inbox-tag-agents"). */
+function hasTags(message: InboxMessage): boolean {
+  return (message.tags?.length ?? 0) > 0;
+}
+
+/** The tag a person's message carries for `session`, or null. */
+function tagOf(message: InboxMessage, session: string): InboxTag | null {
+  return message.tags?.find((tag) => tag.session === session) ?? null;
+}
+
+/**
+ * The tags a Send asked for, as the server resolved them: each session once,
+ * in the order typed, at most INBOX_TAGS_MAX, never the reply's owner (who
+ * gets it anyway), each entry shaped exactly (fail closed: anything else is
+ * a validation error, nothing written).
+ */
+export function normalizeInboxTags(value: unknown, owner: string | null): InboxTag[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new InboxError("validation_error", "tags: a list of tagged sessions.", { field: "tags" });
+  if (value.length > INBOX_TAGS_MAX) throw new InboxError("validation_error", `tags: at most ${INBOX_TAGS_MAX} sessions.`, { field: "tags" });
+  const out: InboxTag[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new InboxError("validation_error", "tags: each one { host, session, wakes }.", { field: "tags" });
+    const { host, session, name, wakes, label } = entry as Record<string, unknown>;
+    if (typeof session !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(session)) {
+      throw new InboxError("validation_error", "tags: each session an id.", { field: "tags" });
+    }
+    if (host !== null && (typeof host !== "string" || host.length > 64)) throw new InboxError("validation_error", "tags: host a string or null.", { field: "tags" });
+    if (typeof wakes !== "boolean") throw new InboxError("validation_error", "tags: wakes true or false.", { field: "tags" });
+    if (name !== undefined && name !== null && (typeof name !== "string" || name.length > 80)) {
+      throw new InboxError("validation_error", "tags: name a short string.", { field: "tags" });
+    }
+    if (label !== undefined && label !== null && (typeof label !== "string" || label.length > 120 || /[\u0000-\u001f\u007f]/.test(label))) {
+      throw new InboxError("validation_error", "tags: label a short line.", { field: "tags" });
+    }
+    if (session === owner || out.some((tag) => tag.session === session)) continue;
+    out.push({
+      host: host as string | null,
+      session,
+      ...(typeof name === "string" && name ? { name } : {}),
+      ...(typeof label === "string" && label.trim() ? { label: label.trim() } : {}),
+      wakes,
+    });
+  }
+  return out;
 }
 
 /** The most ids one send may supersede. */
@@ -917,14 +976,38 @@ export class InboxStore {
     const unseen = messages.filter((m) => m.author.kind === "agent" && seqOf(m) > seenSeq).length;
     // The last message with the Inbox's notes read past: rule 7 (Sent) and "came back".
     const lastReal = lastNonNote(messages) ?? root;
+    // A reply that tags agents is read for each recipient by its own delivery:
+    // it stays Sent until every session a connection wakes has it (an agent
+    // that only reads the Inbox never holds it there).
+    const recipients = lastReal.author.kind === "person" && hasTags(lastReal) ? this.recipientsOf(lastReal) : null;
+    const taggedChecked = (list: InboxSentRecipient[]): string | null => {
+      const awaited = list.filter((r) => r.wakes || r.owner);
+      // No owner and nothing that wakes (only agents that read the Inbox through MCP):
+      // Sent until one of them takes it (its wait_for_reply) or reads the thread.
+      if (awaited.length === 0) {
+        const taken = (lastReal.tags ?? [])
+          .map((t) => t.delivery?.at ?? t.read_at ?? null)
+          .filter((at): at is string => at !== null)
+          .sort();
+        return taken[0] ?? null;
+      }
+      if (awaited.some((r) => r.delivered_at === null)) return null;
+      return awaited.reduce<string | null>((latest, r) => (latest === null || r.delivered_at! > latest ? r.delivered_at : latest), null) ?? lastReal.created_at;
+    };
     const sent =
       lastReal.author.kind === "person"
         ? {
             at: lastReal.created_at,
-            checked_at: (root.agent_checked_seq ?? 0) >= seqOf(lastReal) ? (root.agent_checked_at ?? null) : null,
+            checked_at: recipients
+              ? taggedChecked(recipients)
+              : (root.agent_checked_seq ?? 0) >= seqOf(lastReal)
+                ? (root.agent_checked_at ?? null)
+                : null,
             wakes: this.wakesRecipient(lastReal),
+            ...(recipients ? { recipients } : {}),
           }
         : null;
+    const participants = this.participantsOf(messages);
     // An agent wrote after the person archived the thread (mail apps' rule):
     // it comes back to the list while something there waits (an agent
     // message after the archive the person has not looked at, a live
@@ -963,6 +1046,7 @@ export class InboxStore {
       guide: messages.some((m) => m.guide != null),
       last_agent_at: lastAgentAt,
       ...(root.started_by_person && root.to ? { addressee: { host: root.to.host, session: root.to.session } } : {}),
+      ...(participants.length > 1 ? { participants } : {}),
     };
     const section = inboxSectionOf(facts);
     return { ...facts, section, unread: inboxRowUnread(section) };
@@ -1426,15 +1510,29 @@ export class InboxStore {
    * settled, as `{ label, at }`; one still inside its Undo window (or taken
    * back) is not there.
    */
-  agentThread(threadId: string): InboxThread | null {
+  agentThread(threadId: string, caller: string | null = null): InboxThread | null {
     const thread = this.thread(threadId);
     if (!thread) return null;
     return {
       ...thread,
       messages: thread.messages.map((message) => {
-        if (message.ack === undefined) return message;
-        const { ack, ...rest } = message;
-        return { ...rest, ack: ack && ack.settled_seq != null && !ack.not_sent ? { label: ack.label, at: ack.at } : null } as InboxMessageWire;
+        let out: InboxMessageWire = message;
+        if (message.ack !== undefined) {
+          const { ack, ...rest } = message;
+          out = { ...rest, ack: ack && ack.settled_seq != null && !ack.not_sent ? { label: ack.label, at: ack.at } : null } as InboxMessageWire;
+        }
+        // Who a reply tagged (approval "inbox-tag-agents"), as an agent reads it: the agents and, for
+        // the reader, that it was tagged. Delivery state is the person's view, not the agent's.
+        if (message.tags && message.tags.length > 0) {
+          const { tags, ...rest } = out;
+          const taggedYou = caller !== null && !this.isOwner(message, caller) && tags!.some((t) => t.session === caller);
+          out = {
+            ...rest,
+            tagged: tags!.map((t) => ({ agent: t.name || (t.host ? inboxAgentName({ kind: "agent", host: t.host, name: null }) : "An agent"), session: t.session })),
+            ...(taggedYou ? { tagged_you: true } : {}),
+          } as unknown as InboxMessageWire;
+        }
+        return out;
       }),
     };
   }
@@ -2172,6 +2270,7 @@ export class InboxStore {
     // answered), the session that message is addressed to now. Stamped on the
     // line, so only that session is handed it and only its delivery settles it.
     const to = input.to ?? (message.author.kind === "person" && message.to ? message.to : undefined);
+    const tags = normalizeInboxTags(input.tags, to?.session ?? (message.author.kind === "agent" ? (message.author.session ?? null) : null));
     const reply: InboxMessage = {
       id: replyId,
       project_id: message.project_id,
@@ -2185,6 +2284,7 @@ export class InboxStore {
       idempotency_key: key,
       ...(to ? { to: { host: to.host, session: to.session } } : {}),
       ...(attachments.length > 0 ? { attachments: attachments.map((attachment) => ({ ...attachment, sent_at: at })) } : {}),
+      ...(tags.length > 0 ? { tags } : {}),
     };
     try {
       for (const record of updated) this.appendQuestion(record, at);
@@ -2756,33 +2856,63 @@ export class InboxStore {
    * agent (wait_for_reply or read_thread; any agent's read counts, as for the
    * Sent band). Derived from the log, so a reply waits for its session across
    * Inbox restarts and is handed out again until it is delivered. Oldest first.
+   *
+   * A reply that tags agents (`tags`, approval "inbox-tag-agents") is handed
+   * to its owner and to each tagged session, and settled for each one only by
+   * its own delivery: another agent's read never settles it (a tagged agent
+   * told to read the thread first must not swallow the owner's wake).
+   * `options.tags` false (a connection that did not say it understands tags)
+   * leaves out what this session was only tagged in: its wake would say "the
+   * person replied to you", which is not true.
    */
-  pendingReplies(session: string): InboxMessage[] {
+  pendingReplies(session: string, options: { tags?: boolean } = {}): InboxMessage[] {
     const out: { message: InboxMessage; seq: number }[] = [];
     for (const message of this.messages.values()) {
-      if (message.author.kind !== "person" || message.delivery || !this.isFor(message, session)) continue;
+      if (message.author.kind !== "person") continue;
+      const owner = this.isOwner(message, session);
+      const tag = owner ? null : tagOf(message, session);
+      if (tag) {
+        if (tag.delivery || options.tags === false) continue;
+        out.push({ message, seq: this.messageSeq.get(message.id) ?? 0 });
+        continue;
+      }
+      if (message.delivery || !owner) continue;
       // A 👍 taken back before it went is never delivered.
       if (isAckNote(message) && !this.ackNoteLive(message)) continue;
       const seq = this.messageSeq.get(message.id) ?? 0;
       // A New message, or a reply the person sent to another session, is
       // settled only by its delivery to the session it names (its own
-      // wait_for_reply records one), never by another agent's read.
-      if (!message.to && (this.messages.get(message.thread_id)?.agent_checked_seq ?? 0) >= seq) continue;
+      // wait_for_reply records one), never by another agent's read; so is a
+      // reply that tags agents.
+      if (!message.to && !hasTags(message) && (this.messages.get(message.thread_id)?.agent_checked_seq ?? 0) >= seq) continue;
       out.push({ message, seq });
     }
     return out.sort((a, b) => a.seq - b.seq).map((entry) => entry.message);
   }
 
   /**
-   * A connection delivered a reply into the asking session as a turn: the
-   * reply records it (`delivery`), and the thread counts as read by the agent
-   * up to it (the Sent band's "Delivered to <agent>, <time>"). Idempotent.
+   * A connection delivered a reply into a session as a turn: the reply
+   * records it (`delivery` for its owner, the tag's own `delivery` for a
+   * tagged session), and, for the owner, the thread counts as read by the
+   * agent up to it (the Sent band's "Delivered to <agent>, <time>"). A tagged
+   * session's delivery marks nothing for the owner. Idempotent per session.
    */
   recordDelivery(replyId: string, by: { host: string; session: string }): InboxMessage {
     const reply = this.messages.get(replyId);
     if (!reply || reply.author.kind !== "person" || (!reply.reply_to && !reply.to)) throw new InboxError("message_not_found", `No reply ${replyId}.`);
     if (!this.isFor(reply, by.session)) {
       throw new InboxError("validation_error", "session: this reply answers another session's message.", { field: "session" });
+    }
+    if (!this.isOwner(reply, by.session)) {
+      const tag = tagOf(reply, by.session)!;
+      if (tag.delivery) return reply;
+      const at = this.stamp();
+      const delivered: InboxMessage = {
+        ...reply,
+        tags: reply.tags!.map((t) => (t.session === by.session ? { ...t, delivery: { state: "delivered" as const, host: by.host, session: by.session, at } } : t)),
+      };
+      this.appendMessage(delivered, at);
+      return delivered;
     }
     if (reply.delivery) return reply;
     const at = this.stamp();
@@ -2795,20 +2925,78 @@ export class InboxStore {
   }
 
   /**
-   * Whether a person's message goes to `session`: a New message addressed to
-   * it (`to`), a reply the person sent to it because the asking session had
-   * ended (`to` on a reply), or a reply to a message it sent.
+   * A session that is not woken (MCP) read a thread it was tagged in with
+   * read_thread: its tags there record the read (`read_at`), so the window
+   * can say it saw it. Its own read only; nothing changes for the owner or
+   * any other recipient, and it is not a delivery. No write when nothing is new.
    */
-  private isFor(message: InboxMessage, session: string): boolean {
+  recordTagRead(threadId: string, session: string): void {
+    for (const message of this.threadMessages(threadId)) {
+      const tag = message.author.kind === "person" && !this.isOwner(message, session) ? tagOf(message, session) : null;
+      if (!tag || tag.wakes || tag.delivery || tag.read_at) continue;
+      const at = this.stamp();
+      this.appendMessage({ ...message, tags: message.tags!.map((t) => (t.session === session ? { ...t, read_at: at } : t)) }, at);
+    }
+  }
+
+  /**
+   * Whether `session` is only a guest in this thread: the person tagged it
+   * there, and it never wrote there and owns none of the person's messages.
+   * Its reads must not count as "the agent read it" (`markAgentChecked`,
+   * `markAcksSeen`): that would settle a plain reply still queued for the
+   * thread's owner, which a tagged agent told to read the thread first would
+   * otherwise swallow. Once it writes in the thread it is a participant.
+   */
+  isTaggedGuest(threadId: string, session: string | null): boolean {
+    if (!session) return false;
+    let tagged = false;
+    for (const message of this.threadMessages(threadId)) {
+      if (message.author.kind === "agent") {
+        if (message.author.session === session) return false;
+        continue;
+      }
+      if (this.isOwner(message, session)) return false;
+      if (tagOf(message, session)) tagged = true;
+    }
+    return tagged;
+  }
+
+  /**
+   * The threads a person's reply tagged `session` in and that session has not
+   * taken yet (no delivery): wait_for_reply without a thread waits on them
+   * too, and read_thread lists them, wherever their project is.
+   */
+  taggedThreadsOf(session: string): string[] {
+    const out = new Set<string>();
+    for (const message of this.messages.values()) {
+      if (message.author.kind !== "person" || this.isOwner(message, session)) continue;
+      const tag = tagOf(message, session);
+      if (tag && !tag.delivery) out.add(message.thread_id);
+    }
+    return [...out];
+  }
+
+  /**
+   * Whether a person's message goes to `session`: its owner (a New message
+   * addressed to it, `to`; a reply the person sent to it because the asking
+   * session had ended, `to` on a reply; a reply to a message it sent), or a
+   * session the reply tags.
+   */
+  isFor(message: InboxMessage, session: string): boolean {
+    return this.isOwner(message, session) || tagOf(message, session) !== null;
+  }
+
+  /** Whether `session` owns a person's message: the session it goes to without any tag. */
+  isOwner(message: InboxMessage, session: string): boolean {
     if (message.to) return message.to.session === session;
     const asked = message.reply_to ? this.messages.get(message.reply_to) : undefined;
     return asked?.author.kind === "agent" && asked.author.session === session;
   }
 
   /**
-   * The agent session a person's message goes to (`isFor`'s answer): the
-   * session it is addressed to, else the session of the message it replies
-   * to; null when there is none (a reply to a message sent without a
+   * The agent session a person's message goes to without any tag (its owner):
+   * the session it is addressed to, else the session of the message it
+   * replies to; null when there is none (a reply to a message sent without a
    * session, the Inbox's own notes).
    */
   recipientOf(message: InboxMessage): { host: string | null; session: string } | null {
@@ -2828,17 +3016,70 @@ export class InboxStore {
   }
 
   /**
+   * Who a person's message goes to, the owner first and then each tagged
+   * session, each with its own delivery: the Sent row's "1 of 3 delivered".
+   * An owner that is not woken counts as delivered once an agent read the
+   * thread up to it, as before tags; a tagged session only by its own delivery.
+   */
+  recipientsOf(message: InboxMessage): InboxSentRecipient[] {
+    const out: InboxSentRecipient[] = [];
+    const owner = this.recipientOf(message);
+    if (owner) {
+      const wakes = this.wakesRecipient(message);
+      const root = this.messages.get(message.thread_id);
+      const read = !wakes && (root?.agent_checked_seq ?? 0) >= (this.messageSeq.get(message.id) ?? 0) ? (root?.agent_checked_at ?? null) : null;
+      out.push({ host: owner.host, session: owner.session, owner: true, wakes, delivered_at: message.delivery?.at ?? read });
+    }
+    for (const tag of message.tags ?? []) {
+      out.push({ host: tag.host, session: tag.session, ...(tag.name ? { name: tag.name } : {}), owner: false, wakes: tag.wakes, delivered_at: tag.delivery?.at ?? null });
+    }
+    return out;
+  }
+
+  /**
+   * The agent sessions a thread involves, in order of first appearance: the
+   * session a thread the person started is addressed to, every agent that
+   * wrote, and every session the person tagged. For the overlapping marks.
+   */
+  participantsOf(messages: readonly InboxMessage[]): InboxParticipant[] {
+    const out: InboxParticipant[] = [];
+    const add = (host: string | null, session: string | null | undefined, name?: string | null) => {
+      if (!session || out.some((p) => p.session === session)) return;
+      out.push({ host, session, ...(name ? { name } : {}) });
+    };
+    for (const message of messages) {
+      if (message.author.kind === "agent") add(message.author.host ?? null, message.author.session, message.author.name);
+      else if (message.started_by_person && message.to) add(message.to.host, message.to.session);
+      for (const tag of message.tags ?? []) add(tag.host, tag.session, tag.name);
+    }
+    return out;
+  }
+
+  /**
    * Send now: the person asks for a reply or message of theirs to be
    * delivered at once (the bridge command's `now`), into the running turn
    * when one runs. A new snapshot of the same message with `deliver_now_at`
    * (the last line wins); a second press writes nothing. Refused once
    * delivered (`already_delivered`) or for a message that goes to no
    * session (`not_addressed`). Whether that session's connection can do it
-   * is the server's check, before this is called.
+   * is the server's check, before this is called. `session` names one
+   * recipient (a tagged session's own line); absent, the owner.
    */
-  requestDeliverNow(messageId: string): InboxMessage {
+  requestDeliverNow(messageId: string, session?: string | null): InboxMessage {
     const message = this.messages.get(messageId);
     if (!message) throw new InboxError("message_not_found", `No message ${messageId}.`);
+    const tag = session && !this.isOwner(message, session) ? tagOf(message, session) : null;
+    if (session && !tag && !this.isOwner(message, session)) {
+      throw new InboxError("not_addressed", "That session is not one this message goes to.");
+    }
+    if (tag) {
+      if (tag.delivery) throw new InboxError("already_delivered", "That session already took this.", { delivery: tag.delivery });
+      if (tag.deliver_now_at) return message;
+      const at = this.stamp();
+      const next: InboxMessage = { ...message, tags: message.tags!.map((t) => (t.session === tag.session ? { ...t, deliver_now_at: at } : t)) };
+      this.appendMessage(next, at);
+      return next;
+    }
     if (!this.recipientOf(message)) {
       throw new InboxError("not_addressed", "Only your reply or message to an agent session can be sent now.");
     }
@@ -2854,13 +3095,20 @@ export class InboxStore {
    * The session's connection could not put a Send now reply into the running
    * turn (the engine refused it): the mark goes, so the window reads it as
    * queued again and the reply waits for idle as before. Only the session it
-   * goes to may say so; a delivered reply or one without the mark is left as
-   * it is.
+   * goes to may say so, for its own mark; a delivered reply or one without the
+   * mark is left as it is.
    */
   clearDeliverNow(messageId: string, session: string): InboxMessage {
     const message = this.messages.get(messageId);
     if (!message) throw new InboxError("message_not_found", `No message ${messageId}.`);
     if (!this.isFor(message, session)) throw new InboxError("validation_error", "session: this message goes to another session.", { field: "session" });
+    if (!this.isOwner(message, session)) {
+      const tag = tagOf(message, session)!;
+      if (tag.delivery || !tag.deliver_now_at) return message;
+      const at = this.stamp();
+      this.appendMessage({ ...message, tags: message.tags!.map((t) => (t.session === session ? { ...t, deliver_now_at: null } : t)) }, at);
+      return this.messages.get(messageId)!;
+    }
     if (message.delivery || !message.deliver_now_at) return message;
     const at = this.stamp();
     const next: InboxMessage = { ...message, deliver_now_at: null };
@@ -3033,6 +3281,22 @@ export class InboxStore {
     const next: InboxMessage = { ...message, to: { host: to.host, session: to.session } };
     this.appendMessage(next, at);
     return next;
+  }
+
+  /**
+   * Each agent session's latest message (any project): who it is (host, the
+   * name it gave), whether its connection wakes it (`wakes`), where and when
+   * it last wrote. Tagging lists the agents that read the Inbox only from it.
+   */
+  latestAgentMessages(): Map<string, InboxMessage> {
+    const latest = new Map<string, { message: InboxMessage; seq: number }>();
+    for (const message of this.messages.values()) {
+      if (message.author.kind !== "agent" || !message.author.session) continue;
+      const seq = this.messageSeq.get(message.id) ?? 0;
+      const known = latest.get(message.author.session);
+      if (!known || known.seq < seq) latest.set(message.author.session, { message, seq });
+    }
+    return new Map([...latest].map(([session, { message }]) => [session, message]));
   }
 
   /** The thread each agent session last wrote in (any project): compose's "Last: <subject>". */

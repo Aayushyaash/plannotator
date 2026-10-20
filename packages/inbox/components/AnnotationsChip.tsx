@@ -30,6 +30,10 @@ export function AnnotationsChip({ records, attachments, onEdit, onRemove, onOpen
   const [busy, setBusy] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
+  // Read at the key press, not from the render that bound the listener: an Escape that lands right after a
+  // Save (before the effect re-binds) must close the list, not "close" an edit that already ended.
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
   useEffect(() => {
     if (!open) return;
     const onDown = (event: MouseEvent) => {
@@ -38,8 +42,10 @@ export function AnnotationsChip({ records, attachments, onEdit, onRemove, onOpen
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       event.stopPropagation();
-      if (editing) setEditing(null);
-      else setOpen(false);
+      if (editingRef.current) {
+        editingRef.current = null;
+        setEditing(null);
+      } else setOpen(false);
     };
     window.addEventListener('mousedown', onDown);
     window.addEventListener('keydown', onKey, true);
@@ -47,7 +53,7 @@ export function AnnotationsChip({ records, attachments, onEdit, onRemove, onOpen
       window.removeEventListener('mousedown', onDown);
       window.removeEventListener('keydown', onKey, true);
     };
-  }, [open, editing]);
+  }, [open]);
 
   useEffect(() => {
     if (records.length === 0) setOpen(false);

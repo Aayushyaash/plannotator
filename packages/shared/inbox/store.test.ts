@@ -99,8 +99,10 @@ type Op =
   | { op: "reply"; target: number; body: string }
   | { op: "pick"; target: number; choice: number; question?: number }
   // The person's Send: the message's picks and words; `skip` is the Send that skips (false: Keep open).
-  | { op: "personSend"; target: number; key: string; words: string; skip?: boolean }
+  | { op: "personSend"; target: number; key: string; words: string; skip?: boolean; tag?: string | null }
   | { op: "resolve"; target: number; resolved: boolean }
+  // A tagged session's connection delivered what the person tagged it in, in the thread (bridge `delivered`).
+  | { op: "tagDeliver"; target: number; session: string }
   | { op: "supersede"; target: number; whole: boolean; body: string }
   // The person opened the thread (POST /api/inbox/threads/:id/seen). `through`
   // (an index like `target`): the look stops at that agent message's seq
@@ -126,8 +128,17 @@ const opArb: fc.Arbitrary<Op> = fc.oneof(
   fc.record({ op: fc.constant("send" as const), root: fc.nat(2), body: bodyArb, key: fc.option(fc.constantFrom("a", "b", "c"), { nil: null }) }),
   fc.record({ op: fc.constant("reply" as const), target: fc.nat(), body: bodyArb }),
   fc.record({ op: fc.constant("pick" as const), target: fc.nat(), choice: fc.nat(3) }),
-  fc.record({ op: fc.constant("personSend" as const), target: fc.nat(), key: fc.constantFrom("s1", "s2"), words: fc.constantFrom("", "ok", "go ahead"), skip: fc.boolean() }),
+  fc.record({
+    op: fc.constant("personSend" as const),
+    target: fc.nat(),
+    key: fc.constantFrom("s1", "s2"),
+    words: fc.constantFrom("", "ok", "go ahead"),
+    skip: fc.boolean(),
+    // Tags (approval "inbox-tag-agents"): another session, or the owner itself (dropped).
+    tag: fc.constantFrom(null, null, "ses_t1", "ses_t2", "ses_x"),
+  }),
   fc.record({ op: fc.constant("resolve" as const), target: fc.nat(), resolved: fc.boolean() }),
+  fc.record({ op: fc.constant("tagDeliver" as const), target: fc.nat(), session: fc.constantFrom("ses_t1", "ses_t2") }),
   // An agent replaces an earlier question (or a whole message's), replying in its thread.
   fc.record({ op: fc.constant("supersede" as const), target: fc.nat(), whole: fc.boolean(), body: bodyArb }),
   fc.record({ op: fc.constant("seen" as const), target: fc.nat() }),
@@ -209,6 +220,7 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
           idempotency_key: op.key,
           questions: picked.map((q) => ({ key: q.key, revision: q.revision })),
           skip_unanswered: op.skip === true,
+          ...(op.tag ? { tags: [{ host: "test", session: op.tag, wakes: op.tag !== "ses_t2" }] } : {}),
         });
         if (result.replayed) return "replayed";
         return "ok";
@@ -217,6 +229,14 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
         if (!target) return "noop";
         store.resolveThread(target, op.resolved);
         return "ok";
+      }
+      case "tagDeliver": {
+        if (!target) return "noop";
+        const waiting = store
+          .thread(threadOf(target))!
+          .messages.filter((m) => m.author.kind === "person" && m.tags?.some((t) => t.session === op.session && !t.delivery));
+        for (const message of waiting) store.recordDelivery(message.id, { host: "test", session: op.session });
+        return waiting.length > 0 ? "ok" : "noop";
       }
       case "supersede": {
         if (!target) return "noop";
@@ -288,6 +308,39 @@ describe("InboxStore invariants", () => {
         expect(reopened.changesSince(0)).toEqual(store.changesSince(0));
       }),
       { numRuns: 60 },
+    );
+  });
+
+  test("a reply that tags agents is settled for each recipient only by its own delivery: no agent's read, and no other recipient's delivery, moves it", () => {
+    fc.assert(
+      fc.property(fc.array(opArb, { maxLength: 40 }), (ops) => {
+        const dir = dataDir();
+        const store = InboxStore.open(dir);
+        const ids: string[] = [];
+        for (const op of ops) run(store, op, ids);
+        for (const session of ["ses_x", "ses_t1", "ses_t2"]) {
+          const pending = new Set(store.pendingReplies(session).map((m) => m.id));
+          for (const id of ids) {
+            for (const message of store.thread(store.message(id)!.thread_id)!.messages) {
+              if (message.author.kind !== "person" || !message.tags?.length) continue;
+              const stored = store.message(message.id)!;
+              // The owner never appears among its own tags.
+              expect(stored.tags!.some((t) => store.isOwner(stored, t.session))).toBe(false);
+              if (store.isOwner(stored, session)) expect(pending.has(stored.id)).toBe(!stored.delivery);
+              const tag = stored.tags!.find((t) => t.session === session);
+              if (tag && !store.isOwner(stored, session)) expect(pending.has(stored.id)).toBe(!tag.delivery);
+            }
+          }
+          // A connection that does not understand tags is handed only what it owns.
+          for (const message of store.pendingReplies(session, { tags: false })) expect(store.isOwner(message, session)).toBe(true);
+        }
+        // And it survives a reopen exactly.
+        const reopened = InboxStore.open(dir);
+        for (const session of ["ses_x", "ses_t1", "ses_t2"]) {
+          expect(reopened.pendingReplies(session).map((m) => m.id)).toEqual(store.pendingReplies(session).map((m) => m.id));
+        }
+      }),
+      { numRuns: 80 },
     );
   });
 

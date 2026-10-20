@@ -970,6 +970,8 @@ that state out of `Viewer`, exactly as with `AnnotationToolstrip`'s
 
 ### 3. `CommentPopover` `mentionSource` — an `@` mention source for the composer
 
+> **Agent tags (unreleased, after 0.53.0; opt-in, byte-identical when absent):** `MentionSource.kinds?: readonly ('user' | 'agent')[]` (default `['user']`) is the kinds `mentionMatches` offers; `MentionSource.matchDetail?: boolean` (default `true`) whether a query also matches `detail`; `MentionPerson.group?: string` makes `MentionPicker` draw each run of one group as `role="group"` (`data-mention-group`) labelled by its heading (`data-mention-group-heading`), the option ids unchanged (`<id>-option-<flat index>`); `MentionSource.renderNotice?: (tagged: readonly MentionPerson[]) => ReactNode` is drawn under the composer field in both `CommentPopover` layouts. The Plannotator Inbox uses all four to tag agent sessions in a file comment. `mentionGroups(people)` (`components/MentionPicker`) is the run splitter, exported for a host that draws its own grouped list.
+
 > **0.43.2 additions (opt-in, byte-identical when absent):** `MentionSource.heading?: string | null` draws one non-selectable heading row (`data-mention-heading`, e.g. "People in this workspace") above the list; `MentionPerson.avatar?: { url?, initials?, tint? }` draws an avatar (`data-mention-avatar="image" | "initials"`) before the label — an `<img>` when `url` is set, else `initials` (defaulting to the label's first letter) on a disc tinted with `tint` (any CSS color; absent means the muted surface). Neither the grammar, the keyboard state machine, `onMentionsChange`, `onPickBlocked` nor `Annotation.mentions` changes.
 
 ```ts

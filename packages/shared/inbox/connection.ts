@@ -506,6 +506,69 @@ export interface InboxReplyCommand {
    * Absent on every other command.
    */
   ack_of?: string
+  /**
+   * On a reply handed to a session the person tagged with `@` that does not
+   * own the thread (approval "inbox-tag-agents"): the owning session's agent,
+   * named from its host (`Claude Code`). The wake takes
+   * INBOX_TAGGED_INSTRUCTION and `inboxTaggedLine` instead of the reply's
+   * instruction: it reads the thread first and answers only what is addressed
+   * to it. Only handed to a connection whose poll said it understands tags
+   * (`INBOX_TAGS_POLL_FIELD`), so an older one never words it as a reply to
+   * it. Absent on every other command.
+   */
+  tagged?: { owner: string }
+  /**
+   * On a reply that tags other sessions, handed to its owner: those sessions'
+   * agents, named from their hosts. The wake adds `inboxAlsoTaggedLine`. An
+   * older connection ignores it, and its wake ("the person replied to you")
+   * stays true. Absent on every other command.
+   */
+  also_tagged?: string[]
+}
+
+/**
+ * The poll field (`true`) by which a connection says it understands a reply
+ * it was tagged in (`tagged` on a command): only such a session can be tagged,
+ * and only it is handed what it was tagged in. An older connection never sends
+ * it; the window then says to update Plannotator to tag that session.
+ */
+export const INBOX_TAGS_POLL_FIELD = 'tags'
+
+/**
+ * The fixed second line of the wake of a session the person tagged in a
+ * thread another session owns: not a reply to anything it asked.
+ */
+export const INBOX_TAGGED_INSTRUCTION =
+  "The person tagged you in a Plannotator Inbox thread that another session owns. Their reply follows as they wrote it; parts of it may be meant for the other session, not for you."
+
+/**
+ * The line under INBOX_TAGGED_INSTRUCTION: whose thread it is, read it first,
+ * and answer only your part, in the thread.
+ */
+export function inboxTaggedLine(owner: string, id: string): string {
+  return `The thread belongs to another session (${owner}); you have not seen it. Read it first with read_thread (message_id ${id}). Answer only what is addressed to you, in the same thread: plannotator_inbox send_message with reply_to ${id}.`
+}
+
+/** The line under the instruction on the owner's wake of a reply that tags other sessions. */
+export function inboxAlsoTaggedLine(names: readonly string[]): string {
+  const list = names.length <= 1 ? (names[0] ?? 'another session') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+  return `This reply also tags ${list} (other sessions); each gets it too. Leave what is addressed to them to them.`
+}
+
+/**
+ * The only agent names a wake line may carry about ANOTHER agent (the owner
+ * a tagged session is told about, the sessions also tagged, the session that
+ * asked a redirected reply): the hosts' own names. An agent chooses its own
+ * host string, and these lines go into another session's prompt, so any
+ * other value reads as "another agent" (`agent` in the redirected line).
+ */
+export const INBOX_WAKE_AGENT_NAMES: readonly string[] = ['Claude Code', 'Pi', 'OpenCode', 'Codex', 'Cursor']
+
+/** An agent name a wake line carries: one of INBOX_WAKE_AGENT_NAMES (spacing folded), else '' (the caller says "another agent"). */
+function wakeName(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const name = value.replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ').trim()
+  return INBOX_WAKE_AGENT_NAMES.includes(name) ? name : ''
 }
 
 /**
@@ -576,8 +639,8 @@ export function inboxContinuesLine(id: string): string {
 
 /**
  * The longest asking-agent name a redirected wake carries. The server names
- * it from the host (`Claude Code`), and the wake cleans and caps it again,
- * because it goes into another session's prompt.
+ * it from the host (`Claude Code`); the wake takes only a host's own name
+ * (INBOX_WAKE_AGENT_NAMES), because it goes into another session's prompt.
  */
 export const INBOX_REDIRECTED_NAME_MAX = 40
 
@@ -613,6 +676,8 @@ export function inboxWakeText(
     continues_thread?: boolean
     name_thread?: boolean
     ack_of?: string
+    tagged?: { owner?: unknown } | null
+    also_tagged?: unknown
   },
 ): string {
   if (typeof command.ack_of === 'string' && command.ack_of !== '') {
@@ -620,11 +685,23 @@ export function inboxWakeText(
     return `Plannotator Inbox: ${ackSubject} (${command.id})\n${inboxAckLine(command.ack_of)}`
   }
   const subject = (command.subject ?? '').replace(/\s+/g, ' ').trim() || (command.type === 'message' ? 'a message' : 'a reply')
+  // Tagged into a thread another session owns: what it is, then read the thread first.
+  if (command.tagged && typeof command.tagged === 'object') {
+    const owner = wakeName(command.tagged.owner) || 'another agent'
+    return `Plannotator Inbox: ${subject} (${command.id})\n${INBOX_TAGGED_INSTRUCTION}\n${inboxTaggedLine(owner, command.id)}\n\n${command.body}`
+  }
+  const others = Array.isArray(command.also_tagged)
+    ? command.also_tagged
+        .filter((name) => typeof name === 'string' && name.trim() !== '')
+        .map((name) => wakeName(name) || 'another agent')
+        .slice(0, 8)
+    : []
+  const also = others.length > 0 ? `\n${inboxAlsoTaggedLine(others)}` : ''
   const instruction =
     command.type === 'message' ? (command.new_thread === true ? INBOX_NEW_THREAD_INSTRUCTION : INBOX_MESSAGE_INSTRUCTION) : INBOX_WAKE_INSTRUCTION
   const asker =
-    command.type !== 'message' && typeof command.redirected_from === 'string'
-      ? command.redirected_from.replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ').trim().slice(0, INBOX_REDIRECTED_NAME_MAX).trim()
+    command.type !== 'message' && typeof command.redirected_from === 'string' && command.redirected_from.trim() !== ''
+      ? wakeName(command.redirected_from) || 'agent'
       : ''
   const redirected = asker
     ? `\n${inboxRedirectedLine(asker, command.id)}`
@@ -632,7 +709,7 @@ export function inboxWakeText(
       ? `\n${inboxContinuesLine(command.id)}`
       : ''
   const naming = command.name_thread === true ? `\n${INBOX_NAME_THREAD_LINE}` : ''
-  return `Plannotator Inbox: ${subject} (${command.id})\n${instruction}${redirected}${naming}\n\n${command.body}`
+  return `Plannotator Inbox: ${subject} (${command.id})\n${instruction}${redirected}${also}${naming}\n\n${command.body}`
 }
 
 /**

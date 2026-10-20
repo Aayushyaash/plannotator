@@ -684,6 +684,34 @@ describe("the device door, on the binary", () => {
     expect([closed.status, ((await closed.json()) as Json).code]).toEqual([409, "annotation_closed"]);
   });
 
+  test("7.60: who can be tagged, and a reply that tags a live session, forwarded unchanged; the tagged session is handed it with the tagged wake", async () => {
+    const { token: bridgeToken } = JSON.parse(readFileSync(join(w.dataDir, "inbox", "inbox.json"), "utf8")) as { token: string };
+    const poll = async () =>
+      (await (
+        await fetch(`${base}/api/inbox/bridge/poll`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${bridgeToken}` },
+          body: JSON.stringify({ session: "pi-door", host: "pi", project_path: w.project, waitMs: 0, tags: true }),
+        })
+      ).json()) as { commands: Json[] };
+    await poll();
+    const taggable = (await (await door(`threads/${threadId}/taggable`)).json()) as Json;
+    expect(taggable.sessions.find((s: Json) => s.session === "pi-door")).toMatchObject({ kind: "live", host: "pi", taggable: true, owner: false });
+    const key = keys();
+    const sent = await door(`messages/${threadId}/reply`, { body: { idempotency_key: key, words: "@Pi take the retries.", tags: [{ host: "pi", session: "pi-door", label: "Pi" }] } });
+    expect(sent.status).toBe(200);
+    const reply = ((await sent.json()) as Json).reply;
+    expect(reply.tags).toEqual([{ host: "pi", session: "pi-door", label: "Pi", wakes: true }]);
+    const handed = (await poll()).commands.find((c) => c.id === reply.id);
+    expect(handed).toMatchObject({ tagged: { owner: "Claude Code" } });
+    // The same key again: the recorded answer, nothing new written.
+    const again = await door(`messages/${threadId}/reply`, { body: { idempotency_key: key, words: "@Pi take the retries.", tags: [{ session: "gone" }] } });
+    expect(again.headers.get("idempotent-replayed")).toBe("true");
+    // A session that is not live: refused, nothing written.
+    const gone = await door(`messages/${threadId}/reply`, { body: { idempotency_key: keys(), words: "x", tags: [{ session: "nobody" }] } });
+    expect([gone.status, ((await gone.json()) as Json).code]).toEqual([409, "session_not_live"]);
+  });
+
   test("7.12 and 7.13: resolve, then delete the thread", async () => {
     const resolved = await door(`messages/${threadId}/resolve`, { body: { idempotency_key: keys(), resolved: true } });
     expect(((await resolved.json()) as Json).thread.resolved_at).toBeTruthy();

@@ -385,6 +385,77 @@ export interface InboxMessage {
    * Absent on every other message and on older records.
    */
   ack?: InboxAck | null;
+  /**
+   * On a person's reply: the agent sessions they tagged with `@` (approval
+   * "inbox-tag-agents", Lines variant), in the order typed, never the session
+   * the reply goes to anyway (its owner, `InboxStore.recipientOf`). ONE
+   * message, handed to its owner and to every tagged session; each records
+   * its own delivery in its entry, so each gets its own line and Send now.
+   * A message with tags is settled for each recipient only by that
+   * recipient's own delivery or its own wait_for_reply, never by another
+   * agent's read. Absent on every other message and on older records.
+   */
+  tags?: InboxTag[];
+}
+
+/**
+ * One agent session a person's reply tags (`InboxMessage.tags`). The last
+ * line of the message wins, as for every record: a delivery, a Send now and
+ * a read are new snapshots of the whole message.
+ */
+export interface InboxTag {
+  /** The connection's host (`claude-code`, `pi`); null for an MCP agent that never named one. */
+  host: string | null;
+  session: string;
+  /** The name an MCP agent gave itself, for the person's view only; null otherwise. */
+  name?: string | null;
+  /**
+   * The readable label the person picked, as it reads in their text after
+   * `@` ("Pi", "Claude Code (another session)"): the sent message paints that
+   * token and names the session's line with it. Absent from an older window.
+   */
+  label?: string | null;
+  /**
+   * Its connection wakes it (the Claude Code mod, Pi, OpenCode 2, with the
+   * tag capability): the reply arrives as a turn. False: an agent that reads
+   * the Inbox only (MCP, OpenCode 1); it sees the tag the next time it reads
+   * the thread or waits for a reply.
+   */
+  wakes: boolean;
+  /** It reached the session (its connection delivered it, or its own wait_for_reply returned it). */
+  delivery?: InboxDelivery | null;
+  /** The person pressed Send now for this session. */
+  deliver_now_at?: string | null;
+  /** A session that is not woken read the thread with read_thread after the tag (its own read only). */
+  read_at?: string | null;
+}
+
+/** The most sessions one reply may tag. */
+export const INBOX_TAGS_MAX = 8;
+
+/**
+ * Who a person's last message went to, for the Sent row (`InboxListRow.sent.recipients`):
+ * the owner first, then the tagged sessions in the order typed.
+ */
+export interface InboxSentRecipient {
+  host: string | null;
+  session: string;
+  name?: string | null;
+  owner: boolean;
+  wakes: boolean;
+  /** It reached the session; null while it waits. */
+  delivered_at: string | null;
+}
+
+/**
+ * Who a thread involves, for the overlapping marks on the row and the thread
+ * head: the distinct agent sessions that wrote in it or were tagged in it,
+ * the thread's first agent first. `name` is an MCP agent's own name.
+ */
+export interface InboxParticipant {
+  host: string | null;
+  session: string;
+  name?: string | null;
 }
 
 /**
@@ -748,7 +819,20 @@ export interface InboxListRow extends InboxThreadSummary {
      * Absent from an older Inbox.
      */
     wakes?: boolean;
+    /**
+     * When the reply tags agents (`InboxMessage.tags`): every session it goes
+     * to, the owner first, each with its own delivery ("1 of 3 delivered").
+     * `checked_at` is then set once every recipient a connection wakes has
+     * it. Absent otherwise and from an older Inbox.
+     */
+    recipients?: InboxSentRecipient[];
   } | null;
+  /**
+   * When more than one agent session is in the thread (it wrote there or the
+   * person tagged it): all of them, the thread's first agent first, for the
+   * overlapping marks. Absent with one session and from an older Inbox.
+   */
+  participants?: InboxParticipant[];
   /**
    * When the latest agent message arrived (`last_at` also moves on the
    * person's messages and the Inbox's notes). The window's held list counts

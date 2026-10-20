@@ -572,7 +572,14 @@ export function attachmentFeedback(
   texts: ReadonlyMap<string, string>,
   projectRoot: string,
   /** The person's own messages (their images are named "image in my … message"). */
-  options: { personMessageIds?: ReadonlySet<string> } = {},
+  options: {
+    personMessageIds?: ReadonlySet<string>;
+    /**
+     * The names of the agents a comment tags with `@` (approval "inbox-tag-agents"): the export marks
+     * which comment carried a tag ("Tagged Pi"). Absent: tags are not named.
+     */
+    tagNames?: (ids: readonly string[]) => string[];
+  } = {},
 ): string {
   if (records.length === 0) return '';
   const messages = messageFeedback(records);
@@ -623,6 +630,19 @@ export function attachmentFeedback(
       group.annotations = [...group.annotations].sort(compareVideoTimes).map((annotation, index) => {
         const time = readInboxVideoTime(annotation);
         return { ...annotation, startOffset: index, endOffset: index, ...(time !== null ? { exportLocation: videoLocationLine(time, durationMs) } : {}) } as Annotation;
+      });
+    }
+  }
+  // A comment that tags agents says so under its heading, after a video's moment (export copies only).
+  if (options.tagNames) {
+    for (const group of groups.values()) {
+      group.annotations = group.annotations.map((annotation) => {
+        const ids = Array.isArray(annotation.mentions) ? annotation.mentions : [];
+        const names = ids.length > 0 ? options.tagNames!(ids) : [];
+        if (names.length === 0) return annotation;
+        const line = `Tagged ${names.join(', ')}: this comment sends the reply to ${names.length === 1 ? 'it' : 'them'} too.`;
+        const before = (annotation as Annotation & { exportLocation?: string }).exportLocation;
+        return { ...annotation, exportLocation: before ? `${before} · ${line}` : line } as Annotation;
       });
     }
   }

@@ -16,8 +16,8 @@ import { isAbsolute } from "node:path";
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { QUESTION_AUTHORING_GUIDE } from "@plannotator/core/question-block";
-import { INBOX_NAME_THIS_THREAD_HINT, INBOX_SECTIONS, isInboxNote, INBOX_THREAD_NAME_MAX, type InboxGuideRef, type InboxSectionId, type InboxLine, type InboxMessage, type InboxProject } from "@plannotator/core/inbox-types";
-import { INBOX_WAKES_META_KEY } from "@plannotator/shared/inbox/connection";
+import { inboxAgentName, INBOX_NAME_THIS_THREAD_HINT, INBOX_SECTIONS, isInboxNote, INBOX_THREAD_NAME_MAX, type InboxGuideRef, type InboxSectionId, type InboxLine, type InboxMessage, type InboxProject } from "@plannotator/core/inbox-types";
+import { INBOX_WAKES_META_KEY, inboxTaggedLine } from "@plannotator/shared/inbox/connection";
 import { inboxBodyForAgent } from "@plannotator/shared/inbox/uploads";
 import { bodyShowsLocalImages, captureInboxInlineImages, type InlineImageFailure } from "@plannotator/shared/inbox/inline-images";
 import { inboxMessageRemoteImageRefsInOrder } from "@plannotator/shared/inbox/message-images";
@@ -274,16 +274,29 @@ export function replyQuestions(store: InboxStore, messageId: string): { key: str
 
 function replyResult(store: InboxStore, reply: InboxMessage, base: string, caller: string | null = null): ToolResult {
   const cursor = store.messageCursor(reply.id) ?? store.cursor();
-  // A New message reached the session it was addressed to (only that session's
-  // wait returns it): delivered, so its connection does not wake it again.
-  if (reply.to) store.recordDelivery(reply.id, { host: reply.to.host, session: reply.to.session });
+  // A reply that tags agents (approval "inbox-tag-agents") reached the caller, its owner or a session it
+  // tags: delivered to that one only, so its connection does not wake it again and nobody else's copy moves.
+  const tag = caller && reply.tags?.length && !store.isOwner(reply, caller) ? (reply.tags.find((t) => t.session === caller) ?? null) : null;
+  if (caller && reply.tags?.length && store.isFor(reply, caller)) {
+    store.recordDelivery(reply.id, { host: tag?.host ?? reply.to?.host ?? store.recipientOf(reply)?.host ?? "agent", session: caller });
+  } else if (reply.to) {
+    // A New message reached the session it was addressed to (only that session's
+    // wait returns it): delivered, so its connection does not wake it again.
+    store.recordDelivery(reply.id, { host: reply.to.host, session: reply.to.session });
+  }
   // The agent now has this reply (not any later one): a Sent row moves to Quiet.
-  store.markAgentChecked(reply.thread_id, cursor);
+  // Not for a session only tagged here: its read must not settle what the owner still waits for.
+  if (!store.isTaggedGuest(reply.thread_id, caller)) store.markAgentChecked(reply.thread_id, cursor);
   const questions = reply.reply_to ? replyQuestions(store, reply.reply_to) : [];
   const subject = store.threadSubject(reply.thread_id);
   // The files the person attached are named with their paths, as the wake names them.
   const body = inboxBodyForAgent(reply);
   const naming = namingHint(store, reply.thread_id, caller);
+  const owner = tag ? store.recipientOf(reply) : null;
+  const ownerName = owner?.host ? inboxAgentName({ kind: "agent", host: owner.host, name: null }) : "another agent";
+  const lead = tag
+    ? `The person tagged you in thread ${reply.thread_id}${subject ? ` (${subject})` : ""}. ${inboxTaggedLine(ownerName, reply.id)}`
+    : `The person replied in thread ${reply.thread_id}${subject ? ` (${subject})` : ""}:`;
   const url = threadUrl(base, reply.thread_id);
   // The facts the structured content holds, in words, so the text is complete.
   const numbers = new Map(
@@ -303,13 +316,14 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string, calle
     content: [
       {
         type: "text",
-        text: `The person replied in thread ${reply.thread_id}${subject ? ` (${subject})` : ""}:\n\n${body}\n\n[${facts.join(" · ")}]${naming?.line ?? ""}`,
+        text: `${lead}\n\n${body}\n\n[${facts.join(" · ")}]${naming?.line ?? ""}`,
       },
     ],
     _meta: { ...TEXT_COMPLETE_META },
     structuredContent: {
       status: "replied",
       thread_id: reply.thread_id,
+      ...(tag ? { tagged_you: true } : {}),
       reply: { message_id: reply.id, reply_to: reply.reply_to, body, created_at: reply.created_at },
       questions,
       cursor,
@@ -675,6 +689,12 @@ function personFacts(store: InboxStore, threadId: string, caller: string | null)
     // The Inbox's own notes are not the person's words.
     if (message.author.kind !== "person" || isInboxNote(message)) continue;
     last = message;
+    // A reply that tags agents is unread for each recipient until its own delivery.
+    if (message.tags && message.tags.length > 0) {
+      if (caller && store.isOwner(message, caller) && !message.delivery) unread = true;
+      else if (caller && message.tags.some((t) => t.session === caller && !t.delivery)) unread = true;
+      continue;
+    }
     if (message.to) {
       if (message.to.session === caller && !message.delivery) unread = true;
       continue;
@@ -685,7 +705,7 @@ function personFacts(store: InboxStore, threadId: string, caller: string | null)
 }
 
 /** One row of read_thread's list as a line of text: every field the structured row holds. */
-export function threadRowText(row: InboxAgentThreadRow): string {
+export function threadRowText(row: InboxAgentThreadRow & { tagged_you?: true }): string {
   const parts = [`- ${row.thread_id}`];
   if (row.subject) parts.push(JSON.stringify(row.subject));
   if (row.thread_name) parts.push(`name ${JSON.stringify(row.thread_name)}`);
@@ -697,6 +717,8 @@ export function threadRowText(row: InboxAgentThreadRow): string {
   parts.push(`last ${row.last_author} ${shortTime(row.last_at)}`);
   if (row.last_person_message_id && row.last_person_at) parts.push(`person's last ${row.last_person_message_id} ${shortTime(row.last_person_at)}`);
   if (row.unread) parts.push("unread: the person wrote something you have not read");
+  // The person tagged the reader in this thread (approval "inbox-tag-agents"), in any project.
+  if (row.tagged_you) parts.push("the person tagged you here");
   if (row.resolved_at) parts.push(`resolved ${shortTime(row.resolved_at)}`);
   return parts.join(" · ");
 }
@@ -788,12 +810,17 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
         if (threadId) {
           const naming = namingHint(store, threadId, input.agent_session?.trim() || null);
           const url = threadUrl(context.baseUrl(), threadId);
+          const reader = input.agent_session?.trim() || null;
+          // A session the person only tagged here reads as a guest: what the owner still waits for stays queued.
+          const guest = store.isTaggedGuest(threadId, reader);
           if (input.format === "full") {
-            store.markAgentChecked(threadId);
+            if (!guest) store.markAgentChecked(threadId);
             // The person's 👍 (settled acks) are read now too: the window says the agent saw it.
-            store.markAcksSeen(threadId);
+            if (!guest) store.markAcksSeen(threadId);
+            // An agent that is not woken read a thread it was tagged in: the window says it saw it.
+            if (reader) store.recordTagRead(threadId, reader);
             // The full records, as before the window (tests, scripts, a jq over the result).
-            const thread = store.agentThread(threadId)!;
+            const thread = store.agentThread(threadId, reader)!;
             const replies = thread.messages.filter((m) => m.author.kind === "person").length;
             return ok(
               `Thread ${threadId}${thread.subject ? ` (${thread.subject})` : ""}: ${thread.messages.length} message${thread.messages.length === 1 ? "" : "s"}, ${replies} from the person${thread.resolved_at ? ", resolved" : ""}.${naming?.line ?? ""}`,
@@ -802,8 +829,12 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
           }
           // Built first, so a refused read (a bad expand, before or after) marks nothing read.
           const { result, order, shown, readThrough } = windowedThread(store, threadId, { ...input, caller: input.agent_session?.trim() || null }, url);
-          store.markAgentChecked(threadId, readThrough);
-          store.markAcksSeen(threadId, Number.POSITIVE_INFINITY, undefined, shown);
+          if (!guest) {
+            store.markAgentChecked(threadId, readThrough);
+            store.markAcksSeen(threadId, Number.POSITIVE_INFINITY, undefined, shown);
+          }
+          // An agent that is not woken read a thread it was tagged in: the window says it saw it.
+          if (reader) store.recordTagRead(threadId, reader);
           return okComplete(windowedThreadText(result, order, naming?.line ?? ""), { ...result, ...(naming?.structured ?? {}) });
         }
         if (input.expand || input.before !== undefined || input.after !== undefined) {
@@ -815,12 +846,19 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
         const askedBy = input.asked_by ?? (session ? "me" : "anyone");
         if (askedBy === "me" && !session) throw new InboxError("validation_error", "asked_by: \"me\" needs agent_session.");
         let threads = listScopedRows(store, projectIds, askedBy === "me" ? session : null);
+        // Threads the person tagged this session in (approval "inbox-tag-agents"), in any project: listed too.
+        const tagged = session ? new Set(store.taggedThreadsOf(session)) : new Set<string>();
+        for (const id of tagged) {
+          if (threads.some((row) => row.thread_id === id)) continue;
+          const row = store.listRow(id);
+          if (row) threads = [...threads, row];
+        }
         // A thread an agent wrote in after its archive line still takes a reply: listed like an open one.
         if (!input.include_resolved) threads = threads.filter((t) => t.resolved_at === null || t.agent_after_archive === true);
         const limit = input.limit ?? 20;
         const total = threads.length;
         // One short row per thread: the window's row is the person's view (and its `ack` shows a 👍 before it settles).
-        const rows = threads.slice(0, limit).map((row) => agentThreadRow(store, row, session));
+        const rows = threads.slice(0, limit).map((row) => ({ ...agentThreadRow(store, row, session), ...(tagged.has(row.thread_id) ? { tagged_you: true as const } : {}) }));
         const head = `${total} thread${total === 1 ? "" : "s"} in ${project.name}${total > limit ? `, showing ${limit}` : ""}.`;
         return okComplete(rows.length > 0 ? `${head}\n${rows.map(threadRowText).join("\n")}` : head, {
           project: { id: project.id, name: project.name, root: project.root },
@@ -879,6 +917,9 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
         const release = holder ? context.presence?.hold(holder) : undefined;
         try {
           const single = threadOf(store, input);
+          const caller = input.agent_session?.trim() || null;
+          // The threads the person tagged the caller in (until it took that reply), read once for the call.
+          const taggedThreads = new Set(caller ? store.taggedThreadsOf(caller) : []);
           let threadIds: string[];
           if (single) {
             threadIds = [single];
@@ -889,12 +930,26 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
             threadIds = listScopedRows(store, projectIds, session)
               .filter((t) => t.resolved_at === null || t.agent_after_archive === true)
               .map((t) => t.thread_id);
+            // A thread the person tagged this session in, wherever it is, until it took that reply.
+            for (const id of taggedThreads) if (!threadIds.includes(id)) threadIds.push(id);
           }
-          const caller = input.agent_session?.trim() || null;
           const thresholds = new Map(threadIds.map((id) => [id, input.cursor ?? lastAgentCursor(store, id, caller)]));
           // A New message (step 8) belongs to the session the person picked: it
           // never answers another session's wait.
-          const forCaller = (message: InboxMessage) => !message.to || message.to.session === caller;
+          // A thread the caller never wrote in but was tagged in (approval "inbox-tag-agents"): only what
+          // is addressed to it answers its wait, never the person's earlier words to another session.
+          const taggedOnly = new Set(
+            caller
+              ? threadIds.filter(
+                  (id) =>
+                    taggedThreads.has(id) && !(store.thread(id)?.messages ?? []).some((m) => m.author.kind === "agent" && m.author.session === caller),
+                )
+              : [],
+          );
+          const forCaller = (message: InboxMessage) => {
+            if (caller && (taggedOnly.has(message.thread_id) || (message.tags?.length ?? 0) > 0)) return store.isFor(message, caller);
+            return !message.to || message.to.session === caller;
+          };
 
           const findExisting = (): InboxMessage | null => {
             let best: { message: InboxMessage; seq: number } | null = null;

@@ -11,6 +11,7 @@
  * Nothing here touches the DOM, fetches, or persists. A composer with no
  * `mentionSource` never calls any of it.
  */
+import type { ReactNode } from 'react';
 
 /** One pickable identity, supplied by the host. */
 export interface MentionPerson {
@@ -32,6 +33,13 @@ export interface MentionPerson {
    * supplied `onPickBlocked` (see `MentionSource`).
    */
   readonly canOpen: boolean;
+  /**
+   * Optional group heading: consecutive people with the same
+   * `group` are drawn under one heading, as a `role="group"` labelled by it
+   * (the Inbox groups agents by kind). Absent on every person → the flat
+   * list, exactly as before.
+   */
+  readonly group?: string;
 }
 
 /** The opt-in `@` mention source for `CommentPopover`'s composer. */
@@ -61,6 +69,24 @@ export interface MentionSource {
   readonly tokenClassName?: string;
   /** Fires on every text change with the ids whose token still survives in the body. */
   readonly onMentionsChange?: (ids: readonly string[]) => void;
+  /**
+   * Which kinds of people this composer offers. Absent → users only,
+   * as before (an agent is not taggable in a host's comments by default). A
+   * host whose agents can be tagged (the Inbox) passes `['agent']` or both.
+   */
+  readonly kinds?: readonly MentionPerson['kind'][];
+  /**
+   * Whether a query also matches the `detail` line. Absent → true, as
+   * before. A host whose detail is incidental (the Inbox's "billing-api ·
+   * idle") passes false, so `@p` finds Pi, not every row with a "p" in it.
+   */
+  readonly matchDetail?: boolean;
+  /**
+   * Optional line drawn under the composer field, from the people
+   * the draft still tags: a host's "Goes to …" and heads-up. Absent → nothing
+   * is drawn, as before.
+   */
+  readonly renderNotice?: (tagged: readonly MentionPerson[]) => ReactNode;
   /**
    * A `canOpen: false` person was picked. When supplied, NOTHING is inserted
    * and the host shows its own no-access affordance. When absent, such a
@@ -115,24 +141,27 @@ export function mentionTrigger(text: string, caret: number): MentionTrigger | nu
 }
 
 /**
- * The people this trigger offers: users only (an agent is not taggable in a
- * comment), never one already tagged in this draft, de-duplicated by id, and
- * filtered on label or detail once a query character exists.
+ * The people this trigger offers: users only by default (an agent is not
+ * taggable in a comment unless the host says so with `kinds`), never one
+ * already tagged in this draft, de-duplicated by id, and filtered on label or
+ * detail once a query character exists.
  */
 export function mentionMatches(
   people: readonly MentionPerson[],
   trigger: MentionTrigger,
   alreadyTagged: ReadonlySet<string>,
+  kinds: readonly MentionPerson['kind'][] = ['user'],
+  matchDetail = true,
 ): readonly MentionPerson[] {
   const seen = new Set<string>();
   return people.filter((person) => {
-    if (person.kind !== 'user') return false;
+    if (!kinds.includes(person.kind)) return false;
     if (alreadyTagged.has(person.id) || seen.has(person.id)) return false;
     seen.add(person.id);
     if (trigger.query === '') return true;
     return (
       person.label.toLowerCase().includes(trigger.query) ||
-      (person.detail ?? '').toLowerCase().includes(trigger.query)
+      (matchDetail && (person.detail ?? '').toLowerCase().includes(trigger.query))
     );
   });
 }

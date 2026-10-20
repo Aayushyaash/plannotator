@@ -111,8 +111,17 @@ export interface AgentMessage {
   attachments?: { name: string; kind: string; size: number; path: string }[];
   ack?: { label: string; at: string };
   guide?: { title: string };
-  /** A person's message addressed to one agent session (a New message, or a reply sent to another session because the asker ended). */
+  /** A person's message addressed to one agent session (a New message, or a reply sent to another session because the asker ended); on a reply that tags agents, its owner. */
   to?: AgentAddressee;
+  /** On a person's reply that tags agents (approval "inbox-tag-agents"): the sessions it tags, and whether one is the reader (`you`). */
+  tagged?: AgentTagged[];
+}
+
+/** One agent session a person's reply tags, as an agent reads it. */
+export interface AgentTagged {
+  agent: string;
+  session: string;
+  you: boolean;
 }
 
 /** Who a person's message is for: the session's host and id, and whether that is the reader (`you`). */
@@ -136,6 +145,7 @@ export interface AgentMessageLine {
   guide?: string;
   ack?: true;
   to?: AgentAddressee;
+  tagged?: AgentTagged[];
 }
 
 export interface ThreadReadInput {
@@ -231,6 +241,25 @@ function authorName(author: AgentAuthor): string {
 function addresseeWords(to: AgentAddressee | undefined): string | null {
   if (!to) return null;
   return to.you ? "to you" : `to another session (${INBOX_HOST_NAMES[to.host] ?? to.host} ${to.session})`;
+}
+
+/** `tagged you, Pi (pi-0193)`: the sessions a person's reply tags, the reader first as `you`. */
+function taggedWords(tagged: readonly AgentTagged[] | undefined): string | null {
+  if (!tagged?.length) return null;
+  const you = tagged.filter((t) => t.you);
+  const others = tagged.filter((t) => !t.you).map((t) => `${t.agent} (${t.session})`);
+  return `tagged ${[...(you.length > 0 ? ["you"] : []), ...others].join(", ")}`;
+}
+
+/** The tags a wire message carries as `store.agentThread` writes them (`tagged`), with the reader marked. */
+function taggedOf(message: InboxMessageWire, caller: string | null): AgentTagged[] | undefined {
+  const tagged = (message as { tagged?: unknown }).tagged;
+  if (!Array.isArray(tagged) || tagged.length === 0) return undefined;
+  return tagged.flatMap((t) =>
+    t && typeof t === "object" && typeof (t as { session?: unknown }).session === "string"
+      ? [{ agent: String((t as { agent?: unknown }).agent ?? "An agent"), session: (t as { session: string }).session, you: !!caller && (t as { session: string }).session === caller }]
+      : [],
+  );
 }
 
 export function agentAnswer(answer: QuestionAnswer | null | undefined): AgentAnswer | undefined {
@@ -381,6 +410,7 @@ export function agentMessage(message: InboxMessageWire, form: AgentMessageForm =
     ...(ack ? { ack: { label: ack.label, at: ack.at } } : {}),
     ...(message.guide ? { guide: { title: message.guide.title } } : {}),
     ...(message.to ? { to: addressee(message, caller) } : {}),
+    ...(taggedOf(message, caller) ? { tagged: taggedOf(message, caller) } : {}),
   };
 }
 
@@ -407,6 +437,7 @@ export function agentMessageLine(message: InboxMessageWire, caller: string | nul
     ...(message.guide ? { guide: message.guide.title } : {}),
     ...(message.ack ? { ack: true as const } : {}),
     ...(message.to ? { to: addressee(message, caller) } : {}),
+    ...(taggedOf(message, caller) ? { tagged: taggedOf(message, caller) } : {}),
   };
 }
 
@@ -430,9 +461,16 @@ export function windowedThread(
   input: ThreadReadInput,
   url: string,
 ): { result: ThreadWindowResult; order: string[]; shown: Set<string>; readThrough: number } {
-  const thread = store.agentThread(threadId);
+  // With the reader, so a reply that tags it reads `tagged_you` (approval "inbox-tag-agents").
+  const thread = store.agentThread(threadId, input.caller ?? null);
   if (!thread) throw new InboxError("thread_not_found", `No thread ${threadId}.`);
-  const all = thread.messages;
+  // A reply that tags agents names its owner as `to` (the session it goes to anyway), so the transcript says who it is for.
+  const all = thread.messages.map((message) => {
+    if (message.to || !(message as { tagged?: unknown }).tagged) return message;
+    const stored = store.message(message.id);
+    const owner = stored ? store.recipientOf(stored) : null;
+    return owner ? { ...message, to: { host: owner.host ?? "agent", session: owner.session } } : message;
+  });
   const ids = new Set(all.map((m) => m.id));
   const seq = new Map(all.map((m) => [m.id, store.messageCursor(m.id) ?? 0]));
   const limit = input.limit ?? INBOX_THREAD_WINDOW;
@@ -584,6 +622,8 @@ export function messageLineText(line: AgentMessageLine, context: TranscriptConte
   const parts = [`- ${line.id}`, authorName(line.author), ...whenAndWhat(line, context)];
   const to = addresseeWords(line.to);
   if (to) parts.push(to);
+  const tagged = taggedWords(line.tagged);
+  if (tagged) parts.push(tagged);
   parts.push(`"${line.words}" (${sizeText(line.bytes)})`);
   if (line.questions?.length) parts.push(line.questions.map((q) => questionWords(q, true)).join("; "));
   if (line.attachments?.length) parts.push(`files: ${line.attachments.join(", ")}`);
@@ -597,6 +637,8 @@ export function messageText(message: AgentMessage, context: TranscriptContext): 
   const head = [message.id, authorName(message.author), ...whenAndWhat(message, context)];
   const to = addresseeWords(message.to);
   if (to) head.push(to);
+  const tagged = taggedWords(message.tagged);
+  if (tagged) head.push(tagged);
   const lines = [`[${head.join(" · ")}]`, message.body.trimEnd()];
   if (message.questions?.length) lines.push(`Questions: ${message.questions.map((q) => questionWords(q)).join("; ")}`);
   if (message.attachments?.length) {

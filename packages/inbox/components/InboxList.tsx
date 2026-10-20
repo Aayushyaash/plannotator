@@ -3,6 +3,8 @@ import type { InboxListRow, InboxListSection } from '@plannotator/core/inbox-typ
 import { threadChipName } from '../threadChip';
 import { agentName, formatCount, questionCount, shortTime } from '../format';
 import { sentRowLine } from '../deliveryLine';
+import { sentRecipientsWords } from '../tags';
+import { TagStack } from './TagPicker';
 import { Tip } from './Tip';
 import { AuthorMark, Icon } from '../icons';
 import { ListColumnEdge } from '../shell/ListColumnEdge';
@@ -60,6 +62,12 @@ export function rowAgent(row: InboxListRow): InboxListRow['author'] {
   return row.addressee ? { kind: 'agent', host: row.addressee.host, session: row.addressee.session, name: null } : row.author;
 }
 
+/** The row's mark: the agent's, or, when several agents are in the thread, their marks overlapping (Lines). */
+function RowMark({ row }: { row: InboxListRow }) {
+  if ((row.participants?.length ?? 0) > 1) return <TagStack participants={row.participants!} />;
+  return <AuthorMark author={rowAgent(row)} />;
+}
+
 function badgeOf(row: InboxListRow): string | null {
   if (row.section === 'stopped') return 'Stopped';
   if (row.section === 'holding') return `Holds up ${row.questions.holds_up.length}`;
@@ -74,6 +82,8 @@ function badgeClass(row: InboxListRow): string {
 /** The subject cell's words: a Sent row says where its reply is (queued for a turn, or saved until the agent reads the thread). */
 function subjectOf(row: InboxListRow): string {
   // A thread the person started keeps its own subject in Sent; its count cell says whom it went to.
+  // A reply that tags agents (approval "inbox-tag-agents", Lines): how many have it, and who waits.
+  if (row.section === 'sent' && !row.addressee && row.sent?.recipients?.length) return sentRecipientsWords(row.sent.recipients);
   if (row.section === 'sent' && !row.addressee) return sentRowLine(agentName(rowAgent(row)), row.sent?.wakes);
   return row.subject ?? '(no subject)';
 }
@@ -172,7 +182,7 @@ function WideRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow; 
       {!filtered && <span>{badgeEl}</span>}
       <span className="ib-subj">
         {filtered && badgeEl}
-        <AuthorMark author={rowAgent(row)} />
+        <RowMark row={row} />
         <SubjectLine row={row} />
       </span>
       <span className={`ib-c${row.section === 'quiet' ? ' ib-qlabel' : ''}`}>{countOf(row)}</span>
@@ -233,7 +243,7 @@ function NarrowRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow
       </div>
       <div className="ib-l2">
         {badge && <span className={badgeClass(row)}>{badge}</span>}
-        <AuthorMark author={rowAgent(row)} />
+        <RowMark row={row} />
         <SubjectLine row={row} />
       </div>
     </button>
@@ -262,7 +272,7 @@ function PhoneRow({ row, filtered, lit, onOpen }: { row: InboxListRow; filtered:
       data-lit={lit ? '' : undefined}
     >
       <span className="ib-m1">
-        <AuthorMark author={rowAgent(row)} />
+        <RowMark row={row} />
         <ClipText className="ib-p" text={filtered ? agentName(rowAgent(row)) : row.project.name} />
         <span className="ib-t">{shortTime(row.last_at)}</span>
       </span>

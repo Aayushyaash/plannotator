@@ -41,6 +41,7 @@ import {
   INBOX_BRIDGE_EVENT_PATH,
   INBOX_BRIDGE_POLL_PATH,
   INBOX_SEND_NOW_POLL_FIELD,
+  INBOX_TAGS_POLL_FIELD,
   inboxToolCall,
   inboxToolCallParams,
   inboxToolResultText,
@@ -85,8 +86,14 @@ function rememberedToolsFileOf(dataDir: string): string {
   return join(dataDir, "inbox", "connection-tools.json");
 }
 
-function claimDirOf(dataDir: string, replyId: string): string {
-  return join(dataDir, "inbox", "claims", replyId);
+/**
+ * The claim folder of one delivery. A reply that tags agents goes to several
+ * sessions, which may share this data dir (two Pi sessions, Pi and OpenCode):
+ * a tagged session's claim names its session too, so each is delivered once.
+ */
+function claimDirOf(dataDir: string, replyId: string, taggedSession?: string | null): string {
+  const name = taggedSession ? `${replyId}.${taggedSession.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120)}` : replyId;
+  return join(dataDir, "inbox", "claims", name);
 }
 
 /** One session's lease on one host: which of its processes polls and delivers. */
@@ -584,6 +591,8 @@ export class InboxWake {
         started_at: this.startedAt,
         ...(this.busy === null ? {} : { busy: this.busy, idle_since: this.idleSince }),
         ...(this.steerable ? { [INBOX_SEND_NOW_POLL_FIELD]: true } : {}),
+        // Tags (approval "inbox-tag-agents"): this connection words a reply it was tagged in truthfully.
+        [INBOX_TAGS_POLL_FIELD]: true,
         // What this process loaded (additive): the Inbox says when the session runs an older one.
         ...(pluginVersion ? { plugin: { version: pluginVersion } } : {}),
       },
@@ -644,7 +653,7 @@ export class InboxWake {
     }
     // The person may have moved to another process since the last tick.
     if (this.disposed || !this.holdLease(Date.now())) return;
-    const claim = claimDirOf(this.connection.dataDir, command.id);
+    const claim = claimDirOf(this.connection.dataDir, command.id, command.tagged ? this.sessionId : null);
     try {
       mkdirSync(join(claim, ".."), { recursive: true, mode: 0o700 });
       mkdirSync(claim, { mode: 0o700 });

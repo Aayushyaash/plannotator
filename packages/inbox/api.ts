@@ -241,6 +241,36 @@ export interface LiveSessionsModel {
      */
     connection?: RecipientConnection | null;
   };
+  /**
+   * Asked for with `?recipients=a,b` (approval "inbox-tag-agents"): how each
+   * session a reply tags is connected now (null: its connection does not poll
+   * now). Absent from an older Inbox.
+   */
+  recipients?: Record<string, RecipientConnection | null>;
+}
+
+/** One session the person may tag with `@` (packages/server/inbox-tags.ts). */
+export interface TaggableSession {
+  session: string;
+  host: string | null;
+  /** `live`: its connection polls and wakes it; `mcp`: it reads the Inbox only. */
+  kind: 'live' | 'mcp';
+  name: string | null;
+  project: { id: string | null; name: string; root: string | null } | null;
+  started_at: string | null;
+  last_at: string;
+  busy: boolean | null;
+  idle_since: string | null;
+  /** False: a live session on an older Plannotator; update it to tag it. */
+  taggable: boolean;
+  owner: boolean;
+  wrote_thread: boolean;
+}
+
+export interface TaggableModel {
+  serverSession: string;
+  owner: { host: string | null; session: string } | null;
+  sessions: TaggableSession[];
 }
 
 /** A paired phone as the window lists it (adr/implementation/inbox-mobile.md, 7.36). */
@@ -530,6 +560,8 @@ export const inboxApi = {
       skip_unanswered?: boolean;
       /** Files pasted into the reply box (upload ids): attachments on this reply. */
       uploads?: string[];
+      /** The sessions the person tagged with `@` (approval "inbox-tag-agents"): each one gets this reply too. */
+      tags?: { host?: string | null; session: string; label?: string }[];
     },
   ) => post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reply`, input),
   resolve: (messageId: string, resolved: boolean) =>
@@ -616,10 +648,21 @@ export const inboxApi = {
   saveDraft: (id: string, input: { body: string; to: InboxDraft['to']; project: InboxDraft['project']; files: string[]; base: string | null; thread_name?: string }) =>
     post<{ draft: DraftView }>(`/api/inbox/drafts/${encodeURIComponent(id)}`, { ...input }),
   deleteDraft: (id: string) => post<{ ok: true; deleted: boolean }>(`/api/inbox/drafts/${encodeURIComponent(id)}/delete`, {}),
-  sessions: (threadId: string, asker?: string | null) =>
-    get<LiveSessionsModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}/sessions${asker ? `?asker=${encodeURIComponent(asker)}` : ''}`),
-  /** Send now: deliver the person's reply or message at once, into the running turn when one runs. */
-  sendNow: (messageId: string) => post<{ message: InboxMessage }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/send-now`, {}),
+  sessions: (threadId: string, asker?: string | null, recipients: readonly string[] = []) => {
+    const query = [
+      ...(asker ? [`asker=${encodeURIComponent(asker)}`] : []),
+      ...(recipients.length > 0 ? [`recipients=${recipients.map(encodeURIComponent).join(',')}`] : []),
+    ].join('&');
+    return get<LiveSessionsModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}/sessions${query ? `?${query}` : ''}`);
+  },
+  /** Who the person can tag with `@` in this thread (approval "inbox-tag-agents"). */
+  taggable: (threadId: string) => get<TaggableModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}/taggable`),
+  /**
+   * Send now: deliver the person's reply or message at once, into the running turn when one runs.
+   * `session`: one tagged session's own line (absent: the session the reply goes to).
+   */
+  sendNow: (messageId: string, session?: string | null) =>
+    post<{ message: InboxMessage }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/send-now`, session ? { session } : {}),
   newMessage: (threadId: string, input: { session: string; body: string; idempotency_key: string }) =>
     post<{ message: InboxMessage; replayed: boolean }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/message`, input),
   // Phones: pairing, the paired devices, the tailnet and Wi-Fi switches (packages/server/inbox-devices.ts).
