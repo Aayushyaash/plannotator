@@ -172,6 +172,8 @@ const SSE_HEARTBEAT_MS = 15_000;
 const DEFAULT_HEALTH_TICK_MS = 60_000;
 /** How often the sidebar's "Reload Claude Code N" is checked against the live sessions (a session restarted or went away). */
 const INBOX_RESTART_WATCH_MS = 5_000;
+/** How often the live sessions' delivery signature is compared while a window listens (`event: deliveries`). */
+const INBOX_DELIVERY_WATCH_MS = 1_000;
 /**
  * How often the Inbox checks that `inbox.json` is still there and still its
  * own (`probeInboxData`); two misses in a row end it, so an Inbox whose data
@@ -1322,6 +1324,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         const onDraft = (threadId: string) => send(`event: drafts\ndata: ${JSON.stringify({ thread_id: threadId })}\n\n`);
         if (windowId) draftListeners.add(onDraft);
         if (windowId) sendReach();
+        // A row's delivery moved with the live sessions (no store line): windows only, like `reach`.
+        const sendDeliveries = () => send(`event: deliveries\ndata: {}\n\n`);
+        if (windowId) deliveryListeners.add(sendDeliveries);
         const heartbeat = setInterval(() => send(": ping\n\n"), SSE_HEARTBEAT_MS);
         cleanup = () => {
           clearInterval(heartbeat);
@@ -1329,6 +1334,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
           statusListeners.delete(onStatus);
           stopReach();
           draftListeners.delete(onDraft);
+          deliveryListeners.delete(sendDeliveries);
           leave();
         };
         req.signal.addEventListener("abort", () => {
@@ -1557,6 +1563,22 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     for (const listener of statusListeners) listener();
   }, INBOX_RESTART_WATCH_MS);
   (restartWatch as { unref?: () => void }).unref?.();
+
+  // The list rows' delivery (approval "inbox-row-delivery"): the store reads the live sessions for it.
+  store.setDeliveryPresence({ connection: live.deliveryConnectionOf, askerLive: live.askerLive });
+  // A session's turn starting or ending, its connection going away, or an asker grace running out moves a
+  // row's delivery without writing a store line. The sessions' delivery signature is compared on a short
+  // timer, only while a window listens, and `event: deliveries` tells the windows to read the list again.
+  const deliveryListeners = new Set<() => void>();
+  let lastDeliverySignature = "";
+  const deliveryWatch = setInterval(() => {
+    if (deliveryListeners.size === 0) return;
+    const signature = live.deliverySignature();
+    if (signature === lastDeliverySignature) return;
+    lastDeliverySignature = signature;
+    for (const listener of deliveryListeners) listener();
+  }, INBOX_DELIVERY_WATCH_MS);
+  (deliveryWatch as { unref?: () => void }).unref?.();
 
   const tagsRoute = createInboxTagsRoute({ store, serverSession, live, json });
 
@@ -2278,6 +2300,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     imageCapture.stop();
     clearInterval(uploadSweep);
     clearInterval(restartWatch);
+    clearInterval(deliveryWatch);
     void mcp.close().catch(() => {});
     server.stop(true);
     // The tailnet mapping and the door listener, the Wi-Fi listener and its

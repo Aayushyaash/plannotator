@@ -7,7 +7,7 @@ import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
 import { parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 import type { InboxListRow, InboxMessageWire, InboxProjectRepo, InboxQuestion, InboxSentRecipient, InboxThread, InboxUpload } from '@plannotator/core/inbox-types';
 import type { IndexedQuestion, QuestionAnswer, QuestionStatus } from '@plannotator/core/question-block';
-import { isInboxNote, isInboxTextKind, readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachment, type InboxAttachmentState, type InboxInlineImage } from '@plannotator/core/inbox-types';
+import { inboxAskingMessage, inboxDefaultSkip, isInboxNote, isInboxTextKind, readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachment, type InboxAttachmentState, type InboxInlineImage, type InboxQuestionState } from '@plannotator/core/inbox-types';
 import type { LocalLinkResolver } from '@plannotator/ui/components/LocalLinkContext';
 import { NOT_ATTACHED_TITLE, attachmentDeepLink, attachmentDisplayPath, attachmentForLink, openAttachmentTitle, useRefRepo } from '../links';
 import { InboxApiError, inboxApi, type AttachmentsModel } from '../api';
@@ -179,12 +179,17 @@ export function skipsUnanswered(choice: SkipChoice, answersAny: boolean): boolea
   return choice === 'skip' || (choice === 'auto' && answersAny);
 }
 
+/** A wire message's question states, for the shared asking rule. */
+const questionStatesOf = (message: InboxMessageWire): InboxQuestionState[] => (message.questions ?? []).map((q) => q.state);
+
 /**
  * Whether a Send now would carry at least one answer: a saved pick not yet
  * sent, or one being saved (`pending`, keyed `<message id>/<key>`; null is a
  * pick being cleared).
  */
 export function sendAnswersAny(thread: InboxThread, pending: ReadonlyMap<string, QuestionAnswer | null> = new Map()): boolean {
+  // Nothing being saved: the shared default (core inbox-delivery), which the list row's delivery reads too.
+  if (pending.size === 0) return inboxDefaultSkip(thread.messages.filter((m) => m.author.kind === 'agent'), questionStatesOf);
   for (const m of thread.messages) {
     if (m.author.kind !== 'agent') continue;
     for (const q of m.questions ?? []) {
@@ -208,9 +213,11 @@ export function sendAnswersAny(thread: InboxThread, pending: ReadonlyMap<string,
  * nothing to send, the latest agent message's.
  */
 function askingSessionOf(thread: InboxThread, options: { skip: boolean; carries: boolean }): AskingSession | null {
-  const targets = sendTargetsOf(thread, options.skip);
-  const sending = targets.filter((t) => t.questions.length > 0 || t.skips);
-  const message = (options.carries ? targets.at(-1) : (sending.at(-1) ?? targets.at(-1)))!.message;
+  // Nothing rides on the latest message: the shared rule the list row's delivery uses too (core inbox-delivery).
+  const message = options.carries
+    ? sendTargetsOf(thread, options.skip).at(-1)!.message
+    : inboxAskingMessage(thread.messages, questionStatesOf, options.skip);
+  if (!message) return null;
   if (message.author.kind !== 'agent' || !message.author.session) return null;
   return { message, session: message.author.session, host: message.author.host ?? '', name: agentName(message.author) };
 }

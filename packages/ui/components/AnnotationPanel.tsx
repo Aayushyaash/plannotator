@@ -766,8 +766,37 @@ function formatTimestamp(ts: number): string {
   if (hours < 24) return `${hours}h`;
   if (days < 7) return `${days}d`;
 
-  return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  // An older date names its year: "Oct 20" alone reads as this October.
+  const date = new Date(ts);
+  const thisYear = date.getFullYear() === new Date(now).getFullYear();
+  return date.toLocaleDateString(
+    undefined,
+    thisYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' },
+  );
 }
+
+/**
+ * A card's "author · time" line. The author truncates (its full name in the
+ * title) while the time never shrinks, so a long name cannot push the time
+ * out; `<bdi>` keeps a right-to-left name from reordering the time around it.
+ * The text reads exactly as before: "Alice (me) · 5m".
+ */
+const CardByline: React.FC<{ author?: string; isMe: boolean; timestamp: number }> = ({ author, isMe, timestamp }) => (
+  <span data-annotation-byline="true" className="flex min-w-0 items-center text-[10px] text-muted-foreground/50">
+    {author ? (
+      <>
+        <HostTitle title={author} cut>
+          <span data-annotation-author="true" className="min-w-0 truncate">
+            <bdi>{author}</bdi>
+          </span>
+        </HostTitle>
+        {isMe ? <span data-annotation-me="true" className="shrink-0 whitespace-pre"> (me)</span> : null}
+        <span className="shrink-0 whitespace-pre"> · </span>
+      </>
+    ) : null}
+    <span data-annotation-time="true" className="shrink-0">{formatTimestamp(timestamp)}</span>
+  </span>
+);
 
 /** Pinned card for committed direct edits: +N/−M summary, expandable unified
  *  diff, and a two-step discard. Not part of the annotation timeline — edits
@@ -1056,9 +1085,7 @@ const AnnotationCard: React.FC<{
             </span>
           </HostTitle>
         )}
-        <span className="text-[10px] text-muted-foreground/50 truncate">
-          {annotation.author ? `${annotation.author}${isMe ? ' (me)' : ''} · ` : ''}{formatTimestamp(annotation.createdA)}
-        </span>
+        <CardByline author={annotation.author} isMe={isMe} timestamp={annotation.createdA} />
         {/* Host header slot (a status stamp etc.) — interactions inside it
             must not toggle card selection, exactly like the footer slot.
             Rendered under readOnly too: its contents are host-owned. */}
@@ -1103,7 +1130,7 @@ const AnnotationCard: React.FC<{
         isEditing ? (
           editComposer
         ) : (
-          <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground/90">
+          <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[13px] leading-relaxed text-foreground/90">
             {annotation.text}
           </p>
         )
@@ -1111,7 +1138,7 @@ const AnnotationCard: React.FC<{
         <>
           {/* Quote — the annotated text */}
           {parts?.quote !== false && (
-            <p className="mb-1.5 line-clamp-2 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground/80">
+            <p className="mb-1.5 line-clamp-2 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-[11px] leading-relaxed text-muted-foreground/80">
               "{annotation.originalText}"
             </p>
           )}
@@ -1122,7 +1149,7 @@ const AnnotationCard: React.FC<{
               editComposer
             ) : (
               annotation.text && (
-                <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground/90">
+                <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[13px] leading-relaxed text-foreground/90">
                   {annotation.text}
                 </p>
               )
@@ -1224,9 +1251,7 @@ const CodeAnnotationCard: React.FC<{
       {/* Header: type word + author · time + actions */}
       <div className="mb-1.5 flex items-center gap-1.5">
         <span className="text-[11px] font-medium text-primary">Code</span>
-        <span className="text-[10px] text-muted-foreground/50 truncate">
-          {annotation.author ? `${annotation.author}${isMe ? ' (me)' : ''} · ` : ''}{formatTimestamp(annotation.createdAt)}
-        </span>
+        <CardByline author={annotation.author} isMe={isMe} timestamp={annotation.createdAt} />
         {!readOnly && (
           <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100">
             {onEdit && !isEditing && (
@@ -1261,7 +1286,7 @@ const CodeAnnotationCard: React.FC<{
       </HostTitle>
 
       {annotation.originalCode && (
-        <p className="mt-1.5 line-clamp-2 whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-muted-foreground/80">
+        <p className="mt-1.5 line-clamp-2 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-[11px] leading-relaxed text-muted-foreground/80">
           {annotation.originalCode}
         </p>
       )}
@@ -1294,7 +1319,7 @@ const CodeAnnotationCard: React.FC<{
         </div>
       ) : (
         annotation.text && (
-          <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-relaxed text-foreground/90">
+          <p className="mt-1.5 whitespace-pre-wrap [overflow-wrap:anywhere] text-[13px] leading-relaxed text-foreground/90">
             {annotation.text}
           </p>
         )

@@ -1440,7 +1440,7 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
               onUnanchoredChange={(ids) => setUnanchored(new Set(ids))}
               fullViewport
               hideControls
-              maxAdditionalTargets={0}
+              // Shift-click joins more elements to one comment, as in annotate (the viewer's own cap).
               readOnly={props.readOnly}
             />
             </div>
