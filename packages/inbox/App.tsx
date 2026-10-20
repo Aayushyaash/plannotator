@@ -18,7 +18,7 @@ import { configurePlannotatorUI } from '@plannotator/ui/configure';
 import { selectionToolbarShowing } from './selectionToolbar';
 import { storage } from '@plannotator/ui/utils/storage';
 import type { SkillCatalogEntry } from '@plannotator/ui/utils/skillReferences';
-import type { InboxHealth, InboxListRow, InboxListSection, InboxQuestion, InboxThread } from '@plannotator/core/inbox-types';
+import type { InboxHealth, InboxListRow, InboxListSection, InboxQuestion, InboxReplyDraftRow, InboxThread } from '@plannotator/core/inbox-types';
 import {
   InboxApiError,
   inboxApi,
@@ -442,6 +442,8 @@ function Inbox() {
   /** Where focus goes once compose closes or a draft row goes: the opener, else `focusFallback(next)`. */
   const pendingFocus = useRef<{ opener: HTMLElement | null; next: string | null } | null>(null);
   const [drafts, setDrafts] = useState<DraftView[] | null>(null);
+  /** Open threads holding unsent work (approval "inbox-reply-drafts"): the Drafts row counts them, its page lists them. */
+  const [replyDrafts, setReplyDrafts] = useState<InboxReplyDraftRow[]>([]);
   const [draftsError, setDraftsError] = useState<string | null>(null);
   const [lastSent, setLastSent] = useState<string | null>(() => storage.getItem(COMPOSE_LAST_COOKIE));
   /** The one toast (Mark read, Archive) with its Undo, and what the live region last said. */
@@ -681,6 +683,7 @@ function Inbox() {
     try {
       const next = await inboxApi.drafts();
       setDrafts(next.drafts);
+      setReplyDrafts(next.replies ?? []);
       setDraftsError(null);
     } catch (cause) {
       setDraftsError(cause instanceof Error ? cause.message : String(cause));
@@ -764,6 +767,16 @@ function Inbox() {
             void refreshList(false).then((next) => next && flushNotifications(next));
             const open = routeRef.current.thread;
             if (open) void refreshThread(open);
+            // Picks and comments are unsent work too: the Drafts row follows them.
+            void refreshDrafts();
+          }, 80);
+        },
+        // A reply draft was saved or discarded (here or in another window): the rows' `unsent` and the Drafts row.
+        onDrafts: () => {
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => {
+            void refreshList(false);
+            void refreshDrafts();
           }, 80);
         },
         onStatus: (next, nextUpdated, nextRestart) => {
@@ -782,7 +795,7 @@ function Inbox() {
       unsubscribe();
       if (timer) clearTimeout(timer);
     };
-  }, [refreshList, refreshSettings, refreshThread, observeEvent, flushNotifications, setNotifyReach, windowReport, reportWindow]);
+  }, [refreshList, refreshSettings, refreshThread, refreshDrafts, observeEvent, flushNotifications, setNotifyReach, windowReport, reportWindow]);
 
   // Opening a thread: read it, record the look, and update its row in place.
   // While any thread is open the list holds still (settle.ts): the look
@@ -1959,6 +1972,8 @@ function Inbox() {
   } else if (route.page === 'drafts') {
     main = (
       <DraftsPage
+        replies={replyDrafts}
+        onOpenReply={(row) => go({ page: 'inbox', project: null, thread: row.thread_id })}
         drafts={drafts}
         error={draftsError}
         phone={phone}
@@ -2131,7 +2146,7 @@ function Inbox() {
             updated={updated}
             onSearch={(opener) => openSearch(opener)}
             onCompose={(opener) => openCompose({}, opener)}
-            draftsCount={drafts?.length ?? 0}
+            draftsCount={(drafts?.length ?? 0) + replyDrafts.length}
             onDrafts={() => go({ page: 'drafts', project: null, thread: null })}
             onInbox={() => go({ page: 'inbox', project: null, thread: null })}
             onProject={(projectId) => go({ page: 'inbox', project: projectId, thread: null })}

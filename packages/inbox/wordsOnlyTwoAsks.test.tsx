@@ -293,8 +293,10 @@ test.skipIf(!hasDom)('one session asked twice: the box cancelled and opened agai
   type(el, 'A first try.');
   act(() => button(el, 'Cancel').click());
   await settle();
-  act(() => button(el, 'Reply').click());
+  // Cancel keeps the words as a draft (approval "inbox-reply-drafts"): Edit draft brings them back.
+  act(() => button(el, 'Edit draft').click());
   await settle();
+  expect((el.querySelector('textarea') as HTMLTextAreaElement).value).toBe('A first try.');
   expect(el.querySelector('[data-skip-chip]')?.getAttribute('data-skip-chip')).toBe('keep');
   type(el, 'The second try.');
   act(() => button(el, 'Send').click());

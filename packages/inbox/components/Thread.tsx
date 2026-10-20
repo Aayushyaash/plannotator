@@ -25,6 +25,8 @@ import { PILL_BAND_PX, atEnd, followBy, lookThrough, measureFirstLines, unseenAr
 import { GuideCard } from './GuideCard';
 import { inboxMessageImageBase, inlineImageRefFromSrc, markTallImage } from '../images';
 import { reportUnsentReply } from '../unsent';
+import { useReplyDraft } from '../replyDraft';
+import { DraftHead, DraftFootNote } from './DraftLabel';
 import { canToggleRead } from '../markRead';
 import { NewMessageButton, NewMessageComposer, NewMessagePopover, hostName, useLiveSessions, type NewMessageMode } from './NewMessage';
 import { deliveryLine, restartNote, type DeliveryLine, type RecipientConnection } from '../deliveryLine';
@@ -70,7 +72,8 @@ const noop = () => {};
 const isSuperseded = (cause: unknown): boolean => cause instanceof InboxApiError && cause.code === 'question_superseded';
 const NO_ANNOTATIONS: never[] = [];
 /** An unsent pick's tag on its card (MessageBody's statusLabel). */
-const NOT_SENT_STATUS = { label: 'Not sent', tone: 'open' } as const;
+// A pick saved and not sent is part of the person's draft (approval "inbox-reply-drafts": "Draft" replaces "Not sent").
+const NOT_SENT_STATUS = { label: 'Draft', tone: 'open' } as const;
 const NO_IDS: ReadonlySet<string> = new Set();
 /** The reply box starts with no files: they come only from a paste (compose's tiles and upload path). */
 const NO_UPLOADS: InboxUpload[] = [];
@@ -491,7 +494,7 @@ export function MessageBody({
     [message.questions, readOnly],
   );
 
-  // A pick not sent yet tags its card "Not sent", not "Answered" (the footer says when it was picked);
+  // A pick not sent yet tags its card "Draft", not "Answered" (the footer says when it was picked);
   // a sent answer, and a question a Mark read closed, keep the card's own tag.
   const statusLabel = useCallback(
     (question: IndexedQuestion, status: QuestionStatus) => {
@@ -786,6 +789,17 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
 
   const [box, setBox] = useState<{ open: boolean; text: string }>({ open: false, text: '' });
   /**
+   * The reply box's words, kept per thread as a server draft (approval
+   * "inbox-reply-drafts"): saved while typing, back when the thread opens.
+   */
+  const replyDraft = useReplyDraft(thread.thread_id);
+  /** The words a Send carries: the box's, or (the box closed) those kept as its draft. */
+  const boxWords = box.open ? box.text.trim() : (replyDraft.draft?.body.trim() ?? '');
+  /** A draft put back in the box opens it without taking focus (j/k and the page keep working). */
+  const restoringRef = useRef(false);
+  /** The thread whose draft was put back already (once per visit). */
+  const restoredFor = useRef<string | null>(null);
+  /**
    * Files pasted into the reply box (the owner: "paste in images … if I'm
    * focused in a reply"): compose's tiles and upload path. They live with the
    * box: Cancel, Escape, a Send and another thread forget them.
@@ -797,6 +811,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
   const [taggedIds, setTaggedIds] = useState<readonly string[]>([]);
   const onTagsChange = useCallback((ids: readonly string[]) => setTaggedIds(ids), []);
   const closeBox = () => {
+    // Cancel and Escape keep the words as a draft (saved now); Discard drops them.
+    replyDraft.flush();
     setBox({ open: false, text: '' });
     setTaggedIds([]);
     replyFiles.reset();
@@ -1117,7 +1133,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
   // the Send actually reaches: the latest agent message's when words or
   // annotations ride on it, else the last message a pick or a skip answers.
   // Only finished uploads count: a tile still uploading or refused is not what Send carries.
-  const asking = askingSessionOf(thread, { skip: !keepOpen, carries: (box.open && box.text.trim() !== '') || records.length > 0 || replyUploads.length > 0 });
+  const asking = askingSessionOf(thread, { skip: !keepOpen, carries: boxWords !== '' || records.length > 0 || replyUploads.length > 0 });
   const askerToWatch = asking && askerCanEnd(asking) ? asking.session : null;
   // New message (record 5.x): the project's live sessions, and what the button opened.
   const { model: live, load: loadLive } = useLiveSessions(thread.thread_id, askerToWatch);
@@ -1569,13 +1585,31 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     return () => window.removeEventListener('keydown', onKey);
   }, [one, jumpNew]);
 
+  // The thread's draft, once read, goes back in the box (open, without focus), unless the person already wrote there.
   useEffect(() => {
+    if (replyDraft.loadedFor !== thread.thread_id || restoredFor.current === thread.thread_id) return;
+    restoredFor.current = thread.thread_id;
+    const kept = replyDraft.draft;
+    if (!kept) return;
+    setBox((current) => {
+      if (current.open && current.text.trim()) return current;
+      if (!current.open) restoringRef.current = true;
+      return { open: true, text: kept.body };
+    });
+  }, [replyDraft.loadedFor, replyDraft.draft, thread.thread_id]);
+
+  useEffect(() => {
+    if (restoringRef.current) {
+      restoringRef.current = false;
+      return;
+    }
     if (box.open) textRef.current?.focus();
   }, [box.open]);
 
   // The update control's restart guard: an unsent reply is the one thing a
   // restart (a page reload) would lose.
-  const unsentSubject = box.open && (box.text.trim() || replyFiles.files.length > 0) ? (thread.subject ?? 'this thread') : null;
+  // Words are kept as a draft (and sent as the page goes); only files pasted into the box are not.
+  const unsentSubject = box.open && replyFiles.files.length > 0 ? (thread.subject ?? 'this thread') : null;
   useEffect(() => {
     reportUnsentReply(unsentSubject ? { subject: unsentSubject } : null);
     return () => reportUnsentReply(null);
@@ -1639,7 +1673,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
       return at ? `Sent ${whenTime(at)}` : 'Sent';
     }
     if (q.state === 'closed' && q.set_aside_at) return `Closed unanswered when you marked it read · ${whenTime(q.set_aside_at)}`;
-    if (q.state === 'picked' && q.picked_at) return `Picked ${whenTime(q.picked_at)}, not sent`;
+    if (q.state === 'picked' && q.picked_at) return `Picked ${whenTime(q.picked_at)} · in your draft`;
     return null;
   };
 
@@ -1667,6 +1701,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
   };
   /** Picks or annotations wait for a Send. */
   const waiting = picksCount > 0 || records.length > 0;
+  /** The box is closed and its words are kept as a draft (Cancel or Escape kept them): Edit draft brings them back. */
+  const draftKept = !box.open && replyDraft.draft !== null;
   // What a Send skips: every question still open with no pick (one being
   // saved counts as picked), unless the person pressed Keep open.
   const unanswered = thread.messages.flatMap((m) =>
@@ -1684,7 +1720,9 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     setNewMessage(null);
     setRoute((current) => ({ ...current, open: false, error: null }));
     const draft = withDraft ? picked.map((q) => (q.answer ? `${q.prompt.replace(/[?.!]\s*$/, '')}: ${answerWords(q.answer)}.` : '')).filter(Boolean).join(' ') : '';
-    setBox({ open: true, text: draft });
+    // A draft's words come back as they were; picks only seed the box when there are none.
+    const kept = replyDraft.draft?.body ?? '';
+    setBox({ open: true, text: kept.trim() ? kept : draft });
     setError(null);
   };
 
@@ -1717,7 +1755,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     // The session that asked has ended and another is live: Send asks where
     // the reply goes first (the choice), and sends nothing yet.
     if (askerEnded && anyOtherLive && asking && !options.routed) {
-      const empty = picksCount === 0 && records.length === 0 && !(box.open && box.text.trim()) && replyUploads.length === 0 && !skipping;
+      const empty = picksCount === 0 && records.length === 0 && boxWords === '' && replyUploads.length === 0 && !skipping;
       if (empty) {
         setError('Write a reply or pick an answer first.');
         return;
@@ -1741,7 +1779,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     try {
       await pickChain.current;
       const current = threadRef.current;
-      const words = box.open ? box.text.trim() : '';
+      // The box's words, or (the box closed) the words kept as its draft: the foot's Send carries them too.
+      const words = boxWords;
       // A pick saved just now, or still being saved when Send was pressed, counts as an answer.
       const skip = skipsUnanswered(skipChoice, sendAnswersAny(current) || sendAnswersAny(thread, pending));
       const pendingAnnotations = records;
@@ -1805,6 +1844,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
           // The pasted files ride the reply that carries the words, as attachments.
           ...(last && uploads.length > 0 ? { uploads } : {}),
           ...(tags.length > 0 ? { tags } : {}),
+          // The reply that carries the box's words: its draft goes with the Send.
+          ...(last && words !== '' ? { clear_draft: true } : {}),
           // Only a message the ended session asked goes to the session picked;
           // an answer to another session's message still goes to that session.
           ...(to && target.message.author.kind === 'agent' && target.message.author.session === asking?.session ? { to } : {}),
@@ -1819,6 +1860,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
       const later = replyFiles.current().some((f) => !sentFiles.has(f.key));
       replyFiles.forget(sentFiles);
       setBox({ open: later, text: '' });
+      if (words !== '') replyDraft.sent();
       setTaggedIds([]);
       setFull(false);
       await onChanged();
@@ -2601,7 +2643,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
             ref={guardRef}
             questions={staleQuestions}
             thread={thread}
-            words={box.open ? box.text.trim() : ''}
+            words={boxWords}
             otherPicks={picksCount}
             annotations={records.length}
             onAnswerNew={(target) => {
@@ -2631,9 +2673,15 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
           />
         ) : box.open ? (
           <>
-            <div className="ib-reply-l">
-              Reply to {asker} in {thread.project.name}
-            </div>
+            <DraftHead
+              label={`Reply to ${asker} in ${thread.project.name}`}
+              savedAt={box.text.trim() ? (replyDraft.draft?.updated_at ?? null) : null}
+              onDiscard={() => {
+                replyDraft.discard();
+                closeBox();
+                announce('Draft discarded.');
+              }}
+            />
             {staleQuestions.length > 0 && <ChangedNotice questions={staleQuestions} thread={thread} onJump={jumpTo} />}
             <div
               className="ib-rbox"
@@ -2650,7 +2698,10 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
                 destination="your reply"
                 tags={composerTags}
                 value={box.text}
-                onChange={(text) => setBox({ open: true, text })}
+                onChange={(text) => {
+                  setBox({ open: true, text });
+                  replyDraft.save(text);
+                }}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
                     event.preventDefault();
@@ -2732,19 +2783,19 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
         ) : (
           <>
           <div className="ib-acts">
-            {waiting && <span className="ib-st">Not sent</span>}
-            {waiting && (
+            {(waiting || draftKept) && <DraftFootNote unsent={{ reply: draftKept, picks: picksCount, comments: records.length }} />}
+            {(waiting || draftKept) && (
               <button type="button" className="ib-btn ib-pri" ref={sendRef} onClick={() => void send()} disabled={sending}>
                 <Icon name="send" size={15} />
                 Send
               </button>
             )}
-            <button type="button" className="ib-btn" onClick={() => openBox(picksCount > 0)}>
-              <Icon name="reply" size={15} />
-              {waiting ? 'Edit the reply' : 'Reply'}
+            <button type="button" className="ib-btn" onClick={() => openBox(picksCount > 0)} data-edit-draft={waiting || draftKept ? '' : undefined}>
+              <Icon name={waiting || draftKept ? 'pen' : 'reply'} size={15} />
+              {waiting || draftKept ? 'Edit draft' : 'Reply'}
             </button>
             {/* 👍 Looks good beside Reply: sent to the agent after the Undo window; hidden while a question waits. */}
-            {ackOffered && !waiting && (
+            {ackOffered && !waiting && !draftKept && (
               <Tip
                 content={
                   ackOn

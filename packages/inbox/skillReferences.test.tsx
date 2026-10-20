@@ -366,9 +366,9 @@ test.skipIf(!hasDom)('a comment on an attached file: its skill rides the one blo
   // The window's own catalog is this computer's skills (the comment composers' picker reads it too).
   const { fetchSkillCatalog } = await import('@plannotator/ui/utils/skillCatalog');
   expect((await fetchSkillCatalog()).map((s) => s.name)).toEqual(['readback', 'write-better']);
-  // The comment waits to be sent: the foot offers "Edit the reply".
-  await until(() => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Edit the reply'), 'the waiting comment');
-  act(() => button(el, 'Edit the reply').click());
+  // The comment waits to be sent: the foot offers "Edit draft".
+  await until(() => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Edit draft'), 'the waiting comment');
+  act(() => button(el, 'Edit draft').click());
   await until(() => textarea(el) !== null, 'the reply box');
   await type(textarea(el), 'See my note.');
   act(() => button(el, 'Send').click());

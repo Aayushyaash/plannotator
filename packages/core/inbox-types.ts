@@ -794,10 +794,22 @@ export interface InboxListRow extends InboxThreadSummary {
   /** The thread's name (send_message's `thread`), or null for a session's default thread. */
   thread_name: string | null;
   section: InboxSectionId;
-  /** Waiting on the person or new to them: drawn bold. */
+  /**
+   * Waiting on the person or new to them: drawn bold. Not for a row in New only
+   * for the person's own unsent words or comments (`unsent`).
+   */
   unread: boolean;
   /** No question is open, some are picked and not sent: it waits only for Send. */
   answered_not_sent: boolean;
+  /**
+   * What the person has not sent in this thread yet (approval "inbox-reply-drafts"):
+   * words typed in the reply box (`reply_at`, when they were last saved; null
+   * when none), picks saved and not sent, and comments (on attached files, the
+   * guided review or the messages) waiting for a Send. Null when nothing is
+   * unsent. A thread holding any of it never sits in Quiet unless it is
+   * archived. Additive: absent from an older Inbox.
+   */
+  unsent?: InboxRowUnsent | null;
   /** When the oldest open question was asked, or null when none is open. */
   waiting_since: string | null;
   /**
@@ -1337,6 +1349,41 @@ export interface InboxDraftTo {
  * never in the event log, so never seen by agents, phones or search. A draft
  * never sends itself and is never re-addressed on its own.
  */
+/** What a list row says is not sent yet (`InboxListRow.unsent`). */
+export interface InboxRowUnsent {
+  /** When the reply box's words were last saved, or null when the thread holds no reply draft. */
+  reply_at: string | null;
+  /** Picks saved and not sent. */
+  picks: number;
+  /** Comments (on attached files, the guided review, the messages) waiting for a Send. */
+  comments: number;
+}
+
+/** The thread holds something the person has not sent: reply words, picks or comments. */
+export function inboxHasUnsent(unsent: InboxRowUnsent | null | undefined): boolean {
+  return !!unsent && (unsent.reply_at !== null || unsent.picks > 0 || unsent.comments > 0);
+}
+
+/**
+ * The words the person typed in a thread's reply box and did not send
+ * (approval "inbox-reply-drafts"): one per thread, kept outside the event log
+ * (`inbox/reply-drafts/<thread id>.json`), so agents, the MCP, phones' event
+ * stream and search never see it.
+ */
+export interface InboxReplyDraft {
+  v: 1;
+  thread_id: string;
+  body: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A row on the Drafts page's "Replies not sent" (`GET /api/inbox/drafts` `replies`). */
+export interface InboxReplyDraftRow extends InboxListRow {
+  /** The reply draft's first words (whitespace folded, at most 160 characters), or null when only picks or comments wait. */
+  reply_preview: string | null;
+}
+
 export interface InboxDraft {
   v: 1;
   id: string;

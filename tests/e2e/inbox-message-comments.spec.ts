@@ -192,7 +192,7 @@ test("a comment on words in an agent's message: toolbar, composer, highlight, ch
   await page.mouse.click(5, 5);
 
   // The reply box's chip lists them under the message.
-  await page.locator('section.ib-pane .ib-pfoot').getByRole('button', { name: /^(Reply|Edit the reply)$/ }).first().click();
+  await page.locator('section.ib-pane .ib-pfoot').getByRole('button', { name: /^(Reply|Edit draft)$/ }).first().click();
   const chip = page.locator('[data-annotations-chip]');
   await expect(chip).toHaveText('2 annotations');
   await chip.click();
@@ -287,7 +287,7 @@ test('on a phone-wide window: the same toolbar, composer, highlight and chip, in
     await shot(page, '07-phone-composer');
     await composer.press('ControlOrMeta+Enter');
     await expect(page.locator(`[data-message-id="${id}"] mark.annotation-highlight`)).toHaveText('dead-letter queue');
-    await page.locator('.ib-pfoot').getByRole('button', { name: /^(Reply|Edit the reply)$/ }).first().click();
+    await page.locator('.ib-pfoot').getByRole('button', { name: /^(Reply|Edit draft)$/ }).first().click();
     await shot(page, '08-phone-highlighted');
     await page.locator('[data-annotations-chip]').click();
     await expect(page.locator('.ib-annpop [data-annotation-row]')).toContainText('"dead-letter queue"');

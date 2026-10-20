@@ -3477,3 +3477,33 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
 .ib-tg-marks { position: relative; height: 0; z-index: 51; pointer-events: none; }
 .ib-tg-mark { position: absolute; display: inline-flex; align-items: center; justify-content: center; }
 .ib-tg-mark .ib-mk, .ib-tg-mark .ib-mk > svg, .ib-tg-mark .ib-mk > img { width: 100%; height: 100%; }
+
+/* ── Draft (approval "inbox-reply-drafts", variant Label): what the person has not sent. ──
+   The row's count slot reads "Draft · Your reply, 2 picks", the word in the accent colour (never colour
+   alone: the word says it); the reply box carries a soft pill with when it was saved and Discard; the
+   thread's foot reads "Draft · 2 picks" before Send / Edit draft. */
+.pn-inbox {
+  --ib-draft-fg: color-mix(in oklab, var(--primary) 85%, var(--foreground));
+  --ib-draft-bg: color-mix(in oklab, var(--primary) 11%, transparent);
+}
+.ib-draft-l { color: var(--muted-foreground); white-space: nowrap; }
+.ib-draft-l > b { color: var(--ib-draft-fg); font-weight: 600; }
+.ib-draft-pill { display: inline-flex; align-items: center; flex: none; height: 20px; padding: 0 8px; border-radius: 999px; background: var(--ib-draft-bg); color: var(--ib-draft-fg); font-size: var(--ib-fs-12, 12px); font-weight: 600; }
+.ib-draft-head { display: flex; align-items: center; gap: 8px; }
+/* Whom the reply goes to gives way first (cut with "…"); the pill, the time and Discard keep their place. */
+.ib-draft-for { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ib-draft-saved, .ib-draft-discard { flex: none; white-space: nowrap; }
+.ib-draft-head .ib-sp { flex: 1; }
+.ib-draft-saved { color: var(--muted-foreground); }
+.ib-draft-discard { position: relative; border: 0; background: transparent; padding: 0 2px; color: var(--muted-foreground); font: inherit; cursor: pointer; border-radius: 4px; }
+.ib-draft-discard::after { content: ''; position: absolute; inset: -8px -6px; }
+.ib-draft-discard:hover { color: var(--foreground); text-decoration: underline; }
+.ib-draft-discard:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.ib-draft-foot { display: inline-flex; align-items: center; gap: 6px; margin-right: 4px; min-width: 0; white-space: nowrap; }
+.ib-draft-foot .ib-st { margin-right: 0; }
+.ib-drafts-h { margin: 18px 0 8px; font-size: var(--ib-fs-13, 13px); font-weight: 600; color: var(--muted-foreground); }
+.ib-draft-meta .ib-draft-l { font-size: var(--ib-fs-12-5, 12.5px); }
+@media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
+  .ib-draft-discard::after { inset: -14px -8px; }
+  .ib-drafts .ib-drafts-h { margin-inline: 16px; }
+}

@@ -415,7 +415,7 @@ test('phone (WebKit, iPhone 15): an arrival under the annotations sheet is not s
     // At the end of the thread, then the sheet over it.
     const body = page.locator('section.ib-pane .ib-pbody');
     await body.evaluate((b) => (b.scrollTop = b.scrollHeight));
-    await page.locator('section.ib-pane .ib-pfoot').getByRole('button', { name: /^(Reply|Edit the reply)$/ }).tap();
+    await page.locator('section.ib-pane .ib-pfoot').getByRole('button', { name: /^(Reply|Edit draft)$/ }).tap();
     await page.locator('section.ib-pane [data-annotations-chip]').tap();
     const sheet = page.locator('.ib-annpop');
     await expect(sheet).toBeVisible();

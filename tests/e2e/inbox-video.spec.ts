@@ -251,7 +251,7 @@ test('Send carries the moment and the frame; the agent reads both', async () => 
   const page = world.page;
   await page.locator('[data-attachment-pane]').getByRole('button', { name: /^Close / }).click();
   const waiting = world.claude.waitForReply(world.threadId, 40);
-  await page.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' }).click();
+  await page.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' }).click();
   await page.getByRole('textbox', { name: 'Reply to Claude Code' }).fill('One note on the cut.');
   await page.locator('.ib-pfoot').getByRole('button', { name: 'Send' }).click();
   const reply = await waiting;
