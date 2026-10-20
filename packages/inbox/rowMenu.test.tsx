@@ -435,14 +435,16 @@ test.skipIf(!hasDom)('with a thread open: Archive from another row keeps it in p
   expect(placed()).toEqual(before);
 });
 
-/** A mouse press, as a person's: App reads its pointerdown as the last input. */
-async function press(el: HTMLElement) {
-  await act(async () => {
-    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }));
-    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
-    el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerType: 'mouse' }));
-    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
-    el.click();
+/**
+ * A mouse click, as openStaysPut.test.tsx makes one: a pointer down (the window's last input becomes a
+ * pointer), then a click that counts one click.
+ */
+function mouseClick(el: HTMLElement) {
+  act(() => {
+    el.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+  });
+  act(() => {
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
   });
 }
 
@@ -455,7 +457,7 @@ test.skipIf(!hasDom)('with a thread open, Archive from the menu then a mouse clo
   await choose('archive');
   await until(() => rowButton(ids.waiting)?.querySelector('.ib-c')?.textContent === 'Archived', 'the row shown archived');
   // A mouse close moves nothing (App's rule); the list settles and the archived row leaves.
-  await press(document.querySelector<HTMLElement>('[aria-label="Close the thread"]')!);
+  mouseClick(document.querySelector<HTMLElement>('section.ib-pane [aria-label="Close the thread"]')!);
   await until(() => !rowButton(ids.waiting), 'the archived row to leave once the thread closed');
   await act(async () => {
     await new Promise((r) => setTimeout(r, 300));
@@ -475,8 +477,10 @@ test.skipIf(!hasDom)('after the context-menu key, a pointer press drops the keyu
   inside.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 2, pointerType: 'mouse' }));
   const right = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 400, clientY: 300 });
   // Seen at the window, before anything in the page could cancel it.
-  let seen: boolean | null = null;
-  const look = (event: Event) => (seen = event.defaultPrevented);
+  const seen: { prevented: boolean | null } = { prevented: null };
+  const look = (event: Event) => {
+    seen.prevented = event.defaultPrevented;
+  };
   window.addEventListener('contextmenu', look);
   try {
     await act(async () => {
@@ -485,7 +489,7 @@ test.skipIf(!hasDom)('after the context-menu key, a pointer press drops the keyu
   } finally {
     window.removeEventListener('contextmenu', look);
   }
-  expect(seen).toBe(false);
+  expect(seen.prevented).toBe(false);
 });
 
 test.skipIf(!hasDom)('the row leaves while its menu is open: focus goes to the row in its slot, from the order when the menu opened', async () => {
