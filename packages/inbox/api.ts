@@ -145,6 +145,16 @@ export interface WhatsNewModel {
   release_url: string;
   notes: string;
   skipped: { version: string; text: string }[];
+  /**
+   * The notes' image sources (as written) saved on this computer, loaded from
+   * `whatsNewImageUrl`. Absent from an older Inbox (no image is loaded).
+   */
+  images?: string[];
+}
+
+/** Where the What's new page loads one of the notes' saved images. */
+export function whatsNewImageUrl(version: string, src: string): string {
+  return `/api/inbox/whats-new/image?version=${encodeURIComponent(version)}&src=${encodeURIComponent(src)}`;
 }
 
 /** "Over your tailnet" (packages/server/inbox-tailscale.ts): the switch, the address or why not, and who may open it. */

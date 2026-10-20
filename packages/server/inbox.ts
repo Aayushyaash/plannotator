@@ -128,6 +128,7 @@ import { createInboxRelay } from "./inbox-relay";
 import type { TailscaleRunner } from "@plannotator/shared/tailscale";
 import { createInboxTailscale, PHONES_TAILNET_HTTPS_PORT, type InboxTailscale } from "./inbox-tailscale";
 import { createInboxUpdates, type InboxUpdatesOptions } from "./inbox-updates";
+import { INBOX_WHATS_NEW_IMAGE_PATH, whatsNewImageRoute } from "./inbox-whats-new-images";
 import { inboxCanonicalBaseUrl, inboxCanonicalRedirect } from "./inbox-canonical";
 import { createInboxWindows, parseWindowId, parseWindowOrigin, parseWindowPermission } from "./inbox-windows";
 import {
@@ -228,7 +229,7 @@ export interface InboxServerOptions {
    */
   updates?: Pick<
     InboxUpdatesOptions,
-    "fetchRelease" | "fetchReleaseTag" | "whatsNewWaitMs" | "launchInstaller" | "isManaged" | "listSessions" | "now" | "probeVersion"
+    "fetchRelease" | "fetchReleaseTag" | "fetchImage" | "whatsNewWaitMs" | "launchInstaller" | "isManaged" | "listSessions" | "now" | "probeVersion"
   >;
   /**
    * The window: the built single-file app (`apps/hook/dist/inbox.html`, which
@@ -1763,9 +1764,17 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         return json({ ok: true, restarting: true });
       }
       // The update control (packages/server/inbox-updates.ts). Updating changes
-      // this computer, so none of it answers a page that came through the tailnet.
-      if (path === "/api/inbox/update" || path.startsWith("/api/inbox/update/") || path === "/api/inbox/whats-new") {
+      // this computer, so none of it answers a page that came through the tailnet;
+      // nor does the What's new page, nor its images (inbox-whats-new-images.ts).
+      if (
+        path === "/api/inbox/update" ||
+        path.startsWith("/api/inbox/update/") ||
+        path === "/api/inbox/whats-new" ||
+        path === INBOX_WHATS_NEW_IMAGE_PATH
+      ) {
         if (via === "tailnet") return localOnly();
+        // A stored image of a release's notes: read only, never fetched here.
+        if (path === INBOX_WHATS_NEW_IMAGE_PATH) return whatsNewImageRoute(req, url, dataDir);
         if (path === "/api/inbox/whats-new") {
           if (req.method !== "GET") return json({ error: "Use GET." }, 405);
           // Notes this machine never saved (a version installed outside the
