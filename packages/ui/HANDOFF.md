@@ -1743,7 +1743,8 @@ document open spent most of its mount task in forced layouts):
 - **`AnnotationToolstrip`**'s buttons no longer read `offsetWidth` in a layout
   effect. The label's width comes from layout: a hidden copy of the label sits
   in a one-column grid whose column animates `0fr` -> `1fr`, and the visible
-  label is positioned beside the icon and clipped by the button. Collapsed
+  label is placed beside the icon with `inset-inline-start` (so it follows the
+  icon under `dir="rtl"`) and clipped by the button. Collapsed
   size, padding, gap, the 180 ms curve, compact / iconOnly / touch rules and
   colours are unchanged; an expanded button is now its exact subpixel width
   (up to 0.5 px wider than the integer `offsetWidth` it used before). The

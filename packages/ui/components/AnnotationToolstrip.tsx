@@ -343,7 +343,7 @@ const ToolstripButton: React.FC<{
 
   const slide = (property: string) => `${property} ${DURATION}ms ${EASE}`;
   const transition = mounted
-    ? `${slide('padding-left')}, ${slide('padding-right')}, background-color ${DURATION}ms ease, color ${DURATION}ms ease, box-shadow ${DURATION}ms ease`
+    ? `${slide('padding-inline-start')}, ${slide('padding-inline-end')}, background-color ${DURATION}ms ease, color ${DURATION}ms ease, box-shadow ${DURATION}ms ease`
     : 'none';
 
   return (
@@ -353,17 +353,17 @@ const ToolstripButton: React.FC<{
       onMouseLeave={() => setHovered(false)}
       aria-pressed={active}
       className={`relative flex items-center h-7 rounded-md overflow-hidden whitespace-nowrap ${colorClass}`}
-      style={{ paddingLeft: pad, paddingRight: pad, transition }}
+      style={{ paddingInlineStart: pad, paddingInlineEnd: pad, transition }}
     >
       {icon}
       {/* The label people see, beside the icon, clipped at the button's edge. */}
       <span
         className="absolute inset-y-0 flex items-center text-xs font-medium"
         style={{
-          left: pad + ICON_INNER + GAP,
+          insetInlineStart: pad + ICON_INNER + GAP,
           opacity: expanded ? 1 : 0,
           transition: mounted
-            ? `${slide('left')}, opacity ${expanded ? DURATION : DURATION * 0.6}ms ease ${expanded ? '60ms' : '0ms'}`
+            ? `${slide('inset-inline-start')}, opacity ${expanded ? DURATION : DURATION * 0.6}ms ease ${expanded ? '60ms' : '0ms'}`
             : 'none',
         }}
       >
@@ -380,7 +380,7 @@ const ToolstripButton: React.FC<{
         }}
       >
         <span style={{ minWidth: 0, overflow: 'hidden', visibility: 'hidden' }}>
-          <span className="block text-xs font-medium" style={{ paddingLeft: GAP }}>{label}</span>
+          <span className="block text-xs font-medium" style={{ paddingInlineStart: GAP }}>{label}</span>
         </span>
       </span>
     </button>
