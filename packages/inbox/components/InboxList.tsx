@@ -328,7 +328,11 @@ export function InboxList(props: InboxListProps) {
   // The row callbacks keep one identity for the list's life (they call the latest props), so a row whose
   // data did not change is not rendered again when the list is (ListRow is memoized on its row's content).
   const latest = useRef(props);
-  latest.current = props;
+  // Written after commit, never during render: a render React throws away (concurrent rendering) must not leave
+  // its props behind. The callbacks run only from events, which come after a commit.
+  useLayoutEffect(() => {
+    latest.current = props;
+  });
   const openRow = useCallback((row: InboxListRow) => latest.current.onOpen(row), []);
   const markRead = useCallback((row: InboxListRow) => latest.current.onMarkRead?.(row), []);
   // A row's time reads "8:22 PM" today and "Oct 19" after midnight: a new day renders every row again.
