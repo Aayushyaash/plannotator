@@ -368,6 +368,12 @@ const ERROR_STATUS: Record<string, number> = {
   open_not_allowed: 422,
   app_not_available: 422,
   attachment_too_large: 413,
+  // A page an attached HTML page links to, shown read-only in its pane (inbox-attachments.ts `linked-page`).
+  linked_page_not_html: 415,
+  linked_page_refused: 403,
+  linked_page_outside: 403,
+  linked_page_missing: 404,
+  linked_page_too_large: 413,
   annotation_not_allowed: 422,
   annotation_not_found: 404,
   annotation_closed: 409,

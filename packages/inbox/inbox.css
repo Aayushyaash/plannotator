@@ -1159,6 +1159,32 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 .ib-docscroll:has([data-popout]) { z-index: 7; }
 .ib-toolstrip { position: absolute; top: 14px; left: 16px; z-index: 3; padding: 3px; border-radius: 9px; background: var(--card); box-shadow: var(--card-shadow); }
 .ib-htmlframe { position: absolute; inset: 0; }
+/* A page the attached page links to, not attached: read-only over the attached page, which stays mounted under it (htmlLinks.ts). */
+.ib-htmlframe.ib-covered { visibility: hidden; }
+.ib-linked { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--background); }
+.ib-linkband { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 7px 14px; font-size: var(--ib-fs-13, 13px); line-height: 1.3; background: var(--card); color: var(--card-foreground); border-bottom: 1px solid var(--border); }
+.ib-linkband .ib-btn { flex: none; gap: 4px; max-width: 100%; }
+.ib-linkband-back { display: block; min-width: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ib-linkband-t { flex: 1 1 200px; min-width: 0; color: var(--muted-foreground); overflow-wrap: anywhere; }
+.ib-linkband-t b { color: var(--foreground); font-weight: 600; }
+.ib-linkband-tab { flex: none; white-space: nowrap; text-decoration: none; }
+.ib-linkedframe { position: relative; flex: 1; min-height: 0; }
+/* Full screen: no header, so the band floats at the top left like the changed chip (the toolbar holds the top right). */
+.ib-view.ib-fullview .ib-linkband { position: absolute; top: 12px; left: 12px; z-index: 8; max-width: calc(100% - 360px); box-sizing: border-box; padding: 5px 12px 5px 6px; border-radius: 10px; border: 1px solid var(--border); background: var(--popover); color: var(--popover-foreground); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28); }
+:root.light .ib-view.ib-fullview .ib-linkband { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); }
+.ib-view.ib-fullview.ib-drawer:not(.ib-phone) .ib-linkband { max-width: calc(100% - 680px); min-width: min(320px, calc(100% - 24px)); }
+.ib-view.ib-fullview.ib-phone .ib-linkband { top: calc(10px + env(safe-area-inset-top)); left: 10px; right: 10px; max-width: none; }
+/* The page starts below the floating band, so nothing at its top is hidden under it. */
+.ib-view.ib-fullview .ib-linkedframe { margin-top: calc(var(--ib-linkband-h, 40px) + 20px); }
+.ib-view.ib-fullview.ib-phone .ib-linkedframe { margin-top: calc(var(--ib-linkband-h, 80px) + 16px + env(safe-area-inset-top)); }
+.pn-inbox .ib-view.ib-phone .ib-linkband .ib-btn, .pn-inbox .ib-view.ib-phone .ib-linkband-tab { min-height: 44px; display: inline-flex; align-items: center; }
+/* Why a link opened nothing: a note at the foot of the page for a moment (also said in the pane's live region). */
+.ib-linknote { position: absolute; left: 50%; bottom: calc(22px + var(--ib-fvfoot, 0px)); transform: translateX(-50%); z-index: 9; display: flex; align-items: center; gap: 8px; width: max-content; max-width: min(520px, calc(100% - 32px)); box-sizing: border-box; padding: 8px 14px; border-radius: 10px; background: var(--popover); color: var(--popover-foreground); border: 1px solid var(--border); box-shadow: 0 12px 34px rgba(0, 0, 0, 0.3); font-size: var(--ib-fs-13, 13px); line-height: 1.35; pointer-events: none; opacity: 0; visibility: hidden; transition: opacity 150ms ease, visibility 0s linear 150ms; }
+:root.light .ib-linknote { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); }
+.ib-linknote.ib-on { opacity: 1; visibility: visible; transition: opacity 150ms ease; }
+.ib-linknote > .ib-ic { color: var(--muted-foreground); flex: none; }
+.ib-view.ib-fullview.ib-phone .ib-linknote { bottom: calc(80px + max(var(--ib-fvfoot, 0px), env(safe-area-inset-bottom))); }
+@media (prefers-reduced-motion: reduce) { .ib-linknote, .ib-linknote.ib-on { transition: none; } }
 .ib-view-error { position: absolute; top: 12px; left: 16px; right: 16px; z-index: 5; margin: 0; }
 /* The bar under the open file (stepping design record, v2): a row of the pane's
    grid, never over the file. The stepper at its left; in full screen the

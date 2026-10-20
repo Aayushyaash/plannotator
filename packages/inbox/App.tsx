@@ -144,8 +144,11 @@ interface Route {
   version?: string | null;
   project: string | null;
   thread: string | null;
-  /** An attachment open beside the thread: `file=att_…`, `v=sent` for the version the agent sent, `at=` an annotation to show. */
-  file?: { id: string; version: 'current' | 'sent'; focus: string | null } | null;
+  /**
+   * An attachment open beside the thread: `file=att_…`, `v=sent` for the version the agent sent, `at=` an annotation to show,
+   * `linked=` a page the attached HTML page links to, shown read-only over it (its path in the page's folder, `#fragment` kept).
+   */
+  file?: { id: string; version: 'current' | 'sent'; focus: string | null; linked?: string | null } | null;
   /** The message whose guided review is open over the window (`#thread=…&guide=msg_…`). */
   guide?: string | null;
   /**
@@ -177,7 +180,7 @@ function routeOf(fullHash: string): Route {
     page: 'inbox',
     project: params.get('project'),
     thread,
-    file: fileId ? { id: fileId, version: params.get('v') === 'sent' ? 'sent' : 'current', focus: params.get('at') } : null,
+    file: fileId ? { id: fileId, version: params.get('v') === 'sent' ? 'sent' : 'current', focus: params.get('at'), linked: params.get('linked') } : null,
     guide: thread ? params.get('guide') : null,
     msg: thread ? params.get('msg') : null,
   };
@@ -198,6 +201,7 @@ function hashOf(route: Route): string {
       params.set('file', route.file.id);
       if (route.file.version === 'sent') params.set('v', 'sent');
       if (route.file.focus) params.set('at', route.file.focus);
+      if (route.file.linked) params.set('linked', route.file.linked);
     }
     if (route.thread && route.guide) params.set('guide', route.guide);
     hash = params.toString();
@@ -2037,7 +2041,13 @@ function Inbox() {
             onChanged={afterWrite}
             onClose={() => close({ ...route, thread: null, file: null })}
             file={route.file ?? null}
-            onOpenFile={(file, options) => (file ? writeRoute({ ...routeRef.current, file }, options) : closeTo({ ...routeRef.current, file }))}
+            onOpenFile={(file, options) => {
+              if (!file) return closeTo({ ...routeRef.current, file });
+              const next = { ...routeRef.current, file };
+              // Back through a linked page's stack: the browser's Back when this entry was opened from there.
+              if (options?.back && backTo(hashOf(next))) return;
+              writeRoute(next, options);
+            }}
             onOpenGuide={(messageId) => go({ ...route, guide: messageId })}
             landing={
               route.msg

@@ -186,6 +186,7 @@ jobs:
           packages/inbox/searchPalette.test.tsx
           packages/inbox/searchShortcut.test.tsx
           packages/inbox/openIn.test.tsx
+          packages/inbox/htmlLinks.test.tsx
           packages/inbox/videoAttachment.test.tsx
           packages/inbox/skillReferences.test.tsx
           packages/inbox/messageComments.test.tsx
@@ -284,6 +285,7 @@ jobs:
           packages/editor/planDiffAutoExit.test.tsx
           packages/editor/App.archiveReadOnly.test.tsx
           packages/editor/App.htmlChrome.test.tsx
+          packages/editor/App.htmlLinkDraft.test.tsx
           packages/editor/App.decisionControl.test.tsx
           packages/editor/App.planRevision.test.tsx
           packages/editor/askSessionDrafts.test.tsx

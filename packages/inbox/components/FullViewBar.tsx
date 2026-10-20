@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
 import { formatShortcutBindingText, formatShortcutBindingTokens } from '@plannotator/ui/shortcuts';
+import { modKey } from '@plannotator/ui/utils/platform';
 import { Icon } from '../icons';
 import { Tip as HoverTip } from './Tip';
 
@@ -322,7 +323,7 @@ export const FullViewBar = forwardRef<FullViewBarHandle, FullViewBarProps>(funct
       >
         {props.leave.kind === 'back' && leaveButton}
         {props.onToggleArmed && (
-          <Tip text={props.armed ? 'Annotate: click an element or select text to comment. Esc to interact' : 'Interact: clicks reach the page. Click to annotate'} phone={phone}>
+          <Tip text={props.armed ? `Annotate: click an element or select text to comment; links open (${modKey}-click one to comment on it). Esc to interact` : 'Interact: clicks reach the page. Click to annotate'} phone={phone}>
             <button
               type="button"
               className={`ib-fvb${props.armed ? ' ib-on' : ''}`}

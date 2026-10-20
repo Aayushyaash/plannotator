@@ -620,6 +620,9 @@ export const inboxApi = {
   attachments: (threadId: string) => get<AttachmentsModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}/attachments`),
   view: (attachmentId: string, version: 'current' | 'sent') =>
     get<AttachmentView>(`/api/inbox/attachments/${encodeURIComponent(attachmentId)}/view${version === 'sent' ? '?version=sent' : ''}`),
+  /** A page an attached HTML page links to (not attached itself), by a path relative to that page's folder: read-only. */
+  linkedPage: (attachmentId: string, path: string) =>
+    get<LinkedPageView>(`/api/inbox/attachments/${encodeURIComponent(attachmentId)}/linked-page?path=${encodeURIComponent(path)}`),
   saveAnnotation: (attachmentId: string, version: string, annotation: object) =>
     post<{ annotation: InboxAnnotationRecord }>('/api/inbox/annotations', { attachment_id: attachmentId, version, annotation }),
   removeAnnotation: (id: string) => post<{ annotation: InboxAnnotationRecord }>(`/api/inbox/annotations/${encodeURIComponent(id)}/remove`, {}),
@@ -715,6 +718,18 @@ export interface AttachmentView {
   version: string;
   text: string;
   html: string | null;
+}
+
+/** A page an attached HTML page links to, as `/linked-page` answers it. */
+export interface LinkedPageView {
+  serverSession: string;
+  /** Its realpath. */
+  path: string;
+  name: string;
+  /** The page with a `<base href>` at its own folder's asset route. */
+  html: string;
+  /** Its asset-route URL, for Open in new tab. */
+  url: string | null;
 }
 
 /**

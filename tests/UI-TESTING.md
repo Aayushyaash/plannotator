@@ -570,11 +570,13 @@ play. Run `plannotator annotate <site>/index.html`.
 7. **The chrome survives navigation.** Show the tools (the eye), then follow two HTML links.
    The tools stay shown and the sidebar keeps whatever state you left it in — neither is reset
    to the session defaults mid-session.
-8. **Armed mode still annotates links.** Re-arm with the pen (or `Mod+Shift+A`) and click a
-   link: the comment composer opens on the `<a>` element and no navigation happens.
-9. **Live app sessions are untouched.** Run `plannotator annotate http://localhost:<dev port>`
+8. **Armed: a click follows, Cmd/Ctrl-click pins.** Re-arm with the pen (or `Mod+Shift+A`) and
+   click a link: it follows. Cmd-click (Ctrl-click off macOS) the same link: the comment composer
+   opens on the `<a>` element and no navigation happens. On a phone: a tap follows, a
+   press-and-hold (half a second) opens the composer, and lifting the finger follows nothing.
+9. **Live app sessions follow the same rule.** Run `plannotator annotate http://localhost:<dev port>`
    against any app and click its own in-app links, armed and in Interact: they navigate the app
-   through the proxy exactly as before.
+   through the proxy. Armed, Cmd/Ctrl-click (press-and-hold on a phone) pins the link instead.
 
 Known limitation to expect in step 2: a document in a subfolder loads assets that sit below it,
 but `../style.css` and `../img.png` do not resolve (`/api/html-assets` mints one token per HTML

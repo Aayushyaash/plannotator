@@ -567,9 +567,10 @@ export interface ThreadPaneProps {
   onChanged: () => Promise<void>;
   onClose: () => void;
   /** The attachment open beside the thread (`#…&file=att_…`), its version, and an annotation to show. */
-  file: { id: string; version: 'current' | 'sent'; focus: string | null } | null;
+  file: { id: string; version: 'current' | 'sent'; focus: string | null; linked?: string | null } | null;
   /** `replace`: swap the history entry (stepping between files), so Back returns to the thread in one press. */
-  onOpenFile: (file: { id: string; version: 'current' | 'sent'; focus: string | null } | null, options?: { replace?: boolean }) => void;
+  /** `back`: the browser's Back when the entry on screen was opened from `file` (a linked page's Back), else a new entry. */
+  onOpenFile: (file: { id: string; version: 'current' | 'sent'; focus: string | null; linked?: string | null } | null, options?: { replace?: boolean; back?: boolean }) => void;
   /** Open the guided review a message carries (the record's 4.2). */
   onOpenGuide: (messageId: string) => void;
   /**
@@ -2817,6 +2818,11 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
         steps={steps}
         // A step keeps the frame the person is in, and replaces the route.
         onStep={(attachmentId, version) => onOpenFile({ id: attachmentId, version, focus: null }, { replace: true })}
+        // A link in an attached HTML page to another file of the thread: a new entry, so Back returns to the page; the frame stays.
+        onOpenLinked={(attachmentId) => onOpenFile({ id: attachmentId, version: 'current', focus: null })}
+        // A page the attached page links to: in the route (`linked=`), so each one is a history entry and Back steps back through them.
+        linked={file!.linked ?? null}
+        onLinked={(linked, options) => onOpenFile({ id: openAttachment.id, version: file!.version, focus: null, linked }, options)}
         onToggleFull={() => setFull(!full)}
         focusId={file!.focus}
         focusRequest={paneFocus}

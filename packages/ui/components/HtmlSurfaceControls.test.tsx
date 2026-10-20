@@ -176,7 +176,7 @@ describe.if(hasDom)('HtmlSurfaceControls', () => {
     expect(pen(armed)!.title).toBe('');
     expect(eye(armed)!.title).toBe('');
     expect(refresh(armed)!.title).toBe('');
-    expect(pen(armed)!.getAttribute('aria-label')).toBe('Annotate mode: click an element or select text to comment. Esc to interact');
+    expect(pen(armed)!.getAttribute('aria-label')).toBe(DEFAULT_HTML_SURFACE_CONTROL_LABELS.annotateTitle);
     expect(eye(armed)!.querySelector('.sr-only')!.textContent).toBe('Hide tools');
     expect(refresh(armed)!.getAttribute('aria-label')).toBe('Refresh document');
     expect(refresh(armed)!.textContent).toContain('Refresh');

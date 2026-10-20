@@ -44,6 +44,12 @@
  * each launch to `<data dir>/launches.jsonl`. Each project also gets a thread
  * with page.html, plan.md, build.zip, shot.png and gone.md (deleted after it
  * was sent: missing); the world adds `openIn` (`{ thread, ids: { <name>: <id> } }`).
+ * With `html-links`, each project also gets a thread whose message attaches
+ * `site/SHEET.html` and `site/frames/a.png`; the page links to a sibling page
+ * that is not attached (`B-cards.html`), both images (`b.png` is not
+ * attached), a PDF beside it and another site. The world adds `htmlLinks`
+ * (`{ thread, ids: { <name>: <attachment id> } }`).
+ *
  * The Inbox is published over the tailnet by a scripted `tailscale`, and the
  * first line adds `tailnet: { listener, host, login }`: a request to that
  * loopback port with that Host and login is one `tailscale serve` hands over.
@@ -254,6 +260,7 @@ type World = {
   files?: { thread: string; first: string; middle: string; last: string; ids: Record<string, string> };
   sentMulti?: string;
   openIn?: { thread: string; ids: Record<string, string> };
+  htmlLinks?: { thread: string; ids: Record<string, string> };
   restart?: { thread: string; session: string; project: string; installPath: string; oldPath: string };
   news: string[];
 };
@@ -348,6 +355,27 @@ for (let i = 0; i < count; i++) {
     unlinkSync(join(root, "gone.md"));
     openIn = { thread: thread.id, ids: Object.fromEntries(sentFiles.map((a, n) => [names[n]!, a.id])) };
   }
+  let htmlLinks: World["htmlLinks"];
+  if (extra === "html-links") {
+    const site = join(root, "site");
+    mkdirSync(join(site, "frames"), { recursive: true });
+    const png = Buffer.from(
+      "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63f8cfc0f01f0005fe02fe0dd8a2c90000000049454e44ae426082",
+      "hex",
+    );
+    writeFileSync(
+      join(site, "SHEET.html"),
+      '<!doctype html><title>Sheet</title><h1>Sheet</h1><a href="B-cards.html#pr1">B</a> <a href="frames/a.png">a</a> <a href="frames/b.png">b</a> <a href="report.pdf">pdf</a> <a href="https://example.com/x">site</a>\n',
+    );
+    writeFileSync(join(site, "B-cards.html"), '<!doctype html><title>Cards</title><h1 id="pr1">Cards</h1><a href="SHEET.html">home</a> <a href="C-between.html">C</a>\n');
+    writeFileSync(join(site, "C-between.html"), "<!doctype html><title>Between</title><h1>Between</h1>\n");
+    writeFileSync(join(site, "frames", "a.png"), png);
+    writeFileSync(join(site, "frames", "b.png"), png);
+    writeFileSync(join(site, "report.pdf"), "%PDF-1.4\n");
+    const linkFiles = await recordInboxAttachments(store.dir, ["site/SHEET.html", "site/frames/a.png"], { base: root, at: new Date().toISOString() });
+    const thread = store.sendMessage({ project_id: project.id, author: { ...author, session: `ses_l${i}` }, body: "The contact sheet and one frame.", attachments: linkFiles }).message;
+    htmlLinks = { thread: thread.id, ids: Object.fromEntries(linkFiles.map((a) => [a.name, a.id])) };
+  }
   let restart: World["restart"];
   if (restartMode) {
     const session = `ses_r${i}`;
@@ -361,6 +389,7 @@ for (let i = 0; i < count; i++) {
     restart = { thread: asked.id, session, project: root, installPath: pluginFolder("0.28.25"), oldPath: pluginFolder("0.28.23") };
   }
   worlds.push({
+    ...(htmlLinks ? { htmlLinks } : {}),
     ...(restart ? { restart } : {}),
     ...(openIn ? { openIn } : {}),
     ...(files ? { files } : {}),

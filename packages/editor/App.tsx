@@ -29,6 +29,7 @@ import { setExtraMarkdownExtensions } from '@plannotator/ui/utils/markdownExtens
 import { installPlainTextPaste } from '@plannotator/ui/utils/pasteInsert';
 import { documentRendersHtml, htmlAssetRouteFromDocument, resolveHtmlLinkIntent } from '@plannotator/ui/utils/htmlLinkNavigation';
 import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
+import { LINK_WAITS_FOR_DRAFT_TITLE, linkWaitsForDraftDescription, typedCommentDraft } from './htmlLinkDraftGuard';
 import { createPortal } from 'react-dom';
 import { annotateFileFeedback, annotateMessageFeedback, wrapFeedbackForClipboard, type AnnotateFeedbackTemplates } from '@plannotator/shared/feedback-templates';
 import { diagramDocumentBlocks, parseMarkdownToBlocks, exportAnnotations, exportLinkedDocAnnotations, exportEditorAnnotations, exportCodeFileAnnotations, exportMessageAnnotations, formatDraftAnnotationsForAsk, extractFrontmatter, wrapFeedbackForAgent, Frontmatter, type LinkedDocAnnotationEntry, type MessageAnnotationEntry } from '@plannotator/ui/utils/parser';
@@ -2140,6 +2141,13 @@ const App: React.FC = () => {
       return;
     }
     if (intent.kind !== 'document') return;
+    // A comment being typed would be left over the next document: the link waits (htmlLinkDraftGuard.ts).
+    const draft = typedCommentDraft();
+    if (draft) {
+      toast(LINK_WAITS_FOR_DRAFT_TITLE, { description: linkWaitsForDraftDescription(intent.path.split('/').pop() || intent.path) });
+      draft.focus();
+      return;
+    }
     setHtmlLinkFragment(intent.hash ? { path: intent.path, hash: intent.hash } : null);
     // Following a link between HTML documents must not pop the sidebar open:
     // the page owns the viewport on this surface, and the header's own Back

@@ -21,7 +21,10 @@ import { useConfigValue } from '@plannotator/ui/config';
 import type { Annotation, EditorMode, InputMethod } from '@plannotator/ui/types';
 import { annotationOwnsHighlight } from '@plannotator/ui/utils/annotationOwnsHighlight';
 import { groupAnnotationsByDocument, type AnnotationScope } from '@plannotator/ui/utils/annotationScope';
-import { InboxApiError, inboxApi, type AttachmentView } from '../api';
+import { InboxApiError, inboxApi, type AttachmentView, type LinkedPageView } from '../api';
+import { folderOf, resolveInboxHtmlLink } from '../htmlLinks';
+import { htmlAssetRouteFromDocument } from '@plannotator/ui/utils/htmlLinkNavigation';
+import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
 import {
   annotationOf,
   attachmentBlocks,
@@ -67,6 +70,22 @@ import { Tip } from './Tip';
  * has its own drawer.
  */
 export const FOLD_PANEL_BELOW = 780;
+
+/** How long the note says why a link in an attached page opened nothing. */
+export const LINK_NOTE_MS = 5000;
+
+/** A page an attached HTML page links to, shown read-only over it: its path in the page's folder and the fragment its link named. */
+type LinkedPage = LinkedPageView & { relative: string; hash: string; attachmentId: string };
+
+/** The route's `linked=` value: the page's path in the folder, then `#fragment`. */
+export function linkedValue(relative: string, hash: string): string {
+  return hash ? `${relative}#${hash}` : relative;
+}
+
+export function splitLinked(value: string): { relative: string; hash: string } {
+  const at = value.indexOf('#');
+  return at < 0 ? { relative: value, hash: '' } : { relative: value.slice(0, at), hash: value.slice(at + 1) };
+}
 
 /** How long full screen's step chip names the new file. */
 export const FULL_VIEW_CHIP_MS = 1600;
@@ -167,6 +186,19 @@ export interface AttachmentPaneProps {
    */
   phone?: boolean;
   /**
+   * A link in an attached HTML page names another file of the thread: open it
+   * in this pane as a new history entry (Back returns to the page), in the
+   * frame it is in now. Absent: `onStep`.
+   */
+  onOpenLinked?: (attachmentId: string) => void;
+  /**
+   * The page the attached HTML page links to that is on screen (the route's
+   * `linked=`: its path in the page's folder, `#fragment` kept), or null.
+   */
+  linked?: string | null;
+  /** Show another linked page (null: the attached page). `back`: the browser's Back when it leads there; `replace`: no new entry. */
+  onLinked?: (linked: string | null, options?: { back?: boolean; replace?: boolean }) => void;
+  /**
    * "Open in" (OpenIn.tsx): the split button on this computer (`apps`), the
    * new-tab icon through the tailnet or on a phone (`tab`). Absent: neither.
    */
@@ -229,6 +261,9 @@ interface FileMemory {
   scroll?: { top: number; left: number };
   fit?: 'fit' | 'actual';
 }
+
+const NO_ANNOTATIONS: Annotation[] = [];
+const noop = () => {};
 
 const recordKey = (path: string, version: string) => (version === 'current' ? path : `${path}#${version.slice(0, 12)}`);
 
@@ -744,7 +779,13 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
    * key came from (null: from inside the HTML page).
    */
   function ladderRung(target: Element | null): EscapeRung | null {
-    if (!full || modalOpen()) return null;
+    if (modalOpen()) return null;
+    if (!full) {
+      // Beside the thread the one rung is a linked page, for a key from inside the pane (or the page).
+      if (!linkedTop || document.querySelector(SELF_CLOSING_DRAFTS)) return null;
+      if (target && (!sectionRef.current?.contains(target) || isEditableTarget(target) || inOverlay(target))) return null;
+      return 'linked';
+    }
     if (document.querySelector(SELF_CLOSING_DRAFTS)) return null;
     const inField = !!target && isEditableTarget(target) && !!target.closest('[data-image-composer]') && !!sectionRef.current?.contains(target);
     if (target && !inField && (isEditableTarget(target) || inOverlay(target))) return null;
@@ -754,6 +795,7 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
       composerOpen: !props.readOnly && openComposer() !== null,
       inField,
       panelOpen: panelOpen,
+      linkedOpen: linkedTop !== null,
       annotating: isHtml && armed && !props.readOnly,
       questionOpen: guard !== null,
     });
@@ -797,6 +839,9 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
         } else closeSheet();
         announce('Comments closed.');
         return;
+      case 'linked':
+        linkedBack();
+        return;
       case 'annotate':
         setArmed(false);
         announce('Interact: clicks reach the page.');
@@ -822,6 +867,165 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
     climb(rung, true);
     return true;
   }
+
+  // ── Links inside an attached HTML page (htmlLinks.ts) ─────────────────────
+  /**
+   * Pages the person followed from the attached page, not attached themselves:
+   * shown read-only over it, newest last. The route holds the page on screen
+   * (`linked=`, one history entry each, so Back and a phone's swipe back step
+   * through them); this stack follows it and remembers what came before.
+   */
+  const [linkedStack, setLinkedStack] = useState<readonly LinkedPage[]>([]);
+  const linkedStackRef = useRef(linkedStack);
+  linkedStackRef.current = linkedStack;
+  const linkedLast = linkedStack.at(-1);
+  const linkedTop = linkedLast && linkedLast.attachmentId === attachment.id ? linkedLast : null;
+  /** Why a link opened nothing, for a moment. */
+  const [linkNote, setLinkNote] = useState<string | null>(null);
+  const linkNoteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** A local image a link names that is not attached: the lightbox, through the page's asset route. */
+  const [linkImage, setLinkImage] = useState<{ src: string; alt: string } | null>(null);
+  /** The fragment a link named on an attached page it opened (`SHEET.html#pr1`): cleared once used. */
+  const [linkFragment, setLinkFragment] = useState<{ id: string; hash: string } | null>(null);
+  useEffect(() => {
+    setLinkNote(null);
+    setLinkImage(null);
+  }, [attachment.id, effectiveVersion]);
+  useEffect(
+    () => () => {
+      if (linkNoteTimer.current) clearTimeout(linkNoteTimer.current);
+    },
+    [],
+  );
+  const showLinkNote = (text: string) => {
+    setLinkNote(text);
+    announce(text);
+    if (linkNoteTimer.current) clearTimeout(linkNoteTimer.current);
+    linkNoteTimer.current = setTimeout(() => setLinkNote(null), LINK_NOTE_MS);
+  };
+  const showLinkNoteRef = useRef(showLinkNote);
+  showLinkNoteRef.current = showLinkNote;
+  const onLinkedRef = useRef(props.onLinked);
+  onLinkedRef.current = props.onLinked;
+  // Another file or version: its own page, no stack.
+  useEffect(() => setLinkedStack([]), [attachment.id, effectiveVersion]);
+  // The page the route names: back to one already in the stack, or read and pushed.
+  const linkedRequest = isHtml ? (props.linked ?? null) : null;
+  useEffect(() => {
+    if (!linkedRequest) {
+      setLinkedStack([]);
+      return;
+    }
+    const { relative, hash } = splitLinked(linkedRequest);
+    // Only this file's pages count: a Back may land on another file's linked page with the same name.
+    const at = linkedStackRef.current.findIndex((page) => page.attachmentId === attachment.id && page.relative === relative);
+    if (at >= 0) {
+      setLinkedStack((stack) => [...stack.slice(0, at), { ...stack[at]!, hash }]);
+      return;
+    }
+    let cancelled = false;
+    inboxApi
+      .linkedPage(attachment.id, relative)
+      .then((page) => {
+        if (cancelled) return;
+        setLinkedStack((stack) => [...stack.filter((p) => p.attachmentId === attachment.id), { ...page, relative, hash, attachmentId: attachment.id }]);
+        announce(`${page.name}. It is not attached, so comments are off.`);
+        requestAnimationFrame(() => sectionRef.current?.querySelector<HTMLElement>('[data-linked-back]')?.focus({ preventScroll: true }));
+      })
+      .catch((cause) => {
+        if (cancelled) return;
+        showLinkNoteRef.current(cause instanceof InboxApiError ? cause.message : `${relative} could not be opened.`);
+        // The address names a page that does not open: it goes back to what is on screen.
+        const top = linkedStackRef.current.at(-1);
+        onLinkedRef.current?.(top ? linkedValue(top.relative, top.hash) : null, { replace: true });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [linkedRequest, attachment.id, announce]);
+  // A fragment is replayed once: cleared after the page had time to take it, so a remount does not scroll again and the same #hash works twice.
+  useEffect(() => {
+    if (!linkFragment || linkFragment.id !== attachment.id || !view) return;
+    const timer = setTimeout(() => setLinkFragment(null), 1500);
+    return () => clearTimeout(timer);
+  }, [linkFragment, attachment.id, view]);
+  /** Full screen floats the band over the page: the page starts below it (`--ib-linkband-h`), so its top is never covered. */
+  const linkBandRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const band = linkBandRef.current;
+    const host = band?.parentElement;
+    if (!band || !host) return;
+    const place = () => host.style.setProperty('--ib-linkband-h', `${Math.ceil(band.getBoundingClientRect().height)}px`);
+    place();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
+    observer?.observe(band);
+    return () => observer?.disconnect();
+  }, [linkedTop, full]);
+  /** Every file of the thread a link may name: its attachments and the images its messages show. */
+  const linkables = useMemo(() => {
+    const byId = new Map<string, InboxAttachmentState>();
+    for (const a of props.attachments) byId.set(a.id, a);
+    for (const s of props.steps ?? []) byId.set(s.attachment.id, s.attachment);
+    return [...byId.values()];
+  }, [props.attachments, props.steps]);
+  /** The attached page's folder: links never leave it. */
+  const pageFolder = folderOf(attachment.path);
+  const pageAssetRoute = isHtml ? htmlAssetRouteFromDocument(view?.html) : null;
+  /** One page back (Back, Escape): the browser's Back when the entry on screen was opened from there. */
+  const linkedBack = () => {
+    const stack = linkedStackRef.current;
+    if (stack.length === 0) return;
+    const before = stack.length > 1 ? stack[stack.length - 2]! : null;
+    announce(`Back on ${before ? before.name : attachment.name}.`);
+    props.onLinked?.(before ? linkedValue(before.relative, before.hash) : null, { back: true });
+    requestAnimationFrame(() => sectionRef.current?.focus({ preventScroll: true }));
+  };
+  /** A link the page's bridge handed over (a plain click, armed or not; ⌘/Ctrl-click while armed pins it instead). `baseDir`: the folder of the page it is in. */
+  const followLink = (href: string, baseDir: string) => {
+    const link = resolveInboxHtmlLink(href, {
+      folder: pageFolder,
+      baseDir,
+      attachments: linkables,
+      assetRoute: pageAssetRoute,
+      serverOrigin: window.location.origin,
+    });
+    switch (link.kind) {
+      case 'ignored':
+        return;
+      case 'external':
+        window.open(link.url, '_blank', 'noopener,noreferrer');
+        return;
+      case 'image':
+        setLinkImage({ src: link.url, alt: link.name });
+        return;
+      case 'refused':
+        showLinkNote(link.note);
+        return;
+      case 'attachment': {
+        if (link.id === attachment.id) {
+          // The attached page itself (a linked page's way home): a new entry, as any link followed.
+          if (link.hash) setLinkFragment({ id: link.id, hash: link.hash });
+          announce(`Back on ${attachment.name}.`);
+          props.onLinked?.(null);
+          return;
+        }
+        leave(link.name, () => {
+          if (link.hash) setLinkFragment({ id: link.id, hash: link.hash });
+          pendingStep.current = 'key';
+          if (props.onOpenLinked) props.onOpenLinked(link.id);
+          else props.onStep?.(link.id, 'current');
+        });
+        return;
+      }
+      case 'page':
+        // A typed comment on the attached page asks first, as for any file it would leave.
+        leave(link.name, () => props.onLinked?.(linkedValue(link.relative, link.hash)));
+        return;
+    }
+  };
+  const followLinkRef = useRef(followLink);
+  followLinkRef.current = followLink;
+
   const isText = kind === 'markdown' || kind === 'text';
   const isCode = kind === 'code';
   const isImage = kind === 'image';
@@ -1038,7 +1242,8 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
           onState={setToolbar}
           announce={announce}
           armed={armed}
-          onToggleArmed={isHtml && !props.readOnly ? () => setArmed((v) => !v) : undefined}
+          // A linked page takes no comments: no pen while it is shown.
+          onToggleArmed={isHtml && !props.readOnly && !linkedTop ? () => setArmed((v) => !v) : undefined}
           comments={
             hasPanel
               ? {
@@ -1125,7 +1330,7 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
                 : `from ${props.agent} in ${props.projectName}`}
           </span>
           <span className="ib-sp" />
-          {isHtml && !props.readOnly && <HtmlSurfaceControls armed={armed} onToggleArmed={() => setArmed((v) => !v)} />}
+          {isHtml && !props.readOnly && !linkedTop && <HtmlSurfaceControls armed={armed} onToggleArmed={() => setArmed((v) => !v)} />}
           {props.openIn && <OpenInControl attachment={attachment} version={effectiveVersion} surface={props.openIn} label={!folded} big={phone} />}
           <Tip content={`Download ${attachment.name}${effectiveVersion === 'sent' ? ' (the version it sent)' : ''}`}>
             <a
@@ -1173,7 +1378,7 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
         </div>
       )}
       {full ? (
-        versionChip && (
+        versionChip && !linkedTop && (
           // A fact about the file: it stays when the toolbar tucks.
           <Tip content={versionChip.full}>
           <div className="ib-fvver" role="status" data-full-view-changed="">
@@ -1203,7 +1408,8 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
             </div>
           )}
           {view && isHtml && view.html !== null && (
-            <div className="ib-htmlframe">
+            // Kept mounted under a linked page (inert, hidden), so Back finds it as it was left.
+            <div className={`ib-htmlframe${linkedTop ? ' ib-covered' : ''}`} inert={linkedTop ? true : undefined}>
             <HtmlViewer
               key={`${attachment.id}:${view.version}:${view.attachment.current?.sha256 ?? ''}`}
               rawHtml={view.html}
@@ -1228,15 +1434,63 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
               onToolsToggle={full ? () => barRef.current?.toggle() : undefined}
               // A plain ] or [ pressed in the page while armed (the bridge forwards nothing in Interact).
               onStep={multi ? (dir) => !blockedRef.current && armed && stepRef.current(dir, 'key') : undefined}
-              onOpenLink={(href) => {
-                if (/^https?:\/\//i.test(href)) window.open(href, '_blank', 'noopener,noreferrer');
-              }}
+              // A link the page's bridge handed over: another file of the thread, a page or image beside it, another site (htmlLinks.ts).
+              onOpenLink={(href) => followLinkRef.current(href, pageFolder)}
+              initialFragment={linkFragment?.id === attachment.id ? linkFragment.hash : undefined}
               onUnanchoredChange={(ids) => setUnanchored(new Set(ids))}
               fullViewport
               hideControls
               maxAdditionalTargets={0}
               readOnly={props.readOnly}
             />
+            </div>
+          )}
+          {view && isHtml && linkedTop && (
+            // A page the attached page links to, not attached: read-only (comments belong to attachments).
+            <div className="ib-linked" data-linked-page={linkedTop.name}>
+              <div className="ib-linkband" ref={linkBandRef} role="group" aria-label={`${linkedTop.name}, linked from ${attachment.name}`}>
+                <button type="button" className="ib-btn ib-sm" onClick={linkedBack} data-linked-back="">
+                  <Icon name="chevL" size={13} />
+                  <span className="ib-linkband-back">Back to {linkedStack.length > 1 ? linkedStack[linkedStack.length - 2]!.name : attachment.name}</span>
+                </button>
+                <span className="ib-linkband-t" data-linked-note="">
+                  <b>{linkedTop.name}</b> is not attached, so comments are off.
+                </span>
+                {linkedTop.url && (
+                  <a className="ib-vlink ib-linkband-tab" href={linkedTop.url} target="_blank" rel="noopener noreferrer" data-linked-open-tab="">
+                    Open in new tab
+                  </a>
+                )}
+              </div>
+              <div className="ib-linkedframe">
+                <HtmlViewer
+                  key={`${linkedStack.length}:${linkedTop.path}`}
+                  rawHtml={linkedTop.html}
+                  title={linkedTop.name}
+                  annotations={NO_ANNOTATIONS}
+                  onAddAnnotation={noop}
+                  onSelectAnnotation={noop}
+                  selectedAnnotationId={null}
+                  mode="selection"
+                  inputMethod="pinpoint"
+                  // Nothing to pin: a click on a link follows it.
+                  annotateModeActive={false}
+                  // An Escape the page did not use: one page back (full screen: the ladder, whose next rung is that).
+                  onPageEscape={() => void escapeFromPage()}
+                  onOpenLink={(href) => followLinkRef.current(href, folderOf(linkedTop.path))}
+                  initialFragment={linkedTop.hash || undefined}
+                  fullViewport
+                  hideControls
+                  maxAdditionalTargets={0}
+                  readOnly
+                />
+              </div>
+            </div>
+          )}
+          {isHtml && (
+            <div className={`ib-linknote${linkNote ? ' ib-on' : ''}`} aria-hidden={linkNote ? undefined : true} data-link-note={linkNote ? 'shown' : 'hidden'}>
+              <Icon name="info" size={13} />
+              <span>{linkNote}</span>
             </div>
           )}
           {view && isText && !props.readOnly && (
@@ -1395,7 +1649,8 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
           <AnnotationPanel
             // The sheet and the drawer draw the timeline under their own title and close (and a phone's window-wide overlay below 768 px would have no close here).
             presentation={folded || full ? 'embedded' : undefined}
-            emptyHint={isImage ? 'Comment below the image' : isVideo ? 'Pause at a moment and comment below the film' : isCode ? 'Click a line to comment' : undefined}
+            // A linked page takes no comments: the hint says where they can be written instead.
+            emptyHint={linkedTop ? `Comment on ${attachment.name}, not on this page` : isImage ? 'Comment below the image' : isVideo ? 'Pause at a moment and comment below the film' : isCode ? 'Click a line to comment' : undefined}
             isOpen
             annotations={annotations}
             blocks={blocks}
@@ -1443,8 +1698,11 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
             // The moment and the frame are in the card's header; the quote ("cut.mp4 at 1:42") and the image row would repeat them.
             cardParts={isVideo ? (annotation) => (readInboxVideoTime(annotation) === null ? {} : { quote: false, images: false }) : undefined}
             title={isVideo ? 'Comments' : undefined}
-            titleNote={isVideo ? 'By time' : undefined}
+            // A linked page takes no comments: the panel lists the attached page's, and says so.
+            titleNote={isVideo ? 'By time' : linkedTop ? `Off on ${linkedTop.name}` : undefined}
             onSelect={(id) => {
+              // A card is a comment on the attached page: back to it first (a new entry, as a link followed).
+              if (linkedTop) props.onLinked?.(null);
               setSelectedId(id);
               if (isVideo) videoRef.current?.seekTo(id);
               // A sheet over the file steps aside to show the comment; the drawer sits beside the page and stays.
@@ -1593,6 +1851,8 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
             phonePeekHost,
           )
         : null}
+      {linkImage &&
+        createPortal(<ImageLightbox src={linkImage.src} alt={linkImage.alt} onClose={() => setLinkImage(null)} />, document.body)}
       <div className="ib-sr" aria-live="polite" data-step-live="">
         {announced}
       </div>
