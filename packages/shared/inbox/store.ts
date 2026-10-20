@@ -651,7 +651,7 @@ export class InboxStore {
   }
 
   /** The seq of a resolved thread's archive line, or null for an open thread. */
-  private archiveSeq(threadId: string): number | null {
+  archiveSeq(threadId: string): number | null {
     const root = this.messages.get(threadId);
     if (!root || root.resolved_at == null) return null;
     return this.resolvedSeq.get(root.id) ?? Number.MAX_SAFE_INTEGER;
@@ -682,6 +682,15 @@ export class InboxStore {
       if (this.messages.get(id)?.author.kind === "agent" && (this.messageSeq.get(id) ?? 0) > archiveSeq) return true;
     }
     return false;
+  }
+
+  /**
+   * The seq of a question record's latest line (`<message id>/<key>`): when
+   * its pick, answer, replacement or Mark read last changed. An archive closes
+   * a question without a question line; `archiveSeq` says when that happened.
+   */
+  questionLineSeq(questionId: string): number | null {
+    return this.latest.get(`question:${questionId}`)?.seq ?? null;
   }
 
   questionsOf(messageId: string): InboxQuestion[] {
@@ -1442,11 +1451,13 @@ export class InboxStore {
    * An agent read the thread's settled acks (read_thread, or wait_for_reply's
    * `acknowledged`): each gets `seen_at`, so the window's pill says "<agent>
    * saw it". `upToSeq` limits it to acks settled at or before that seq. An
-   * ack that was not sent (`not_sent`) is never seen.
+   * ack that was not sent (`not_sent`) is never seen. `only` limits it to
+   * those messages (a windowed read marks only the acks it showed).
    */
-  markAcksSeen(threadId: string, upToSeq = Number.POSITIVE_INFINITY, at = this.stamp()): void {
+  markAcksSeen(threadId: string, upToSeq = Number.POSITIVE_INFINITY, at = this.stamp(), only?: ReadonlySet<string>): void {
     for (const message of this.threadMessages(threadId)) {
       const ack = message.ack;
+      if (only && !only.has(message.id)) continue;
       if (!ack || ack.settled_seq == null || ack.not_sent || ack.settled_seq > upToSeq || ack.seen_at) continue;
       this.appendMessage({ ...message, ack: { ...ack, seen_at: at } }, at);
     }

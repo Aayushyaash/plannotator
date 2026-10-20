@@ -25,13 +25,20 @@ import { InboxError } from "@plannotator/shared/inbox/schema";
 import type { InboxSendResult, InboxStore } from "@plannotator/shared/inbox/store";
 import type { InboxAttachment, InboxListRow, InboxQuestion } from "@plannotator/core/inbox-types";
 import { registerInboxGuideTools } from "./inbox-guides";
+import { INBOX_BODY_CUT_BYTES, INBOX_EARLIER_PERSON_BYTES, INBOX_THREAD_WINDOW, clip, questionWords, shortTime, sizeText, windowedThread, windowedThreadText } from "./inbox-mcp-read";
+import { registerInboxSearchTool } from "./inbox-mcp-search";
+import { fail, guarded, ok, okComplete, PROJECT_PATH_DESCRIPTION, TEXT_COMPLETE_META, type ToolResult } from "./inbox-mcp-result";
+
+// The result helpers live in inbox-mcp-result.ts (no import cycle for the tool modules); re-exported for older importers.
+export { fail, guarded, ok, okComplete, PROJECT_PATH_DESCRIPTION, type ToolResult };
+import type { InboxSearchIndex } from "@plannotator/shared/inbox/search";
 import { isInsideFolder, type InboxProjectRoot } from "./inbox-project-root";
 
 /** wait_for_reply's default hold: inside the 45-55 s window hosts' own tool timeouts allow. */
 export const INBOX_WAIT_DEFAULT_MS = 50_000;
 export const INBOX_WAIT_MAX_SECONDS = 50;
 
-export const INBOX_MCP_TOOLS = ["send_message", "read_thread", "resolve_message", "wait_for_reply", "get_guide_brief", "submit_guide"] as const;
+export const INBOX_MCP_TOOLS = ["send_message", "read_thread", "search", "resolve_message", "wait_for_reply", "get_guide_brief", "submit_guide"] as const;
 
 /** Under Claude Code's 2,048-character cap on server instructions. */
 export const INBOX_MCP_INSTRUCTIONS = [
@@ -42,7 +49,7 @@ export const INBOX_MCP_INSTRUCTIONS = [
   "- send_message posts markdown. Your messages join your session's thread until the person resolves it; pass `thread` (a short name) to keep separate work apart, or reply_to to answer a message. Pass an idempotency_key so a retry never posts twice. The question syntax is in send_message's description.",
   "- attachments: paths of files to show the person (a plan, a screenshot, an HTML mock, any file), absolute or relative to project_path. Link one from the body (`[the mock](mock.html)`) to open it beside the thread. The person's annotations come back in their reply.",
   "- wait_for_reply (thread_id) returns the reply as soon as it lands, or { status: \"waiting\", cursor } after about 50 seconds: call it again with that cursor. Call it when you need the answer, after the work that does not depend on it.",
-  "- read_thread reads one thread (thread_id) or lists yours. When an open question of yours no longer fits, send with reply_to into its thread with `supersedes` instead of leaving it open. resolve_message archives the thread for the person; use it only when nothing in it is left for them to read or answer.",
+  "- read_thread reads one thread (thread_id): open questions, the newest messages in full, earlier ones one line each; without an id it lists yours. search finds messages by words. When an open question of yours no longer fits, send with reply_to into its thread with `supersedes` instead of leaving it open. resolve_message archives the thread for the person; use it only when nothing in it is left for them to read or answer.",
   "- To walk the person through a code change: get_guide_brief, write the guide, then submit_guide with the exact patch.",
   "",
   "The reply is the person's answer, framed as theirs: their words, then \"Answers to your questions\". No tool answers or approves on the person's behalf.",
@@ -66,6 +73,13 @@ export const SEND_MESSAGE_DESCRIPTION = [
  */
 export const SUPERSEDES_DESCRIPTION =
   "Earlier questions in this thread that no longer apply, so the person cannot answer them any more. Withdraw your own questions that are still open (read_thread state open or picked; a sent, skipped or closed one is refused) this way as the thread moves on: when this message replaces them, makes them moot or follows up on them, or the person's reply settled them in words, so they stop keeping the thread at the top of the person's list. \"<message id>/<key>\" for one question (read_thread gives each question's key) or \"<message id>\" for every open question of that message. With exactly one question in this message, it replaces them; otherwise they read \"No longer applies\". To replace one with a particular new question, put `Replaces: <message id>/<key>` in that question's block instead. The person's pick on a superseded question is never sent. Every id must name an open question of the thread this message lands in (use reply_to); otherwise nothing is sent and the refusal, invalid_supersedes, lists the thread's open questions.";
+
+/**
+ * read_thread, as a raw MCP client reads it (the agent tool words its lead
+ * itself, INBOX_AGENT_ACTION_LEADS). A thread read is a window, so a long
+ * thread costs a few thousand tokens instead of the whole history.
+ */
+export const READ_THREAD_DESCRIPTION = `Read one Inbox thread (thread_id, or message_id to show that message in full) as a transcript: the questions still waiting on the person (key, state, prompt, choices), the newest messages in full (\`limit\`, default ${INBOX_THREAD_WINDOW}), the person's earlier messages in full (up to ${sizeText(INBOX_EARLIER_PERSON_BYTES)}), and every other earlier message as one line with its questions' states and answers; a body over ${sizeText(INBOX_BODY_CUT_BYTES)} is cut. \`expand\` shows messages in full, \`before\` reads further back, \`after\` (the result's cursor, or a message id) returns only what is new; \`format: "full"\` returns every full record. A message the person marked 👍 Looks good carries \`ack\` (they read it and need nothing more; no reply is needed). Without an id, list this project's threads, newest activity first, one short row each (subject, name, section in the person's list, open questions, last author and time, the person's last message, \`unread\`: the person wrote something you have not read): only the ones you sent in unless asked_by is "anyone", and only open ones unless include_resolved.`;
 
 /**
  * The Inbox-only `Stopped:` / `Holds up:` lines, as a whole block. The body
@@ -103,8 +117,6 @@ export const SEND_BODY_DESCRIPTION = [
   INBOX_STOP_EXAMPLE,
 ].join("\n");
 
-const PROJECT_PATH_DESCRIPTION =
-  "Absolute path of the repository or folder you work in; the thread lands in that project's row. The `plannotator inbox mcp` shim fills it from its working folder.";
 const AGENT_SESSION_DESCRIPTION =
   "Your session id. The `plannotator inbox mcp` shim fills it. send_message joins your session's thread by it; read_thread's asked_by \"me\" and wait_for_reply without a thread match on it.";
 
@@ -160,13 +172,18 @@ export interface InboxMcpContext {
    * (packages/server/inbox-sessions.ts).
    */
   presence?: { seen: (session: string) => void; hold: (session: string) => () => void };
+  /** The ⌘K search index (packages/server/inbox-search.ts), for the agents' read-only search tool. */
+  searchIndex?: InboxSearchIndex;
+  /**
+   * The projects a path names, WITHOUT making one (search writes nothing):
+   * the project at its root, plus the one an older Inbox kept for the very
+   * worktree it lies in. `unresolved` when git did not answer in time and no
+   * existing repository project holds the folder. Absent: search finds no
+   * project for a path.
+   */
+  findProjects?: (path: string) => Promise<{ projects: InboxProject[]; unresolved: boolean }>;
 }
 
-export type ToolResult = {
-  content: { type: "text"; text: string }[];
-  structuredContent?: Record<string, unknown>;
-  isError?: boolean;
-};
 
 /**
  * Whether the caller's connection delivers the person's reply into its
@@ -183,22 +200,6 @@ export function callerWakes(ctx: unknown): boolean {
 export const INBOX_REPLY_ARRIVES_TEXT =
   "The person's reply arrives in this session by itself, as a new message once the session is idle: end your turn, or go on with other work; do not call wait_for_reply.";
 
-export function ok(line: string, structured: Record<string, unknown>): ToolResult {
-  return { content: [{ type: "text", text: line }], structuredContent: structured };
-}
-
-export function fail(code: string, message: string): ToolResult {
-  return { content: [{ type: "text", text: `${code}: ${message}` }], isError: true };
-}
-
-export async function guarded(run: () => Promise<ToolResult> | ToolResult): Promise<ToolResult> {
-  try {
-    return await run();
-  } catch (error) {
-    if (error instanceof InboxError) return fail(error.code, error.message);
-    return fail("internal_error", error instanceof Error ? error.message : String(error));
-  }
-}
 
 function threadUrl(base: string, threadId: string): string {
   return `${base}#thread=${threadId}`;
@@ -208,6 +209,13 @@ function threadOf(store: InboxStore, input: { thread_id?: string; message_id?: s
   if (input.thread_id) {
     const root = store.message(input.thread_id);
     if (!root || root.thread_id !== root.id) throw new InboxError("thread_not_found", `No thread ${input.thread_id}.`);
+    if (input.message_id) {
+      const message = store.message(input.message_id);
+      if (!message) throw new InboxError("message_not_found", `No message ${input.message_id}.`);
+      if (message.thread_id !== root.id) {
+        throw new InboxError("validation_error", `message_id: ${input.message_id} is in thread ${message.thread_id}, not ${root.id}; pass one of them.`);
+      }
+    }
     return root.id;
   }
   if (input.message_id) {
@@ -255,7 +263,7 @@ function namingHint(store: InboxStore, threadId: string, session: string | null)
  * not the window's full records. The prompts, choices and context are the
  * agent's own block, and the reply body words every answer already.
  */
-export function replyQuestions(store: InboxStore, messageId: string): { key: string; state: string; answer: InboxQuestion["answer"]; sent_reply_id?: string }[] {
+export function replyQuestions(store: InboxStore, messageId: string): { key: string; state: InboxQuestion["state"]; answer: InboxQuestion["answer"]; sent_reply_id?: string }[] {
   return store.questionsOf(messageId).map((q) => ({
     key: q.key,
     state: q.state,
@@ -276,20 +284,36 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string, calle
   // The files the person attached are named with their paths, as the wake names them.
   const body = inboxBodyForAgent(reply);
   const naming = namingHint(store, reply.thread_id, caller);
+  const url = threadUrl(base, reply.thread_id);
+  // The facts the structured content holds, in words, so the text is complete.
+  const numbers = new Map(
+    [...(reply.reply_to ? store.questionsOf(reply.reply_to) : [])].sort((a, b) => a.position - b.position).map((q, i) => [q.key, i + 1]),
+  );
+  const facts = [
+    `reply ${reply.id}`,
+    reply.reply_to ? `to ${reply.reply_to}` : null,
+    shortTime(reply.created_at),
+    questions.length > 0
+      ? `questions of ${reply.reply_to}: ${questions.map((q) => questionWords({ key: q.key, q: numbers.get(q.key) ?? 1, state: q.state }, false, false)).join("; ")}`
+      : null,
+    `cursor ${cursor}`,
+    url,
+  ].filter((part): part is string => part !== null);
   return {
     content: [
       {
         type: "text",
-        text: `The person replied in thread ${reply.thread_id}${subject ? ` (${subject})` : ""}:\n\n${body}${naming?.line ?? ""}`,
+        text: `The person replied in thread ${reply.thread_id}${subject ? ` (${subject})` : ""}:\n\n${body}\n\n[${facts.join(" · ")}]${naming?.line ?? ""}`,
       },
     ],
+    _meta: { ...TEXT_COMPLETE_META },
     structuredContent: {
       status: "replied",
       thread_id: reply.thread_id,
       reply: { message_id: reply.id, reply_to: reply.reply_to, body, created_at: reply.created_at },
       questions,
       cursor,
-      url: threadUrl(base, reply.thread_id),
+      url,
       ...(naming?.structured ?? {}),
     },
   };
@@ -312,8 +336,8 @@ function ackResult(store: InboxStore, message: InboxMessage, base: string): Tool
     store.markAgentChecked(message.thread_id, store.messageCursor(note.id) ?? cursor);
   }
   const subject = store.threadSubject(message.thread_id);
-  return ok(
-    `The person marked your message in thread ${message.thread_id}${subject ? ` (${subject})` : ""} 👍 ${ack.label}: they read it and need nothing more. No reply is coming for it; go on.`,
+  return okComplete(
+    `The person marked your message in thread ${message.thread_id}${subject ? ` (${subject})` : ""} 👍 ${ack.label}: they read it and need nothing more. No reply is coming for it; go on.\n\n[message ${message.id} · 👍 ${shortTime(ack.at)} · cursor ${cursor} · ${threadUrl(base, message.thread_id)}]`,
     {
       status: "acknowledged",
       thread_id: message.thread_id,
@@ -364,7 +388,7 @@ export async function sendProject(context: InboxMcpContext, input: { reply_to?: 
  * before the upgrade would never find the person's reply after it: its
  * thread stays in that project, while `path` now resolves to the main one.
  */
-async function threadReadScope(context: InboxMcpContext, path: string): Promise<{ project: InboxProject; projectIds: Set<string> }> {
+export async function threadReadScope(context: InboxMcpContext, path: string): Promise<{ project: InboxProject; projectIds: Set<string> }> {
   const project = await context.resolveProject(path);
   const projectIds = new Set([project.id]);
   const resolved = await context.projectRootOf?.(path).catch(() => null);
@@ -660,6 +684,23 @@ function personFacts(store: InboxStore, threadId: string, caller: string | null)
   return { unread, last };
 }
 
+/** One row of read_thread's list as a line of text: every field the structured row holds. */
+export function threadRowText(row: InboxAgentThreadRow): string {
+  const parts = [`- ${row.thread_id}`];
+  if (row.subject) parts.push(JSON.stringify(row.subject));
+  if (row.thread_name) parts.push(`name ${JSON.stringify(row.thread_name)}`);
+  parts.push(row.section, `${row.message_count} message${row.message_count === 1 ? "" : "s"}`);
+  const { open, picked, prompt } = row.questions;
+  if (open + picked > 0) {
+    parts.push(`${open} open${picked > 0 ? `, ${picked} picked not sent` : ""}${prompt ? `: ${JSON.stringify(clip(prompt, 100))}` : ""}`);
+  }
+  parts.push(`last ${row.last_author} ${shortTime(row.last_at)}`);
+  if (row.last_person_message_id && row.last_person_at) parts.push(`person's last ${row.last_person_message_id} ${shortTime(row.last_person_at)}`);
+  if (row.unread) parts.push("unread: the person wrote something you have not read");
+  if (row.resolved_at) parts.push(`resolved ${shortTime(row.resolved_at)}`);
+  return parts.join(" · ");
+}
+
 export function agentThreadRow(store: InboxStore, row: InboxListRow, caller: string | null): InboxAgentThreadRow {
   const person = personFacts(store, row.thread_id, caller);
   return {
@@ -723,8 +764,7 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
     "read_thread",
     {
       title: "Read a thread, or list your threads",
-      description:
-        "Read one Inbox thread (thread_id or message_id): every message with its questions and the person's answers. A message the person marked 👍 Looks good carries `ack` (they read it and need nothing more; no reply is needed). Without an id, list this project's threads, newest activity first, one short row each (subject, name, section in the person's list, open questions, last author and time, the person's last message, `unread`: the person wrote something you have not read): only the ones you sent in unless asked_by is \"anyone\", and only open ones unless include_resolved.",
+      description: READ_THREAD_DESCRIPTION,
       inputSchema: z
         .object({
           thread_id: z.string().optional(),
@@ -732,7 +772,11 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
           project_path: z.string().optional().describe(PROJECT_PATH_DESCRIPTION),
           asked_by: z.enum(["me", "anyone"]).optional().describe("Default \"me\" when your session is known."),
           include_resolved: z.boolean().optional(),
-          limit: z.number().int().min(1).max(100).optional().describe("Threads to list (default 20)."),
+          limit: z.number().int().min(1).max(100).optional().describe(`How many: a thread's messages in full (default ${INBOX_THREAD_WINDOW}), listed threads (20), search results (10, at most 50).`),
+          expand: z.array(z.string()).optional().describe("Message ids of this thread to show in full."),
+          before: z.union([z.string(), z.number().min(0)]).optional().describe("Only messages before this message id or cursor."),
+          after: z.union([z.string(), z.number().min(0)]).optional().describe("Only messages after this message id or cursor (what is new)."),
+          format: z.enum(["full"]).optional().describe("Every message as its full record (large)."),
           agent_session: z.string().optional().describe(AGENT_SESSION_DESCRIPTION),
         })
         .strict(),
@@ -742,16 +786,28 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
       guarded(async () => {
         const threadId = threadOf(store, input);
         if (threadId) {
-          store.markAgentChecked(threadId);
-          // The person's 👍 (settled acks) are read now too: the window says the agent saw it.
-          store.markAcksSeen(threadId);
-          const thread = store.agentThread(threadId)!;
-          const replies = thread.messages.filter((m) => m.author.kind === "person").length;
           const naming = namingHint(store, threadId, input.agent_session?.trim() || null);
-          return ok(
-            `Thread ${threadId}${thread.subject ? ` (${thread.subject})` : ""}: ${thread.messages.length} message${thread.messages.length === 1 ? "" : "s"}, ${replies} from the person${thread.resolved_at ? ", resolved" : ""}.${naming?.line ?? ""}`,
-            { thread, url: threadUrl(context.baseUrl(), threadId), ...(naming?.structured ?? {}) },
-          );
+          const url = threadUrl(context.baseUrl(), threadId);
+          if (input.format === "full") {
+            store.markAgentChecked(threadId);
+            // The person's 👍 (settled acks) are read now too: the window says the agent saw it.
+            store.markAcksSeen(threadId);
+            // The full records, as before the window (tests, scripts, a jq over the result).
+            const thread = store.agentThread(threadId)!;
+            const replies = thread.messages.filter((m) => m.author.kind === "person").length;
+            return ok(
+              `Thread ${threadId}${thread.subject ? ` (${thread.subject})` : ""}: ${thread.messages.length} message${thread.messages.length === 1 ? "" : "s"}, ${replies} from the person${thread.resolved_at ? ", resolved" : ""}.${naming?.line ?? ""}`,
+              { thread, url, ...(naming?.structured ?? {}) },
+            );
+          }
+          // Built first, so a refused read (a bad expand, before or after) marks nothing read.
+          const { result, order, shown, readThrough } = windowedThread(store, threadId, { ...input, caller: input.agent_session?.trim() || null }, url);
+          store.markAgentChecked(threadId, readThrough);
+          store.markAcksSeen(threadId, Number.POSITIVE_INFINITY, undefined, shown);
+          return okComplete(windowedThreadText(result, order, naming?.line ?? ""), { ...result, ...(naming?.structured ?? {}) });
+        }
+        if (input.expand || input.before !== undefined || input.after !== undefined) {
+          throw new InboxError("validation_error", "expand, before and after read one thread: pass thread_id (or message_id).");
         }
         if (!input.project_path) throw new InboxError("validation_error", "project_path: required to list threads (or pass thread_id).");
         const { project, projectIds } = await threadReadScope(context, input.project_path);
@@ -765,13 +821,17 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
         const total = threads.length;
         // One short row per thread: the window's row is the person's view (and its `ack` shows a 👍 before it settles).
         const rows = threads.slice(0, limit).map((row) => agentThreadRow(store, row, session));
-        return ok(`${total} thread${total === 1 ? "" : "s"} in ${project.name}${total > limit ? `, showing ${limit}` : ""}.`, {
+        const head = `${total} thread${total === 1 ? "" : "s"} in ${project.name}${total > limit ? `, showing ${limit}` : ""}.`;
+        return okComplete(rows.length > 0 ? `${head}\n${rows.map(threadRowText).join("\n")}` : head, {
           project: { id: project.id, name: project.name, root: project.root },
           threads: rows,
           total,
         });
       }),
   );
+
+  // The agents' read-only search over the ⌘K index (approval "inbox-agent-search"): packages/server/inbox-mcp-search.ts.
+  registerInboxSearchTool(server, context);
 
   server.registerTool(
     "resolve_message",
@@ -880,7 +940,7 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
           // A resolved thread takes no reply: say so now instead of holding the call.
           // (An agent that wrote after the archive line can still get a reply there.)
           if (single && store.message(single)?.resolved_at != null && !store.agentAfterArchive(single)) {
-            return ok(`Thread ${single} is resolved; no reply will come.`, { status: "resolved", thread_id: single, cursor: store.cursor() });
+            return okComplete(`Thread ${single} is resolved; no reply will come. (cursor ${store.cursor()})`, { status: "resolved", thread_id: single, cursor: store.cursor() });
           }
 
           const waitMs = input.timeout_seconds ? input.timeout_seconds * 1000 : (context.waitDefaultMs ?? INBOX_WAIT_DEFAULT_MS);
@@ -921,10 +981,10 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
           if (outcome.kind === "ack") return ackResult(store, outcome.message, context.baseUrl());
           const cursor = store.cursor();
           if (outcome.kind === "resolved") {
-            return ok(`The person resolved thread ${outcome.threadId} without a reply.`, { status: "resolved", thread_id: outcome.threadId, cursor });
+            return okComplete(`The person resolved thread ${outcome.threadId} without a reply. (cursor ${cursor})`, { status: "resolved", thread_id: outcome.threadId, cursor });
           }
-          return ok(
-            `No reply yet. Call wait_for_reply again with cursor ${cursor} to keep waiting, or go on and check later.`,
+          return okComplete(
+            `No reply yet. Call wait_for_reply again with cursor ${cursor} to keep waiting, or go on and check later. (Waiting on ${threadIds.length === 0 ? "no open thread" : `thread${threadIds.length === 1 ? "" : "s"} ${threadIds.join(", ")}`}.)`,
             { status: "waiting", cursor, thread_ids: threadIds },
           );
         } finally {

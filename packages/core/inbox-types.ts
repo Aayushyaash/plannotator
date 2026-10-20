@@ -1145,16 +1145,18 @@ export type InboxToolCostHost = "pi" | "opencode";
  * `plannotator inbox --help`. History on both hosts: 11,736 bytes (2,796
  * tokens with o200k_base) before the long field descriptions were shortened
  * (INBOX_AGENT_FIELD_DESCRIPTIONS); 7,058 bytes (1,661 with o200k_base) before
- * Decisions (list_decisions, record_decision) were removed. The current value
- * is that measurement less the 668 bytes the two actions took in the entry
- * (the generated tool JSON before and after), not yet re-measured on the hosts.
+ * Decisions (list_decisions, record_decision) were removed; about 6,390 bytes
+ * after (estimated from the generated entry, never re-measured). The current
+ * value is measured on Pi with the read_thread window's fields (`expand`,
+ * `before`, `after`, `format`) and the `search` action added: 7,328 bytes,
+ * 1,732 tokens with o200k_base.
  */
 export const INBOX_TOOL_COST: Readonly<Record<InboxToolCostHost, { bytes: number; tokens: number }>> = {
-  pi: { bytes: 6390, tokens: 1800 },
-  opencode: { bytes: 6390, tokens: 1800 },
+  pi: { bytes: 7328, tokens: 2000 },
+  opencode: { bytes: 7328, tokens: 2000 },
 };
 
-/** "about 6 KB, roughly 1,800 tokens" for a host's measured cost. */
+/** "about 7 KB, roughly 2,000 tokens" for a host's measured cost. */
 export function inboxToolCostText(host: InboxToolCostHost): string {
   const cost = INBOX_TOOL_COST[host];
   return `about ${Math.round(cost.bytes / 1000)} KB, roughly ${cost.tokens.toLocaleString("en-US")} tokens`;

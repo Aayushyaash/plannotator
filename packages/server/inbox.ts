@@ -593,6 +593,26 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     return pending;
   };
 
+  /**
+   * The projects a path names, never making one (the agents' search writes
+   * nothing): resolveProject's lookup without its creation, plus the project
+   * an Inbox from before worktrees folded kept for the worktree itself.
+   */
+  const findProjects = async (path: string): Promise<{ projects: InboxProject[]; unresolved: boolean }> => {
+    const { root, folder, settled, worktree } = await projectRoots.resolve(path);
+    const projects: InboxProject[] = [];
+    const existing = store.projectByRoot(root);
+    if (existing) projects.push(existing);
+    else if (!settled) {
+      const repositories = store.listProjects().filter((project) => existsSync(join(project.root, ".git")));
+      const holder = nearestProjectHolding(repositories, folder);
+      if (holder) projects.push(holder);
+    }
+    const earlier = worktree ? store.projectByRoot(worktree) : null;
+    if (earlier && !projects.some((project) => project.id === earlier.id)) projects.push(earlier);
+    return { projects, unresolved: !settled && projects.length === 0 };
+  };
+
   const mcp = createMcpHandler(
     () =>
       createInboxMcpServer({
@@ -604,6 +624,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
           recordInboxAttachments(store.dir, paths, { base, at: new Date().toISOString() }),
         // An open wait_for_reply keeps its session present (never "ended").
         presence: { seen: (session) => live.seenOverMcp(session), hold: (session) => live.holdOverMcp(session) },
+        // The agents' read-only search reads the window's own ⌘K index, and finds projects without making one.
+        searchIndex: search.index,
+        findProjects,
       }),
     { legacy: "stateless", maxRequestBodySize: INBOX_MAX_REQUEST_BYTES },
   );

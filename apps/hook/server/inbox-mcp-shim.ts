@@ -28,6 +28,8 @@ import { inboxStatus, type InboxRegistryEntry } from "@plannotator/shared/inbox/
 import { INBOX_MAX_REQUEST_BYTES, inboxRequestTooLargeMessage } from "@plannotator/shared/inbox/connection";
 
 const FILLED_TOOLS = new Set(["send_message", "read_thread", "wait_for_reply", "submit_guide"]);
+/** The tools that take the project but no session: search (its schema is strict, so no `agent_session`). */
+const PROJECT_ONLY_TOOLS = new Set(["search"]);
 /** The tools that record an author, and so take `agent_host` / `agent_name` (their schemas are strict). */
 const AUTHOR_TOOLS = new Set(["send_message", "submit_guide"]);
 
@@ -100,7 +102,13 @@ function rpcError(id: string | number | null | undefined, message: string, code 
 export function fillInboxToolArguments(message: JsonRpc, cwd: string, own: string, hostSession?: InboxHostSession | null): JsonRpc {
   if (message.method !== "tools/call" || !message.params) return message;
   const name = message.params.name;
-  if (typeof name !== "string" || !FILLED_TOOLS.has(name)) return message;
+  if (typeof name !== "string") return message;
+  if (PROJECT_ONLY_TOOLS.has(name)) {
+    const args = { ...((message.params.arguments as Record<string, unknown> | undefined) ?? {}) };
+    if (args.project_path === undefined && args.all_projects !== true) args.project_path = cwd;
+    return { ...message, params: { ...message.params, arguments: args } };
+  }
+  if (!FILLED_TOOLS.has(name)) return message;
   const args = { ...((message.params.arguments as Record<string, unknown> | undefined) ?? {}) };
   if (args.project_path === undefined && args.reply_to === undefined) args.project_path = cwd;
   if (args.agent_session === undefined) {

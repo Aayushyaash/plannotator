@@ -5,7 +5,8 @@
  * hand the model (`inboxToolResultText`). The failures these guard: a host
  * that indents the structured JSON again, wait_for_reply or read_thread's
  * list carrying the window's full records again, and a message id passed as
- * `thread` starting a new thread named after it.
+ * `thread` starting a new thread named after it. The thread window, the
+ * text-complete mark and search are in inbox-mcp-window.test.ts.
  */
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -50,9 +51,10 @@ async function call(client: Client, name: string, args: Record<string, unknown>)
 
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 
-test("the hosts render the structured result as compact JSON: no indentation, and a quarter or more smaller than indented", async () => {
+test("the hosts render a structured result they are not told is complete as compact JSON: no indentation, and a quarter or more smaller than indented", async () => {
   const { client, seeded } = await world();
-  const read = await call(client, "read_thread", { thread_id: seeded.threadId, agent_session: "ses_long" });
+  // format: "full" is not marked complete (packages/server/inbox-mcp-window.test.ts covers the marked results).
+  const read = await call(client, "read_thread", { thread_id: seeded.threadId, agent_session: "ses_long", format: "full" });
   const rendered = inboxToolResultText(read).text;
   // The text line, a blank line, then the JSON on one line.
   const json = rendered.slice(rendered.indexOf("\n\n") + 2);
@@ -62,12 +64,15 @@ test("the hosts render the structured result as compact JSON: no indentation, an
   expect(bytes(rendered)).toBeLessThan(bytes(indented) * 0.75);
 });
 
-test("a thread read is the whole thread, with or without limit (limit applies to the list only)", async () => {
+test("a thread read is a window (limit sets it); format: \"full\" is the whole thread with every record's fields", async () => {
   const { client, seeded } = await world();
-  const whole = await call(client, "read_thread", { thread_id: seeded.threadId, agent_session: "ses_long" });
-  expect((whole.structuredContent.thread.messages as { id: string }[]).map((m) => m.id)).toEqual(seeded.messageIds);
+  const windowed = await call(client, "read_thread", { thread_id: seeded.threadId, agent_session: "ses_long" });
+  expect((windowed.structuredContent.thread.messages as { id: string }[]).map((m) => m.id).slice(-6)).toEqual(seeded.messageIds.slice(-6));
   const limited = await call(client, "read_thread", { thread_id: seeded.threadId, agent_session: "ses_long", limit: 4 });
-  expect(limited.structuredContent).toEqual(whole.structuredContent);
+  expect((limited.structuredContent.thread.messages as { id: string }[]).map((m) => m.id).slice(-4)).toEqual(seeded.messageIds.slice(-4));
+  expect(bytes(inboxToolResultText(limited).text)).toBeLessThan(bytes(inboxToolResultText(windowed).text));
+  const whole = await call(client, "read_thread", { thread_id: seeded.threadId, agent_session: "ses_long", format: "full" });
+  expect((whole.structuredContent.thread.messages as { id: string }[]).map((m) => m.id)).toEqual(seeded.messageIds);
   // The fields tests and proofs read stay on each message: question key and state, attachments' sent_sha256.
   const first = whole.structuredContent.thread.messages[0] as Record<string, any>;
   expect(first.questions[0]).toMatchObject({ key: expect.any(String), state: "sent" });

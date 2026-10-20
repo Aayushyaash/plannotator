@@ -970,7 +970,10 @@ test('Settings: the store size counts the sent files; delete thread removes its 
   await expect.poll(bytesOf).toBeLessThan(before);
   const blobsAfter = readdirSync(join(world.dataDir, 'inbox', 'blobs'));
   expect(blobsAfter).toHaveLength(2);
-  const flowSha = (await world.claude.readThread(world.threads.billing)).messages[0].attachments.map((a: { sent_sha256: string }) => a.sent_sha256);
+  // The sent versions' hashes, from the window's own route (read_thread leaves sha256s out).
+  const billingFiles = (await (await inboxFetch(`/api/inbox/threads/${world.threads.billing}/attachments`)).json()) as { attachments: { message_id: string; sent_sha256: string }[] };
+  const firstBilling = billingFiles.attachments[0]!.message_id;
+  const flowSha = billingFiles.attachments.filter((a) => a.message_id === firstBilling).map((a) => a.sent_sha256);
   expect(blobsAfter.sort()).toEqual([...flowSha].sort());
   expect((await inboxFetch(`/api/inbox/attachments/${world.attachments.flow}`)).status).toBe(404);
   await shot('7.1-settings-after-delete');

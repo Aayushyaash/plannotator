@@ -238,6 +238,34 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
     w.proof(`thread ${sent.thread_id}: project ${t.project.root}, author ${JSON.stringify(t.messages[0]?.author)}`)
   }, 60_000)
 
+  test('a long thread through the tool: read_thread answers a windowed transcript as text alone (no JSON after it), and search finds a message by its words', async () => {
+    const w = world('02b-long-thread')
+    startInbox(w)
+    const session = await open(w, 'session-long')
+    const first = await send(session, w, `Round 1: the queue drains in order.\n\n${QUESTION}`)
+    let last = first.message_id
+    for (let round = 2; round <= 20; round++) {
+      const reply = await personSends(w, last, `Round ${round - 1}: go ahead.`)
+      const answer = await session.callInbox({ action: 'send_message', reply_to: reply, body: `Round ${round}: the queue drains in order.${round === 13 ? ' The flamingo budget is set.' : ''}` }, w.project)
+      if ('deny' in answer) throw new Error(answer.deny)
+      last = JSON.parse(answer.text.slice(answer.text.indexOf('{'))).message_id
+    }
+    const read = await session.callInbox({ action: 'read_thread', thread_id: first.thread_id }, w.project)
+    if ('deny' in read) throw new Error(read.deny)
+    expect(read.text.split('\n')[0]).toStartWith(`Thread ${first.thread_id} (What should the worker do on a Stripe 409?): 39 messages, 19 from the person.`)
+    // The transcript is complete: the connection hands it over without the JSON.
+    expect(read.text).not.toContain('{"thread"')
+    expect(read.text).toContain(`- ${first.message_id} · Claude Code · `)
+    expect(read.text).toContain(`Q1 `)
+    expect(read.text).toMatch(/\nCursor \d+: read_thread after: \d+ returns only what is new since this read\.$/)
+    expect(Buffer.byteLength(read.text)).toBeLessThan(12_000)
+    const found = await session.callInbox({ action: 'search', query: 'flamingo' }, w.project)
+    if ('deny' in found) throw new Error(found.deny)
+    expect(found.text.split('\n')[0]).toBe('1 message matches "flamingo" in refund-service:')
+    expect(found.text).not.toContain('{"query"')
+    w.proof(`> plannotator_inbox read_thread (39 messages)\n${read.text}\n\n> plannotator_inbox search flamingo\n${found.text}`)
+  }, 120_000)
+
   test("the person's Send reaches the asking session once, as a turn: the stable header, the fixed line, the reply verbatim; Delivered, then Replied", async () => {
     const w = world('03-send-wakes-the-session')
     startInbox(w)
@@ -564,7 +592,9 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
     expect(other.host.submits[0]!.endsWith(`\n\n${words}`)).toBe(true)
     expect(writer.host.submits).toEqual([])
     const waited = await writerWait
-    expect('text' in waited && waited.text).toContain('"status":"waiting"')
+    // The wait's text is complete (the Inbox marks it), so the mod hands the model the text alone.
+    expect('text' in waited && waited.text).toStartWith('No reply yet.')
+    expect('text' in waited && waited.text).not.toContain('"status"')
     w.proof(`session-writer's wait_for_reply on the same thread kept waiting: ${('text' in waited ? waited.text : waited.deny).split('\n')[0]}`)
     w.proof(`turn.start ${turn.id} in session-other:\n${turn.text}\n\nsession-writer submits: ${writer.host.submits.length}`)
 

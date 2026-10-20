@@ -42,6 +42,7 @@ export const INBOX_TOOL_NAME = 'plannotator_inbox'
 export const INBOX_TOOL_ACTIONS = [
   'send_message',
   'read_thread',
+  'search',
   'wait_for_reply',
   'resolve_message',
   'submit_guide',
@@ -169,6 +170,8 @@ export const INBOX_TOOL_HELP_NOTE = "Every field and the full question syntax: `
  * OpenCode request carries it).
  */
 export const INBOX_AGENT_ACTION_LEADS: Readonly<Record<string, string>> = {
+  read_thread: 'Read a thread (thread_id): open questions, the newest messages, earlier ones one line each; or list yours.',
+  search: 'Find messages by words (read-only).',
   get_guide_brief: "Get Plannotator's method, the guide's JSON shape and the rules for writing a guided review, with a worked submit_guide call.",
 }
 
@@ -331,16 +334,33 @@ export function inboxToolCall(
   return projectPath === undefined ? { name: tool.name, arguments: args } : { name: tool.name, arguments: args, projectPath }
 }
 
-/** An MCP `tools/call` result as the text the agent tool answers with: the text, then any structured content as compact JSON (no indentation: it can be most of the bytes the model reads). */
+/**
+ * The `_meta` key an Inbox sets to `true` on a tool result whose text already
+ * says everything its structured content holds (read_thread, search,
+ * wait_for_reply): a compact transcript the model reads instead of JSON. A
+ * connection then hands the model the text alone. An older connection does
+ * not know the key and appends the structured content as before, which the
+ * Inbox keeps to the same trimmed shape.
+ */
+export const INBOX_TEXT_COMPLETE_META_KEY = 'ai.plannotator/text-complete'
+
+/**
+ * An MCP `tools/call` result as the text the agent tool answers with: the
+ * text, then any structured content as compact JSON (no indentation: it can
+ * be most of the bytes the model reads), unless the Inbox marked the text
+ * complete (INBOX_TEXT_COMPLETE_META_KEY).
+ */
 export function inboxToolResultText(result: unknown): { text: string; isError: boolean } {
-  const value = result && typeof result === 'object' ? (result as { content?: unknown; structuredContent?: unknown; isError?: unknown }) : {}
+  const value = result && typeof result === 'object' ? (result as { content?: unknown; structuredContent?: unknown; isError?: unknown; _meta?: unknown }) : {}
   const text = Array.isArray(value.content)
     ? value.content
         .map((part) => (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' ? (part as { text: string }).text : ''))
         .filter(Boolean)
         .join('\n')
     : ''
-  const structured = value.structuredContent && typeof value.structuredContent === 'object' ? `\n\n${JSON.stringify(value.structuredContent)}` : ''
+  const meta = value._meta && typeof value._meta === 'object' ? (value._meta as Record<string, unknown>) : {}
+  const complete = meta[INBOX_TEXT_COMPLETE_META_KEY] === true
+  const structured = !complete && value.structuredContent && typeof value.structuredContent === 'object' ? `\n\n${JSON.stringify(value.structuredContent)}` : ''
   return { text: `${text}${value.isError === true ? '' : structured}`.trim(), isError: value.isError === true }
 }
 
