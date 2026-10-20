@@ -348,6 +348,8 @@ const ERROR_STATUS: Record<string, number> = {
   invalid_supersedes: 422,
   // A pick on a question a Mark read closed: Move back first.
   question_set_aside: 409,
+  // Re-ask: every question of that session is answered, picked or closed already.
+  nothing_to_reask: 409,
   thread_resolved: 409,
   // 👍 Looks good: refused on a person's message, on an older agent message, and while a question is open.
   ack_not_allowed: 422,
@@ -1436,6 +1438,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       ...(!reply.ack_of && store.canNameThread(reply.thread_id, reply.to?.session ?? recipientOf(reply)) ? { name_thread: true } : {}),
       // The person's 👍 Looks good (amended 2026-10-16): the wake is the one ack line.
       ...(reply.ack_of ? { ack_of: reply.ack_of } : {}),
+      // The person's Re-ask (approval "inbox-reask"): the wake takes INBOX_REASK_INSTRUCTION.
+      ...((reply.reask?.length ?? 0) > 0 ? { reask: true } : {}),
     };
   };
 
@@ -2014,7 +2018,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       const guide = await inboxGuideRoute(req, path, store, serverSession);
       if (guide) return guide;
 
-      const messageMatch = /^\/api\/inbox\/messages\/([A-Za-z0-9_]+)\/(picks|reply|resolve)$/.exec(path);
+      const messageMatch = /^\/api\/inbox\/messages\/([A-Za-z0-9_]+)\/(picks|reply|reask|resolve)$/.exec(path);
       if (messageMatch) {
         if (req.method !== "POST") return json({ error: "Use POST." }, 405);
         const body = await readBody(req);
@@ -2073,6 +2077,24 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
             if (result.replayed) removeInboxAttachmentFiles(store.dir, attachments);
             // Sent: the uploads are the reply's attachments now.
             else if (attachments.length > 0) removeInboxUploads(store.dir, uploads.filter((id): id is string => typeof id === "string"));
+            return json({
+              message_id: messageId,
+              questions: store.questionsOf(messageId),
+              reply: result.reply,
+              replayed: result.replayed,
+            });
+          }
+          case "reask": {
+            // Re-ask (approval "inbox-reask"): a note asking the session that
+            // wrote this message for its open questions again, in one message.
+            // `to`: another live session, because the one that asked has ended
+            // (checked as a reply's is; null: not live, 409, nothing written).
+            const asked = body.to === undefined ? undefined : store.message(messageId);
+            const to = body.to === undefined || !asked ? undefined : live.replyTarget(asked.thread_id, body.to);
+            const result = store.sendReask(messageId, {
+              idempotency_key: body.idempotency_key as string,
+              ...(to === undefined ? {} : { to }),
+            });
             return json({
               message_id: messageId,
               questions: store.questionsOf(messageId),

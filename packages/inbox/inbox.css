@@ -3531,3 +3531,12 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
 .ib-tg-marks { position: relative; height: 0; z-index: 51; pointer-events: none; }
 .ib-tg-mark { position: absolute; display: inline-flex; align-items: center; justify-content: center; }
 .ib-tg-mark .ib-mk, .ib-tg-mark .ib-mk > svg, .ib-tg-mark .ib-mk > img { width: 100%; height: 100%; }
+
+/* Re-ask (approval "inbox-reask"): the person's note in the thread, one line, its body behind a disclosure. */
+.ib-reask { margin: 2px 0 0; }
+.ib-reask-l { display: flex; align-items: flex-start; gap: 8px; margin: 0; font-size: var(--ib-fs-13-5, 13.5px); line-height: 1.5; color: var(--foreground); }
+.ib-reask-l svg { flex: none; margin-top: 3px; color: var(--muted-foreground); }
+.ib-reask-d { margin: 6px 0 0 23px; }
+.ib-reask-d summary { cursor: pointer; min-height: 24px; width: fit-content; font-size: var(--ib-fs-12-5, 12.5px); color: var(--muted-foreground); border-radius: 4px; }
+.ib-reask-d summary:hover { color: var(--foreground); }
+.ib-reask-d pre { margin: 8px 0 0; padding: 10px 12px; border-radius: 8px; background: color-mix(in oklch, var(--muted) 60%, transparent); font-family: var(--font-mono); font-size: var(--ib-fs-12, 12px); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--foreground); }

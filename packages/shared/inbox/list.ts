@@ -18,6 +18,9 @@
  *   quiet     the person marked it read (Mark read) and nothing but a
  *             set-aside note came after; an agent's next message (or the
  *             person's own reply) brings it back, with no write
+ *   sent      the person's Re-ask note is the last message (approval
+ *             "inbox-reask"): it waits on the agent to ask again, whatever
+ *             is still open, read by the agent or not
  *   stopped   an open question says the agent cannot go on (`Stopped:`)
  *   holding   an open question names work that waits (`Holds up:`)
  *   waiting   any other open question
@@ -59,11 +62,13 @@ import {
 export type InboxSectionFacts = Pick<
   InboxListRow,
   "resolved_at" | "questions" | "answered_not_sent" | "sent" | "unseen"
-> & { read_at?: string | null; back_from_archive?: boolean };
+> & { read_at?: string | null; back_from_archive?: boolean; reask_pending?: boolean };
 
 export function inboxSectionOf(row: InboxSectionFacts): InboxSectionId {
   if (row.resolved_at !== null && row.back_from_archive !== true) return "quiet";
   if (row.read_at != null) return "quiet";
+  // The person's Re-ask note is the last message: it waits on the agent (approval "inbox-reask").
+  if (row.reask_pending === true) return "sent";
   if (row.questions.open > 0) {
     if (row.questions.stopped) return "stopped";
     if (row.questions.holds_up.length > 0) return "holding";

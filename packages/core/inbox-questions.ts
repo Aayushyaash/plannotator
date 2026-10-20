@@ -38,8 +38,11 @@ export {
 import {
   canonicalQuestionAnswer,
   findQuestionBlocks,
+  formatQuestionAnswerLines,
   formatQuestionAnswersSection,
   isQuestionAnswerEmpty,
+  isRecommendedQuestionAnswer,
+  QUESTION_ANSWERS_HEADING,
   isQuestionAnswered,
   capQuestionPrompt,
   MAX_QUESTION_PROMPT_CHARS,
@@ -386,6 +389,58 @@ export function composeInboxReplyBody(input: {
   // leaves every question open, and says so: the agent must not ask again.
   const stillOpen = input.sent.length === 0 ? inboxStillOpenLine(input.stillOpen ?? input.questions) : "";
   return [sentence, words, stillOpen, section].filter((part) => part !== "").join("\n\n");
+}
+
+/**
+ * The body of the person's Re-ask note (approval "inbox-reask"): what the
+ * agent is asked to do with its open questions, then the answers the person
+ * had picked and not sent, which go with the note. `noteId` is the note's
+ * own id, the `reply_to` of the agent's new message.
+ */
+export function composeInboxReaskBody(input: {
+  reask: readonly Pick<InboxQuestionRecord, "id" | "prompt">[];
+  answered: readonly { record: Pick<InboxQuestionRecord, "id" | "prompt" | "parsed">; answer: QuestionAnswer }[];
+  noteId: string;
+  /**
+   * The agent that asked, when the note goes to another session because the
+   * asking one ended: named from its host ("Claude Code"), so the note says
+   * whose questions they are instead of "your".
+   */
+  askedBy?: string | null;
+}): string {
+  const n = input.reask.length;
+  const whose = input.askedBy ? `the ${n === 1 ? "open question" : `${n} open questions`} ${input.askedBy} asked` : `your ${n === 1 ? "open question" : `${n} open questions`}`;
+  const lines = [
+    n === 1
+      ? `Please ask ${whose} in this thread again, in one new message, so the person can answer it in one place.`
+      : `Please ask ${whose} in this thread again, together in one new message, so the person can answer them in one place.`,
+  ];
+  if (input.answered.length > 0) {
+    const k = input.answered.length;
+    lines.push(`The person answered ${k === 1 ? "one more question" : `${k} more questions`} with this note; the ${k === 1 ? "answer is" : "answers are"} below. Don't ask ${k === 1 ? "it" : "them"} again.`);
+  }
+  lines.push(
+    "",
+    "Still open:",
+    ...input.reask.map((q) => `- ${q.id}: ${q.prompt.replace(/\s+/g, " ").trim()}`),
+    "",
+    `Check ${n === 1 ? "it" : "each one"} against where the work is now:`,
+    "- Still needed: ask it again with the context the person needs today (what changed since you asked, your recommendation), and put a `Replaces: <id>` line in its question block.",
+    "- No longer needed: leave it out, put its id in `supersedes`, and say in one line why.",
+    `Send one message (send_message) with reply_to ${input.noteId}. Until every id above is replaced or in \`supersedes\`, the old ${n === 1 ? "question stays" : "questions stay"} open for the person.`,
+  );
+  if (input.answered.length > 0) {
+    let section = `## ${QUESTION_ANSWERS_HEADING}\n\n`;
+    for (const { record, answer } of input.answered) {
+      const recommended = record.parsed.choices.filter((c) => c.recommended).map((c) => c.label);
+      const suggested = record.parsed.suggested_text ?? undefined;
+      section += `### ${record.prompt.replace(/\s+/g, " ").trim()} (${record.id})\n`;
+      section += formatQuestionAnswerLines(answer, { recommended: isQuestionAnswered(answer) && isRecommendedQuestionAnswer(answer, recommended, suggested) });
+      section += "\n";
+    }
+    lines.push("", section.trimEnd());
+  }
+  return lines.join("\n");
 }
 
 /**

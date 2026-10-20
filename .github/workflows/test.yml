@@ -140,6 +140,7 @@ jobs:
           packages/inbox/whatsNewLink.test.tsx
           packages/inbox/whatsNewHeader.test.tsx
           packages/inbox/replaced.test.tsx
+          packages/inbox/reask.test.tsx
           packages/inbox/threadFolding.test.tsx
           packages/inbox/pasteTarget.test.ts
           packages/inbox/seenOnSight.test.tsx

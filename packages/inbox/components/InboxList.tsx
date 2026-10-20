@@ -2,7 +2,7 @@ import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import type { InboxListRow, InboxListSection } from '@plannotator/core/inbox-types';
 import { threadChipName } from '../threadChip';
 import { agentName, formatCount, questionCount, shortTime } from '../format';
-import { sentRowLine } from '../deliveryLine';
+import { reaskRowLine, sentRowLine } from '../deliveryLine';
 import { sentRecipientsWords } from '../tags';
 import { TagStack } from './TagPicker';
 import { Tip } from './Tip';
@@ -90,6 +90,8 @@ function subjectOf(row: InboxListRow): string {
   // A thread the person started keeps its own subject in Sent; its count cell says whom it went to.
   // A reply that tags agents (approval "inbox-tag-agents", Lines): how many have it, and who waits.
   if (row.section === 'sent' && !row.addressee && row.sent?.recipients?.length) return sentRecipientsWords(row.sent.recipients);
+  // A Re-ask note waits on the agent to ask again (approval "inbox-reask"): its own words, beside the delivery tick.
+  if (row.section === 'sent' && row.reask_pending) return reaskRowLine(agentName(rowAgent(row)), row.sent?.checked_at ?? null, row.sent?.wakes);
   if (row.section === 'sent' && !row.addressee && !row.delivery) return sentRowLine(agentName(rowAgent(row)), row.sent?.wakes);
   return row.subject ?? '(no subject)';
 }

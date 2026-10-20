@@ -47,6 +47,8 @@ import {
   type AskingSession,
   type RouteState,
 } from './ReplyRoute';
+import { ReaskNote } from './ReaskNote';
+import { reaskedIn, reaskNoteAgent, reaskOffered, reaskTargets, reaskTooltip } from '../reask';
 import { ChangedNotice, ReplacedQuestionCard, ReplacesLine, StaleGuard, replacedBy, replacementOf, type JumpTarget } from './ReplacedQuestion';
 import { InboxComposerField } from './ComposerField';
 import { SkillsLine } from './SkillsLine';
@@ -1158,6 +1160,11 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
   const noteId = `ib-asker-note-${thread.thread_id}`;
   // The choice at Send, when the session that asked has ended.
   const [route, setRoute] = useState<RouteState>(CLOSED_ROUTE);
+  /** What the route choice is for: a reply, or a Re-ask (the same choice, its own words). */
+  const [routeFor, setRouteFor] = useState<'reply' | 'reask'>('reply');
+  const reaskRef = useRef<HTMLButtonElement>(null);
+  const routeForRef = useRef(routeFor);
+  routeForRef.current = routeFor;
   useEffect(() => {
     if (!asking) return;
     setRoute((current) => (current.open ? mergeRouteRows(current, asking, live) : current));
@@ -1647,6 +1654,9 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     }
     if (q.state === 'closed' && q.set_aside_at) return `Closed unanswered when you marked it read · ${whenTime(q.set_aside_at)}`;
     if (q.state === 'picked' && q.picked_at) return `Picked ${whenTime(q.picked_at)}, not sent`;
+    // Re-ask: the person asked the agent for it again; it stays open until the agent replaces it.
+    const reaskedBy = reaskedIn(thread.messages, message.id, q);
+    if (reaskedBy) return `Asked again ${whenTime(reaskedBy.created_at)}`;
     return null;
   };
 
@@ -1698,6 +1708,11 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
   /** Back from the choice to the reply: the draft and its choice kept, focus at the end of the text. */
   const routeBack = useCallback(() => {
     setRoute((current) => ({ ...current, open: false, error: null }));
+    if (routeForRef.current === 'reask') {
+      setRouteFor('reply');
+      requestAnimationFrame(() => reaskRef.current?.focus());
+      return;
+    }
     requestAnimationFrame(() => {
       const text = textRef.current;
       if (text) {
@@ -1986,15 +2001,85 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     newMessage?.kind !== 'compose' &&
     (box.open || waiting || last.author.kind !== 'person');
 
+  // Re-ask (approval "inbox-reask"): one note per session that still has an
+  // open question here, asking it for them again in one message (reask.ts).
+  const reaskList = resolved && !cameBack ? [] : reaskTargets(thread.messages, liveMessage);
+  const reaskShown = reaskOffered(reaskList, thread.messages.filter(liveMessage));
+  const reaskOpen = reaskList.reduce((n, t) => n + (t.kind === 'reask' ? t.open : 0), 0);
+  const [reasking, setReasking] = useState(false);
+  /** One idempotency key per target message, kept for a retry. */
+  const reaskKeys = useRef<Map<string, string> | null>(null);
+  const sendReask = async (routed = false) => {
+    if (reasking || reaskList.length === 0) return;
+    const notes = reaskList.filter((t) => t.kind === 'reask');
+    // The one session asked has ended and another is live: who asks again is the person's choice, as for a reply.
+    const single = notes.length === 1 ? notes[0]! : null;
+    const routable = !!single && !!asking && single.session === asking.session && askerEnded && anyOtherLive;
+    if (routable && !routed) {
+      setError(null);
+      setRouteFor('reask');
+      setRoute((current) => mergeRouteRows({ ...current, open: true, error: null, focus: current.focus + 1 }, asking!, live));
+      return;
+    }
+    const chosen =
+      routed && route.selected && route.selected !== LEAVE && route.selected !== asking?.session
+        ? (route.rows.find((row) => row.live.session === route.selected && !row.ended)?.live ?? null)
+        : null;
+    const to = chosen ? { host: chosen.host, session: chosen.session } : undefined;
+    setReasking(true);
+    setError(null);
+    let went = 0;
+    const total = reaskList.reduce((n, t) => n + (t.kind === 'picks' ? t.replies.length : 1), 0);
+    try {
+      // A pick still being saved goes too: wait for it.
+      await pickChain.current;
+      if (!reaskKeys.current) reaskKeys.current = new Map();
+      const keyFor = (id: string) => {
+        const key = reaskKeys.current!.get(id) ?? crypto.randomUUID();
+        reaskKeys.current!.set(id, key);
+        return key;
+      };
+      // A session with only picks: a plain reply carries them, so the Re-ask strands none (owner's rule 2).
+      for (const target of reaskList.filter((t) => t.kind === 'picks')) {
+        for (const reply of target.replies) {
+          await inboxApi.reply(reply.message.id, { idempotency_key: keyFor(`picks:${reply.message.id}`), words: '', questions: reply.questions, skip_unanswered: false });
+          went += 1;
+        }
+      }
+      for (const target of notes) {
+        await inboxApi.reask(target.message.id, { idempotency_key: keyFor(target.message.id), ...(to && target === single ? { to } : {}) });
+        went += 1;
+      }
+      reaskKeys.current = null;
+      setRoute(CLOSED_ROUTE);
+      setRouteFor('reply');
+      await onChanged();
+      requestAnimationFrame(() => bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight }));
+    } catch (cause) {
+      if (to && cause instanceof InboxApiError && cause.code === 'session_not_live') {
+        setRoute((current) => routeRace(current, to.session, { went, total }));
+        void loadLive();
+        return;
+      }
+      const why = cause instanceof InboxApiError ? cause.message : 'Try again.';
+      setError(went > 0 ? `${went} of ${total} went; the rest did not. ${why}` : `Nothing was asked again. ${why}`);
+      if (went > 0) await onChanged();
+    } finally {
+      setReasking(false);
+    }
+  };
+
   const routeChoice = asking ? (
     <RouteChoice
+      kind={routeFor}
+      reaskCount={reaskOpen}
       name={`route-${thread.thread_id}`}
       asking={asking}
       project={thread.project.name}
       state={route}
       sending={sending}
       onSelect={(id) => setRoute((current) => ({ ...current, selected: id, error: null }))}
-      onSubmit={() => void send({ routed: true })}
+      onSubmit={() => void (routeFor === 'reask' ? sendReask(true) : send({ routed: true }))}
       onBack={routeBack}
       onShowAll={() => setRoute((current) => ({ ...current, showAll: true }))}
     />
@@ -2441,6 +2526,13 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
                     )}
                   </div>
                 )}
+                {(message.reask?.length ?? 0) > 0 ? (
+                  <ReaskNote
+                    message={message}
+                    agent={message.to ? toName(message, message.to) : reaskNoteAgent(askedBy(message)?.author, asker)}
+                    picks={thread.messages.reduce((n, m) => n + (m.questions ?? []).filter((q) => q.sent_reply_id === message.id).length, 0)}
+                  />
+                ) : (
                 <MessageBody
                   message={message}
                   projectRoot={thread.project.root}
@@ -2464,6 +2556,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
                       : undefined
                   }
                 />
+                )}
                 {/* An agent's files, and the person's own (compose): the same tiles and viewers. */}
                 {(message.attachments?.length ?? 0) > 0 && (
                   <AttachmentTiles
@@ -2750,6 +2843,15 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
               <Icon name="reply" size={15} />
               {waiting ? 'Edit the reply' : 'Reply'}
             </button>
+            {/* Re-ask (approval "inbox-reask"): the open questions again, in one message per session. */}
+            {reaskShown && (
+              <Tip content={reaskTooltip(reaskList)}>
+                <button type="button" className="ib-btn" ref={reaskRef} data-reask="" disabled={reasking} onClick={() => void sendReask()}>
+                  <Icon name="refresh" size={15} />
+                  Re-ask
+                </button>
+              </Tip>
+            )}
             {/* 👍 Looks good beside Reply: sent to the agent after the Undo window; hidden while a question waits. */}
             {ackOffered && !waiting && (
               <Tip
