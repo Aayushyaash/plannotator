@@ -53,7 +53,7 @@ export interface SidebarProps {
   onWhatsNew: (version: string) => void;
   /**
    * Claude Code sessions a restart would bring up to date (the list model's
-   * `restart_claude_code`): "Restart Claude Code N" under "What's new in X",
+   * `restart_claude_code`): "Reload Claude Code N" under "What's new in X",
    * opening Settings → Agents (owner approval "restart-warning"). It goes away
    * by itself once they restart. Absent or 0: no row.
    */
@@ -270,16 +270,16 @@ export function Sidebar(props: SidebarProps) {
 }
 
 /**
- * "Restart Claude Code N": the Claude Code sessions still on the plugin from
+ * "Reload Claude Code N": the Claude Code sessions still on the plugin from
  * before an update. A real button named by its words and count; what it does
  * is in its description. Opens Settings → Agents, which lists them.
  */
 function RestartSessionsRow({ count, onOpen }: { count: number; onOpen: () => void }) {
-  const why = `${count === 1 ? '1 Claude Code session runs' : `${count} Claude Code sessions run`} the plugin from before the update. Opens Settings, Agents.`;
+  const why = `${count === 1 ? '1 Claude Code session runs' : `${count} Claude Code sessions run`} the plugin from before the update; /reload-plugins loads the new one. Opens Settings, Agents.`;
   return (
     <button type="button" className="ib-nav ib-quiet ib-rw-restart" data-restart-sidebar={count} onClick={onOpen}>
       <Icon name="refresh" />
-      <span className="ib-rw-label">Restart Claude Code</span>
+      <span className="ib-rw-label">Reload Claude Code</span>
       <span className="ib-n">{formatCount(count)}</span>
       <span className="ib-sr">. {why}</span>
     </button>

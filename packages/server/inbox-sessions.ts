@@ -536,7 +536,7 @@ export function createInboxLiveSessions(options: {
     return out;
   };
 
-  /** Live Claude Code sessions a restart brings up to date: the sidebar's "Restart Claude Code N". */
+  /** Live Claude Code sessions a restart brings up to date: the sidebar's "Reload Claude Code N". */
   const restartCount = (): number => {
     let count = 0;
     for (const entry of sessions.values()) {

@@ -22,6 +22,12 @@ export interface InboxToastModel {
   onReply?: () => void;
   /** One more action (compose: Open the thread just sent, or Drafts). */
   action?: { label: string; onPress: () => void };
+  /**
+   * What the live region says in place of lead and detail, when the line is
+   * kept short for one line and a screen reader should still hear the whole
+   * sentence (compose's Sent toast).
+   */
+  speech?: string;
 }
 
 const ICONS: Record<Exclude<InboxToastIcon, 'thumb'>, IconName> = { check: 'checkCircle', warn: 'warn', archive: 'archive', mute: 'mute' };
@@ -31,9 +37,9 @@ const ICONS: Record<Exclude<InboxToastIcon, 'thumb'>, IconName> = { check: 'chec
  * undo it when it can be undone: "Marked read. Moves to Quiet. Press Z to
  * undo." (a phone has no Z: "Undo is available.").
  */
-export function toastSpeech(toast: Pick<InboxToastModel, 'lead' | 'detail' | 'onUndo'>, phone = false): string {
+export function toastSpeech(toast: Pick<InboxToastModel, 'lead' | 'detail' | 'onUndo' | 'speech'>, phone = false): string {
   const sentence = (text: string) => (/[.!?…”"]$/.test(text) ? text : `${text}.`);
-  const said = toast.detail ? `${sentence(toast.lead)} ${sentence(toast.detail)}` : sentence(toast.lead);
+  const said = toast.speech ? sentence(toast.speech) : toast.detail ? `${sentence(toast.lead)} ${sentence(toast.detail)}` : sentence(toast.lead);
   if (!toast.onUndo) return said;
   return `${said} ${phone ? 'Undo is available.' : 'Press Z to undo.'}`;
 }

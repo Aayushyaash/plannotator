@@ -88,6 +88,7 @@ import { DraftsPage } from './compose/DraftsPage';
 import { useComposeSessions } from './compose/useComposeSessions';
 import { composeActions, composeTargets, hostLabel, type ComposeAction } from './compose/model';
 import type { DraftView } from './api';
+import { inboxTabCount, useTabCount } from './tabCount';
 
 // The Inbox has no /api/config and no browser-agent tools: settings stay in
 // the page's own cookies, except the theme, which goes to config.json `theme`
@@ -354,6 +355,9 @@ function Inbox() {
     storage.setItem(SIDEBAR_OPEN_COOKIE, String(next));
   }, []);
   const [latest, setLatest] = useState<ListModel | null>(null);
+  // The tab's count (tabCount.ts): every thread with news the person has not looked at, from the
+  // latest read (not the held list on screen, and not the sidebar's project filter).
+  useTabCount(useMemo(() => (latest ? inboxTabCount(latest.sections) : 0), [latest]));
   /** The list on screen: held until the person acts (the "N new" notice). */
   const [shown, setShown] = useState<InboxListSection[] | null>(null);
   const [thread, setThread] = useState<InboxThread | null>(null);
@@ -396,7 +400,7 @@ function Inbox() {
   const [restarting, setRestarting] = useState(false);
   /** This run started on a newer version: the sidebar's "What's new in X" link. */
   const [updated, setUpdated] = useState<string | null>(null);
-  // Claude Code sessions a restart would bring up to date: the sidebar's "Restart Claude Code N" (owner approval "restart-warning").
+  // Claude Code sessions a /reload-plugins would bring up to date: the sidebar's "Reload Claude Code N" (owner approval "restart-warning").
   const [restartClaudeCode, setRestartClaudeCode] = useState(0);
   /** The update control's dialogs and what they read (GET /api/inbox/update). */
   const [updateDialog, setUpdateDialog] = useState<null | 'update' | 'restart' | 'failed'>(null);
@@ -1085,7 +1089,9 @@ function Inbox() {
       {
         icon: 'check',
         lead: `Sent to ${hostLabel(sent.host)}`,
-        detail: `in ${sent.projectName}. It takes it as its next turn.`,
+        // Short enough for one line; the thread's own line says Queued / Sending / Delivered.
+        detail: `in ${sent.projectName}`,
+        speech: `Sent to ${hostLabel(sent.host)} in ${sent.projectName}. It takes it as its next turn.`,
         action: { label: 'Open', onPress: () => {
           dismissToast();
           go({ page: 'inbox', project: routeRef.current.page === 'inbox' ? routeRef.current.project : null, thread: sent.threadId });
@@ -1395,7 +1401,7 @@ function Inbox() {
     showToast({
       ...copy,
       // Stopped partway: the warning, and why, whole (it may wrap); Undo still covers what did apply.
-      ...(incomplete ? { icon: 'warn' as const, detail: `${incomplete} · ${name}`, wrap: true } : {}),
+      ...(incomplete ? { icon: 'warn' as const, detail: `${incomplete} · ${name}`, speech: undefined, wrap: true } : {}),
       onUndo: () => {
         void (async () => {
           try {

@@ -31,16 +31,30 @@ function sinceText(iso: string): string {
 
 const TWO_WORDS = ['', 'it', 'these two', 'these three'];
 
-/** The head's state when sessions need something: "Connected · 2 need a restart". */
+/** The head's state when sessions need something: "Connected · 2 need a reload". */
 function sessionsState(id: InboxToolHostId, sessions: InboxHostSessions | undefined): string | null {
   if (!sessions || sessions.outdated === 0) return null;
   const n = sessions.outdated;
   if (id === 'pi') return n === 1 ? '1 needs a reload' : `${n} need a reload`;
   if (sessions.sessions.some((s) => s.outdated?.fix === 'update_plugin')) return 'plugin needs an update';
-  return n === 1 ? '1 needs a restart' : `${n} need a restart`;
+  return n === 1 ? '1 needs a reload' : `${n} need a reload`;
 }
 
-/** Settings → Agents' "Open sessions" row (the approved "restart-warning" mock): count, older ones, and a Copy restart per session. */
+/**
+ * Sessions that share a folder: each needs its own `/reload-plugins`, and the
+ * rows tell them apart by "since <time>". The folder's name, or null when no two share one.
+ */
+function sharedFolder(stale: readonly InboxOpenSession[]): string | null {
+  const seen = new Set<string>();
+  for (const s of stale) {
+    if (!s.folder) continue;
+    if (seen.has(s.folder)) return s.project ?? s.folder;
+    seen.add(s.folder);
+  }
+  return null;
+}
+
+/** Settings → Agents' "Open sessions" row (the approved "restart-warning" mock, amendment 2): count, older ones, and a Copy restart per session for the fallback. */
 function OpenSessions({ id, label, sessions }: { id: InboxToolHostId; label: string; sessions: InboxHostSessions }) {
   const phone = usePhone();
   const [open, setOpen] = useState<boolean | null>(null);
@@ -63,23 +77,34 @@ function OpenSessions({ id, label, sessions }: { id: InboxToolHostId; label: str
   let sub: ReactNode = null;
   if (id === 'claude-code' && stale.length > 0) {
     const them = TWO_WORDS[stale.length] ?? `these ${stale.length}`;
+    const where = stale.length === 1 ? 'that Claude Code' : `each of ${them}`;
+    const shared = stale.length > 1 ? sharedFolder(stale) : null;
+    const fallback = (
+      <>
+        {' '}If {stale.length === 1 ? 'it is' : 'one is'} still listed after that, type <code>/exit</code> in it and run the command <b>Copy restart</b> gives.
+      </>
+    );
+    const sameFolder = shared && (
+      <span data-restart-same-folder="">
+        {' '}Sessions in the same folder ({shared}) each need their own <code>/reload-plugins</code>; tell them apart by when they started.
+      </span>
+    );
     sub = updating ? (
       <>
-        The installed plugin{sessions.installed ? ` (${sessions.installed})` : ''} is older than this Inbox, so a restart alone loads it again. Update it, then type{' '}
-        <code>/exit</code> in {stale.length === 1 ? 'that Claude Code' : `each of ${them}`} and run the command <b>Copy restart</b> gives (or{' '}
-        <code>/restart</code>, if your Claude Code has it).
+        The installed plugin{sessions.installed ? ` (${sessions.installed})` : ''} is older than this Inbox, so reloading alone loads it again. Update it, then type{' '}
+        <code>/reload-plugins</code> in {where}.{sameFolder}
         {sessions.update_command && (
           <span className="ib-rw-cmd" data-restart-update="">
             <code>{sessions.update_command}</code>
             <CopyCommand text={sessions.update_command} label="Copy the command that updates Plannotator's Claude Code plugin" announcement={UPDATE_COPIED_ANNOUNCEMENT} />
           </span>
         )}
+        {fallback}
       </>
     ) : (
       <>
-        {sessions.installed ? `Plugin ${sessions.installed} is installed. ` : 'A newer plugin is installed. '}To load it, type <code>/exit</code> in{' '}
-        {stale.length === 1 ? 'that Claude Code' : `each of ${them}`} and run the command <b>Copy restart</b> gives: {stale.length === 1 ? 'it comes' : 'each comes'} back
-        as the same session. If your Claude Code has <code>/restart</code>, that does the same.
+        {sessions.installed ? `Plugin ${sessions.installed} is installed. ` : 'A newer plugin is installed. '}To load it, type <code>/reload-plugins</code> in {where}:{' '}
+        {stale.length === 1 ? 'it keeps' : 'each keeps'} the session and nothing is interrupted.{sameFolder}{fallback}
       </>
     );
   } else if (id === 'pi' && stale.length > 0) {
@@ -138,7 +163,7 @@ function SessionRow({ session }: { session: InboxOpenSession }) {
         <span className="ib-rw-sm">{meta}</span>
       </span>
       {session.restart_command && (
-        <CopyCommand text={session.restart_command} short="Copy restart" label={`Copy the command that restarts the ${session.project ?? 'Claude Code'} session`} />
+        <CopyCommand text={session.restart_command} short="Copy restart" label={`Copy restart: the command that restarts the ${session.project ?? 'Claude Code'} session started ${sinceText(session.started_at)}`} />
       )}
     </div>
   );

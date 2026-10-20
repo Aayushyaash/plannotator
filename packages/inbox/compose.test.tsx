@@ -254,6 +254,11 @@ test.skipIf(!hasDom)('a live session: To is prefilled, Send starts the thread ad
   expect(send.body).toMatchObject({ to: { host: 'claude-code', session: 'ses_live_dom' }, body: 'Idea: group the list by session.' });
   expect(typeof send.body.draft_id).toBe('string');
   expect(document.querySelector('[data-inbox-toast]')?.textContent).toContain('Sent to Claude Code');
+  // One short line: the project, no trailing sentence; the live region still says the whole of it.
+  const detail = document.querySelector('[data-inbox-toast] .ib-tdetail')?.textContent ?? '';
+  expect(detail).toMatch(/^in \S/);
+  expect(detail).not.toContain('next turn');
+  await until(() => /^Sent to Claude Code in .+\. It takes it as its next turn\.$/.test(document.querySelector('[data-inbox-live]')?.textContent ?? ''), 'the live region says the whole sentence');
   // The row that opened it is gone: focus goes to the Drafts heading (no other draft), never the page.
   await until(() => document.activeElement === el.querySelector('[data-drafts-page] h1'), 'focus on the Drafts heading');
   expect(await drafts()).toEqual([]);
