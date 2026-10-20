@@ -134,10 +134,80 @@ describe("reply drafts", () => {
     const kept = await post(server, `/api/inbox/messages/${message_id}/reply`, { idempotency_key: "k1", words: "From the phone" });
     expect(kept.status).toBe(200);
     expect(server.store.replyDraft(thread_id)?.body).toBe("Ship it");
-    const cleared = await post(server, `/api/inbox/messages/${message_id}/reply`, { idempotency_key: "k2", words: "Ship it", clear_draft: true });
+    // An older window's `clear_draft: true` names no draft: nothing is cleared.
+    expect((await post(server, `/api/inbox/messages/${message_id}/reply`, { idempotency_key: "k2", words: "Ship it", clear_draft: true })).status).toBe(200);
+    expect(server.store.replyDraft(thread_id)?.body).toBe("Ship it");
+    const draft = server.store.replyDraft(thread_id)!;
+    const cleared = await post(server, `/api/inbox/messages/${message_id}/reply`, { idempotency_key: "k3", words: "Ship it", clear_draft: draft.updated_at });
     expect(cleared.status).toBe(200);
     expect(server.store.replyDraft(thread_id)).toBeNull();
     expect((await rowOf(server, thread_id)).unsent ?? null).toBeNull();
+  });
+
+  test("clear_draft is a compare-and-set: a newer draft another window saved meanwhile stays", async () => {
+    const { server, send } = await setup();
+    const { thread_id, message_id } = await send("The build is green.", "ses_c2");
+    const mine = (await saveDraft(server, thread_id, "Ship it", null))!;
+    // Another window types over it before this window's Send lands.
+    const theirs = (await saveDraft(server, thread_id, "Ship it, and tag the release", mine.updated_at))!;
+    const sent = await post(server, `/api/inbox/messages/${message_id}/reply`, { idempotency_key: "k1", words: "Ship it", clear_draft: mine.updated_at });
+    expect(sent.status).toBe(200);
+    expect(server.store.replyDraft(thread_id)).toEqual(theirs);
+    // That window's own Send clears its own draft.
+    await post(server, `/api/inbox/messages/${message_id}/reply`, { idempotency_key: "k2", words: theirs.body, clear_draft: theirs.updated_at });
+    expect(server.store.replyDraft(thread_id)).toBeNull();
+  });
+
+  test("a save sent as the page goes, a step behind on its base, lands when the draft holds the words it last wrote", async () => {
+    const { server, send } = await setup();
+    const { thread_id } = await send("The build is green.", "ses_c3");
+    const first = (await saveDraft(server, thread_id, "Ship", null))!;
+    // The window's next save landed, but the page went before its answer came back: base is still the first.
+    await saveDraft(server, thread_id, "Ship it", first.updated_at);
+    const stale = await post(server, `/api/inbox/threads/${thread_id}/draft`, { body: "Ship it now", base: first.updated_at });
+    expect(stale.status).toBe(409);
+    const kept = await post(server, `/api/inbox/threads/${thread_id}/draft`, { body: "Ship it now", base: first.updated_at, base_body: "Ship it" });
+    expect(kept.status).toBe(200);
+    expect(server.store.replyDraft(thread_id)?.body).toBe("Ship it now");
+    // Words another window wrote are not this window's: still a conflict.
+    const other = await post(server, `/api/inbox/threads/${thread_id}/draft`, { body: "mine", base: first.updated_at, base_body: "Ship it" });
+    expect(other.status).toBe(409);
+    expect((await post(server, `/api/inbox/threads/${thread_id}/draft`, { body: "x", base: null, base_body: 3 })).status).toBe(422);
+  });
+
+  test("agents read the section without the person's unsent work: a thread holding only a draft is quiet to them", async () => {
+    const { server, client, send, project } = await setup();
+    const { thread_id } = await send("The build is green.", "ses_c4");
+    await post(server, `/api/inbox/threads/${thread_id}/seen`, {});
+    await saveDraft(server, thread_id, "Ship it", null);
+    expect((await rowOf(server, thread_id)).section).toBe("new");
+    const list = (await client.callTool({ name: "read_thread", arguments: { project_path: project, agent_session: "ses_c4" } })) as {
+      structuredContent?: { threads?: { thread_id: string; section: string }[] };
+    };
+    const rows = list.structuredContent?.threads ?? [];
+    expect(rows.find((r) => r.thread_id === thread_id)?.section).toBe("quiet");
+    expect(JSON.stringify(list)).not.toContain("Ship it");
+  });
+
+  test("search's status filter follows a draft's save and Discard", async () => {
+    const { server, send } = await setup();
+    const { thread_id } = await send("The build is green.", "ses_c5");
+    await post(server, `/api/inbox/threads/${thread_id}/seen`, {});
+    const total = async (status: string) => {
+      for (let i = 0; i < 40; i++) {
+        const body = (await (await fetch(url(server, `/api/inbox/search?q=build&status=${status}`))).json()) as { indexing: boolean; totals: { threads: number } | null };
+        if (!body.indexing) return body.totals?.threads ?? 0;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      throw new Error("the search index did not build");
+    };
+    expect(await total("quiet")).toBe(1);
+    expect(await total("new")).toBe(0);
+    await saveDraft(server, thread_id, "Ship it", null);
+    expect(await total("new")).toBe(1);
+    expect(await total("quiet")).toBe(0);
+    expect((await post(server, `/api/inbox/threads/${thread_id}/draft/delete`, {})).status).toBe(200);
+    expect(await total("quiet")).toBe(1);
   });
 
   test("never in the event log, never seen by an agent: read_thread and wait_for_reply carry none of it", async () => {

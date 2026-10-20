@@ -2090,10 +2090,11 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
               }
               throw error;
             }
-            // The Send that carried the reply box's words: its draft goes (a replay too, since the first one sent them).
-            if (body.clear_draft === true) {
+            // The Send that carried the reply box's words: its draft goes (a replay too, since the first one sent them),
+            // a compare-and-set on the `updated_at` those words were saved as, so another window's newer draft stays.
+            if (typeof body.clear_draft === "string") {
               const threadId = store.message(messageId)?.thread_id;
-              if (threadId && store.deleteReplyDraft(threadId)) for (const listener of draftListeners) listener(threadId);
+              if (threadId && store.clearSentReplyDraft(threadId, body.clear_draft)) for (const listener of draftListeners) listener(threadId);
             }
             if (result.replayed) removeInboxAttachmentFiles(store.dir, attachments);
             // Sent: the uploads are the reply's attachments now.

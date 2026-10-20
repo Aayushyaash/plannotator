@@ -575,6 +575,8 @@ export interface ThreadPaneProps {
   onQuestions: (messageId: string, questions: InboxQuestion[]) => void;
   /** Something was written (a Send, resolve): read the thread and the list again. */
   onChanged: () => Promise<void>;
+  /** Raised each time the Inbox says this thread's reply draft changed (`event: drafts`): the draft is read again. */
+  draftChanged?: number;
   onClose: () => void;
   /** The attachment open beside the thread (`#…&file=att_…`), its version, and an annotation to show. */
   file: { id: string; version: 'current' | 'sent'; focus: string | null; linked?: string | null } | null;
@@ -758,7 +760,7 @@ export function AckPill({
   );
 }
 
-export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
+export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged = 0, onClose, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
   // "Open in" (OpenIn.tsx): apps on this computer; a new tab only through the tailnet or on a phone.
   const openIn: OpenInSurface | undefined = phone || remote === true ? 'tab' : remote === null ? undefined : 'apps';
   const root = thread.messages[0]!;
@@ -1592,6 +1594,12 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     return () => window.removeEventListener('keydown', onKey);
   }, [one, jumpNew]);
 
+  // Another window saved or discarded this thread's draft (or this one did): its copy here follows.
+  const reloadDraft = replyDraft.reload;
+  useEffect(() => {
+    if (draftChanged > 0) void reloadDraft();
+  }, [draftChanged, reloadDraft]);
+
   // The thread's draft, once read, goes back in the box (open, without focus), unless the person already wrote there.
   useEffect(() => {
     if (replyDraft.loadedFor !== thread.thread_id || restoredFor.current === thread.thread_id) return;
@@ -1787,7 +1795,20 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
       await pickChain.current;
       const current = threadRef.current;
       // The box's words, or (the box closed) the words kept as its draft: the foot's Send carries them too.
-      const words = boxWords;
+      // Before anything goes, the draft's saves are answered (a save landing after the Send would bring the
+      // words back), and the Send names the `updated_at` its words were saved as, so the server clears that
+      // draft only, never a newer one another window saved meanwhile.
+      let words = boxWords;
+      let draftSavedAs: string | null = null;
+      if (box.open) {
+        if (words !== '') draftSavedAs = await replyDraft.settle();
+      } else {
+        // The box is closed: the words as the draft holds them now (another window may have changed them).
+        const fresh = await replyDraft.reload();
+        const kept = fresh === undefined ? replyDraft.draft : fresh;
+        words = kept?.body.trim() ?? '';
+        draftSavedAs = kept?.updated_at ?? null;
+      }
       // A pick saved just now, or still being saved when Send was pressed, counts as an answer.
       const skip = skipsUnanswered(skipChoice, sendAnswersAny(current) || sendAnswersAny(thread, pending));
       const pendingAnnotations = records;
@@ -1851,8 +1872,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
           // The pasted files ride the reply that carries the words, as attachments.
           ...(last && uploads.length > 0 ? { uploads } : {}),
           ...(tags.length > 0 ? { tags } : {}),
-          // The reply that carries the box's words: its draft goes with the Send.
-          ...(last && words !== '' ? { clear_draft: true } : {}),
+          // The reply that carries the box's words: their draft goes with the Send (that draft only).
+          ...(last && words !== '' && draftSavedAs !== null ? { clear_draft: draftSavedAs } : {}),
           // Only a message the ended session asked goes to the session picked;
           // an answer to another session's message still goes to that session.
           ...(to && target.message.author.kind === 'agent' && target.message.author.session === asking?.session ? { to } : {}),

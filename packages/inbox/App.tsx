@@ -448,6 +448,8 @@ function Inbox() {
   const [drafts, setDrafts] = useState<DraftView[] | null>(null);
   /** Open threads holding unsent work (approval "inbox-reply-drafts"): the Drafts row counts them, its page lists them. */
   const [replyDrafts, setReplyDrafts] = useState<InboxReplyDraftRow[]>([]);
+  /** Raised when the open thread's reply draft changed (`event: drafts`): the thread reads it again. */
+  const [draftChanged, setDraftChanged] = useState(0);
   const [draftsError, setDraftsError] = useState<string | null>(null);
   const [lastSent, setLastSent] = useState<string | null>(() => storage.getItem(COMPOSE_LAST_COOKIE));
   /** The one toast (Mark read, Archive) with its Undo, and what the live region last said. */
@@ -779,7 +781,9 @@ function Inbox() {
         },
         // A reply draft was saved or discarded (here or in another window): the rows' `unsent` and the Drafts row.
         // Its own timer: sharing the record timer let a draft save cancel a record's pending reads (the open thread's).
-        onDrafts: () => {
+        onDrafts: (threadId) => {
+          // The open thread's own copy of its draft follows at once (the foot's Send carries those words).
+          if (threadId === routeRef.current.thread) setDraftChanged((n) => n + 1);
           if (draftsTimer) clearTimeout(draftsTimer);
           draftsTimer = setTimeout(() => {
             void refreshList(false);
@@ -2073,6 +2077,7 @@ function Inbox() {
             onAck={(messageId, on, agent) => void acknowledge(thread.thread_id, messageId, on, agent)}
             onArchive={(next) => void archive(thread.thread_id, thread.messages[0]!.id, next)}
             replyRequest={replyFor}
+            draftChanged={draftChanged}
             onReplyOpened={() => setReplyFor(null)}
             onQuestions={patchQuestions}
             onChanged={afterWrite}

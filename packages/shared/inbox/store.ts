@@ -438,6 +438,8 @@ export class InboxStore {
   private readonly personNamed = new Map<string, string[]>();
   /** The person's annotations on attachments, by id. */
   private readonly annotations = new Map<string, InboxAnnotationRecord>();
+  /** Per thread, its annotations waiting for a Send (not sent, not removed): a row's `unsent.comments`. */
+  private readonly unsentAnnotations = new Map<string, number>();
   /**
    * The words typed in each thread's reply box and not sent (reply-drafts.ts),
    * by thread id: files outside the event log, read at load and kept here.
@@ -447,6 +449,8 @@ export class InboxStore {
   private readonly guideFileSets = new Map<string, ReadonlyMap<string, DiffFile>>();
   private readonly tornFiles = new Set<string>();
   private readonly listeners = new Set<InboxListener>();
+  /** Told when a thread's reply draft is saved or deleted (no store line is written for it). */
+  private readonly replyDraftListeners = new Set<(threadId: string) => void>();
   /** How many times the store was read again from disk (a deletion): a reader's derived view is stale once it changes. */
   private reloads = 0;
   private readonly now: () => Date;
@@ -582,7 +586,7 @@ export class InboxStore {
         break;
       }
       case "annotation":
-        this.annotations.set(line.record.id, line.record);
+        this.setAnnotation(line.record);
         break;
     }
   }
@@ -676,6 +680,22 @@ export class InboxStore {
   subscribe(listener: InboxListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** A thread's reply draft was saved or deleted: its row's `unsent` (and section) changed with no store line. */
+  onReplyDraftChange(listener: (threadId: string) => void): () => void {
+    this.replyDraftListeners.add(listener);
+    return () => this.replyDraftListeners.delete(listener);
+  }
+
+  private replyDraftChanged(threadId: string): void {
+    for (const listener of this.replyDraftListeners) {
+      try {
+        listener(threadId);
+      } catch {
+        // A listener's failure never fails the save.
+      }
+    }
   }
 
   /**
@@ -1065,11 +1085,8 @@ export class InboxStore {
         summary.questions.picked > 0 ||
         replyUnread);
     const draft = this.replyDrafts.get(threadId) ?? null;
-    // Comments waiting for a Send: on attached files, the guided review, the messages.
-    let comments = 0;
-    for (const record of this.annotations.values()) {
-      if (record.thread_id === threadId && record.sent_reply_id === null && record.removed_at === null) comments += 1;
-    }
+    // Comments waiting for a Send: on attached files, the guided review, the messages (kept per thread).
+    const comments = this.unsentAnnotations.get(threadId) ?? 0;
     const unsent = draft !== null || summary.questions.picked > 0 || comments > 0
       ? { reply_at: draft?.updated_at ?? null, picks: summary.questions.picked, comments }
       : null;
@@ -2882,8 +2899,24 @@ export class InboxStore {
     });
   }
 
-  private restoreAnnotation(record: InboxAnnotationRecord): void {
+  /** Every write to `annotations` goes here, so the per-thread unsent count follows it. */
+  private setAnnotation(record: InboxAnnotationRecord): void {
+    const unsent = (r: InboxAnnotationRecord | undefined) => (r && r.sent_reply_id === null && r.removed_at === null ? 1 : 0);
+    const before = this.annotations.get(record.id);
     this.annotations.set(record.id, record);
+    if (before && before.thread_id !== record.thread_id) this.bumpUnsent(before.thread_id, -unsent(before));
+    this.bumpUnsent(record.thread_id, unsent(record) - (before && before.thread_id === record.thread_id ? unsent(before) : 0));
+  }
+
+  private bumpUnsent(threadId: string, delta: number): void {
+    if (delta === 0) return;
+    const next = (this.unsentAnnotations.get(threadId) ?? 0) + delta;
+    if (next > 0) this.unsentAnnotations.set(threadId, next);
+    else this.unsentAnnotations.delete(threadId);
+  }
+
+  private restoreAnnotation(record: InboxAnnotationRecord): void {
+    this.setAnnotation(record);
     const key = `annotation:${record.id}`;
     const line = this.latest.get(key);
     if (line && line.kind === "annotation") this.latest.set(key, { ...line, record });
@@ -2921,12 +2954,15 @@ export class InboxStore {
    * body (whitespace only) deletes the draft and answers null. Never a line in
    * the event log: agents, the MCP and search never see it.
    */
-  saveReplyDraft(threadId: string, input: { body?: unknown; base?: unknown }): InboxReplyDraft | null {
+  saveReplyDraft(threadId: string, input: { body?: unknown; base?: unknown; base_body?: unknown }): InboxReplyDraft | null {
     const root = this.messages.get(threadId);
     if (!root || root.thread_id !== threadId) throw new InboxError("thread_not_found", `No thread ${threadId}.`);
-    const { body, base } = checkInboxReplyDraftInput(input);
+    const { body, base, baseBody } = checkInboxReplyDraftInput(input);
     const existing = this.replyDrafts.get(threadId) ?? null;
-    if ((existing?.updated_at ?? null) !== base) {
+    // `base_body`: the words this window wrote last. A save sent as the page goes may carry a base read
+    // before that write's answer came back; the draft still holding those words is the window's own.
+    const ownWords = baseBody !== null && existing !== null && existing.body === baseBody;
+    if ((existing?.updated_at ?? null) !== base && !ownWords) {
       throw new InboxError(
         "draft_conflict",
         existing ? "This reply changed in another window since you opened it." : "This reply's draft was discarded or sent in another window.",
@@ -2943,13 +2979,27 @@ export class InboxStore {
     const draft: InboxReplyDraft = { v: 1, thread_id: threadId, body, created_at: existing?.created_at ?? at, updated_at: updatedAt };
     writeInboxReplyDraft(this.dir, draft);
     this.replyDrafts.set(threadId, draft);
+    this.replyDraftChanged(threadId);
     return draft;
   }
 
-  /** Drop a thread's reply draft (Discard, or the Send that carried its words); true when there was one. */
+  /**
+   * The Send that carried the reply box's words: drop the draft only while it is
+   * still the one those words were saved as (`updated_at`), so a newer draft
+   * another window saved meanwhile stays. True when it went.
+   */
+  clearSentReplyDraft(threadId: string, updatedAt: string): boolean {
+    const existing = this.replyDrafts.get(threadId);
+    if (!existing || existing.updated_at !== updatedAt) return false;
+    return this.deleteReplyDraft(threadId);
+  }
+
+  /** Drop a thread's reply draft (Discard); true when there was one. */
   deleteReplyDraft(threadId: string): boolean {
     const had = this.replyDrafts.delete(threadId);
-    return removeInboxReplyDraft(this.dir, threadId) || had;
+    const removed = removeInboxReplyDraft(this.dir, threadId) || had;
+    if (removed) this.replyDraftChanged(threadId);
+    return removed;
   }
 
   /** Bytes the reply drafts take on disk (Settings → Storage). */
@@ -3037,6 +3087,7 @@ export class InboxStore {
     this.namedThreads.clear();
     this.personNamed.clear();
     this.annotations.clear();
+    this.unsentAnnotations.clear();
     this.tornFiles.clear();
     this.load();
     const used = pendingInboxUploadBlobs(this.dir);

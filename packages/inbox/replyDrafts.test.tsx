@@ -34,6 +34,13 @@ let host: HTMLElement | null = null;
 let savedFetch: typeof fetch;
 let savedEventSource: unknown;
 let posted: { path: string; body: Record<string, unknown> }[] = [];
+/** How long the reply route's answer is held back (the delayed-reply probe), in ms. */
+let replyDelay = 0;
+/** The window's event streams (a stand-in EventSource), to hand it an `event: drafts`. */
+let streams: { listeners: Map<string, ((event: { data: string }) => void)[]> }[] = [];
+function emit(type: string, data: unknown) {
+  for (const stream of streams) for (const listener of stream.listeners.get(type) ?? []) listener({ data: JSON.stringify(data) });
+}
 const lines: string[] = [];
 
 function loopback(path: string, method = 'GET', body?: string): Promise<{ status: number; text: string }> {
@@ -49,7 +56,7 @@ function loopback(path: string, method = 'GET', body?: string): Promise<{ status
   });
 }
 
-const TESTS = 7;
+const TESTS = 10;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -109,13 +116,23 @@ beforeEach(() => {
     const body = init?.body ? String(init.body) : undefined;
     if (method === 'POST') posted.push({ path, body: body ? JSON.parse(body) : {} });
     const answer = await loopback(path, method, body);
+    // Only the reply's answer is held back: the request itself has reached the server.
+    if (replyDelay > 0 && method === 'POST' && path.endsWith('/reply')) await new Promise((r) => setTimeout(r, replyDelay));
     return new Response(answer.text, { status: answer.status, headers: { 'Content-Type': 'application/json' } });
   }) as typeof fetch;
   savedEventSource = (globalThis as Record<string, unknown>).EventSource;
+  streams = [];
   (globalThis as Record<string, unknown>).EventSource = class {
-    addEventListener() {}
+    listeners = new Map<string, ((event: { data: string }) => void)[]>();
+    constructor() {
+      streams.push(this);
+    }
+    addEventListener(type: string, listener: (event: { data: string }) => void) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+    }
     close() {}
   };
+  replyDelay = 0;
   posted = [];
   window.location.hash = '';
 });
@@ -254,8 +271,69 @@ test.skipIf(!hasDom)('the Send that carries the words clears the draft (clear_dr
   act(() => button(el, 'Send').click());
   await until(() => el.querySelector('textarea') === null, 'the Send');
   const reply = posted.filter((p) => p.path.endsWith('/reply')).at(-1)!;
-  expect(reply.body).toMatchObject({ words: 'Pagefind, thanks.', clear_draft: true });
+  // The draft the words were saved as, by its updated_at: the server clears that draft only.
+  expect(reply.body).toMatchObject({ words: 'Pagefind, thanks.' });
+  expect(reply.body.clear_draft).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   expect(await serverDraft(world.waiting)).toBeNull();
+});
+
+test.skipIf(!hasDom)('a Send pressed before the pause in typing, whose answer is slow, never brings the words back as a draft', async () => {
+  const el = await renderApp(`#thread=${world.waiting}`);
+  await until(() => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Reply'), 'the foot');
+  act(() => button(el, 'Reply').click());
+  await settle(5);
+  // The reply's answer comes 800 ms late; Send goes well inside the 500 ms pause before the save.
+  replyDelay = 800;
+  type(el, 'Sent quickly.');
+  act(() => button(el, 'Send').click());
+  await until(() => el.querySelector('textarea') === null, 'the Send');
+  const reply = posted.filter((p) => p.path.endsWith('/reply')).at(-1)!;
+  expect(reply.body.words).toBe('Sent quickly.');
+  // Past any save the typing scheduled: the server holds no draft, and the window shows none.
+  await settle(200);
+  expect(await serverDraft(world.waiting)).toBeNull();
+  expect(el.querySelector('[data-draft-foot]')).toBeNull();
+  // The save that ran before the Send is the only one; none came after it.
+  const saves = posted.filter((p) => /\/draft$/.test(p.path));
+  const replyAt = posted.indexOf(reply);
+  expect(saves.every((p) => posted.indexOf(p) < replyAt)).toBe(true);
+});
+
+test.skipIf(!hasDom)('the foot\'s Send (box closed) carries the draft as it is now, and a newer draft from another window survives a Send of older words', async () => {
+  const el = await renderApp(`#thread=${world.waiting}`);
+  await until(() => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Reply'), 'the foot');
+  act(() => button(el, 'Reply').click());
+  await settle();
+  type(el, 'Pagefind.');
+  act(() => button(el, 'Cancel').click());
+  await until(async () => (await serverDraft(world.waiting))?.body === 'Pagefind.', 'the draft saved on Cancel');
+  // Another window types over the draft; no event reaches this one.
+  const mine = (await serverDraft(world.waiting))!;
+  const theirs = await loopback(`/api/inbox/threads/${world.waiting}/draft`, 'POST', JSON.stringify({ body: 'Orama, after all.', base: mine.updated_at }));
+  expect(theirs.status).toBe(200);
+  await until(() => el.querySelector('[data-draft-foot]') !== null, 'the foot says Draft');
+  act(() => button(el, 'Send').click());
+  await until(() => posted.some((p) => p.path.endsWith('/reply')), 'the Send');
+  const reply = posted.filter((p) => p.path.endsWith('/reply')).at(-1)!;
+  expect(reply.body.words).toBe('Orama, after all.');
+  await until(async () => (await serverDraft(world.waiting)) === null, 'the draft it carried cleared');
+});
+
+test.skipIf(!hasDom)('an `event: drafts` for the open thread reads its draft again: Edit draft brings back the other window\'s words', async () => {
+  const el = await renderApp(`#thread=${world.waiting}`);
+  await until(() => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Reply'), 'the foot');
+  act(() => button(el, 'Reply').click());
+  await settle();
+  type(el, 'First words.');
+  act(() => button(el, 'Cancel').click());
+  await until(async () => (await serverDraft(world.waiting))?.body === 'First words.', 'the draft saved on Cancel');
+  const mine = (await serverDraft(world.waiting))!;
+  await loopback(`/api/inbox/threads/${world.waiting}/draft`, 'POST', JSON.stringify({ body: 'Newer words.', base: mine.updated_at }));
+  await act(async () => emit('drafts', { thread_id: world.waiting }));
+  await settle();
+  act(() => button(el, 'Edit draft').click());
+  await settle();
+  expect((el.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Newer words.');
 });
 
 test.skipIf(!hasDom)('the list says "Draft · Your reply" and "Draft · 1 pick"; the Drafts row counts them and its page lists them above the messages', async () => {

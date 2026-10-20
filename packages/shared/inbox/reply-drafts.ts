@@ -11,7 +11,11 @@
  *
  * A save is a compare-and-set on `updated_at`: `base` is the `updated_at` the
  * writer last read (null to create), and a draft another tab changed since is
- * `409 draft_conflict` with the newer draft. Saving an empty body deletes it.
+ * `409 draft_conflict` with the newer draft. A save may also name `base_body`,
+ * the words that window saved last: a draft still holding them is the window's
+ * own (a save sent as the page goes, before an earlier save answered). Saving
+ * an empty body deletes it. The Send that carries the words clears the draft
+ * only while it is still the one they were saved as (its `updated_at`).
  */
 
 import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -63,14 +67,22 @@ export function readInboxReplyDrafts(inboxDirPath: string): Map<string, InboxRep
 }
 
 /** The checks on a save's input, before anything is written. */
-export function checkInboxReplyDraftInput(input: { body?: unknown; base?: unknown }): { body: string; base: string | null } {
+export function checkInboxReplyDraftInput(input: { body?: unknown; base?: unknown; base_body?: unknown }): {
+  body: string;
+  base: string | null;
+  baseBody: string | null;
+} {
   const body = input.body === undefined ? "" : input.body;
   if (typeof body !== "string" || body.length > INBOX_DRAFT_BODY_MAX) {
     throw new InboxError("validation_error", `body: a string of at most ${INBOX_DRAFT_BODY_MAX} characters.`, { field: "body" });
   }
   const base = input.base === undefined ? null : input.base;
   if (base !== null && typeof base !== "string") throw new InboxError("validation_error", "base: the updated_at you read, or null to create.", { field: "base" });
-  return { body, base };
+  const baseBody = input.base_body === undefined ? null : input.base_body;
+  if (baseBody !== null && (typeof baseBody !== "string" || baseBody.length > INBOX_DRAFT_BODY_MAX)) {
+    throw new InboxError("validation_error", "base_body: the words this window saved last, or null.", { field: "base_body" });
+  }
+  return { body, base, baseBody };
 }
 
 /** Write one draft whole (owner-only folder and file). */

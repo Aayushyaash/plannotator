@@ -19,6 +19,7 @@ import { QUESTION_AUTHORING_GUIDE } from "@plannotator/core/question-block";
 import { inboxAgentName, INBOX_NAME_THIS_THREAD_HINT, INBOX_SECTIONS, isInboxNote, INBOX_THREAD_NAME_MAX, type InboxGuideRef, type InboxSectionId, type InboxLine, type InboxMessage, type InboxProject } from "@plannotator/core/inbox-types";
 import { INBOX_WAKES_META_KEY, inboxTaggedLine } from "@plannotator/shared/inbox/connection";
 import { inboxBodyForAgent } from "@plannotator/shared/inbox/uploads";
+import { inboxSectionOf } from "@plannotator/shared/inbox/list";
 import { bodyShowsLocalImages, captureInboxInlineImages, type InlineImageFailure } from "@plannotator/shared/inbox/inline-images";
 import { inboxMessageRemoteImageRefsInOrder } from "@plannotator/shared/inbox/message-images";
 import { InboxError } from "@plannotator/shared/inbox/schema";
@@ -729,7 +730,8 @@ export function agentThreadRow(store: InboxStore, row: InboxListRow, caller: str
     thread_id: row.thread_id,
     subject: row.subject,
     thread_name: row.thread_name,
-    section: row.section,
+    // The section without the person's unsent work: a reply draft (and comments not sent) never reach an agent.
+    section: inboxSectionOf({ ...row, unsent: null }),
     message_count: row.message_count,
     questions: { open: row.questions.open, picked: row.questions.picked, prompt: row.questions.prompt },
     last_author: row.last_author,

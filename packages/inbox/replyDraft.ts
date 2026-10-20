@@ -9,7 +9,14 @@
  * window's newer save answers `409 draft_conflict`: the window being typed in
  * reads the newer `updated_at` and saves its own words over it (the person is
  * typing here now), and the other window picks the newer words up when it
- * next opens the thread.
+ * next opens the thread, or at once when the Inbox says a draft changed
+ * (`reload`, on `event: drafts`).
+ *
+ * A Send waits for the saves in flight (`settle`) and names the `updated_at`
+ * its words were saved as, so the server clears only that draft. Each thread
+ * has a generation: `sent` and `discard` raise it, and a save queued before
+ * then does nothing when its turn comes, so a slow Send never brings the
+ * words back as a draft.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { InboxReplyDraft } from '@plannotator/core/inbox-types';
@@ -38,19 +45,31 @@ export function useReplyDraft(threadId: string) {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const current = useRef(threadId);
   current.current = threadId;
+  /** Per thread: raised by a Send and by Discard; a save queued under an older one does nothing. */
+  const generations = useRef(new Map<string, number>());
+  const generationOf = (target: string) => generations.current.get(target) ?? 0;
+  /** The words the last save queued here carries (or the draft read): the page's last save names them (`base_body`). */
+  const lastWords = useRef<string | null>(null);
 
   const write = useCallback((target: string, text: string) => {
     unsaved += 1;
+    const generation = generationOf(target);
+    if (target === current.current) lastWords.current = text;
     chain.current = chain.current.then(async () => {
       try {
+        // Sent or discarded since this save was queued: the words must not come back.
+        if (generation !== generationOf(target)) return;
         let answer: { draft: InboxReplyDraft | null };
         try {
           answer = await inboxApi.saveReplyDraft(target, text, target === current.current ? base.current : await latestBase(target));
         } catch (cause) {
           if (!(cause instanceof InboxApiError) || cause.code !== 'draft_conflict') throw cause;
+          const latest = await latestBase(target);
+          if (generation !== generationOf(target)) return;
           // Another window saved since: these words, typed here now, go over its.
-          answer = await inboxApi.saveReplyDraft(target, text, await latestBase(target));
+          answer = await inboxApi.saveReplyDraft(target, text, latest);
         }
+        if (generation !== generationOf(target)) return;
         if (target === current.current) {
           base.current = answer.draft?.updated_at ?? null;
           setState({ loadedFor: target, draft: answer.draft ?? null });
@@ -83,6 +102,7 @@ export function useReplyDraft(threadId: string) {
         const draft = (await inboxApi.replyDraft(threadId)).draft ?? null;
         if (!live) return;
         base.current = draft?.updated_at ?? null;
+        lastWords.current = draft?.body ?? null;
         setState({ loadedFor: threadId, draft });
       } catch {
         if (live) setState({ loadedFor: threadId, draft: null });
@@ -106,7 +126,13 @@ export function useReplyDraft(threadId: string) {
         method: 'POST',
         keepalive: true,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ body: next.text, base: base.current, ...(session ? { serverSession: session } : {}) }),
+        // `base` may be a step behind a save still on its way; `base_body` names the words that save carries.
+        body: JSON.stringify({
+          body: next.text,
+          base: base.current,
+          ...(lastWords.current !== null ? { base_body: lastWords.current } : {}),
+          ...(session ? { serverSession: session } : {}),
+        }),
       }).catch(() => {});
     };
     window.addEventListener('pagehide', onHide);
@@ -123,30 +149,70 @@ export function useReplyDraft(threadId: string) {
     [flush],
   );
 
+  const bump = (target: string) => generations.current.set(target, generationOf(target) + 1);
+
   /** Discard: the draft goes, here and on the server. */
   const discard = useCallback(() => {
     if (timer.current) clearTimeout(timer.current);
     timer.current = null;
     pending.current = null;
     const target = current.current;
+    bump(target);
+    lastWords.current = null;
     base.current = null;
     setState({ loadedFor: target, draft: null });
     chain.current = chain.current.then(() => inboxApi.discardReplyDraft(target).then(() => undefined, () => undefined));
   }, []);
 
-  /** The Send carried the words (the server deleted the draft with `clear_draft`). */
+  /** The Send carried the words (the server deleted the draft with `clear_draft`): saves still queued do nothing. */
   const sent = useCallback(() => {
     if (timer.current) clearTimeout(timer.current);
     timer.current = null;
     pending.current = null;
+    bump(current.current);
+    lastWords.current = null;
     base.current = null;
     setState({ loadedFor: current.current, draft: null });
+  }, []);
+
+  /**
+   * Before a Send: the words waiting for the pause in typing are saved now, and
+   * every save in flight is answered. Resolves with the `updated_at` the box's
+   * words were saved as (null when no draft holds them), which the Send names
+   * in `clear_draft`.
+   */
+  const settle = useCallback(async (): Promise<string | null> => {
+    flush();
+    await chain.current;
+    return base.current;
+  }, [flush]);
+
+  /**
+   * Read the thread's draft again (another window saved or discarded it, or the
+   * foot's Send wants the words as they are now). Leaves the words being typed
+   * here alone. Answers the draft (null: none), or undefined when it was not
+   * read (a save waits, the thread changed, the read failed).
+   */
+  const reload = useCallback(async (): Promise<InboxReplyDraft | null | undefined> => {
+    const target = current.current;
+    await chain.current;
+    if (target !== current.current || pending.current) return undefined;
+    try {
+      const draft = (await inboxApi.replyDraft(target)).draft ?? null;
+      if (target !== current.current || pending.current) return draft;
+      base.current = draft?.updated_at ?? null;
+      lastWords.current = draft?.body ?? null;
+      setState({ loadedFor: target, draft });
+      return draft;
+    } catch {
+      return undefined;
+    }
   }, []);
 
   /** A save is waiting for the pause in typing (the words are not on the server yet). */
   const waiting = useCallback(() => pending.current !== null, []);
 
-  return { ...state, save, flush, discard, sent, waiting };
+  return { ...state, save, flush, discard, sent, waiting, settle, reload };
 }
 
 async function latestBase(threadId: string): Promise<string | null> {

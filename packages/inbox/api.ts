@@ -569,8 +569,11 @@ export const inboxApi = {
       uploads?: string[];
       /** The sessions the person tagged with `@` (approval "inbox-tag-agents"): each one gets this reply too. */
       tags?: { host?: string | null; session: string; label?: string }[];
-      /** This reply carries the reply box's words: its draft goes (approval "inbox-reply-drafts"). */
-      clear_draft?: boolean;
+      /**
+       * This reply carries the reply box's words: their draft goes (approval "inbox-reply-drafts"),
+       * named by the `updated_at` they were saved as, so a newer draft from another window stays.
+       */
+      clear_draft?: string;
     },
   ) => post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reply`, input),
   resolve: (messageId: string, resolved: boolean) =>
@@ -661,8 +664,12 @@ export const inboxApi = {
   // Reply drafts (approval "inbox-reply-drafts"): the reply box's words per thread.
   replyDraft: (threadId: string) => get<{ draft: InboxReplyDraft | null }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/draft`),
   /** Save (compare-and-set on `base`, the `updated_at` last read; null to create); an empty body deletes it. */
-  saveReplyDraft: (threadId: string, body: string, base: string | null) =>
-    post<{ draft: InboxReplyDraft | null }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/draft`, { body, base }),
+  saveReplyDraft: (threadId: string, body: string, base: string | null, baseBody: string | null = null) =>
+    post<{ draft: InboxReplyDraft | null }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/draft`, {
+      body,
+      base,
+      ...(baseBody !== null ? { base_body: baseBody } : {}),
+    }),
   discardReplyDraft: (threadId: string) => post<{ ok: true; deleted: boolean }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/draft/delete`, {}),
   saveDraft: (id: string, input: { body: string; to: InboxDraft['to']; project: InboxDraft['project']; files: string[]; base: string | null; thread_name?: string }) =>
     post<{ draft: DraftView }>(`/api/inbox/drafts/${encodeURIComponent(id)}`, { ...input }),
