@@ -193,6 +193,9 @@ test('a touchscreen laptop: after a touch, a mouse drag across a link still quot
       await frame.locator('h1').tap();
       const composer = page.locator('[data-comment-popover]');
       await expect(composer).toBeVisible();
+      // A touch-opened composer is the full-screen dialog, which takes focus on a 0 ms timer and handles
+      // Escape itself; pressed before that timer runs (a loaded runner), the key goes nowhere.
+      await expect(page.getByRole('dialog', { name: 'Comment' })).toBeFocused();
       await page.keyboard.press('Escape');
       await expect(composer).toHaveCount(0);
       expect(await frame.locator('body').evaluate((b) => b.hasAttribute('data-plannotator-touch'))).toBe(true);
