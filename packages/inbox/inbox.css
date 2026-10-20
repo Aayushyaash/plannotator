@@ -813,6 +813,11 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 .ib-rtext.pn-ref-input.pn-ref-composing { color: var(--foreground); }
 .ib-cfield [data-skill-menu] { margin-bottom: 8px; }
 .ib-cfield [data-skill-human-only-notice] { padding: 0 12px 6px; margin-top: -2px; }
+/* The picker at the caret (compose): portaled into the dialog, hung off a box laid over the caret's line
+   (ComposerField's CaretSkillMenu). Painted after the footer, it floats over it and past the dialog's edge (the
+   dialog is overflow: visible); on a phone it stays above the footer. The box itself takes no clicks. */
+.ib-skanchor { position: absolute; z-index: 60; pointer-events: none; }
+.ib-skanchor > [data-skill-menu] { pointer-events: auto; }
 /* Files pasted into the reply box: compose's tiles, inside the box above its chips. A tile never runs past
    the box: at least 200 px wide in a row, the whole box when that is narrower (a 320 px phone). */
 .ib-rfiles { padding: 0 8px 4px; }
@@ -2067,9 +2072,9 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
      the description under the name; a tap inserts on pointerdown, so the keyboard stays up. */
   .ib-cfield [data-skill-menu] { left: -1px; right: -1px; margin-bottom: 10px; }
   .ib-cfield [data-skill-menu-list] { max-height: min(198px, var(--ib-vvh, 100dvh) * 0.4) !important; }
-  .ib-cfield [data-skill-item] { min-height: 44px; flex-wrap: wrap; row-gap: 0; align-content: center; }
-  .ib-cfield [data-skill-item-part="description"] { order: 3; flex-basis: 100%; padding-left: 26px; font-size: var(--ib-fs-12-5, 12.5px); }
-  .ib-cfield [data-skill-item-part="root"] { margin-left: auto; }
+  .ib-cfield [data-skill-item], .ib-skanchor [data-skill-item] { min-height: 44px; flex-wrap: wrap; row-gap: 0; align-content: center; }
+  .ib-cfield [data-skill-item-part="description"], .ib-skanchor [data-skill-item-part="description"] { order: 3; flex-basis: 100%; padding-left: 26px; font-size: var(--ib-fs-12-5, 12.5px); }
+  .ib-cfield [data-skill-item-part="root"], .ib-skanchor [data-skill-item-part="root"] { margin-left: auto; }
   .ib-cfield [data-skill-human-only-notice] > summary { min-height: 44px; }
   .ib-skills > summary { min-height: 44px; align-items: center; }
   .ib-rfoot { flex-wrap: wrap; }

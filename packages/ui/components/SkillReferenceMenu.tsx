@@ -15,6 +15,16 @@ interface SkillReferenceMenuProps {
   /** Explicitly activated row, or null — the menu opens with nothing active. */
   activeIndex: number | null;
   onSelect: (index: number) => void;
+  /**
+   * The box the menu must stay inside, in viewport coordinates, read at each
+   * measure. Default: the viewport. A host whose composer sits in a dialog
+   * with a footer passes the dialog's area above the footer.
+   */
+  boundary?: () => { top: number; bottom: number } | null;
+  /** Which side of the anchor the menu tries first. Default: above. */
+  prefer?: 'above' | 'below';
+  /** Upper bound on the list's height, in px. Default: 256. */
+  maxListHeight?: number;
 }
 
 /** Vertical gap between the composer wrapper and the menu (mb-1.5 / mt-1.5 = 6px). */
@@ -40,24 +50,29 @@ interface MenuPlacement {
  * When neither side fits the whole list, the side with more room wins and the
  * list is clamped to it, so the menu never extends past a viewport edge.
  */
-function computeMenuPlacement(
+export function computeMenuPlacement(
   anchorRect: Pick<DOMRect, 'top' | 'bottom'>,
   naturalListHeight: number,
   chromeHeight: number,
   viewportHeight: number,
+  options: { boundaryTop?: number; prefer?: 'above' | 'below'; maxListHeight?: number } = {},
 ): MenuPlacement {
-  const spaceAbove = anchorRect.top - MENU_GAP - MENU_VIEWPORT_MARGIN - chromeHeight;
+  const boundaryTop = options.boundaryTop ?? 0;
+  const cap = options.maxListHeight ?? MAX_LIST_HEIGHT;
+  const spaceAbove = anchorRect.top - boundaryTop - MENU_GAP - MENU_VIEWPORT_MARGIN - chromeHeight;
   const spaceBelow = viewportHeight - anchorRect.bottom - MENU_GAP - MENU_VIEWPORT_MARGIN - chromeHeight;
-  const needed = Math.min(naturalListHeight, MAX_LIST_HEIGHT);
+  const needed = Math.min(naturalListHeight, cap);
+  const [first, second] = options.prefer === 'below' ? (['below', 'above'] as const) : (['above', 'below'] as const);
+  const space = (side: MenuPlacement['direction']) => (side === 'above' ? spaceAbove : spaceBelow);
   const direction: MenuPlacement['direction'] =
-    needed <= spaceAbove ? 'above'
-    : needed <= spaceBelow ? 'below'
-    : spaceAbove >= spaceBelow ? 'above'
-    : 'below';
-  const available = direction === 'above' ? spaceAbove : spaceBelow;
+    needed <= space(first) ? first
+    : needed <= space(second) ? second
+    : space(first) >= space(second) ? first
+    : second;
+  const available = space(direction);
   return {
     direction,
-    maxListHeight: Math.max(0, Math.min(MAX_LIST_HEIGHT, Math.round(available))),
+    maxListHeight: Math.max(0, Math.min(cap, Math.round(available))),
   };
 }
 
@@ -85,13 +100,19 @@ export const SkillReferenceMenu: React.FC<SkillReferenceMenuProps> = ({
   items,
   activeIndex,
   onSelect,
+  boundary,
+  prefer,
+  maxListHeight,
 }) => {
   const menuRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [placement, setPlacement] = useState<MenuPlacement>({
-    direction: 'above',
-    maxListHeight: MAX_LIST_HEIGHT,
+    direction: prefer ?? 'above',
+    maxListHeight: maxListHeight ?? MAX_LIST_HEIGHT,
   });
+  // The optional seams, read through a ref so `measure` stays stable for its listeners.
+  const optionsRef = useRef({ boundary, prefer, maxListHeight });
+  optionsRef.current = { boundary, prefer, maxListHeight };
 
   const measure = useCallback(() => {
     const menuEl = menuRef.current;
@@ -106,7 +127,13 @@ export const SkillReferenceMenu: React.FC<SkillReferenceMenuProps> = ({
     // jitter loop this component once shipped.
     const chrome = Math.max(0, menuEl.offsetHeight - listEl.offsetHeight);
     // scrollHeight reports full content height even while clamped.
-    const next = computeMenuPlacement(rect, listEl.scrollHeight, chrome, window.innerHeight);
+    const { boundary: readBoundary, prefer: side, maxListHeight: cap } = optionsRef.current;
+    const box = readBoundary?.() ?? null;
+    const next = computeMenuPlacement(rect, listEl.scrollHeight, chrome, box ? box.bottom : window.innerHeight, {
+      boundaryTop: box ? box.top : 0,
+      prefer: side,
+      maxListHeight: cap,
+    });
     setPlacement((prev) =>
       prev.direction === next.direction && prev.maxListHeight === next.maxListHeight
         ? prev
