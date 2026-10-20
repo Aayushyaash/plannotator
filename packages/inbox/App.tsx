@@ -88,6 +88,7 @@ import { DraftsPage } from './compose/DraftsPage';
 import { useComposeSessions } from './compose/useComposeSessions';
 import { composeActions, composeTargets, hostLabel, type ComposeAction } from './compose/model';
 import type { DraftView } from './api';
+import { inboxTabCount, useTabCount } from './tabCount';
 
 // The Inbox has no /api/config and no browser-agent tools: settings stay in
 // the page's own cookies, except the theme, which goes to config.json `theme`
@@ -354,6 +355,9 @@ function Inbox() {
     storage.setItem(SIDEBAR_OPEN_COOKIE, String(next));
   }, []);
   const [latest, setLatest] = useState<ListModel | null>(null);
+  // The tab's count (tabCount.ts): every thread with news the person has not looked at, from the
+  // latest read (not the held list on screen, and not the sidebar's project filter).
+  useTabCount(useMemo(() => (latest ? inboxTabCount(latest.sections) : 0), [latest]));
   /** The list on screen: held until the person acts (the "N new" notice). */
   const [shown, setShown] = useState<InboxListSection[] | null>(null);
   const [thread, setThread] = useState<InboxThread | null>(null);

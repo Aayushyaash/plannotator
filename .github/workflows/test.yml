@@ -171,6 +171,7 @@ jobs:
           packages/inbox/fileBack.test.tsx
           packages/inbox/archived.test.tsx
           packages/inbox/openStaysPut.test.tsx
+          packages/inbox/tabCountWindow.test.tsx
           packages/inbox/phoneList.test.tsx
           packages/inbox/listLabels.test.tsx
           packages/inbox/componentTooltips.test.tsx
