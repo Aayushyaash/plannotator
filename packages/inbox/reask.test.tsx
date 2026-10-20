@@ -1,0 +1,265 @@
+/**
+ * Re-ask (approval "inbox-reask") as the window draws and sends it: the
+ * button beside Reply when two or more questions wait, one note per session,
+ * the note's line and "Asked again" on the old cards while it waits, the
+ * button gone while the note waits and right after the agent answered it,
+ * and the ended-session choice ("Who should ask again?").
+ *
+ * The pure rules (reask.ts) run everywhere; the window's parts are
+ * DOM-gated: they run under DOM_TESTS=1 (happy-dom), from the test.yml DOM list.
+ */
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { parseInboxQuestionBlocks } from '@plannotator/core/inbox-questions';
+import type { InboxAuthor, InboxMessageWire, InboxProject, InboxQuestion, InboxThread } from '@plannotator/core/inbox-types';
+import { reaskNoteSentence, reaskOffered, reaskTargets, reaskTooltip } from './reask';
+
+const hasDom = typeof document !== 'undefined';
+const { ThreadPane } = (hasDom ? await import('./components/Thread') : {}) as typeof import('./components/Thread');
+
+const PROJECT: InboxProject = { id: 'prj_1', key: 'billing-abcdef', name: 'billing', root: '/work/billing', created_at: '2026-10-20T10:00:00.000Z' };
+const A: Extract<InboxAuthor, { kind: 'agent' }> = { kind: 'agent', host: 'claude-code', session: 'ses_a', name: null };
+const B: Extract<InboxAuthor, { kind: 'agent' }> = { kind: 'agent', host: 'pi', session: 'ses_b', name: null };
+const M1 = 'msg_01M5DA00000000000000000001';
+const M2 = 'msg_01M5DA00000000000000000002';
+const M3 = 'msg_01M5DA00000000000000000003';
+const NOTE = 'msg_01M5DA00000000000000000004';
+const M5 = 'msg_01M5DA00000000000000000005';
+
+const block = (prompt: string) => [':::question', prompt, '', '- [ ] Yes', '- [ ] No', ':::'].join('\n');
+const BODY1 = `Two calls.\n\n${block('Backfill ledger first?')}\n\n${block('Keep the old webhook?')}`;
+const BODY2 = `One more.\n\n${block('Move refunds now?')}`;
+
+function questionsOf(messageId: string, body: string, author = A): InboxQuestion[] {
+  return parseInboxQuestionBlocks(body).map((q) => ({
+    key: q.key,
+    position: q.position,
+    kind: q.kind,
+    prompt: q.prompt,
+    context: q.parsed.context,
+    choices: q.parsed.choices,
+    recommendation: null,
+    suggested_text: null,
+    stopped: q.stopped,
+    holds_up: q.holds_up,
+    asked_by_agent_id: author.session,
+    orphaned: false,
+    state: 'open',
+    answer: null,
+    revision: 0,
+    sent_revision: 0,
+    picked_by: null,
+    picked_at: null,
+    sent_reply_id: null,
+    message_id: messageId,
+    superseded_by: null,
+  }));
+}
+
+function agent(id: string, body: string, at: string, author = A, extra: Partial<InboxMessageWire> = {}): InboxMessageWire {
+  const questions = questionsOf(id, body, author);
+  return {
+    id,
+    project_id: PROJECT.id,
+    thread_id: M1,
+    reply_to: id === M1 ? null : M1,
+    author,
+    subject: id === M1 ? 'Billing migration' : null,
+    body,
+    created_at: at,
+    resolved_at: null,
+    idempotency_key: null,
+    wakes: true,
+    ...(questions.length > 0 ? { questions } : {}),
+    ...extra,
+  };
+}
+
+function note(ids: string[], replyTo = M2, extra: Partial<InboxMessageWire> = {}): InboxMessageWire {
+  return {
+    id: NOTE,
+    project_id: PROJECT.id,
+    thread_id: M1,
+    reply_to: replyTo,
+    author: { kind: 'person' },
+    subject: null,
+    body: 'Please ask your 3 open questions in this thread again, together in one new message.',
+    created_at: '2026-10-20T10:52:00.000Z',
+    resolved_at: null,
+    idempotency_key: 'k',
+    reask: ids,
+    ...extra,
+  };
+}
+
+function thread(messages: InboxMessageWire[]): InboxThread {
+  return { thread_id: M1, project: PROJECT, subject: 'Billing migration', thread_name: null, resolved_at: null, messages };
+}
+
+const base = () => [agent(M1, BODY1, '2026-10-20T10:42:00.000Z'), agent(M2, BODY2, '2026-10-20T10:45:00.000Z')];
+const openIds = (messages: InboxMessageWire[]) => messages.flatMap((m) => (m.questions ?? []).filter((q) => q.state === 'open').map((q) => `${q.message_id}/${q.key}`));
+
+describe('the rules (reask.ts)', () => {
+  test('one target per session, at its latest message with a question waiting; offered for two or more', () => {
+    const one = reaskTargets(base());
+    expect(one).toHaveLength(1);
+    expect(one[0]).toMatchObject({ session: 'ses_a', open: 3, picked: 0, name: 'Claude Code' });
+    expect(one[0]!.message.id).toBe(M2);
+    expect(reaskOffered(one)).toBe(true);
+    // One question waiting: nothing to gather.
+    expect(reaskOffered(reaskTargets([agent(M2, BODY2, '2026-10-20T10:45:00.000Z')]))).toBe(false);
+    const two = reaskTargets([...base(), agent(M3, block('Pin Node?'), '2026-10-20T10:47:00.000Z', B)]);
+    expect(two.map((t) => [t.session, t.message.id, t.open])).toEqual([
+      ['ses_a', M2, 3],
+      ['ses_b', M3, 1],
+    ]);
+    expect(reaskTooltip(two)).toBe('Ask Claude Code and Pi to ask their 4 open questions again, each together in one message with fresh context. Questions that no longer apply are closed; until then they stay open here.');
+  });
+
+  test('picks count as waiting and go with it; a session whose questions are all picked is left out', () => {
+    const msgs = base();
+    const q = msgs[0]!.questions![0]!;
+    msgs[0]!.questions![0] = { ...q, state: 'picked', answer: { v: 1, key: q.key, kind: q.kind, prompt: q.prompt, selected: ['Yes'] } };
+    const [t] = reaskTargets(msgs);
+    expect(t).toMatchObject({ open: 2, picked: 1 });
+    expect(reaskTooltip([t!])).toContain('Your 1 pick goes with it.');
+    const allPicked = [agent(M3, block('Pin Node?'), '2026-10-20T10:47:00.000Z', B)];
+    allPicked[0]!.questions![0] = { ...allPicked[0]!.questions![0]!, state: 'picked' };
+    expect(reaskTargets(allPicked)).toEqual([]);
+  });
+
+  test('left out while its note waits, and right after the agent answered it in one message', () => {
+    const msgs = base();
+    expect(reaskTargets([...msgs, note(openIds(msgs))])).toEqual([]);
+    const answered = agent(M5, `${block('Backfill ledger first?')}\n\n${block('Keep the old webhook?')}`, '2026-10-20T10:55:00.000Z', A, { reply_to: NOTE });
+    const old = msgs.map((m) => ({ ...m, questions: m.questions!.map((q) => ({ ...q, state: 'superseded' as const })) }));
+    expect(reaskTargets([...old, note(openIds(msgs)), answered])).toEqual([]);
+  });
+
+  test("the note's line", () => {
+    expect(reaskNoteSentence('Claude Code', 3, 0)).toBe('You asked Claude Code to ask the 3 open questions again, together in one message. They stay open here until it does.');
+    expect(reaskNoteSentence('Claude Code', 2, 1)).toBe('You asked Claude Code to ask the 2 open questions again, together in one message. They stay open here until it does. Your 1 pick went with it.');
+  });
+});
+
+let root: Root | null = null;
+let host: HTMLElement | null = null;
+let savedFetch: typeof fetch;
+let posted: { path: string; body: Record<string, unknown> }[] = [];
+let sessions: Record<string, unknown> = { sessions: [] };
+
+const live = (session: string, hostName: string) => ({
+  session,
+  host: hostName,
+  started_at: '2026-10-20T10:31:00.000Z',
+  last_seen_at: '2026-10-20T10:50:00.000Z',
+  busy: false,
+  idle_since: '2026-10-20T10:48:00.000Z',
+  wrote_thread: false,
+});
+
+beforeEach(() => {
+  if (!hasDom) return;
+  savedFetch = globalThis.fetch;
+  posted = [];
+  sessions = { sessions: [] };
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (init?.method === 'POST') {
+      posted.push({ path, body: JSON.parse(String(init.body)) });
+      return Response.json({ reply: {}, questions: [], replayed: false });
+    }
+    if (path.includes('/attachments')) return Response.json({ serverSession: 's', attachments: [], annotations: [] });
+    if (path.includes('/sessions')) return Response.json({ serverSession: 's', home: '/home/me', project: PROJECT, ...sessions });
+    return Response.json({});
+  }) as typeof fetch;
+});
+
+afterEach(() => {
+  if (!hasDom) return;
+  act(() => root?.unmount());
+  host?.remove();
+  root = null;
+  host = null;
+  globalThis.fetch = savedFetch;
+});
+
+async function settle() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+async function render(t: InboxThread) {
+  host = document.createElement('div');
+  document.body.appendChild(host);
+  act(() => {
+    root = createRoot(host!);
+    root.render(
+      <div className="pn-inbox">
+        <ThreadPane thread={t} sent={null} onQuestions={() => {}} onChanged={async () => {}} onClose={() => {}} file={null} onOpenFile={() => {}} onOpenGuide={() => {}} />
+      </div>,
+    );
+  });
+  await settle();
+  return host;
+}
+
+const reaskButton = (el: HTMLElement) => el.querySelector('[data-reask]') as HTMLButtonElement | null;
+
+test.skipIf(!hasDom)('Re-ask sits beside Reply, named by its text, and posts one note to the latest asking message', async () => {
+  const el = await render(thread(base()));
+  const button = reaskButton(el)!;
+  expect(button.textContent?.trim()).toBe('Re-ask');
+  const foot = [...el.querySelectorAll('.ib-pfoot .ib-acts button')].map((b) => b.textContent?.trim());
+  expect(foot.slice(0, 2)).toEqual(['Reply', 'Re-ask']);
+  await act(async () => button.click());
+  await settle();
+  const reasks = posted.filter((p) => p.path.endsWith('/reask'));
+  expect(reasks.map((p) => p.path)).toEqual([`/api/inbox/messages/${M2}/reask`]);
+  expect(typeof reasks[0]!.body.idempotency_key).toBe('string');
+  expect(reasks[0]!.body.to).toBeUndefined();
+});
+
+test.skipIf(!hasDom)('two sessions asked: one note each, to each session\'s own message', async () => {
+  const el = await render(thread([...base(), agent(M3, block('Pin Node?'), '2026-10-20T10:47:00.000Z', B)]));
+  await act(async () => reaskButton(el)!.click());
+  await settle();
+  expect(posted.filter((p) => p.path.endsWith('/reask')).map((p) => p.path)).toEqual([`/api/inbox/messages/${M2}/reask`, `/api/inbox/messages/${M3}/reask`]);
+});
+
+test.skipIf(!hasDom)('while the note waits: no Re-ask, the note reads as one line, and the old cards say they were asked again', async () => {
+  const msgs = base();
+  const el = await render(thread([...msgs, note(openIds(msgs))]));
+  expect(reaskButton(el)).toBeNull();
+  const line = el.querySelector('[data-reask-note] .ib-reask-l')!;
+  expect(line.textContent).toBe('You asked Claude Code to ask the 3 open questions again, together in one message. They stay open here until it does.');
+  expect(el.querySelector('[data-reask-note] summary')?.textContent).toBe('What Claude Code was sent');
+  expect(el.textContent).toContain('Asked again');
+});
+
+test.skipIf(!hasDom)('one question waiting: no Re-ask', async () => {
+  const el = await render(thread([agent(M1, block('Move refunds now?'), '2026-10-20T10:45:00.000Z')]));
+  expect(el.querySelector('.ib-pfoot')?.textContent).toContain('Reply');
+  expect(reaskButton(el)).toBeNull();
+});
+
+test.skipIf(!hasDom)('the session that asked has ended: Re-ask opens the choice, and the pick goes as `to`', async () => {
+  sessions = { sessions: [live('ses_other', 'claude-code')], asker: { session: 'ses_a', live: false } };
+  const el = await render(thread(base()));
+  await settle();
+  expect(el.querySelector('[data-asker-ended]')?.getAttribute('data-asker-ended')).toBe('live');
+  await act(async () => reaskButton(el)!.click());
+  await settle();
+  const form = el.querySelector('[data-route-choice]') as HTMLElement;
+  expect(form.querySelector('legend')?.textContent).toBe('Who should ask again?');
+  expect(posted.filter((p) => p.path.endsWith('/reask'))).toHaveLength(0);
+  const send = form.querySelector('[data-route-send]') as HTMLButtonElement;
+  expect(send.textContent?.trim()).toBe('Ask Claude Code to re-ask');
+  await act(async () => send.click());
+  await settle();
+  const reasks = posted.filter((p) => p.path.endsWith('/reask'));
+  expect(reasks).toHaveLength(1);
+  expect(reasks[0]!.body.to).toEqual({ host: 'claude-code', session: 'ses_other' });
+});

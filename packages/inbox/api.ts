@@ -564,6 +564,13 @@ export const inboxApi = {
       tags?: { host?: string | null; session: string; label?: string }[];
     },
   ) => post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reply`, input),
+  /**
+   * Re-ask (approval "inbox-reask"): a note asking the session that wrote this
+   * message for its open questions again, in one message. `to`: another live
+   * session, because the one that asked has ended.
+   */
+  reask: (messageId: string, input: { idempotency_key: string; to?: { host: string; session: string } }) =>
+    post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reask`, input),
   resolve: (messageId: string, resolved: boolean) =>
     post<unknown>(`/api/inbox/messages/${encodeURIComponent(messageId)}/resolve`, { resolved }),
   health: () => get<InboxHealth>('/api/inbox/health'),
