@@ -297,6 +297,7 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
         const thread = threadOf(target);
         store.saveReplyDraft(thread, { body: op.words ? "Cards, but keep the totals" : "", base: store.replyDraft(thread)?.updated_at ?? null });
         return "ok";
+      }
       case "reask": {
         if (!target) return "noop";
         return store.sendReask(target, { idempotency_key: op.key }).replayed ? "replayed" : "ok";
@@ -1872,8 +1873,9 @@ function batchStep(world: StateWorld, item: Exclude<BatchItem, { kind: "op" }>, 
     // The model decides which threads the batch takes, by its own rules.
     const threads = modelThreadsOf(world, done!.projectId).filter((t) => !world.model.archived(t));
     if (item.action === "read") {
-      // Every bold row: a row in New only for the person's own unsent words waits on nobody (approval "inbox-reply-drafts").
-      const waits = threads.filter((t) => world.model.unread(t)).map((t) => t.id);
+      // Every bold row: a row in New only for the person's own unsent words waits on nobody (approval "inbox-reply-drafts"),
+      // and a thread whose Mark read still stands (unsent work keeps it in New) is not marked again.
+      const waits = threads.filter((t) => world.model.unread(t) && !world.model.readHolds(t)).map((t) => t.id);
       expect(new Set(done!.read)).toEqual(new Set(waits));
       for (const id of done!.read) modelSingle(world, { op: "read", target: 0, read: true }, id, created, tick);
     } else {

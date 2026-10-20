@@ -939,12 +939,14 @@ export function inboxRowWaitsOnPerson(row: Pick<InboxListRow, "section" | "unsee
  * Mark read is offered on the thread (the list row's hover action, and each
  * thread a project's "Mark all as read" takes): something waits on the
  * person, and the thread is open or came back from the archive (Mark read
- * sends a came-back thread back to the archive).
+ * sends a came-back thread back to the archive). Never on a thread whose Mark
+ * read still stands: unsent work can keep it in New ("inbox-reply-drafts"),
+ * and marking it again then undoing would drop the earlier Mark read.
  */
 export function inboxRowOffersMarkRead(
-  row: Pick<InboxListRow, "section" | "unseen" | "answered_not_sent" | "resolved_at" | "back_from_archive">,
+  row: Pick<InboxListRow, "section" | "unseen" | "answered_not_sent" | "resolved_at" | "back_from_archive"> & { read_at?: string | null },
 ): boolean {
-  return (row.resolved_at === null || row.back_from_archive === true) && inboxRowWaitsOnPerson(row);
+  return (row.resolved_at === null || row.back_from_archive === true) && (row.read_at ?? null) === null && inboxRowWaitsOnPerson(row);
 }
 
 export interface InboxThread {
