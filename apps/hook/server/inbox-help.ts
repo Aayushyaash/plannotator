@@ -152,6 +152,20 @@ export const TOOL_GUIDE: Record<InboxMcpToolName, InboxToolGuide> = {
       "Send the person a guided review of a code change: `guide` (the shape get_guide_brief gives) plus `patch` (the exact unified diff it describes), or a complete `snapshot` instead of both. `body` is your note above the card (default: the guide's intent). It takes send_message's routing fields (`subject`, `thread`, `reply_to`, `supersedes`, `idempotency_key`). A guide that does not match its patch is refused with `invalid_guide: …` naming the file. Code diffs only.",
     ],
   },
+  card: {
+    args: ["op", "card_id", "title", "column", "say", "you", "thread_id", "pr", "reason", "idempotency_key", "asked_by", "include_resolved"],
+    lines: [
+      "Keep a card on the person's Board for work that outlasts the reply it was asked in: a lane or background task started, a PR opened, \"I'll send you X\". Not for a quick answer. Make it when you take such an ask, then keep it current with one short call at the moments you already note: work started, a PR opened, something sent to the person, waiting on them, shipped. The person reads the Board instead of asking each terminal where things are; a card nobody wrote to for 2 days turns amber there. A card is its own record: it never changes a thread or the person's list.",
+      "- `op`: `create`, `move`, `say`, `link`, `ship`, `drop` or `list`. Every op but create and list takes `card_id` (`crd_…`, from create or list); an op refuses a field it does not take.",
+      "- `column`: `asked` (nobody has started), `designing` (research, a plan, mocks, a sheet, options: anything that is not code), `your_look` (a non-code thing waits on the person: a sheet, options, questions, a triage call), `building` (code, or a PR not ready for them), `your_review` (code waits on the person: screenshots before a merge, a green PR to merge, a release go), `shipped` (merged or live, staging included), `dropped`. The stage is the kind of thing the next move makes: code, a PR or a release is building, anything else designing. Waiting on the person wins over work you keep doing beside it. Work you hold back yourself stays in its column, with the reason in `say`.",
+      "- `you`: what the person owes, one line, shown as \"You: …\" in your_look and your_review. Moving a card into either needs it; it is dropped when the card leaves them, and refused elsewhere. `say`: your last word, one line (\"lane running, sheet in ~1 h\"), shown in the other columns.",
+      "- create: `title`, or `thread_id` (a thread or message id of this project) to link it and take its subject as the title; `column` (default asked; a live column or shipped), `say`, `you`, `pr`, `idempotency_key` (the same key answers the first card). The card is your session's: list shows it as yours.",
+      "- move: `column`, with any of `say`, `you`, `pr` and `thread_id`; to dropped it needs `reason`. say: `say` and/or `you`, or `title` to rename. link: `thread_id` and/or `pr` (`owner/repo#123`, or a GitHub, GitLab or Bitbucket PR URL). Every write counts as hearing from the card.",
+      "- ship: when it is merged or live. A merged PR never moves a card by itself: ship it. Reported broken again: move it back to asked. drop: `reason` (required from you, one line); the person can restore it.",
+      "- list: your cards in this project (`asked_by: \"anyone\"` for every card here) in the live columns and the icebox; `include_resolved` adds shipped and dropped. One line each: id, title, column, `You:` or said, when it was last heard (amber after 2 days), dropped reason, threads, PRs, the agent it belongs to. Read it after a compaction or in a new session to pick your work back up.",
+      "- The icebox is the person's pause: you cannot put a card there or move one out of it (`card_icebox_person_only`, `card_iceboxed`), and only the person restores a card they dropped (`card_dropped_by_person`); you can still `say` and `link` on such a card. Leave an iceboxed card's work alone. A card or thread of another project is refused (`card_other_project`): pass that project's `project_path`.",
+    ],
+  },
 };
 
 const SECTION_LABEL = (id: InboxSectionId): string => INBOX_SECTIONS.find((section) => section.id === id)?.label ?? id;
@@ -262,6 +276,7 @@ export function formatInboxHelp(options: InboxHelpOptions): string {
     "- Long work you finished while the person was away: one short summary, with the files to look at in `attachments`.",
     "- A plan, document, HTML prototype or diagram the person should read and annotate (`attachments`).",
     "- A guided review of a finished code change (get_guide_brief, then submit_guide).",
+    "- Work that outlasts your reply (a lane, a PR, something you promised to send): a card on the person's Board (card), kept current as it moves.",
     "",
     "Do not use it for:",
     "",
