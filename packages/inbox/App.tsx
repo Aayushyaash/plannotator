@@ -2203,7 +2203,7 @@ function Inbox() {
           onClosed={() => setAgentNote('shown')}
         />
       )}
-      {toast && soundDialog !== 'open' && !agentNoteOpen && <InboxToast toast={toast} phone={phone} />}
+      {toast && soundDialog !== 'open' && !agentNoteOpen && <InboxToast toast={toast} phone={phone} onDismiss={dismissToast} />}
       <SearchHost
         mounted={searchMounted}
         open={searchOpen}

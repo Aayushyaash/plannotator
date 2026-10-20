@@ -19,7 +19,10 @@
  *  - Mark read moves a thread to Quiet ("Read"), and an agent's new message
  *    brings it back to the top;
  *  - Mark read on a thread an agent is stopped on warns, and Z undoes it;
- *  - the row's hover action, and its Undo.
+ *  - the row's hover action, and its Undo;
+ *  - the toast's × and a swipe close it early, its Undo with it (Z no longer
+ *    undoes), a short drag springs back, and the longest one-line toasts stay
+ *    one line with the ×.
  *
  * Build the binary first (see inbox.spec.ts), then `bun run test:e2e:inbox`.
  * PNGs at 1440 by 900 land in .local/proof/mark-read/.
@@ -307,9 +310,10 @@ test('Mark read on a thread an agent is stopped on warns with Reply; Z undoes it
   const toast = page.locator('[data-inbox-toast]');
   await expect(toast).toContainText('Claude Code was stopped');
   await expect(toast.getByRole('button', { name: 'Reply' })).toBeVisible();
-  // One 40 px line, no close, centered on the window (not the thread pane), 16 px from the window's bottom
-  // edge even with a thread open (owner, 2026-10-18: a toast may cover the foot for a moment).
-  await expect(toast.getByRole('button')).toHaveCount(2);
+  // One 40 px line (Reply, Undo and the ×), centered on the window (not the thread pane), 16 px from the
+  // window's bottom edge even with a thread open (owner, 2026-10-18: a toast may cover the foot for a moment).
+  await expect(toast.getByRole('button')).toHaveCount(3);
+  await expect(toast.getByRole('button').last()).toHaveAccessibleName('Dismiss');
   await toast.evaluate((el) => Promise.all(el.getAnimations().map((a) => a.finished)).then(() => undefined));
   const [toastBox, paneBox] = await Promise.all([toast.boundingBox(), page.locator('section.ib-pane').boundingBox()]);
   expect(toastBox!.height).toBe(40);
@@ -324,6 +328,115 @@ test('Mark read on a thread an agent is stopped on warns with Reply; Z undoes it
   await page.locator('body').press('z');
   await expect(page.locator('[data-mark-read]')).toHaveAttribute('aria-pressed', 'false');
   await expect(toast).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect.poll(() => sectionOf(page, threads.worker)).toBe('stopped');
+});
+
+test('the toast closes early: the × (focus back, Z no longer undoes), a mouse swipe past 40%; a short drag springs back; long one-line toasts keep one line', async () => {
+  const { page, threads } = world;
+  await page.locator(`.ib-lbody [data-thread-id="${threads.worker}"]`).click();
+  const head = page.locator('[data-mark-read]');
+  await expect(head).toHaveAttribute('aria-pressed', 'false');
+  await head.focus();
+  await page.keyboard.press('Enter');
+  await expect(head).toHaveAttribute('aria-pressed', 'true');
+  const toast = page.locator('[data-inbox-toast]');
+  await toast.evaluate((el) => Promise.all(el.getAnimations().map((a) => a.finished)).then(() => undefined));
+  const close = toast.locator('[data-toast-dismiss]');
+  const closeBox = await close.boundingBox();
+  expect(Math.round(closeBox!.width)).toBe(24);
+  expect(Math.round(closeBox!.height)).toBe(24);
+
+  // The × never makes a toast wrap: the widest toasts take the same lines (and stay within 520 px) with the ×
+  // as without it. The live toast, copied with each one's words and actions.
+  const heights = await toast.evaluate((el) => {
+    // [lead, detail, the actions before the ×]: the real copy of the widest one-line toasts.
+    const copies: [string, string, ('reply' | 'undo' | 'drafts')[]][] = [
+      ['Looks good', 'Goes to Claude Code in 10 s · Moves to Quiet', ['undo']],
+      ['Draft saved', 'It waits under Drafts and never sends itself.', ['drafts']],
+      ['Marked read', 'Claude Code was stopped', ['reply', 'undo']],
+      ['Back in your Inbox', '“Retry worker: Stripe 409”', ['undo']],
+    ];
+    return copies.map(([lead, detail, acts]) => {
+      const copy = el.cloneNode(true) as HTMLElement;
+      const reply = copy.querySelector('[data-toast-reply]')!;
+      if (acts.includes('drafts')) reply.textContent = 'Drafts';
+      else if (!acts.includes('reply')) reply.remove();
+      if (!acts.includes('undo')) copy.querySelector('[data-toast-undo]')!.remove();
+      copy.removeAttribute('data-inbox-toast');
+      copy.style.animation = 'none';
+      copy.style.visibility = 'hidden';
+      copy.querySelector('.ib-tlead')!.textContent = lead;
+      copy.querySelector('.ib-tdetail')!.textContent = detail;
+      el.parentElement!.appendChild(copy);
+      const box = copy.getBoundingClientRect();
+      copy.querySelector('[data-toast-dismiss]')!.remove();
+      copy.classList.remove('ib-toast-closable');
+      const without = copy.getBoundingClientRect();
+      copy.remove();
+      return { lead, height: Math.round(box.height), without: Math.round(without.height), width: Math.round(box.width) };
+    });
+  });
+  for (const h of heights) {
+    expect(h.height, h.lead).toBe(h.without);
+    expect(h.width, h.lead).toBeLessThanOrEqual(520);
+  }
+  // The approved one-line copies (👍 Looks good, the stopped warning) are one 40 px line.
+  expect(heights.filter((h) => h.lead === 'Looks good' || h.lead === 'Marked read').map((h) => h.height)).toEqual([40, 40]);
+
+  // Focus moves from Mark read onto the × (the toast sits at the end of the page, past the thread, so this
+  // stands in for the Tabs); Enter on it: the toast goes, focus is back on Mark read, and Z has nothing to undo.
+  await close.focus();
+  await expect(close).toBeFocused();
+  await shot('09-toast-close-focused', ['light', 'dark']);
+  await page.keyboard.press('Enter');
+  await expect(toast).toHaveCount(0);
+  await expect(head).toBeFocused();
+  await page.locator('body').press('z');
+  await page.waitForTimeout(400);
+  await expect(head).toHaveAttribute('aria-pressed', 'true');
+
+  // Move it back (Undo), then swipe that toast away with the mouse: a short drag springs back first.
+  await head.click();
+  await expect(head).toHaveAttribute('aria-pressed', 'false');
+  await head.click();
+  await expect(head).toHaveAttribute('aria-pressed', 'true');
+  await expect(toast).toContainText('Claude Code was stopped');
+  await toast.evaluate((el) => Promise.all(el.getAnimations().map((a) => a.finished)).then(() => undefined));
+  const box = (await toast.boundingBox())!;
+  const grip = { x: box.x + 30, y: box.y + box.height / 2 };
+  await page.mouse.move(grip.x, grip.y);
+  await page.mouse.down();
+  for (let dx = 10; dx <= 60; dx += 10) {
+    await page.mouse.move(grip.x + dx, grip.y);
+    await page.waitForTimeout(30);
+  }
+  await expect.poll(() => toast.evaluate((el) => el.style.translate)).toBe('60px');
+  await page.mouse.up();
+  await expect(toast).toBeVisible();
+  await expect.poll(() => toast.evaluate((el) => el.getAnimations().length)).toBe(0);
+  const back = (await toast.boundingBox())!;
+  expect(Math.abs(back.x - box.x)).toBeLessThanOrEqual(1);
+
+  // Past 40% of its width: mid-swipe it follows the pointer and fades, then it slides out and is gone.
+  await page.mouse.move(grip.x, grip.y);
+  await page.mouse.down();
+  for (let dx = 20; dx <= Math.round(box.width * 0.5); dx += 20) {
+    await page.mouse.move(grip.x + dx, grip.y);
+    await page.waitForTimeout(30);
+  }
+  expect(Number(await toast.evaluate((el) => el.style.opacity))).toBeLessThan(1);
+  await page.screenshot({ path: join(proofDir, '10-toast-mid-swipe-light.png') });
+  await page.mouse.up();
+  await expect(toast).toHaveCount(0);
+  await expect(page.locator('[data-toast-ghost]')).toHaveCount(0);
+  await page.locator('body').press('z');
+  await page.waitForTimeout(400);
+  await expect(head).toHaveAttribute('aria-pressed', 'true');
+
+  // Put it back for the tests after this one.
+  await head.click();
+  await expect(head).toHaveAttribute('aria-pressed', 'false');
   await page.keyboard.press('Escape');
   await expect.poll(() => sectionOf(page, threads.worker)).toBe('stopped');
 });

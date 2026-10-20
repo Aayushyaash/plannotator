@@ -1932,6 +1932,16 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
 .pn-inbox .ib-toast .ib-tundo { padding: 0 6px 0 9px; background: var(--foreground); color: var(--card); }
 .pn-inbox .ib-toast .ib-tundo:hover { background: color-mix(in oklch, var(--foreground) 88%, var(--card)); }
 .ib-toast .ib-tundo kbd { font-family: var(--font-mono); font-size: var(--ib-fs-10-5, 10.5px); line-height: 14px; padding: 0 4px; border: 1px solid color-mix(in oklch, var(--card) 40%, transparent); border-radius: 4px; opacity: 0.6; }
+/* The × at the end (owner, 2026-10-20): closes the toast early, and its Undo with it. 24 px, muted until hovered. */
+/* Its room comes from the edges (4 px less padding at the end, none before the actions), so a toast that fit one
+   520 px line before the × still does. */
+.ib-toast.ib-toast-closable { padding-right: 4px; }
+.ib-toast.ib-toast-closable .ib-tacts { padding-left: 0; }
+.pn-inbox .ib-toast .ib-tclose { width: 24px; height: 24px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; flex: none; color: var(--muted-foreground); }
+.pn-inbox .ib-toast .ib-tclose:hover { background: var(--muted); color: var(--foreground); }
+/* Swipe it away: a horizontal drag is the toast's, a vertical one stays the page's. */
+.ib-toast { touch-action: pan-y; }
+.ib-toast.ib-toast-dragging { cursor: grabbing; user-select: none; -webkit-user-select: none; animation: none; }
 /* An error keeps its message whole: it may wrap. */
 .ib-toast.ib-toast-wrap { padding-top: 9px; padding-bottom: 9px; }
 .ib-toast-wrap .ib-tsay { overflow-wrap: anywhere; }
@@ -2233,6 +2243,12 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   .ib-toast.ib-toast-phone.ib-toast-wrap { min-height: 44px; padding-top: 9px; padding-bottom: 9px; }
   .pn-inbox .ib-toast-phone .ib-tundo { position: relative; height: 36px; padding: 0 12px; font-size: var(--ib-fs-14, 14px); }
   .pn-inbox .ib-toast-phone .ib-tundo::after { content: ""; position: absolute; inset: -4px; }
+  /* The ×: 24 px drawn, a 44 px target (its ::after, reaching into the toast's end padding and up to Undo's edge, never over it). Its room
+     comes from the gaps and the start, so a toast that fit one line without it still does, down to an iPhone SE. */
+  .ib-toast.ib-toast-phone.ib-toast-closable { gap: 8px; padding-left: 12px; }
+  .pn-inbox .ib-toast-phone.ib-toast-closable .ib-tundo { padding: 0 11px; }
+  .pn-inbox .ib-toast-phone .ib-tclose { position: relative; margin-left: 2px; }
+  .pn-inbox .ib-toast-phone .ib-tclose::after { content: ""; position: absolute; inset: -10px -16px -10px -4px; }
   /* 44 px hit areas for small controls that keep their look: the reply's
      Keep open / Skip them, and the file's toolstrip, Global comment and Copy
      file (ui). */
@@ -3207,6 +3223,8 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
 .ib-toast-wrap .ib-tlead { font-weight: var(--ib-fl-600-s, 400); }
 .pn-inbox .ib-toast .ib-tghost, .pn-inbox .ib-toast .ib-tundo { border-radius: var(--ib-pill-s, 5px); font-weight: var(--ib-fl-550-s, 500); }
 .pn-inbox .ib-toast .ib-tghost:hover { background: var(--ib-hover-s, var(--muted)); }
+.pn-inbox .ib-toast .ib-tclose { border-radius: var(--ib-pill-s, 5px); transition: var(--ib-fade-s, var(--ib-ui-fade)); }
+.pn-inbox .ib-toast .ib-tclose:hover { background: var(--ib-hover-s, var(--muted)); }
 .ib-toast .ib-tundo kbd { border-color: var(--ib-float-line-s, color-mix(in oklch, var(--card) 40%, transparent)); font-family: var(--ib-fl-kbd-font-s, var(--font-mono)); opacity: var(--ib-fl-kbd-o-s, 0.6); }
 .ib-toast.ib-toast-wrap { border-radius: var(--ib-r16-s, 8px); }
 

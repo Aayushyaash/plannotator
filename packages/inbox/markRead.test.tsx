@@ -82,7 +82,7 @@ async function serverSection(threadId: string): Promise<string | undefined> {
   return model.sections.find((s) => s.threads.some((t) => t.thread_id === threadId))?.id;
 }
 
-const TESTS = 15;
+const TESTS = 16;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -349,6 +349,30 @@ test.skipIf(!hasDom)('the pressed button moves it back; the toast Undo does the 
   act(() => (document.querySelector('[data-toast-undo]') as HTMLButtonElement).click());
   await until(() => head().getAttribute('aria-pressed') === 'false', 'Undo');
   expect(await serverSection(ids.stopped)).toBe('stopped');
+});
+
+test.skipIf(!hasDom)("the toast's × closes it early and drops its Undo: Z no longer undoes, and focus goes back where it was", async () => {
+  // Owner, 2026-10-20: "a way to grab toasts to swipe remove them or way to clear a toast manually".
+  const el = await renderApp(`#thread=${ids.stopped}`);
+  const head = () => el.querySelector('[data-mark-read]') as HTMLButtonElement;
+  head().focus();
+  act(() => head().click());
+  await until(() => document.querySelector('[data-toast-dismiss]') !== null && head().getAttribute('aria-pressed') === 'true', 'the toast');
+  const close = document.querySelector('[data-toast-dismiss]') as HTMLButtonElement;
+  expect(close.getAttribute('aria-label')).toBe('Dismiss');
+  // Tabbed onto the ×, then pressed: the toast goes, focus returns to Mark read (never the page body).
+  act(() => close.focus());
+  expect(document.activeElement).toBe(close);
+  act(() => close.click());
+  expect(document.querySelector('[data-inbox-toast]')).toBeNull();
+  expect(document.activeElement).toBe(head());
+  // Closing never undoes, and Z has nothing left to undo.
+  const before = posted.length;
+  press('z');
+  await settle();
+  expect(posted.length).toBe(before);
+  expect(head().getAttribute('aria-pressed')).toBe('true');
+  expect(await serverSection(ids.stopped)).toBe('quiet');
 });
 
 test.skipIf(!hasDom)('the row hover action marks read without opening the thread; the Quiet row says Read', async () => {
