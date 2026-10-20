@@ -194,6 +194,7 @@ jobs:
           packages/ui/components/HumanOnlySkillNotice.test.tsx
           packages/ui/components/MenuVersionSection.test.tsx
           packages/ui/components/blocks/QuestionBlock.test.tsx
+          packages/ui/components/blocks/QuestionContext.lines.test.tsx
           packages/ui/components/blocks/QuestionBlock.host.test.tsx
           packages/ui/components/blocks/QuestionBlock.decisionToggle.test.tsx
           packages/ui/components/blocks/QuestionBlock.decisionAnyQuestion.test.tsx
@@ -303,6 +304,7 @@ jobs:
           packages/review-editor/components/ReviewSidebar.outdated.test.tsx
           packages/ui/components/HtmlSurfaceControls.test.tsx
           packages/ui/components/AnnotationPanel.unanchored.test.tsx
+          packages/ui/components/AnnotationPanel.breakUi.test.tsx
           packages/ui/hooks/useHtmlRefresh.test.tsx
           packages/ui/hooks/useSharing.contentRevision.test.tsx
           packages/ui/hooks/useSharing.shortUrlLifecycle.test.tsx
