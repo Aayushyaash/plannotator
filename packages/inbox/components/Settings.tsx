@@ -573,7 +573,7 @@ export function SettingsPage(props: SettingsPageProps) {
     if (id === 'archived' && archivedTotal) return <span className="ib-scount">{formatCount(archivedTotal)}</span>;
     if (id === 'about' && aboutDot) return <span className="ib-dot" aria-label="A new version is available" role="img" />;
     if (id === 'devices' && devicesDot) return <span className="ib-dot ib-warn" aria-label="Something here is not working" role="img" />;
-    if (id === 'agents' && agentsNeedRestart(props.agents)) return <span className="ib-dot ib-warn" aria-label="Sessions need a restart" role="img" data-agents-dot="" />;
+    if (id === 'agents' && agentsNeedRestart(props.agents)) return <span className="ib-dot ib-warn" aria-label="Sessions need a reload" role="img" data-agents-dot="" />;
     return null;
   };
 

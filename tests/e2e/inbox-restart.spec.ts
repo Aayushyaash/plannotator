@@ -11,8 +11,10 @@
  * connection is the bridge's real poll, driven as the mod drives it, saying
  * it loaded plugin 0.28.23 (`plugin: { version, root, loaded_at }`). The
  * person replies in the window. What is proved: the line under the reply
- * ("Steps"), its "How to restart" disclosure and Copy; the sidebar's "Restart
- * Claude Code 2" and Settings → Agents' "Open sessions"; the row going away by
+ * ("Steps"), its "How to reload" disclosure (`/reload-plugins` first, `/exit`
+ * and the resume command as the fallback) and Copy; the sidebar's "Reload
+ * Claude Code 3" and Settings → Agents' "Open sessions", two of them in
+ * one folder, which the sub-line says each need their own `/reload-plugins`; the row going away by
  * itself once the sessions run the installed plugin; and a phone at 390 px,
  * where nothing overflows.
  *
@@ -36,6 +38,8 @@ const proofDir = resolve(process.env.PLANNOTATOR_RESTART_SHOTS ?? join(resolve(p
 
 const BILLING_SESSION = '6f2c9e14-8b0d-4c5a-9e27-1d3b7a0c4f81';
 const PLAN_SESSION = 'a41d7e02-55c3-4b8e-8f10-6e9b2c7d3a55';
+/** A second Claude Code in the billing-api folder: each needs its own /reload-plugins. */
+const BILLING_SESSION_2 = '0c9b5a37-2e41-4f6d-9a08-7b3e1c5d9f20';
 
 interface World {
   root: string;
@@ -187,7 +191,7 @@ test.afterAll(async () => {
 const OLD = () => ({ version: '0.28.23', root: world.pluginFolder('0.28.23'), loaded_at: Date.parse('2026-10-16T09:14:00Z') });
 const CURRENT = () => ({ version: '0.28.25', root: world.pluginFolder('0.28.25'), loaded_at: Date.now() });
 
-test('a working Claude Code on an older plugin: the reason under the reply, then "How to restart": /exit and the resume command with Copy, /restart as a shortcut', async () => {
+test('a working Claude Code on an older plugin: the reason under the reply, then "How to reload": /reload-plugins first, /exit and the resume command with Copy as the fallback', async () => {
   const { page } = world;
   const sent = await world.agent.send(
     {
@@ -201,6 +205,9 @@ test('a working Claude Code on an older plugin: the reason under the reply, then
   const today = new Date();
   today.setHours(9, 14, 0, 0);
   world.connections.push(new Connection(BILLING_SESSION, world.billing, true, OLD(), today.getTime()));
+  const earlier = new Date(today);
+  earlier.setHours(8, 2, 0, 0);
+  world.connections.push(new Connection(BILLING_SESSION_2, world.billing, false, OLD(), earlier.getTime()));
   const yesterday = new Date(today.getTime() - 86_400_000);
   yesterday.setHours(18, 2, 0, 0);
   world.connections.push(new Connection(PLAN_SESSION, world.plannotator, false, OLD(), yesterday.getTime()));
@@ -215,10 +222,12 @@ test('a working Claude Code on an older plugin: the reason under the reply, then
   const line = pane.locator('[data-delivery]');
   await expect(line).toContainText('Queued · Claude Code is working; it gets this when its turn ends.');
   const note = line.locator('[data-restart-note]');
-  await expect(note).toContainText('No Send now here: this Claude Code runs an older Plannotator plugin (0.28.23; 0.28.25 is installed). Restart it to get Send now.');
+  await expect(note).toContainText('No Send now here: this Claude Code runs an older Plannotator plugin (0.28.23; 0.28.25 is installed). Type /reload-plugins in it to get Send now.');
+  await expect(note.locator('code')).toHaveText('/reload-plugins');
+  await expect(note.locator('code')).toHaveCSS('white-space', 'nowrap');
   await expect(pane.locator('[data-send-now]')).toHaveCount(0);
   const toggle = note.locator('[data-restart-toggle]');
-  await expect(toggle).toHaveAccessibleName('How to restart');
+  await expect(toggle).toHaveAccessibleName('How to reload');
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
   await shot(page, '1-reply-steps-desktop');
 
@@ -227,11 +236,14 @@ test('a working Claude Code on an older plugin: the reason under the reply, then
   await expect(toggle).toHaveAccessibleName('Hide steps');
   const steps = line.locator('[data-restart-steps]');
   await expect(steps).toBeVisible();
-  await expect(steps.locator('ol > li').first()).toContainText('Type /exit in that Claude Code, then run:');
-  await expect(steps.locator('ol > li').first()).toContainText('Exiting now stops the turn it is working on; to keep it, wait until it finishes.');
-  await expect(steps.locator('[data-restart-shortcut]')).toHaveText('If your Claude Code has /restart, that does the same and keeps the session.');
-  await expect(steps.locator('.ib-rw-cmd code')).toHaveText(`cd ~/code/billing-api && claude --resume ${BILLING_SESSION}`);
-  await expect(steps).toContainText('Your reply waits here and reaches it once it is back.');
+  await expect(steps.locator('ol > li')).toHaveCount(1);
+  await expect(steps.locator('ol > li').first()).toHaveText('Type /reload-plugins in that Claude Code. It loads the new plugin and keeps the session; nothing is interrupted.');
+  const fallback = steps.locator('[data-restart-fallback]');
+  await expect(fallback).toContainText('If this note is still here after that, type /exit in that Claude Code, then run:');
+  await expect(fallback).toContainText('Exiting stops the turn it is working on; to keep it, wait until it finishes.');
+  await expect(fallback.locator('.ib-rw-cmd code')).toHaveText(`cd ~/code/billing-api && claude --resume ${BILLING_SESSION}`);
+  await expect(steps).not.toContainText('/restart');
+  await expect(steps).toContainText('Your reply waits here until then.');
   await shot(page, '1-reply-steps-open-desktop');
 
   await steps.getByRole('button', { name: 'Copy the command that restarts this Claude Code session' }).click();
@@ -240,24 +252,28 @@ test('a working Claude Code on an older plugin: the reason under the reply, then
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`cd ~/code/billing-api && claude --resume ${BILLING_SESSION}`);
 });
 
-test('the sidebar: "Restart Claude Code 2" under the What\'s new spot opens Settings → Agents with Open sessions', async () => {
+test('the sidebar: "Reload Claude Code 3" under the What\'s new spot opens Settings → Agents with Open sessions', async () => {
   const { page } = world;
   await page.goto(world.url);
   const row = page.locator('[data-restart-sidebar]');
   await expect(row).toBeVisible();
-  await expect(row).toHaveAttribute('data-restart-sidebar', '2');
-  await expect(row).toHaveAccessibleName(/^Restart Claude Code 2/);
+  await expect(row).toHaveAttribute('data-restart-sidebar', '3');
+  await expect(row).toHaveAccessibleName(/^Reload Claude Code 3/);
   await shot(page, '3-updated-sidebar-desktop');
   await row.click();
   await expect(page).toHaveURL(/#settings\/agents/);
   const sessions = page.locator('[data-agent-sessions="claude-code"]');
-  await expect(sessions).toContainText('2 running · 2 on plugin 0.28.23');
-  await expect(sessions).toContainText(
-    "Plugin 0.28.25 is installed. To load it, type /exit in each of these two and run the command Copy restart gives: each comes back as the same session. If your Claude Code has /restart, that does the same.",
+  await expect(sessions).toContainText('3 running · 3 on plugin 0.28.23');
+  await expect(sessions.locator('.ib-agsub')).toHaveText(
+    'Plugin 0.28.25 is installed. To load it, type /reload-plugins in each of these three: each keeps the session and nothing is interrupted. Sessions in the same folder (billing-api) each need their own /reload-plugins; tell them apart by when they started. If one is still listed after that, type /exit in it and run the command Copy restart gives.',
   );
-  await expect(page.locator('[data-agent="claude-code"] .ib-agstate')).toHaveText('Connected · 2 need a restart');
+  await expect(page.locator('[data-agent="claude-code"] .ib-agstate')).toHaveText('Connected · 3 need a reload');
+  await expect(sessions.locator(`[data-session-row="${BILLING_SESSION_2}"]`)).toContainText('idle · plugin 0.28.23');
   await expect(sessions.locator(`[data-session-row="${BILLING_SESSION}"]`)).toContainText('working · plugin 0.28.23');
-  await expect(sessions.getByRole('button', { name: 'Copy the command that restarts the billing-api session' })).toBeVisible();
+  // Two billing-api sessions: each Copy restart names when its session started, so they are told apart.
+  await expect(sessions.getByRole('button', { name: /^Copy restart: the command that restarts the billing-api session started / })).toHaveCount(2);
+  await expect(sessions.getByRole('button', { name: 'Copy restart: the command that restarts the billing-api session started 9:14 AM' })).toBeVisible();
+  await expect(sessions.locator('[data-restart-same-folder]')).toHaveText(' Sessions in the same folder (billing-api) each need their own /reload-plugins; tell them apart by when they started.');
   await shot(page, '2-agents-desktop');
 });
 
@@ -272,7 +288,7 @@ test('a phone at 390 px: the line, its steps, and the row in the navigation shee
     await expect(note).toBeVisible();
     await note.scrollIntoViewIfNeeded();
     await shot(page, '1-reply-steps-phone');
-    await note.getByRole('button', { name: 'How to restart' }).click();
+    await note.getByRole('button', { name: 'How to reload' }).click();
     await expect(page.locator('[data-restart-steps]')).toBeVisible();
     await page.locator('[data-restart-steps]').scrollIntoViewIfNeeded();
     await noOverflow(page);

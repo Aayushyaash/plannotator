@@ -169,7 +169,7 @@ const THEME_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const INBOX_FORBIDDEN_PORT = 19432;
 const SSE_HEARTBEAT_MS = 15_000;
 const DEFAULT_HEALTH_TICK_MS = 60_000;
-/** How often the sidebar's "Restart Claude Code N" is checked against the live sessions (a session restarted or went away). */
+/** How often the sidebar's "Reload Claude Code N" is checked against the live sessions (a session restarted or went away). */
 const INBOX_RESTART_WATCH_MS = 5_000;
 /**
  * How often the Inbox checks that `inbox.json` is still there and still its
@@ -715,7 +715,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       update: updates.current(),
       /** This Inbox started on a newer version than the last one: the sidebar's "What's new in X" link. */
       updated: updates.updated(),
-      /** Claude Code sessions a restart would bring up to date (inbox-restart.ts): the sidebar's "Restart Claude Code N". Additive. */
+      /** Claude Code sessions a restart would bring up to date (inbox-restart.ts): the sidebar's "Reload Claude Code N". Additive. */
       restart_claude_code: live.restartCount(),
       notice: portChanged ? "The Inbox moved to a new port: allow notifications again on this page." : null,
       projects: projectFolders(rows),
@@ -1298,7 +1298,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         if (cursor !== null) for (const line of store.changesSince(cursor)) sendLine(line);
         const unsubscribe = store.subscribe(sendLine);
         // `updated` (additive): the "What's new in X" link appears or goes once its notes are fetched or cannot be.
-        // `restart_claude_code` (additive): the sidebar's "Restart Claude Code N" follows the sessions as they restart.
+        // `restart_claude_code` (additive): the sidebar's "Reload Claude Code N" follows the sessions as they restart.
         const onStatus = () =>
           send(`event: status\ndata: ${JSON.stringify({ update: updates.current(), updated: updates.updated(), restart_claude_code: live.restartCount() })}\n\n`);
         statusListeners.add(onStatus);
@@ -1541,7 +1541,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     displayFolder: (path) => displayPath(path, agentEnvironment) ?? path,
     restartCommandOf: (host, folder, session) => (host === "claude-code" ? claudeRestartCommand(folder, session) : null),
   });
-  // The sidebar's "Restart Claude Code N" is pushed as it changes (a session restarts, goes away, or an update lands).
+  // The sidebar's "Reload Claude Code N" is pushed as it changes (a session restarts, goes away, or an update lands).
   let lastRestartCount = 0;
   const restartWatch = setInterval(() => {
     const count = live.restartCount();

@@ -180,7 +180,7 @@ const CodeInlineAnnotation: React.FC<{
         <span className="rounded bg-muted px-1.5 py-0.5 font-mono normal-case text-foreground">
           {lineLabel(annotation.lineStart, annotation.lineEnd)}
         </span>
-        {annotation.author && <span className="truncate normal-case">by {annotation.author}</span>}
+        {annotation.author && <span className="truncate normal-case">by <bdi>{annotation.author}</bdi></span>}
         <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
           {onEdit && !isEditing && (
             <button

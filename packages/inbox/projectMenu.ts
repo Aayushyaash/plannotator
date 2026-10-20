@@ -43,8 +43,10 @@ export interface ProjectBatchToast {
   lead: string;
   /** A phone's lead ("Read" replaces "Marked read": "3 threads read"). */
   phoneLead: string;
-  /** The muted rest of the line: the warning, the questions closed, or when it comes back, then the project. */
+  /** The muted rest of the line: the warning or the questions closed when there are any, else the project. */
   detail: string;
+  /** What the live region says: the whole of it, the project and when it comes back included. */
+  speech: string;
   /** An agent was stopped or held up on a thread the batch took: the warning icon (no Reply: several threads). */
   icon: 'warn' | 'check' | 'archive';
 }
@@ -54,11 +56,10 @@ export interface ProjectBatchToast {
  * batch took (its answer's ids), and `rows` the list's rows for those as they
  * were before it (the window may not have every one: a thread that arrived
  * since its last read), which give the warning and the questions closed. In
- * the approved one-line toast style
- * (`.product/approved/inbox-toast/`: an icon, a bold lead, a muted detail
- * cut with "…"). The detail leads with what matters most (a warning, then
- * the questions closed), then the project, so a long project name is what
- * the "…" cuts.
+ * the approved one-line toast style (`.product/approved/inbox-toast/`), short
+ * enough for one line: the detail is the warning (or the questions closed)
+ * when there is one, else the project. The rest ("Back when an agent
+ * writes") is said only to a screen reader, through `speech`.
  */
 export function projectBatchToast(action: ProjectAction, projectName: string, taken: number, rows: readonly InboxListRow[]): ProjectBatchToast {
   const threads = plural(taken, 'thread');
@@ -71,12 +72,13 @@ export function projectBatchToast(action: ProjectAction, projectName: string, ta
   else if (stopped.length > 1) warning = `${stopped.length} agents were stopped`;
   else if (holds > 0) warning = `Held up ${plural(holds, 'thing')}`;
   const closed = questions > 0 ? `Closed ${plural(questions, 'question')}` : '';
-  const why = warning || closed || (action === 'read' ? 'Back when an agent writes' : 'Back when an agent writes there');
-  const detail = `${why} · ${projectName}`;
-  if (action === 'read') {
-    return { lead: `Marked ${threads} read`, phoneLead: `${threads} read`, detail, icon: warning ? 'warn' : 'check' };
-  }
-  return { lead: `Archived ${threads}`, phoneLead: `Archived ${threads}`, detail, icon: warning ? 'warn' : 'archive' };
+  const why = warning || closed;
+  const back = action === 'read' ? 'Back when an agent writes' : 'Back when an agent writes there';
+  const lead = action === 'read' ? `Marked ${threads} read` : `Archived ${threads}`;
+  const detail = why || projectName;
+  const speech = `${lead} in ${projectName}. ${why || back}.`;
+  if (action === 'read') return { lead, phoneLead: `${threads} read`, detail, speech, icon: warning ? 'warn' : 'check' };
+  return { lead, phoneLead: `Archived ${threads}`, detail, speech, icon: warning ? 'warn' : 'archive' };
 }
 
 /** A key for one batch, so a retried request answers what the first did (the server's `batch_id`). */

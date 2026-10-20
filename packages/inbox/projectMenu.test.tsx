@@ -246,8 +246,9 @@ test.skipIf(!hasDom)('Mark all as read: one batch, the warning toast, and one Un
   expect(typeof call.body.batch_id).toBe('string');
   // An agent was stopped on one of them: the warning, and no Reply (several threads).
   expect(toast()!.textContent).toContain('Marked 6 threads read');
-  expect(toast()!.textContent).toContain(name);
-  expect(toast()!.textContent).toContain('Claude Code was stopped');
+  // The warning is the whole detail (one line); the project rides only the live region.
+  expect(toast()!.querySelector('.ib-tdetail')?.textContent).toBe('Claude Code was stopped');
+  await until(() => (document.querySelector('[data-inbox-live]')?.textContent ?? '').startsWith(`Marked 6 threads read in ${name}. Claude Code was stopped.`), 'the live region names the project');
   expect(toast()!.querySelector('[data-toast-reply]')).toBeNull();
   const after = await serverSections();
   for (const id of [ids.stopped, ids.waiting, ids.mixed, ids.same, ids.picked, ids.filed]) expect(after.get(id)).toBe('quiet');
@@ -276,7 +277,7 @@ test.skipIf(!hasDom)('Archive all hides the project; the toast Undo brings it ba
   await choose('archive');
   await until(() => !!toast(), 'the toast');
   expect(toast()!.textContent).toContain('Archived 6 threads');
-  expect(toast()!.textContent).toContain(name);
+  await until(() => (document.querySelector('[data-inbox-live]')?.textContent ?? '').startsWith(`Archived 6 threads in ${name}.`), 'the live region names the project');
   await until(() => projectRow() === null, 'the project to leave the sidebar');
   // Focus never falls to the page.
   expect(document.activeElement).not.toBe(document.body);

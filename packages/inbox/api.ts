@@ -72,7 +72,7 @@ export interface ListModel {
   update: InboxHealth['update'];
   /** This Inbox started on a newer version than the one before it: "What's new in X" for this run. Absent from an older Inbox. */
   updated?: string | null;
-  /** Claude Code sessions a restart would bring up to date: the sidebar's "Restart Claude Code N". Absent from an older Inbox. */
+  /** Claude Code sessions a /reload-plugins would bring up to date: the sidebar's "Reload Claude Code N". Absent from an older Inbox. */
   restart_claude_code?: number;
   notice: string | null;
   projects: ProjectFolder[];
@@ -743,7 +743,7 @@ export function subscribeInboxEvents(
     onRecord: (event: InboxEvent | null) => void;
     /**
      * `updated` is undefined from an Inbox older than the field (the "What's new in X" link stays as the list said);
-     * `restartClaudeCode` too (the sidebar's "Restart Claude Code N" stays as the list said).
+     * `restartClaudeCode` too (the sidebar's "Reload Claude Code N" stays as the list said).
      */
     onStatus: (update: InboxHealth['update'], updated?: string | null, restartClaudeCode?: number) => void;
     /** Whether a notification can reach the person now (inbox-windows.ts); never called by an older Inbox. */

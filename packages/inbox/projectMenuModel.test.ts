@@ -79,8 +79,9 @@ describe('projectBatchToast', () => {
     const rows = [row({ section: 'waiting', questions: asks({ open: 2 }) }), row({ questions: asks({ open: 0, picked: 1 }), answered_not_sent: true })];
     const copy = projectBatchToast('read', 'pando', rows.length, rows);
     expect(copy.lead).toContain('2 threads');
-    expect(copy.detail).toContain('pando');
-    expect(copy.detail).toContain('3 questions');
+    // The questions closed are the whole detail; the project goes to the screen reader.
+    expect(copy.detail).toBe('Closed 3 questions');
+    expect(copy.speech).toContain('pando');
     expect(copy.icon).toBe('check');
     expect(copy.phoneLead).toContain('2 threads');
     // The phone's word for Mark read is "read", never "Marked".
@@ -90,7 +91,8 @@ describe('projectBatchToast', () => {
   test('an agent stopped, or work held up, makes it a warning naming that', () => {
     const stopped = projectBatchToast('read', 'pando', 2, [row({ section: 'stopped', questions: asks({ stopped: true }) }), row({})]);
     expect(stopped.icon).toBe('warn');
-    expect(stopped.detail).toContain('Claude Code was stopped');
+    expect(stopped.detail).toBe('Claude Code was stopped');
+    expect(stopped.speech).toBe('Marked 2 threads read in pando. Claude Code was stopped.');
     const two = projectBatchToast('archive', 'pando', 2, [row({ section: 'stopped', questions: asks({ stopped: true }) }), row({ section: 'stopped', questions: asks({ stopped: true }) })]);
     expect(two.detail).toContain('2 agents were stopped');
     const held = projectBatchToast('read', 'pando', 1, [row({ section: 'holding', questions: asks({ holds_up: ['deploy', 'billing'] }) })]);
@@ -98,13 +100,17 @@ describe('projectBatchToast', () => {
     expect(held.detail).toContain('2 things');
   });
 
-  test('Archive all says the project comes back, with nothing closed; one thread is singular', () => {
+  test('Archive all with nothing closed names the project; one thread is singular; the screen reader hears it comes back', () => {
     const copy = projectBatchToast('archive', 'ux-meeting', 1, [row({ section: 'quiet', unseen: 0 })]);
     expect(copy.lead).toBe('Archived 1 thread');
-    expect(copy.detail).toContain('ux-meeting');
+    expect(copy.detail).toBe('ux-meeting');
+    expect(copy.speech).toBe('Archived 1 thread in ux-meeting. Back when an agent writes there.');
     expect(copy.icon).toBe('archive');
-    // The warning or the questions come before the project, so a long project name is what "…" cuts.
+    const read = projectBatchToast('read', 'ux-meeting', 2, [row({ section: 'new' }), row({ section: 'new' })]);
+    expect(read.detail).toBe('ux-meeting');
+    expect(read.speech).toBe('Marked 2 threads read in ux-meeting. Back when an agent writes.');
+    // A warning is the whole detail, so a long project name never pushes it to a second line.
     const warned = projectBatchToast('archive', 'a-very-long-project-name', 1, [row({ section: 'stopped', questions: asks({ stopped: true }) })]);
-    expect(warned.detail.indexOf('was stopped')).toBeLessThan(warned.detail.indexOf('a-very-long-project-name'));
+    expect(warned.detail).toBe('Claude Code was stopped');
   });
 });
