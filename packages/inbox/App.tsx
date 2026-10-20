@@ -757,6 +757,7 @@ function Inbox() {
     let unsubscribe = () => {};
     let timer: ReturnType<typeof setTimeout> | null = null;
     let deliveriesTimer: ReturnType<typeof setTimeout> | null = null;
+    let draftsTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
     void (async () => {
       const first = await refreshList(true);
@@ -777,9 +778,10 @@ function Inbox() {
           }, 80);
         },
         // A reply draft was saved or discarded (here or in another window): the rows' `unsent` and the Drafts row.
+        // Its own timer: sharing the record timer let a draft save cancel a record's pending reads (the open thread's).
         onDrafts: () => {
-          if (timer) clearTimeout(timer);
-          timer = setTimeout(() => {
+          if (draftsTimer) clearTimeout(draftsTimer);
+          draftsTimer = setTimeout(() => {
             void refreshList(false);
             void refreshDrafts();
           }, 80);
@@ -807,6 +809,7 @@ function Inbox() {
       unsubscribe();
       if (timer) clearTimeout(timer);
       if (deliveriesTimer) clearTimeout(deliveriesTimer);
+      if (draftsTimer) clearTimeout(draftsTimer);
     };
   }, [refreshList, refreshSettings, refreshThread, refreshDrafts, observeEvent, flushNotifications, setNotifyReach, windowReport, reportWindow]);
 
