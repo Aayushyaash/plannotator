@@ -920,6 +920,7 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
   useEffect(() => {
     if (!linkedRequest) {
       setLinkedStack([]);
+      focusLinkedBack.current = false;
       return;
     }
     const { relative, hash } = splitLinked(linkedRequest);
@@ -951,12 +952,15 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
     };
   }, [linkedRequest, attachment.id, announce]);
   // A page just opened from a link: focus goes to its Back, after the commit that draws it (a frame
-  // callback could run first, find no button, and leave focus behind).
+  // callback could run first, find no button, and leave focus behind). The page can be drawn well after
+  // it was read (a deep link or reload names it before the file's view is read), so focus the person
+  // moved into a field meanwhile (the reply box) stays there.
   useLayoutEffect(() => {
     if (!focusLinkedBack.current || !linkedTop || !view) return;
     const back = linkedBackRef.current;
     if (!back) return;
     focusLinkedBack.current = false;
+    if (isEditableTarget(document.activeElement)) return;
     back.focus({ preventScroll: true });
   }, [linkedTop, view]);
   // A fragment is replayed once: cleared after the page had time to take it, so a remount does not scroll again and the same #hash works twice.
