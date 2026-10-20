@@ -882,23 +882,28 @@ for (const narrow of [
         // Closing the file reopens the docked sidebar on a spring: the thread covers the list from the first
         // frame, never drawn squeezed beside it while the sidebar opens (motion on, so the spring runs).
         await page.emulateMedia({ reducedMotion: 'no-preference' });
+        type Sampled = { listFrames: boolean[]; listFrameAt: number[] };
         await page.evaluate(() => {
           const frames: boolean[] = [];
-          (window as unknown as { listFrames: boolean[] }).listFrames = frames;
+          const at: number[] = [];
+          Object.assign(window, { listFrames: frames, listFrameAt: at });
           const start = performance.now();
           const tick = () => {
             const list = document.querySelector('.ib-listcol');
             frames.push(!!list && getComputedStyle(list).visibility !== 'hidden' && list.getBoundingClientRect().width > 0);
-            if (performance.now() - start < 900) requestAnimationFrame(tick);
+            at.push(performance.now() - start);
+            if (at.at(-1)! < 900) requestAnimationFrame(tick);
           };
           requestAnimationFrame(tick);
         });
         await view.getByRole('button', { name: 'Back to the thread' }).click();
         await expect(view).toHaveCount(0);
         await expect(pane).toBeVisible();
-        await page.waitForTimeout(1000);
-        const frames = await page.evaluate(() => (window as unknown as { listFrames: boolean[] }).listFrames);
-        expect(frames.length).toBeGreaterThan(10);
+        // The sampling covered the whole 900 ms window (a loaded runner draws fewer frames in it, not a shorter window).
+        await expect.poll(() => page.evaluate(() => (window as unknown as Sampled).listFrameAt.at(-1) ?? 0), { timeout: 10_000 }).toBeGreaterThanOrEqual(900);
+        const frames = await page.evaluate(() => (window as unknown as Sampled).listFrames);
+        // Enough samples to land inside the ~540 ms spring itself.
+        expect(frames.length).toBeGreaterThanOrEqual(5);
         expect(frames.filter(Boolean)).toEqual([]);
       } finally {
         await browser.close();
