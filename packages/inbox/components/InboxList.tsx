@@ -384,14 +384,17 @@ export function InboxList(props: InboxListProps) {
                 <Icon key={props.refreshSpin ?? 'rest'} name="refresh" size={16} className="ib-ic-refresh" />
               </button>
             </Tip>
-            <span id={refreshHintId} hidden>
-              Refresh the list
-            </span>
           </h1>
         ) : (
           <Tip content={props.title} cut>
             <h1 dir="auto">{props.title}</h1>
           </Tip>
+        )}
+        {/* The button's description, outside the h1 so the heading reads only the name. */}
+        {props.onRefresh && (
+          <span id={refreshHintId} hidden>
+            Refresh the list
+          </span>
         )}
         {props.path && (
           <Tip content={props.path} cut>

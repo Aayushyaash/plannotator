@@ -305,6 +305,8 @@ test.skipIf(!hasDom)('the list title refreshes beside an open thread: the thread
   await openRow(el, first);
   const late = await heldArrival(el);
   const title = el.querySelector<HTMLButtonElement>('.ib-lhead [data-list-refresh]')!;
+  // The heading reads only the project's name: the button's description sits outside it (CI, #2027).
+  expect(el.querySelector('.ib-lhead h1')!.textContent).toBe(projectRow(el).querySelector('.ib-name')!.textContent);
   act(() => title.focus());
   mouseClick(title);
   await until(() => rowOf(el, late) !== null && notice(el) === null, 'the refresh');
