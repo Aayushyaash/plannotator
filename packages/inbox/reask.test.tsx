@@ -165,6 +165,15 @@ describe('the rules (reask.ts)', () => {
     expect(reaskTargets([...old, note(openIds(msgs)), answered])).toEqual([]);
   });
 
+  test('rule 2a: a note stops hiding its session once nothing it lists is open, even if that session never wrote', () => {
+    const msgs = base();
+    const [q1] = openIds(msgs);
+    // The note listed only q1 (the others were picked then); someone else superseded q1 since.
+    const gone = msgs.map((m) => ({ ...m, questions: m.questions!.map((q) => (`${q.message_id}/${q.key}` === q1 ? { ...q, state: 'superseded' as const } : q)) }));
+    expect(reaskTargets([...msgs, note([q1!])]).map((t) => t.session)).toEqual([]);
+    expect(reaskTargets([...gone, note([q1!])]).map((t) => [t.session, t.open])).toEqual([['ses_a', 2]]);
+  });
+
   test("the note's line", () => {
     expect(reaskNoteSentence('Claude Code', 3, 0)).toBe('You asked Claude Code to ask the 3 open questions again, together in one message. They stay open here until it does.');
     expect(reaskNoteSentence('Claude Code', 2, 1)).toBe('You asked Claude Code to ask the 2 open questions again, together in one message. They stay open here until it does. Your 1 pick went with it.');

@@ -41,10 +41,11 @@ const isReaskNote = (m: InboxMessageWire): boolean => m.author.kind === 'person'
 
 /**
  * The sessions a Re-ask would go to now. A session is left out while a note
- * of its waits: no message after it from the session the note went to (the
- * note's `to` when the person sent it to another session because this one
- * ended, else this session). Once that session wrote, what it neither
- * replaced nor superseded can be asked again. Also left out right after it
+ * of its waits (rule 2a): no message after it from the session the note went
+ * to (the note's `to` when the person sent it to another session because
+ * this one ended, else this session), and a question it lists still open.
+ * Once that session wrote, or nothing it lists is open, what is left can be
+ * asked again. Also left out right after it
  * answered a note (every question it still has open sits in its one message
  * that answered the note), and when nothing of its waits. `live` says which
  * messages still take answers (not closed by an archive).
@@ -63,6 +64,9 @@ export function reaskTargets(messages: readonly InboxMessageWire[], live: (messa
     const at = messages.indexOf(note);
     return messages.slice(at + 1).some((m) => m.author.kind === 'agent' && m.author.session === by.session && (m.author.host ?? '') === (by.host ?? ''));
   };
+  const openIds = new Set(
+    messages.flatMap((m) => (m.author.kind === 'agent' && live(m) ? (m.questions ?? []).filter((q) => q.state === 'open').map((q) => `${q.message_id}/${q.key}`) : [])),
+  );
   const targets: ReaskTarget[] = [];
   for (const group of groups.values()) {
     const ids = new Set(group.map((m) => m.id));
@@ -71,7 +75,11 @@ export function reaskTargets(messages: readonly InboxMessageWire[], live: (messa
     const own = { host: author?.host ?? null, session: author?.session ?? null };
     // A note to this session (an answer to one of its messages), or one sent to it from an ended session.
     const notes = messages.filter((m) => isReaskNote(m) && ((m.reply_to && ids.has(m.reply_to)) || (own.session && m.to?.session === own.session)));
-    if (notes.some((note) => !wroteAfter(note, note.to && note.to.session !== own.session ? { host: note.to.host, session: note.to.session } : own))) continue;
+    // A note waits until its session wrote again, and only while a question it lists is still open (rule 2a).
+    const waits = (note: InboxMessageWire) =>
+      !wroteAfter(note, note.to && note.to.session !== own.session ? { host: note.to.host, session: note.to.session } : own) &&
+      note.reask!.some((id) => openIds.has(id));
+    if (notes.some(waits)) continue;
     const waiting = group.flatMap((m) => (m.questions ?? []).filter((q) => q.state === 'open' || q.state === 'picked'));
     if (waiting.length === 0) continue;
     const open = waiting.filter((q) => q.state === 'open').length;

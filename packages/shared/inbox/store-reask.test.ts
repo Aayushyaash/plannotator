@@ -149,19 +149,37 @@ describe("Re-ask", () => {
     expect(again.listRow(first.id)?.section).toBe("sent");
   });
 
-  test("several sessions: the row stays in Sent until every session that got a note has written again", () => {
+  test("several sessions: Sent while every open question is in a note that waits; one session's answer leaves its own open questions on the person", () => {
     const { store, project, first, second } = setup();
     const pi = store.sendMessage({ project_id: project.id, author: B, reply_to: first.id, body: `${block("Pin the Node version?")}\n\n${block("Drop Node 18?")}` }).message;
     const forA = store.sendReask(second.id, { idempotency_key: "a" }).reply;
+    // Only A's questions are in a note: B's are still the person's to answer.
+    expect(sectionOf(store, first.id)).toBe("waiting");
     store.sendReask(pi.id, { idempotency_key: "b" });
     expect(sectionOf(store, first.id)).toBe("sent");
-    // A answers; B's note still waits.
-    store.sendMessage({ project_id: project.id, author: A, reply_to: forA.id, body: block("Backfill ledger first?") });
-    expect(store.listRow(first.id)?.reask_pending).toBe(true);
-    expect(sectionOf(store, first.id)).toBe("sent");
-    store.sendMessage({ project_id: project.id, author: B, reply_to: pi.id, body: "Still checking the Node matrix." });
+    // A answers with one question and replaces nothing: its old questions are no longer in a waiting note.
+    store.sendMessage({ project_id: project.id, author: A, reply_to: forA.id, body: block("Backfill ledger first, today?") });
     expect(store.listRow(first.id)?.reask_pending).toBe(false);
     expect(sectionOf(store, first.id)).toBe("waiting");
+  });
+
+  test("the reviewer's case: never stuck in Sent when the noted session does not write", () => {
+    const { store, project, first, second } = setup();
+    store.sendReask(second.id, { idempotency_key: "k1" });
+    expect(sectionOf(store, first.id)).toBe("sent");
+    // B asks a Stopped question: it waits on the person.
+    const stop = store.sendMessage({ project_id: project.id, author: B, reply_to: second.id, body: [":::question", "Which region first?", "", "Stopped: the deploy waits.", "", "- [ ] East", "- [ ] West", ":::"].join("\n") }).message;
+    const row = store.listRow(first.id)!;
+    expect(row.section).toBe("stopped");
+    expect(row.unread).toBe(true);
+    // The person replies in words to B: B's question is still open and in no note.
+    store.sendReply(stop.id, { idempotency_key: "w1", words: "Looking into it." });
+    expect(sectionOf(store, first.id)).toBe("stopped");
+    // B supersedes every question A asked (and its own): nothing the note lists is open, so it no longer waits.
+    store.sendMessage({ project_id: project.id, author: B, reply_to: stop.id, supersedes: [first.id, second.id, stop.id], body: "Settled in the session; none of these apply." });
+    const after = store.listRow(first.id)!;
+    expect(after.reask_pending).toBe(false);
+    expect(after.section).not.toBe("sent");
   });
 
   test("sent to another session because the asker ended: the note names whose questions they are, and only that session's answer ends Sent", () => {

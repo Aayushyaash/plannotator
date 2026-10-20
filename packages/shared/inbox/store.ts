@@ -1053,7 +1053,7 @@ export class InboxStore {
       project: { id: project.id, name: this.labeled(project).name },
       thread_name: root.thread_name ?? null,
       answered_not_sent: (root.resolved_at === null || backFromArchive) && summary.questions.open === 0 && summary.questions.picked > 0,
-      // A Re-ask note waits: Sent until every session that got one has written again (approval "inbox-reask").
+      // Rule 2a: every open question is in a Re-ask note that still waits (approval "inbox-reask").
       reask_pending: (root.resolved_at === null || backFromArchive) && this.reaskWaiting(messages),
       waiting_since: waitingSince,
       unseen,
@@ -2395,20 +2395,30 @@ export class InboxStore {
   }
 
   /**
-   * Whether a Re-ask note in these messages (a thread's, in order) still
-   * waits: no message from the session it went to (its `to`, else the
-   * session of the message it answers) came after it.
+   * Rule 2a (approval "inbox-reask"): a thread's messages (in order) sit in
+   * Sent only while every question open in them is listed in a Re-ask note
+   * that still waits. A note waits until the session it went to (its `to`,
+   * else the session of the message it answers) writes again, and only while
+   * one of the questions it lists is still open. Another session's new
+   * question, or the last listed one answered, superseded or closed, ends it.
    */
   private reaskWaiting(messages: readonly InboxMessage[]): boolean {
-    return messages.some((note, index) => {
-      if (note.author.kind !== "person" || (note.reask?.length ?? 0) === 0) return false;
+    const states = new Map<string, string>();
+    for (const m of messages) if (m.author.kind === "agent") for (const q of this.questionsOf(m.id)) states.set(`${m.id}/${q.key}`, q.state);
+    const covered = new Set<string>();
+    messages.forEach((note, index) => {
+      if (note.author.kind !== "person" || (note.reask?.length ?? 0) === 0) return;
       const asked = note.reply_to ? this.messages.get(note.reply_to) : undefined;
       const by = note.to ?? (asked?.author.kind === "agent" ? { host: asked.author.host ?? "", session: asked.author.session } : null);
-      if (!by) return false;
-      return !messages
+      if (!by) return;
+      const wrote = messages
         .slice(index + 1)
         .some((m) => m.author.kind === "agent" && m.author.session === by.session && (m.author.host ?? "") === (by.host ?? ""));
+      if (wrote) return;
+      for (const id of note.reask!) if (states.get(id) === "open") covered.add(id);
     });
+    const open = [...states].filter(([, state]) => state === "open").map(([id]) => id);
+    return open.length > 0 && open.every((id) => covered.has(id));
   }
 
   /**
