@@ -6,11 +6,12 @@
  * restart and failure dialogs; the What's new page; Settings → About.
  */
 
-import { useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { Viewer } from '@plannotator/ui/components/Viewer';
+import { ImageResolverContext, type ImageResolution } from '@plannotator/ui/components/ImageResolverContext';
 import { parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 import type { InboxHealth } from '@plannotator/core/inbox-types';
-import type { UpdateDetails, UpdateSwitches, WhatsNewModel } from '../api';
+import { whatsNewImageUrl, type UpdateDetails, type UpdateSwitches, type WhatsNewModel } from '../api';
 import { clockTime, dayWords, formatCount, tildePath, whenTime } from '../format';
 import { Icon } from '../icons';
 import { CopyButton } from './ConnectPicker';
@@ -519,6 +520,19 @@ export function WhatsNewPage({
   onUpdate: () => void;
 }) {
   const blocks = useMemo(() => parseMarkdownToBlocks(model?.notes ?? '', { frontmatter: false }), [model?.notes]);
+  // The notes' images load from the copies the Inbox saved (never from GitHub:
+  // the window's CSP allows only its own origin). One not saved is drawn as
+  // its alt text in a quiet chip, never a broken image.
+  const storedImages = useMemo(() => new Set(model?.images ?? []), [model?.images]);
+  const modelVersion = model?.version;
+  const resolveImage = useCallback(
+    (src: string): ImageResolution | null => {
+      if (/^(data|blob):/i.test(src)) return null;
+      if (modelVersion && storedImages.has(src)) return { kind: 'src', src: whatsNewImageUrl(modelVersion, src) };
+      return { kind: 'unavailable', title: 'This image is not saved on this computer. It is in the release on GitHub.' };
+    },
+    [modelVersion, storedImages],
+  );
   const released = releasedLong(model?.published_at);
   const canUpdate = whatsNewCanUpdate(model, update);
   const standing = model ? whatsNewStanding(model) : null;
@@ -571,6 +585,7 @@ export function WhatsNewPage({
         {error && <div className="ib-error">{error}</div>}
         {model && model.notes ? (
           <div className="ib-body ib-wn-body">
+            <ImageResolverContext.Provider value={resolveImage}>
             <Viewer
               blocks={blocks}
               markdown={model.notes}
@@ -586,6 +601,7 @@ export function WhatsNewPage({
               answerOnly
               readOnly
             />
+            </ImageResolverContext.Provider>
           </div>
         ) : (
           model && <p className="ib-sum">The release has no notes. They are on GitHub.</p>
