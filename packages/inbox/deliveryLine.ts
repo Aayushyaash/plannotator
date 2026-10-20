@@ -64,7 +64,7 @@ export function restartNote(name: string, connection: RecipientConnection | null
       fix: outdated.fix,
       command,
       updateCommand: outdated.update_command ?? null,
-      text: `No Send now here: the Plannotator plugin ${name} has installed${behind} is older than this Inbox. Update the plugin, then restart ${name} to get Send now.`,
+      text: `No Send now here: the Plannotator plugin ${name} has installed${behind} is older than this Inbox. Update the plugin, then type /reload-plugins in that ${name} to get Send now.`,
     };
   }
   if (outdated.fix !== 'restart') return null;
@@ -79,7 +79,7 @@ export function restartNote(name: string, connection: RecipientConnection | null
     fix: outdated.fix,
     command,
     updateCommand: null,
-    text: `No Send now here: this ${name} runs an older Plannotator plugin${versions}. Restart it to get Send now.`,
+    text: `No Send now here: this ${name} runs an older Plannotator plugin${versions}. Type /reload-plugins in it to get Send now.`,
   };
 }
 

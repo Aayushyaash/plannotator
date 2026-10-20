@@ -400,7 +400,7 @@ function Inbox() {
   const [restarting, setRestarting] = useState(false);
   /** This run started on a newer version: the sidebar's "What's new in X" link. */
   const [updated, setUpdated] = useState<string | null>(null);
-  // Claude Code sessions a restart would bring up to date: the sidebar's "Restart Claude Code N" (owner approval "restart-warning").
+  // Claude Code sessions a /reload-plugins would bring up to date: the sidebar's "Reload Claude Code N" (owner approval "restart-warning").
   const [restartClaudeCode, setRestartClaudeCode] = useState(0);
   /** The update control's dialogs and what they read (GET /api/inbox/update). */
   const [updateDialog, setUpdateDialog] = useState<null | 'update' | 'restart' | 'failed'>(null);

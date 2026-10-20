@@ -3418,11 +3418,12 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
 }
 /*
  * A session that needs a restart after an update (owner approval "restart-warning", 2026-10-19):
- * the line under a reply ("Steps"), the sidebar's "Restart Claude Code N", Settings → Agents' "Open sessions".
+ * the line under a reply ("Steps"), the sidebar's "Reload Claude Code N", Settings → Agents' "Open sessions".
  */
 .ib-rw-note { flex-basis: 100%; display: flex; align-items: flex-start; gap: 6px; color: var(--muted-foreground); font-size: var(--ib-fs-12-5, 12.5px); line-height: 1.5; min-width: 0; }
 .pn-inbox .ib-rw-note > svg.ib-ic { width: 14px; height: 14px; flex: none; margin-top: 2px; }
 .ib-rw-note > span { min-width: 0; overflow-wrap: anywhere; }
+.ib-rw-note code { font-family: var(--font-mono); font-size: var(--ib-fs-12, 12px); white-space: nowrap; }
 .pn-inbox .ib-rw-lnk { color: var(--primary); font: inherit; font-weight: 550; background: none; border: 0; padding: 0; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; vertical-align: baseline; }
 .pn-inbox .ib-rw-lnk:hover { text-decoration: underline; text-underline-offset: 2px; }
 .pn-inbox .ib-rw-lnk .ib-rw-chev { width: 12px; height: 12px; transition: transform 150ms ease-out; }
@@ -3467,9 +3468,9 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
   .ib-rw-sess { grid-column: 1 / -1; }
   .ib-rw-cmd { flex-wrap: wrap; }
 }
-/* The restart steps: /exit and the resume command; /restart only as a shortcut. */
+/* The steps: /reload-plugins first; /exit and the resume command only as the fallback, quieter. */
+.ib-rw-steps .ib-rw-fallback { margin: 10px 0 0; padding-top: 8px; border-top: 1px solid color-mix(in oklch, var(--border) 60%, transparent); color: var(--muted-foreground); }
 .ib-rw-steps .ib-rw-warn { margin: 6px 0 0; color: var(--muted-foreground); }
-.ib-rw-steps .ib-rw-shortcut { margin: 8px 0 0; color: var(--muted-foreground); }
 
 /* A sent reply's tag chip carries its agent's mark over the `@` (approved shot 5): the `@` is drawn clear and the mark sits in its place, in a layer of the message's own (tagHighlight.ts). */
 ::highlight(ib-tag-at) { color: transparent; }
