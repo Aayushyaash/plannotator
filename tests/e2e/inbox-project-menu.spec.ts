@@ -131,8 +131,9 @@ test('Mark all as read takes every waiting thread, warns, and Z undoes the batch
   await page.locator('[data-project-action="read"]').click();
   const toast = page.locator('[data-inbox-toast]');
   await expect(toast).toContainText('Marked 3 threads read');
-  await expect(toast).toContainText('billing');
-  await expect(toast).toContainText('Claude Code was stopped');
+  // The warning is the whole detail; the project rides only the live region.
+  await expect(toast.locator('.ib-tdetail')).toHaveText('Claude Code was stopped');
+  await expect(page.locator('[data-inbox-live]')).toHaveText('Marked 3 threads read in billing. Claude Code was stopped. Press Z to undo.');
   await page.screenshot({ path: join(proofDir, '02-mark-all-read.png') });
   await page.locator('[data-section-id="quiet"] .ib-band').click();
   for (const id of [threads.worker, threads.search, threads.news]) await expect.poll(() => sectionOf(page, id)).toBe('quiet');

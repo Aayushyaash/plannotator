@@ -1089,7 +1089,9 @@ function Inbox() {
       {
         icon: 'check',
         lead: `Sent to ${hostLabel(sent.host)}`,
-        detail: `in ${sent.projectName}. It takes it as its next turn.`,
+        // Short enough for one line; the thread's own line says Queued / Sending / Delivered.
+        detail: `in ${sent.projectName}`,
+        speech: `Sent to ${hostLabel(sent.host)} in ${sent.projectName}. It takes it as its next turn.`,
         action: { label: 'Open', onPress: () => {
           dismissToast();
           go({ page: 'inbox', project: routeRef.current.page === 'inbox' ? routeRef.current.project : null, thread: sent.threadId });
@@ -1399,7 +1401,7 @@ function Inbox() {
     showToast({
       ...copy,
       // Stopped partway: the warning, and why, whole (it may wrap); Undo still covers what did apply.
-      ...(incomplete ? { icon: 'warn' as const, detail: `${incomplete} · ${name}`, wrap: true } : {}),
+      ...(incomplete ? { icon: 'warn' as const, detail: `${incomplete} · ${name}`, speech: undefined, wrap: true } : {}),
       onUndo: () => {
         void (async () => {
           try {

@@ -292,7 +292,8 @@ test('an agent connects: the draft reopens with To prefilled; Send starts a thre
   await dialog.locator('[data-compose-send]').click();
   await expect(dialog).toHaveCount(0);
   const toast = page.locator('[data-inbox-toast]');
-  await expect(toast).toContainText('in ledger. It takes it as its next turn.');
+  await expect(toast.locator('.ib-tdetail')).toHaveText('in ledger');
+  await expect(page.locator('[data-inbox-live]')).toHaveText('Sent to Claude Code in ledger. It takes it as its next turn.');
   // The draft is gone; with none left, so is the sidebar row.
   await expect(page.locator('[data-drafts-nav]')).toHaveCount(0);
   await toast.locator('[data-toast-action]').click();
