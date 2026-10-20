@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { memo, useCallback, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { InboxListRow, InboxListSection } from '@plannotator/core/inbox-types';
 import { threadChipName } from '../threadChip';
 import { agentName, formatCount, questionCount, shortTime } from '../format';
@@ -325,6 +325,14 @@ export function InboxList(props: InboxListProps) {
   const resizable = props.narrow && !isMobile;
   const visible = props.sections.filter((s) => s.threads.length > 0);
   const lit = (row: InboxListRow) => props.lit?.has(row.thread_id) === true;
+  // The row callbacks keep one identity for the list's life (they call the latest props), so a row whose
+  // data did not change is not rendered again when the list is (ListRow is memoized on its row's content).
+  const latest = useRef(props);
+  latest.current = props;
+  const openRow = useCallback((row: InboxListRow) => latest.current.onOpen(row), []);
+  const markRead = useCallback((row: InboxListRow) => latest.current.onMarkRead?.(row), []);
+  // A row's time reads "8:22 PM" today and "Oct 19" after midnight: a new day renders every row again.
+  const day = new Date().toDateString();
   return (
     <section
       ref={listRef}
@@ -390,20 +398,20 @@ export function InboxList(props: InboxListProps) {
                   </div>
                 )}
                 {open &&
-                  section.threads.map((row) =>
-                    // A phone's row has no hover action (a hover on a touch screen is a first tap): Mark read is in the thread's header there.
-                    props.phone ? (
-                      <PhoneRow key={row.thread_id} row={row} filtered={props.filtered} lit={lit(row)} onOpen={() => props.onOpen(row)} />
-                    ) : (
-                      <RowWithAction key={row.thread_id} row={row} onMarkRead={props.onMarkRead}>
-                        {twoLine ? (
-                          <NarrowRow row={row} filtered={props.filtered} lit={lit(row)} selected={row.thread_id === props.selectedThreadId} onOpen={() => props.onOpen(row)} />
-                        ) : (
-                          <WideRow row={row} filtered={props.filtered} lit={lit(row)} selected={row.thread_id === props.selectedThreadId} onOpen={() => props.onOpen(row)} />
-                        )}
-                      </RowWithAction>
-                    ),
-                  )}
+                  section.threads.map((row) => (
+                    <ListRow
+                      key={row.thread_id}
+                      row={row}
+                      // A phone's row has no hover action (a hover on a touch screen is a first tap): Mark read is in the thread's header there.
+                      shape={props.phone ? 'phone' : twoLine ? 'narrow' : 'wide'}
+                      filtered={props.filtered}
+                      selected={row.thread_id === props.selectedThreadId}
+                      lit={lit(row)}
+                      onOpen={openRow}
+                      onMarkRead={props.onMarkRead ? markRead : undefined}
+                      day={day}
+                    />
+                  ))}
               </div>
             );
           })}
@@ -411,6 +419,64 @@ export function InboxList(props: InboxListProps) {
       {resizable && <ListColumnEdge controls={columnId} />}
     </section>
   );
+}
+
+interface ListRowProps {
+  row: InboxListRow;
+  shape: 'wide' | 'narrow' | 'phone';
+  filtered: boolean;
+  selected: boolean;
+  lit: boolean;
+  onOpen: (row: InboxListRow) => void;
+  onMarkRead?: (row: InboxListRow) => void;
+  /** Today's date: the row's time is written against it (shortTime). */
+  day: string;
+}
+
+/**
+ * One row of the list, in the shape the list draws. Every list read brings new
+ * row objects, so it is memoized on the row's content, not its identity: a
+ * list update renders only the rows that changed.
+ */
+const ListRow = memo(
+  function ListRow({ row, shape, filtered, selected, lit, onOpen, onMarkRead }: ListRowProps) {
+    const open = () => onOpen(row);
+    if (shape === 'phone') return <PhoneRow row={row} filtered={filtered} lit={lit} onOpen={open} />;
+    return (
+      <RowWithAction row={row} onMarkRead={onMarkRead}>
+        {shape === 'narrow' ? (
+          <NarrowRow row={row} filtered={filtered} lit={lit} selected={selected} onOpen={open} />
+        ) : (
+          <WideRow row={row} filtered={filtered} lit={lit} selected={selected} onOpen={open} />
+        )}
+      </RowWithAction>
+    );
+  },
+  (a, b) =>
+    a.shape === b.shape &&
+    a.filtered === b.filtered &&
+    a.selected === b.selected &&
+    a.lit === b.lit &&
+    a.day === b.day &&
+    a.onOpen === b.onOpen &&
+    a.onMarkRead === b.onMarkRead &&
+    sameValue(a.row, b.row),
+);
+
+/** Deep equality over JSON-shaped values (a list row). */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!sameValue(a[i], b[i])) return false;
+    return true;
+  }
+  if (Array.isArray(b)) return false;
+  const ka = Object.keys(a);
+  if (ka.length !== Object.keys(b).length) return false;
+  for (const k of ka) if (!sameValue((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])) return false;
+  return true;
 }
 
 /** The guided review mark drops its label to its icon when the row is short of room: only then does it need a tooltip. */
