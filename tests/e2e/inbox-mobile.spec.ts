@@ -834,7 +834,8 @@ for (const narrow of [
         // The sampling covered the whole 900 ms window (a loaded runner draws fewer frames in it, not a shorter window).
         await expect.poll(() => page.evaluate(() => (window as unknown as Sampled).listFrameAt.at(-1) ?? 0), { timeout: 10_000 }).toBeGreaterThanOrEqual(900);
         const frames = await page.evaluate(() => (window as unknown as Sampled).listFrames);
-        expect(frames.length).toBeGreaterThan(1);
+        // Enough samples to land inside the ~540 ms spring itself.
+        expect(frames.length).toBeGreaterThanOrEqual(5);
         expect(frames.filter(Boolean)).toEqual([]);
       } finally {
         await browser.close();
