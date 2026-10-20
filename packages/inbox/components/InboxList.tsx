@@ -11,6 +11,8 @@ import { ListColumnEdge } from '../shell/ListColumnEdge';
 import { SidebarTrigger, useSidebar } from '../shell/sidebar';
 import { offersRowMarkRead } from '../markRead';
 import { useNarrowerThan } from '../narrower';
+import { rowTimeIso } from '../rowDelivery';
+import { TimeWithTick } from './DeliveryTick';
 
 export interface InboxListProps {
   title: string;
@@ -79,12 +81,16 @@ function badgeClass(row: InboxListRow): string {
   return row.section === 'stopped' ? 'ib-badge ib-b-stop' : 'ib-badge ib-b-hold';
 }
 
-/** The subject cell's words: a Sent row says where its reply is (queued for a turn, or saved until the agent reads the thread). */
+/**
+ * The subject cell's words. A row keeps its own subject: the delivery glyph
+ * by its time says where the person's reply is (approval "inbox-row-delivery").
+ * An older Inbox sends no `delivery`: its Sent row says it in words instead.
+ */
 function subjectOf(row: InboxListRow): string {
   // A thread the person started keeps its own subject in Sent; its count cell says whom it went to.
   // A reply that tags agents (approval "inbox-tag-agents", Lines): how many have it, and who waits.
   if (row.section === 'sent' && !row.addressee && row.sent?.recipients?.length) return sentRecipientsWords(row.sent.recipients);
-  if (row.section === 'sent' && !row.addressee) return sentRowLine(agentName(rowAgent(row)), row.sent?.wakes);
+  if (row.section === 'sent' && !row.addressee && !row.delivery) return sentRowLine(agentName(rowAgent(row)), row.sent?.wakes);
   return row.subject ?? '(no subject)';
 }
 
@@ -186,7 +192,9 @@ function WideRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow; 
         <SubjectLine row={row} />
       </span>
       <span className={`ib-c${row.section === 'quiet' ? ' ib-qlabel' : ''}`}>{countOf(row)}</span>
-      <span className="ib-t">{shortTime(row.last_at)}</span>
+      <span className="ib-t">
+        <TimeWithTick delivery={row.delivery} time={shortTime(rowTimeIso(row))} />
+      </span>
     </button>
   );
 }
@@ -239,7 +247,9 @@ function NarrowRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow
       <div className="ib-l1">
         <ClipText className="ib-p" text={filtered ? agentName(rowAgent(row)) : row.project.name} />
         {count && <span className={`ib-c${row.section === 'quiet' ? ' ib-qlabel' : ''}`}>{count}</span>}
-        <span className={`ib-t${count ? '' : ' ib-alone'}`}>{shortTime(row.last_at)}</span>
+        <span className={`ib-t${count ? '' : ' ib-alone'}`}>
+          <TimeWithTick delivery={row.delivery} time={shortTime(rowTimeIso(row))} />
+        </span>
       </div>
       <div className="ib-l2">
         {badge && <span className={badgeClass(row)}>{badge}</span>}
@@ -274,7 +284,9 @@ function PhoneRow({ row, filtered, lit, onOpen }: { row: InboxListRow; filtered:
       <span className="ib-m1">
         <RowMark row={row} />
         <ClipText className="ib-p" text={filtered ? agentName(rowAgent(row)) : row.project.name} />
-        <span className="ib-t">{shortTime(row.last_at)}</span>
+        <span className="ib-t">
+          <TimeWithTick delivery={row.delivery} time={shortTime(rowTimeIso(row))} />
+        </span>
       </span>
       <span className="ib-m2" dir="auto">{subjectOf(row)}</span>
       {(badge || chip || count || guide) && (

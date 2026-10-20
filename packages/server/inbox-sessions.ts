@@ -490,6 +490,35 @@ export function createInboxLiveSessions(options: {
     };
   };
 
+  /** The fields a list row's delivery reads (`InboxStore.setDeliveryPresence`): `connectionOf` without its plugin checks. */
+  const deliveryConnectionOf = (session: string): { busy: boolean | null; send_now: boolean } | null => {
+    const entry = sessions.get(session);
+    if (!entry || !isLive(entry)) return null;
+    return { busy: entry.busy, send_now: entry.sendNow };
+  };
+
+  /**
+   * Everything the rows' delivery reads from the sessions, as one string:
+   * which sessions are live, busy or idle, can take Send now, and are still
+   * there for the asker grace (MCP presence and the Inbox's own start
+   * included). Time alone changes it (a session stops polling, a grace runs
+   * out), so the server compares it on a short timer and tells the windows
+   * when it moved (`event: deliveries`). O(sessions), from memory.
+   */
+  const deliverySignature = (): string => {
+    const t = now();
+    const parts: string[] = [now() - startedAt <= INBOX_ASKER_GRACE_MS ? "g" : ""];
+    for (const [id, entry] of sessions) {
+      const recent = entry.holding > 0 || t - entry.lastSeen <= INBOX_ASKER_GRACE_MS;
+      if (!recent) continue;
+      parts.push(`${id}:${isLive(entry) ? 1 : 0}${entry.busy === null ? "n" : entry.busy ? "b" : "i"}${entry.sendNow ? "s" : ""}`);
+    }
+    for (const [id, entry] of mcpSeen) {
+      if (entry.holding > 0 || t - entry.lastSeen <= INBOX_ASKER_GRACE_MS) parts.push(`m:${id}`);
+    }
+    return parts.join("|");
+  };
+
   /** The folder a restart runs in (shown with ~): where the session started, else where it works now. */
   const folderOf = (entry: SeenSession): string | null => {
     const path = entry.folder ?? entry.cwd;
@@ -669,6 +698,8 @@ export function createInboxLiveSessions(options: {
     isSessionLive,
     composeTarget,
     connectionOf,
+    deliveryConnectionOf,
+    deliverySignature,
     hostSessions,
     restartCount,
     mcpAgents,

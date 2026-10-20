@@ -16,11 +16,13 @@
 
 import type { QuestionAnswer, QuestionKind } from "./question-block";
 import type { InboxAnnotationRecord, InboxAttachment, InboxAttachmentKind, InboxInlineImage } from "./inbox-attachments";
+import type { InboxRowDelivery } from "./inbox-delivery";
 
 // The attachment shapes and file rules (step 2) live in their own module and
 // reach the Inbox through this published entry, so core's export map is unchanged.
 export * from "./inbox-attachments";
 export * from "./inbox-open-in";
+export * from "./inbox-delivery";
 // The surface bridge's messages (the phone, PLAN step S1), the same way.
 export * from "./inbox-surface-bridge";
 
@@ -878,6 +880,16 @@ export interface InboxListRow extends InboxThreadSummary {
    * on its own. Derived. Absent from an older Inbox.
    */
   back_from_archive?: boolean;
+  /**
+   * Where the person's latest sent item in the thread is (approval
+   * "inbox-row-delivery", "Ticks"): their reply or message when it is the
+   * thread's last message (the Inbox's notes read past), else a 👍 Looks good
+   * on the latest agent message once the Inbox sent it through. Computed with
+   * the rule the thread's delivery line uses (`inboxDeliveryState`) from the
+   * live sessions, so a row and its thread agree. Null when there is none (an
+   * agent wrote last, a 👍 not sent). Absent from an older Inbox.
+   */
+  delivery?: InboxRowDelivery | null;
 }
 
 export interface InboxListSection {

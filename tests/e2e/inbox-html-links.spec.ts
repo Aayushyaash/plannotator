@@ -14,7 +14,8 @@
  * Back, Escape and the band's Back step back one page. Beside the thread
  * and on a phone the same. On a phone (WebKit iPhone 15 and Chromium Pixel
  * 7) a tap on a link follows it and a press-and-hold opens a comment on it,
- * whose release follows nothing.
+ * whose release follows nothing. Shift-click joins more elements, a link
+ * among them, to one comment on the page, as in annotate.
  *
  * Screenshots (light and dark, desktop and phone) go to
  * PLANNOTATOR_HTML_LINKS_SHOTS when it is set.
@@ -148,6 +149,58 @@ async function openSheet(page: Page, url: string, thread: string, sheet: string)
   await expect(page.getByRole('button', { name: 'Annotate mode' })).toBeVisible();
   return { pane, frame };
 }
+
+/**
+ * A click with Shift held down first, as a person makes it: the composer over
+ * the page lets the pointer through while Shift is held, once the pointer is
+ * over the page (waited for here, so the press lands on the page, not the composer).
+ */
+async function shiftClick(page: Page, target: Locator) {
+  const box = (await target.boundingBox())!;
+  const x = box.x + Math.min(10, box.width / 2);
+  const y = box.y + box.height / 2;
+  await page.keyboard.down('Shift');
+  await page.mouse.move(x, y);
+  await expect.poll(() => page.evaluate(([px, py]) => document.elementFromPoint(px!, py!)?.tagName, [x, y])).toBe('IFRAME');
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.keyboard.up('Shift');
+}
+
+test('shift-click joins more elements to one comment on an attached page, a link among them', async ({ browser }) => {
+  const { root, url, agent, thread, ids } = await world();
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  try {
+    const page = await context.newPage();
+    const { frame } = await openSheet(page, url, thread, ids['SHEET.html']!);
+    // A plain click pins the heading and opens the composer.
+    await frame.getByRole('heading', { name: 'Guided narrative: contact sheet' }).click();
+    const composer = page.locator('[data-comment-popover]');
+    await expect(composer).toBeVisible();
+    // Shift-click adds the paragraph, and a link (which a plain click would follow), to the same comment.
+    // Held Shift, as a person holds it: the composer then lets the pointer through to the page under it.
+    await shiftClick(page, frame.getByText('Three directions.'));
+    await shiftClick(page, frame.getByRole('link', { name: 'A: Story page' }));
+    await expect(page.locator('[data-target-chip]')).toHaveCount(3);
+    await expect(page.locator('[data-linked-page]')).toHaveCount(0);
+    await composer.locator('textarea').fill('These three read as one block.');
+    await shot(page, 'shift-click-1-three-targets');
+    await composer.locator('textarea').press('ControlOrMeta+Enter');
+    await expect(composer).toHaveCount(0);
+    // The saved annotation covers the heading and both extra elements.
+    const extra = async () => {
+      const res = await context.request.get(new URL(`/api/inbox/threads/${thread}/attachments`, url).href);
+      const body = (await res.json()) as { annotations: { annotation: { htmlAdditionalTargets?: { text: string }[] } }[] };
+      return body.annotations.map((a) => (a.annotation.htmlAdditionalTargets ?? []).length);
+    };
+    await expect.poll(extra).toEqual([2]);
+    await shot(page, 'shift-click-2-saved');
+    await context.close();
+  } finally {
+    await agent.close().catch(() => {});
+    await removeInboxScratch(root);
+  }
+});
 
 for (const scheme of ['light', 'dark'] as const) {
   test(`links in an attached page open: a sibling page, an attached frame, an image beside it, and a refusal (${scheme})`, async ({ browser }) => {
