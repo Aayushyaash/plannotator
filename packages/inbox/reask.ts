@@ -14,8 +14,15 @@
 import type { InboxMessageWire, InboxQuestion } from '@plannotator/core/inbox-types';
 import { agentName, plural } from './format';
 
-/** One session's Re-ask: the message it goes to, and what it carries. */
+/** One session's part of a Re-ask. */
 export interface ReaskTarget {
+  /**
+   * `reask`: a note asking the session for its open questions again (its
+   * unsent picks go with it). `picks`: the session has nothing open, only
+   * picks not sent: a plain reply carries them as answers, so a Re-ask never
+   * strands them.
+   */
+  kind: 'reask' | 'picks';
   /** The session's latest message with a question still open or picked: the note answers it. */
   message: InboxMessageWire;
   session: string | null;
@@ -24,18 +31,23 @@ export interface ReaskTarget {
   name: string;
   /** Open questions with no pick: asked again. */
   open: number;
-  /** Picked and not sent: they go with the note as answers. */
+  /** Picked and not sent: they go with the note (or the plain reply) as answers. */
   picked: number;
+  /** For `picks`: one plain reply per message holding picks, as a Send carries them. */
+  replies: { message: InboxMessageWire; questions: { key: string; revision: number }[] }[];
 }
 
 const isReaskNote = (m: InboxMessageWire): boolean => m.author.kind === 'person' && (m.reask?.length ?? 0) > 0;
 
 /**
- * The sessions a Re-ask would go to now. A session is left out while its
- * note waits (no message of that session after its latest note), right after
- * it answered a note (every question it still has open sits in its one
- * message that answered the note), and when nothing of its is open.
- * `live` says which messages still take answers (not closed by an archive).
+ * The sessions a Re-ask would go to now. A session is left out while a note
+ * of its waits: no message after it from the session the note went to (the
+ * note's `to` when the person sent it to another session because this one
+ * ended, else this session). Once that session wrote, what it neither
+ * replaced nor superseded can be asked again. Also left out right after it
+ * answered a note (every question it still has open sits in its one message
+ * that answered the note), and when nothing of its waits. `live` says which
+ * messages still take answers (not closed by an archive).
  */
 export function reaskTargets(messages: readonly InboxMessageWire[], live: (message: InboxMessageWire) => boolean = () => true): ReaskTarget[] {
   const groups = new Map<string, InboxMessageWire[]>();
@@ -47,20 +59,32 @@ export function reaskTargets(messages: readonly InboxMessageWire[], live: (messa
     list.push(m);
     groups.set(key, list);
   }
-  const index = new Map(messages.map((m, i) => [m.id, i]));
+  const wroteAfter = (note: InboxMessageWire, by: { host: string | null; session: string | null }) => {
+    const at = messages.indexOf(note);
+    return messages.slice(at + 1).some((m) => m.author.kind === 'agent' && m.author.session === by.session && (m.author.host ?? '') === (by.host ?? ''));
+  };
   const targets: ReaskTarget[] = [];
   for (const group of groups.values()) {
     const ids = new Set(group.map((m) => m.id));
     const first = group[0]!;
     const author = first.author.kind === 'agent' ? first.author : null;
-    // The latest note this session was sent (a reply to one of its messages, or addressed to it).
-    const notes = messages.filter((m) => isReaskNote(m) && ((m.reply_to && ids.has(m.reply_to)) || (author?.session && m.to?.session === author.session)));
-    const lastNote = notes.at(-1);
-    const lastOwn = group.at(-1)!;
-    if (lastNote && (index.get(lastNote.id) ?? 0) > (index.get(lastOwn.id) ?? 0)) continue;
+    const own = { host: author?.host ?? null, session: author?.session ?? null };
+    // A note to this session (an answer to one of its messages), or one sent to it from an ended session.
+    const notes = messages.filter((m) => isReaskNote(m) && ((m.reply_to && ids.has(m.reply_to)) || (own.session && m.to?.session === own.session)));
+    if (notes.some((note) => !wroteAfter(note, note.to && note.to.session !== own.session ? { host: note.to.host, session: note.to.session } : own))) continue;
     const waiting = group.flatMap((m) => (m.questions ?? []).filter((q) => q.state === 'open' || q.state === 'picked'));
+    if (waiting.length === 0) continue;
     const open = waiting.filter((q) => q.state === 'open').length;
-    if (open === 0) continue;
+    const target = [...group].reverse().find((m) => (m.questions ?? []).some((q) => q.state === 'open' || q.state === 'picked'))!;
+    const base = { message: target, session: own.session, host: own.host, name: agentName(first.author), open, picked: waiting.length - open };
+    if (open === 0) {
+      // Only picks: a plain reply per message carries them (owner's rule: picks go, never stranded).
+      const replies = group
+        .map((m) => ({ message: m, questions: (m.questions ?? []).filter((q) => q.state === 'picked').map((q) => ({ key: q.key, revision: q.revision })) }))
+        .filter((r) => r.questions.length > 0);
+      targets.push({ ...base, kind: 'picks', replies });
+      continue;
+    }
     // Just answered a note: everything still waiting is in that one message.
     const holders = new Set(waiting.map((q) => q.message_id));
     if (holders.size === 1) {
@@ -68,28 +92,26 @@ export function reaskTargets(messages: readonly InboxMessageWire[], live: (messa
       const answers = holder.reply_to ? messages.find((m) => m.id === holder.reply_to) : undefined;
       if (answers && isReaskNote(answers)) continue;
     }
-    const target = [...group].reverse().find((m) => (m.questions ?? []).some((q) => q.state === 'open' || q.state === 'picked'))!;
-    targets.push({
-      message: target,
-      session: author?.session ?? null,
-      host: author?.host ?? null,
-      name: agentName(first.author),
-      open,
-      picked: waiting.length - open,
-    });
+    targets.push({ ...base, kind: 'reask', replies: [] });
   }
   return targets;
 }
 
-/** Re-ask is offered when two or more questions wait, at least one of them with no pick (approval: "2+ questions are open"). */
-export function reaskOffered(targets: readonly ReaskTarget[]): boolean {
-  const waiting = targets.reduce((n, t) => n + t.open + t.picked, 0);
-  return waiting >= 2 && targets.some((t) => t.open > 0);
+/**
+ * Re-ask is offered when two or more questions wait in the thread (open or
+ * picked, not sent: approval "2+ questions are open") and some session has
+ * an open one it can be asked for again. `messages`: the thread's live ones.
+ */
+export function reaskOffered(targets: readonly ReaskTarget[], messages?: readonly InboxMessageWire[]): boolean {
+  const waiting = messages
+    ? messages.reduce((n, m) => n + (m.author.kind === 'agent' ? (m.questions ?? []).filter((q) => q.state === 'open' || q.state === 'picked').length : 0), 0)
+    : targets.reduce((n, t) => n + t.open + t.picked, 0);
+  return waiting >= 2 && targets.some((t) => t.kind === 'reask' && t.open > 0);
 }
 
 /** "Claude Code", "Claude Code and Pi", or "2 sessions" when two share a name. */
 export function reaskWho(targets: readonly ReaskTarget[]): string {
-  const names = targets.map((t) => t.name);
+  const names = targets.filter((t) => t.kind === 'reask').map((t) => t.name);
   if (names.length === 1) return names[0]!;
   if (new Set(names).size < names.length) return `${names.length} sessions`;
   return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
@@ -99,12 +121,12 @@ export function reaskWho(targets: readonly ReaskTarget[]): string {
 export function reaskTooltip(targets: readonly ReaskTarget[]): string {
   const open = targets.reduce((n, t) => n + t.open, 0);
   const picks = targets.reduce((n, t) => n + t.picked, 0);
-  const several = targets.length > 1;
+  const several = targets.filter((t) => t.kind === 'reask').length > 1;
   const what =
     open === 1
       ? `the open question again${several ? '' : ', with fresh context'}`
       : `${several ? 'their' : 'the'} ${open} open questions again, ${several ? 'each together in one message' : 'together in one message'} with fresh context`;
-  const pickWords = picks > 0 ? ` Your ${plural(picks, 'pick')} ${picks === 1 ? 'goes' : 'go'} with it.` : '';
+  const pickWords = picks > 0 ? ` Your ${plural(picks, 'pick')} ${picks === 1 ? 'is' : 'are'} sent too.` : '';
   return `Ask ${reaskWho(targets)} to ask ${what}. Questions that no longer apply are closed; until then they stay open here.${pickWords}`;
 }
 

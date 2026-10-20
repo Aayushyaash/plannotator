@@ -12,6 +12,7 @@ import { join } from "node:path";
 import type { InboxAuthor, InboxQuestion } from "@plannotator/core/inbox-types";
 import { InboxError } from "./schema";
 import { InboxStore } from "./store";
+import { inboxSearchReplyText } from "./search";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -146,5 +147,41 @@ describe("Re-ask", () => {
     expect(again.message(reply.id)?.reask).toEqual(reply.reask);
     expect(again.questionsOf(first.id).find((q) => q.key === q1.key)?.state).toBe("sent");
     expect(again.listRow(first.id)?.section).toBe("sent");
+  });
+
+  test("several sessions: the row stays in Sent until every session that got a note has written again", () => {
+    const { store, project, first, second } = setup();
+    const pi = store.sendMessage({ project_id: project.id, author: B, reply_to: first.id, body: `${block("Pin the Node version?")}\n\n${block("Drop Node 18?")}` }).message;
+    const forA = store.sendReask(second.id, { idempotency_key: "a" }).reply;
+    store.sendReask(pi.id, { idempotency_key: "b" });
+    expect(sectionOf(store, first.id)).toBe("sent");
+    // A answers; B's note still waits.
+    store.sendMessage({ project_id: project.id, author: A, reply_to: forA.id, body: block("Backfill ledger first?") });
+    expect(store.listRow(first.id)?.reask_pending).toBe(true);
+    expect(sectionOf(store, first.id)).toBe("sent");
+    store.sendMessage({ project_id: project.id, author: B, reply_to: pi.id, body: "Still checking the Node matrix." });
+    expect(store.listRow(first.id)?.reask_pending).toBe(false);
+    expect(sectionOf(store, first.id)).toBe("waiting");
+  });
+
+  test("sent to another session because the asker ended: the note names whose questions they are, and only that session's answer ends Sent", () => {
+    const { store, project, second } = setup();
+    const C: Extract<InboxAuthor, { kind: "agent" }> = { kind: "agent", host: "claude-code", session: "ses_c", name: null };
+    const { reply } = store.sendReask(second.id, { idempotency_key: "k1", to: { host: "claude-code", session: "ses_c" } });
+    expect(reply.to).toEqual({ host: "claude-code", session: "ses_c" });
+    expect(reply.body.startsWith("Please ask the 3 open questions Claude Code asked in this thread again")).toBe(true);
+    expect(reply.body).not.toContain("your 3 open questions");
+    // The ended session writing does not end it; the session it went to does.
+    store.sendMessage({ project_id: project.id, author: A, reply_to: second.id, body: "late" });
+    expect(store.listRow(second.thread_id)?.reask_pending).toBe(true);
+    store.sendMessage({ project_id: project.id, author: C, reply_to: reply.id, body: block("Backfill ledger first?") });
+    expect(store.listRow(second.thread_id)?.reask_pending).toBe(false);
+  });
+
+  test("search indexes the person's own words only: a note's instructions and the prompts it lists are not", () => {
+    const { store, second } = setup();
+    const { reply } = store.sendReask(second.id, { idempotency_key: "k1" });
+    expect(inboxSearchReplyText(reply.body, reply)).toBe("");
+    expect(inboxSearchReplyText("Ship it tomorrow.", { reask: [] })).toContain("Ship it tomorrow");
   });
 });

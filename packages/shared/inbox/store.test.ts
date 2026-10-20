@@ -119,7 +119,9 @@ type Op =
   // The addressed session's connection delivered what the person sent it in the thread (bridge `delivered`).
   | { op: "deliver"; target: number }
   // 👍 Looks good on a message, or its Undo (POST /api/inbox/messages/:id/ack): silent, and a Mark read.
-  | { op: "ack"; target: number; on: boolean };
+  | { op: "ack"; target: number; on: boolean }
+  // Re-ask (POST /api/inbox/messages/:id/reask): a note asking the session that wrote it for its open questions again.
+  | { op: "reask"; target: number; key: string };
 
 /** What the person writes when they start a thread (compose). */
 const PERSON_BODIES = ["Idea: group the list by session.", "Add a retry budget to the relay."] as const;
@@ -287,6 +289,10 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
         if (!target) return "noop";
         store.ackMessage(target, op.on);
         return "ok";
+      case "reask": {
+        if (!target) return "noop";
+        return store.sendReask(target, { idempotency_key: op.key }).replayed ? "replayed" : "ok";
+      }
     }
   } catch (error) {
     if (!(error instanceof InboxError)) throw error;
@@ -820,6 +826,8 @@ function stateOpArbOf(body: fc.Arbitrary<string>, agentKeys: boolean): fc.Arbitr
           { arbitrary: fc.record({ op: fc.constant("deliver" as const), target: fc.nat() }), weight: 1 },
           // 👍 Looks good and its Undo, in the property runs only (the trace fixtures were drawn without it).
           { arbitrary: fc.record({ op: fc.constant("ack" as const), target: fc.nat(), on: fc.boolean() }), weight: 2 },
+          // Re-ask, in the property runs only; "s1" is also a Send's key, so a key used by the other is exercised.
+          { arbitrary: fc.record({ op: fc.constant("reask" as const), target: fc.nat(), key: fc.constantFrom("r1", "r2", "s1") }), weight: 2 },
         ]
       : []),
   );
@@ -857,6 +865,12 @@ interface ModelMessage {
   questions: ModelQuestion[];
   /** The person's Send keys on this message (a replayed key writes nothing). */
   replyKeys: Set<string>;
+  /** The Re-ask keys on this message (also in `replyKeys`: one key space per message). */
+  reaskKeys?: Set<string>;
+  /** An agent message's session (null: it named none); the store's host is always "test". */
+  session?: string | null;
+  /** The person's Re-ask note: the session it went to, which ends its wait by writing again. */
+  reask?: { session: string | null };
   /** A thread the person started: addressed to a session, until that session's connection delivers it. */
   addressed?: { delivered: boolean };
   /** The person's 👍 on this agent message: the step of the Mark read it stands on, and whether the 👍 made it. */
@@ -995,6 +1009,8 @@ class ThreadStateModel {
   section(t: ModelThread): InboxSectionId {
     if (this.archived(t)) return "quiet";
     if (this.readHolds(t)) return "quiet";
+    // A Re-ask note waits until the session it went to writes again: Sent, whatever is open.
+    if (this.reaskPending(t)) return "sent";
     const c = this.counts(t);
     if (c.open > 0) return c.stopped ? "stopped" : c.holds ? "holding" : "waiting";
     if (c.picked > 0) return "new";
@@ -1003,6 +1019,12 @@ class ThreadStateModel {
     if (last.author === "person" && t.checked < last.tick) return "sent";
     if (this.unseen(t) > 0) return "new";
     return "quiet";
+  }
+
+  reaskPending(t: ModelThread): boolean {
+    return t.messages.some(
+      (note, i) => note.reask !== undefined && !t.messages.slice(i + 1).some((m) => m.author === "agent" && m.session === note.reask!.session),
+    );
   }
 
   threadOf(messageId: string): ModelThread | undefined {
@@ -1018,11 +1040,12 @@ class ThreadStateModel {
     return id;
   }
 
-  private addAgent(thread: ModelThread, tick: number, store: InboxStore): void {
+  private addAgent(thread: ModelThread, tick: number, store: InboxStore, session: string | null = "ses_x"): void {
     const id = this.take();
     const message: ModelMessage = {
       id,
       author: "agent",
+      session,
       note: null,
       tick,
       replyKeys: new Set(),
@@ -1105,7 +1128,7 @@ class ThreadStateModel {
         this.threads.set(id, thread);
         if (route) this.sessionRoots.set(route, id);
       }
-      this.addAgent(thread, tick, store);
+      this.addAgent(thread, tick, store, session);
       if (key !== null) this.keyed.set(`${project}\0${key}`, op.body);
       return "ok";
     }
@@ -1291,6 +1314,26 @@ class ThreadStateModel {
         message.ack = { readTick: thread.read, made: thread.read !== before };
         return "ok";
       }
+      case "reask": {
+        // The store's order: a replayed key, the archive, the person's own message, then what is open.
+        if (message.reaskKeys?.has(op.key)) return "replayed";
+        if (message.replyKeys.has(op.key)) return "refused:idempotency_key_reused";
+        if (this.closedByArchive(thread, message)) return "refused:thread_resolved";
+        if (message.author !== "agent") return "refused:validation_error";
+        const session = message.session ?? null;
+        const group = thread.messages.filter(
+          (m) => m.author === "agent" && (session !== null ? m.session === session : m === message) && !this.closedByArchive(thread, m),
+        );
+        const questions = group.flatMap((m) => m.questions);
+        if (!questions.some((q) => this.recordState(q) === "open")) return "refused:nothing_to_reask";
+        // Picks not sent go with the note.
+        for (const q of questions) if (this.recordState(q) === "picked") q.sent = true;
+        message.replyKeys.add(op.key);
+        (message.reaskKeys ??= new Set()).add(op.key);
+        this.addPerson(thread, tick, null);
+        thread.messages[thread.messages.length - 1]!.reask = { session };
+        return "ok";
+      }
       case "personStart":
       case "send":
         return "noop";
@@ -1432,8 +1475,11 @@ function checkThreadState(world: StateWorld): void {
       expect(store.message(m.id)?.thread_id).toBe(t.id);
       expect(store.questionsOf(m.id).map((q) => q.state)).toEqual(m.questions.map((q) => model.state(t, m, q)));
     }
-    // A question still waiting on the person keeps its thread in Stopped, Holding or Waiting.
-    if (t.messages.some((m) => store.questionsOf(m.id).some((q) => q.state === "open"))) expect(SHW).toContain(row.section);
+    // A question still waiting on the person keeps its thread in Stopped, Holding or Waiting, unless a
+    // Re-ask note waits on the agent (approval "inbox-reask"): then the thread is in Sent.
+    if (row.reask_pending === true) expect(row.section).toBe(model.archived(t) || model.readHolds(t) ? "quiet" : "sent");
+    else if (t.messages.some((m) => store.questionsOf(m.id).some((q) => q.state === "open"))) expect(SHW).toContain(row.section);
+    expect(row.reask_pending === true).toBe(!model.archived(t) && model.reaskPending(t));
     // An archived thread never counts.
     if (inboxRowArchived(row)) expect(row.unread).toBe(false);
   }
@@ -1972,6 +2018,9 @@ function traceEventOf(op: Op, world: StateWorld, labels: TraceLabels): TraceEven
       return { type: "set_aside_note", thread };
     case "deliver":
       return { type: "delivered", thread };
+    // Re-ask runs in the property runs only: the trace fixtures were drawn without it.
+    case "reask":
+      return null;
     case "ack":
       return { type: op.on ? "ack" : "unack", message: labels.label(target) };
   }

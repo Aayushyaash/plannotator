@@ -27,6 +27,7 @@ import {
   INBOX_BRIDGE_EVENT_PATH,
   INBOX_BRIDGE_POLL_PATH,
   INBOX_REASK_INSTRUCTION,
+  inboxReaskRedirectedLine,
   inboxWakeText,
   parseInboxBridgeCommands,
   type InboxReplyCommand,
@@ -292,6 +293,7 @@ test('the session that asked ended: Re-ask asks who should ask again, and the pi
   const command = await waitFor('the note handed to the session picked', () => taker.commands.find((c) => c.reask === true));
   expect(command.redirected_from).toBe('Claude Code');
   expect(inboxWakeText(command).split('\n')[1]).toBe(INBOX_REASK_INSTRUCTION);
+  expect(inboxWakeText(command).split('\n')[2]).toBe(inboxReaskRedirectedLine('Claude Code', command.id));
   await expect(pane.locator('[data-reask-note] .ib-reask-l')).toHaveText('You asked Claude Code (another session) to ask the 2 open questions again, together in one message. They stay open here until it does.');
   await shot(page, '4-ended-sent', ['light']);
   expect(world.errors).toEqual([]);

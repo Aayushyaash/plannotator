@@ -401,12 +401,19 @@ export function composeInboxReaskBody(input: {
   reask: readonly Pick<InboxQuestionRecord, "id" | "prompt">[];
   answered: readonly { record: Pick<InboxQuestionRecord, "id" | "prompt" | "parsed">; answer: QuestionAnswer }[];
   noteId: string;
+  /**
+   * The agent that asked, when the note goes to another session because the
+   * asking one ended: named from its host ("Claude Code"), so the note says
+   * whose questions they are instead of "your".
+   */
+  askedBy?: string | null;
 }): string {
   const n = input.reask.length;
+  const whose = input.askedBy ? `the ${n === 1 ? "open question" : `${n} open questions`} ${input.askedBy} asked` : `your ${n === 1 ? "open question" : `${n} open questions`}`;
   const lines = [
     n === 1
-      ? "Please ask your open question in this thread again, in one new message, so the person can answer it in one place."
-      : `Please ask your ${n} open questions in this thread again, together in one new message, so the person can answer them in one place.`,
+      ? `Please ask ${whose} in this thread again, in one new message, so the person can answer it in one place.`
+      : `Please ask ${whose} in this thread again, together in one new message, so the person can answer them in one place.`,
   ];
   if (input.answered.length > 0) {
     const k = input.answered.length;

@@ -123,10 +123,38 @@ describe('the rules (reask.ts)', () => {
     msgs[0]!.questions![0] = { ...q, state: 'picked', answer: { v: 1, key: q.key, kind: q.kind, prompt: q.prompt, selected: ['Yes'] } };
     const [t] = reaskTargets(msgs);
     expect(t).toMatchObject({ open: 2, picked: 1 });
-    expect(reaskTooltip([t!])).toContain('Your 1 pick goes with it.');
-    const allPicked = [agent(M3, block('Pin Node?'), '2026-10-20T10:47:00.000Z', B)];
-    allPicked[0]!.questions![0] = { ...allPicked[0]!.questions![0]!, state: 'picked' };
-    expect(reaskTargets(allPicked)).toEqual([]);
+    expect(reaskTooltip([t!])).toContain('Your 1 pick is sent too.');
+  });
+
+  test('a session with only picks gets a plain reply carrying them, never stranded (A asks 2, B asks 1, B picked)', () => {
+    const msgs = [agent(M1, BODY1, '2026-10-20T10:42:00.000Z'), agent(M3, block('Pin Node?'), '2026-10-20T10:47:00.000Z', B)];
+    const qb = msgs[1]!.questions![0]!;
+    msgs[1]!.questions![0] = { ...qb, state: 'picked', revision: 1, answer: { v: 1, key: qb.key, kind: qb.kind, prompt: qb.prompt, selected: ['Yes'] } };
+    const targets = reaskTargets(msgs);
+    expect(targets.map((t) => [t.kind, t.session, t.open, t.picked])).toEqual([
+      ['reask', 'ses_a', 2, 0],
+      ['picks', 'ses_b', 0, 1],
+    ]);
+    expect(targets[1]!.replies).toEqual([{ message: msgs[1], questions: [{ key: qb.key, revision: 1 }] }]);
+    expect(reaskOffered(targets)).toBe(true);
+    expect(reaskTooltip(targets)).toBe(
+      'Ask Claude Code to ask the 2 open questions again, together in one message with fresh context. Questions that no longer apply are closed; until then they stay open here. Your 1 pick is sent too.',
+    );
+  });
+
+  test('after a note sent to another session (the asker ended): blocked until that session writes, then what it left open can be asked again', () => {
+    const msgs = base();
+    const redirected = note(openIds(msgs), M2, { to: { host: 'claude-code', session: 'ses_c' } });
+    expect(reaskTargets([...msgs, redirected])).toEqual([]);
+    // The new session re-asked two and left the third neither replaced nor superseded.
+    const old = msgs.map((m) => ({ ...m, questions: m.questions!.map((q) => (q.message_id === M2 ? q : { ...q, state: 'superseded' as const })) }));
+    const C: typeof A = { ...A, session: 'ses_c' };
+    const answer = agent(M5, `${block('Backfill ledger first?')}\n\n${block('Keep the old webhook?')}`, '2026-10-20T10:55:00.000Z', C, { reply_to: NOTE });
+    const thread = [...old, redirected, answer];
+    const after = reaskTargets(thread);
+    // ses_c just answered the note (left out); ses_a's question it left open can be asked again: 3 wait in the thread.
+    expect(after.map((t) => [t.kind, t.session, t.open])).toEqual([['reask', 'ses_a', 1]]);
+    expect(reaskOffered(after, thread)).toBe(true);
   });
 
   test('left out while its note waits, and right after the agent answered it in one message', () => {
@@ -237,6 +265,18 @@ test.skipIf(!hasDom)('while the note waits: no Re-ask, the note reads as one lin
   expect(line.textContent).toBe('You asked Claude Code to ask the 3 open questions again, together in one message. They stay open here until it does.');
   expect(el.querySelector('[data-reask-note] summary')?.textContent).toBe('What Claude Code was sent');
   expect(el.textContent).toContain('Asked again');
+});
+
+test.skipIf(!hasDom)('A asks 2, B asks 1 and B is picked: one press sends A its note and B a plain reply with the pick', async () => {
+  const msgs = [agent(M1, BODY1, '2026-10-20T10:42:00.000Z'), agent(M3, block('Pin Node?'), '2026-10-20T10:47:00.000Z', B)];
+  const qb = msgs[1]!.questions![0]!;
+  msgs[1]!.questions![0] = { ...qb, state: 'picked', revision: 1, picked_at: '2026-10-20T10:48:00.000Z', answer: { v: 1, key: qb.key, kind: qb.kind, prompt: qb.prompt, selected: ['Yes'] } };
+  const el = await render(thread(msgs));
+  await act(async () => reaskButton(el)!.click());
+  await settle();
+  expect(posted.map((p) => p.path)).toEqual([`/api/inbox/messages/${M3}/reply`, `/api/inbox/messages/${M1}/reask`]);
+  expect(posted[0]!.body).toMatchObject({ words: '', questions: [{ key: qb.key, revision: 1 }], skip_unanswered: false });
+  expect(typeof posted[0]!.body.idempotency_key).toBe('string');
 });
 
 test.skipIf(!hasDom)('one question waiting: no Re-ask', async () => {

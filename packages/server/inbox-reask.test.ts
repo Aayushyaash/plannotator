@@ -16,6 +16,8 @@ import {
   INBOX_BRIDGE_POLL_PATH,
   INBOX_REASK_INSTRUCTION,
   INBOX_WAKE_INSTRUCTION,
+  inboxReaskRedirectedLine,
+  inboxRedirectedLine,
   inboxWakeText,
   parseInboxBridgeCommands,
 } from "@plannotator/shared/inbox/connection";
@@ -160,6 +162,26 @@ describe("Re-ask reaches the agent", () => {
     const r = await row(server, t.thread);
     expect(r.reask_pending).toBe(false);
     expect(r.section).toBe("waiting");
+  });
+});
+
+describe("Re-ask to another session (the asker ended)", () => {
+  test("the note names whose questions they are, and the wake says the questions are another session's", async () => {
+    const { server, client, project } = await setup();
+    const t = await seed(client, project);
+    // Another session of the project is live (it polled).
+    await bridge(server, INBOX_BRIDGE_POLL_PATH, { session: "ses-c", host: "claude-code", project_path: project, waitMs: 0 });
+    const sent = await reask(server, t.second, { idempotency_key: "k1", to: { host: "claude-code", session: "ses-c" } });
+    expect(sent.status).toBe(200);
+    const note = ((await sent.json()) as { reply: { id: string; body: string } }).reply;
+    expect(note.body.startsWith("Please ask the 3 open questions Claude Code asked in this thread again")).toBe(true);
+    const polled = await bridge(server, INBOX_BRIDGE_POLL_PATH, { session: "ses-c", host: "claude-code", project_path: project, waitMs: 0 });
+    const [command] = parseInboxBridgeCommands(await polled.text());
+    expect(command).toMatchObject({ id: note.id, reask: true, redirected_from: "Claude Code" });
+    const lines = inboxWakeText(command!).split("\n");
+    expect(lines[1]).toBe(INBOX_REASK_INSTRUCTION);
+    expect(lines[2]).toBe(inboxReaskRedirectedLine("Claude Code", note.id));
+    expect(lines[2]).not.toBe(inboxRedirectedLine("Claude Code", note.id));
   });
 });
 

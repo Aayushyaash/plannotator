@@ -1997,15 +1997,16 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
   // Re-ask (approval "inbox-reask"): one note per session that still has an
   // open question here, asking it for them again in one message (reask.ts).
   const reaskList = resolved && !cameBack ? [] : reaskTargets(thread.messages, liveMessage);
-  const reaskShown = reaskOffered(reaskList);
-  const reaskOpen = reaskList.reduce((n, t) => n + t.open, 0);
+  const reaskShown = reaskOffered(reaskList, thread.messages.filter(liveMessage));
+  const reaskOpen = reaskList.reduce((n, t) => n + (t.kind === 'reask' ? t.open : 0), 0);
   const [reasking, setReasking] = useState(false);
   /** One idempotency key per target message, kept for a retry. */
   const reaskKeys = useRef<Map<string, string> | null>(null);
   const sendReask = async (routed = false) => {
     if (reasking || reaskList.length === 0) return;
+    const notes = reaskList.filter((t) => t.kind === 'reask');
     // The one session asked has ended and another is live: who asks again is the person's choice, as for a reply.
-    const single = reaskList.length === 1 ? reaskList[0]! : null;
+    const single = notes.length === 1 ? notes[0]! : null;
     const routable = !!single && !!asking && single.session === asking.session && askerEnded && anyOtherLive;
     if (routable && !routed) {
       setError(null);
@@ -2021,14 +2022,25 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     setReasking(true);
     setError(null);
     let went = 0;
+    const total = reaskList.reduce((n, t) => n + (t.kind === 'picks' ? t.replies.length : 1), 0);
     try {
-      // A pick still being saved goes with the note: wait for it.
+      // A pick still being saved goes too: wait for it.
       await pickChain.current;
       if (!reaskKeys.current) reaskKeys.current = new Map();
-      for (const target of reaskList) {
-        const key = reaskKeys.current.get(target.message.id) ?? crypto.randomUUID();
-        reaskKeys.current.set(target.message.id, key);
-        await inboxApi.reask(target.message.id, { idempotency_key: key, ...(to && target === single ? { to } : {}) });
+      const keyFor = (id: string) => {
+        const key = reaskKeys.current!.get(id) ?? crypto.randomUUID();
+        reaskKeys.current!.set(id, key);
+        return key;
+      };
+      // A session with only picks: a plain reply carries them, so the Re-ask strands none (owner's rule 2).
+      for (const target of reaskList.filter((t) => t.kind === 'picks')) {
+        for (const reply of target.replies) {
+          await inboxApi.reply(reply.message.id, { idempotency_key: keyFor(`picks:${reply.message.id}`), words: '', questions: reply.questions, skip_unanswered: false });
+          went += 1;
+        }
+      }
+      for (const target of notes) {
+        await inboxApi.reask(target.message.id, { idempotency_key: keyFor(target.message.id), ...(to && target === single ? { to } : {}) });
         went += 1;
       }
       reaskKeys.current = null;
@@ -2038,12 +2050,12 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
       requestAnimationFrame(() => bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight }));
     } catch (cause) {
       if (to && cause instanceof InboxApiError && cause.code === 'session_not_live') {
-        setRoute((current) => routeRace(current, to.session, { went, total: reaskList.length }));
+        setRoute((current) => routeRace(current, to.session, { went, total }));
         void loadLive();
         return;
       }
       const why = cause instanceof InboxApiError ? cause.message : 'Try again.';
-      setError(went > 0 ? `${went} of ${reaskList.length} sessions were asked again; the rest were not. ${why}` : `Nothing was asked again. ${why}`);
+      setError(went > 0 ? `${went} of ${total} went; the rest did not. ${why}` : `Nothing was asked again. ${why}`);
       if (went > 0) await onChanged();
     } finally {
       setReasking(false);

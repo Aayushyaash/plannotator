@@ -69,6 +69,7 @@ import {
   inboxThreadNameKey,
   isInboxNote,
   inboxAgentName,
+  INBOX_HOST_NAMES,
   INBOX_TAGS_MAX,
   type InboxParticipant,
   type InboxSentRecipient,
@@ -1052,8 +1053,8 @@ export class InboxStore {
       project: { id: project.id, name: this.labeled(project).name },
       thread_name: root.thread_name ?? null,
       answered_not_sent: (root.resolved_at === null || backFromArchive) && summary.questions.open === 0 && summary.questions.picked > 0,
-      // The person's Re-ask note is the last message: Sent until the agent asks again (approval "inbox-reask").
-      reask_pending: (root.resolved_at === null || backFromArchive) && lastReal.author.kind === "person" && (lastReal.reask?.length ?? 0) > 0,
+      // A Re-ask note waits: Sent until every session that got one has written again (approval "inbox-reask").
+      reask_pending: (root.resolved_at === null || backFromArchive) && this.reaskWaiting(messages),
       waiting_since: waitingSince,
       unseen,
       sent,
@@ -2360,12 +2361,15 @@ export class InboxStore {
     const answered = picked.map(
       (record) => ({ ...record, sent_revision: record.revision, sent_reply_id: replyId }) satisfies InboxQuestionRecord,
     );
+    const to = input.to ?? undefined;
+    // Sent to another session because the one that asked ended: the note says whose questions they are.
+    const redirected = to && asker && to.session !== asker.session;
     const body = composeInboxReaskBody({
       reask: open,
       answered: picked.map((record) => ({ record, answer: record.answer as QuestionAnswer })),
       noteId: replyId,
+      askedBy: redirected ? (INBOX_HOST_NAMES[asker.host ?? ""] ?? "agent") : null,
     });
-    const to = input.to ?? undefined;
     const note: InboxMessage = {
       id: replyId,
       project_id: message.project_id,
@@ -2388,6 +2392,23 @@ export class InboxStore {
       throw error;
     }
     return { reply: note, questions: this.questionsOf(message.id), replayed: false };
+  }
+
+  /**
+   * Whether a Re-ask note in these messages (a thread's, in order) still
+   * waits: no message from the session it went to (its `to`, else the
+   * session of the message it answers) came after it.
+   */
+  private reaskWaiting(messages: readonly InboxMessage[]): boolean {
+    return messages.some((note, index) => {
+      if (note.author.kind !== "person" || (note.reask?.length ?? 0) === 0) return false;
+      const asked = note.reply_to ? this.messages.get(note.reply_to) : undefined;
+      const by = note.to ?? (asked?.author.kind === "agent" ? { host: asked.author.host ?? "", session: asked.author.session } : null);
+      if (!by) return false;
+      return !messages
+        .slice(index + 1)
+        .some((m) => m.author.kind === "agent" && m.author.session === by.session && (m.author.host ?? "") === (by.host ?? ""));
+    });
   }
 
   /**

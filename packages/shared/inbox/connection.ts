@@ -622,7 +622,16 @@ export const INBOX_WAKE_INSTRUCTION =
  * asked for the open questions again, in one message, and how to answer.
  */
 export const INBOX_REASK_INSTRUCTION =
-  "The person asked you, from the Plannotator Inbox, to ask your open questions in this thread again, together in one new message. The questions and what to do with each follow. Answer in the same thread: plannotator_inbox send_message with reply_to set to the id in parentheses on the line above."
+  "The person asked, from the Plannotator Inbox, for the open questions in this thread to be asked again, together in one new message. The questions and what to do with each follow. Answer in the same thread: plannotator_inbox send_message with reply_to set to the id in parentheses on the line above."
+
+/**
+ * The line under INBOX_REASK_INSTRUCTION on a Re-ask the person sent to this
+ * session because the session that asked had ended: the questions are
+ * another session's, and this one takes them over.
+ */
+export function inboxReaskRedirectedLine(asker: string, id: string): string {
+  return `These questions were asked by another ${asker} session, which has ended; the person picked you to take them over. Read the thread first with read_thread (message_id ${id}), then ask the ones still needed again as below.`
+}
 
 /** The fixed second line of a New message wake: the person wrote first, and how to answer. */
 export const INBOX_MESSAGE_INSTRUCTION =
@@ -728,7 +737,7 @@ export function inboxWakeText(
       ? wakeName(command.redirected_from) || 'agent'
       : ''
   const redirected = asker
-    ? `\n${inboxRedirectedLine(asker, command.id)}`
+    ? `\n${command.reask === true ? inboxReaskRedirectedLine(asker, command.id) : inboxRedirectedLine(asker, command.id)}`
     : command.continues_thread === true
       ? `\n${inboxContinuesLine(command.id)}`
       : ''
