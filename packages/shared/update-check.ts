@@ -129,6 +129,12 @@ export interface UpdateState {
    * version: claimed before the request, so concurrent processes ask once.
    */
   notesFetch?: Record<string, { attemptedAt: number; failedAt?: number; error?: string }>;
+  /**
+   * The Inbox's fetch of one release's images (packages/server/inbox-whats-new-images.ts),
+   * per version, with the same claim and back-off as `notesFetch`. Only the
+   * Inbox writes it; nothing here fetches an image.
+   */
+  releaseImagesFetch?: Record<string, { attemptedAt: number; failedAt?: number; error?: string }>;
 }
 
 export function updateCheckPaths(dataDir: string = getPlannotatorDataDir()) {

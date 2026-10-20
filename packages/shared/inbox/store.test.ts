@@ -122,7 +122,9 @@ type Op =
   | { op: "ack"; target: number; on: boolean }
   // The person types in the thread's reply box (a reply draft, saved), or empties it (deleted).
   // Approval "inbox-reply-drafts": a thread holding unsent work never sits in Quiet.
-  | { op: "draft"; target: number; words: boolean };
+  | { op: "draft"; target: number; words: boolean }
+  // Re-ask (POST /api/inbox/messages/:id/reask): a note asking the session that wrote it for its open questions again.
+  | { op: "reask"; target: number; key: string };
 
 /** What the person writes when they start a thread (compose). */
 const PERSON_BODIES = ["Idea: group the list by session.", "Add a retry budget to the relay."] as const;
@@ -295,6 +297,9 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
         const thread = threadOf(target);
         store.saveReplyDraft(thread, { body: op.words ? "Cards, but keep the totals" : "", base: store.replyDraft(thread)?.updated_at ?? null });
         return "ok";
+      case "reask": {
+        if (!target) return "noop";
+        return store.sendReask(target, { idempotency_key: op.key }).replayed ? "replayed" : "ok";
       }
     }
   } catch (error) {
@@ -831,6 +836,8 @@ function stateOpArbOf(body: fc.Arbitrary<string>, agentKeys: boolean): fc.Arbitr
           { arbitrary: fc.record({ op: fc.constant("ack" as const), target: fc.nat(), on: fc.boolean() }), weight: 2 },
           // A reply draft saved or emptied, in the property runs only (outside the event log: traces never see it).
           { arbitrary: fc.record({ op: fc.constant("draft" as const), target: fc.nat(), words: fc.boolean() }), weight: 2 },
+          // Re-ask, in the property runs only; "s1" is also a Send's key, so a key used by the other is exercised.
+          { arbitrary: fc.record({ op: fc.constant("reask" as const), target: fc.nat(), key: fc.constantFrom("r1", "r2", "s1") }), weight: 2 },
         ]
       : []),
   );
@@ -868,6 +875,12 @@ interface ModelMessage {
   questions: ModelQuestion[];
   /** The person's Send keys on this message (a replayed key writes nothing). */
   replyKeys: Set<string>;
+  /** The Re-ask keys on this message (also in `replyKeys`: one key space per message). */
+  reaskKeys?: Set<string>;
+  /** An agent message's session (null: it named none); the store's host is always "test". */
+  session?: string | null;
+  /** The person's Re-ask note: the session it went to (writing again ends its wait) and the questions it lists. */
+  reask?: { session: string | null; ids: string[] };
   /** A thread the person started: addressed to a session, until that session's connection delivers it. */
   addressed?: { delivered: boolean };
   /** The person's 👍 on this agent message: the step of the Mark read it stands on, and whether the 👍 made it. */
@@ -1012,8 +1025,10 @@ class ThreadStateModel {
   /** The section, strongest reason first (the doc's table "Sections"). */
   section(t: ModelThread): InboxSectionId {
     if (this.archived(t)) return "quiet";
-    // A thread holding unsent work never sits in Quiet (unless archived): it is in New.
-    if (this.readHolds(t)) return this.unsent(t) ? "new" : "quiet";
+    // A thread holding unsent work never sits in Quiet (unless archived): it is in New, unless a Re-ask waits.
+    if (this.readHolds(t)) return this.unsent(t) && !this.reaskPending(t) ? "new" : "quiet";
+    // A Re-ask note waits until the session it went to writes again: Sent, whatever is open.
+    if (this.reaskPending(t)) return "sent";
     const c = this.counts(t);
     if (c.open > 0) return c.stopped ? "stopped" : c.holds ? "holding" : "waiting";
     if (c.picked > 0) return "new";
@@ -1031,6 +1046,23 @@ class ThreadStateModel {
     return SHWN.includes(section);
   }
 
+  /**
+   * Rule 2a, in the model's own terms: every open question is listed in a
+   * note that still waits (its session has not written since, and something
+   * it lists is still open).
+   */
+  reaskPending(t: ModelThread): boolean {
+    const open = new Set<string>();
+    for (const m of t.messages) for (const q of m.questions) if (this.state(t, m, q) === "open") open.add(q.id);
+    const covered = new Set<string>();
+    t.messages.forEach((note, i) => {
+      if (!note.reask) return;
+      if (t.messages.slice(i + 1).some((m) => m.author === "agent" && m.session === note.reask!.session)) return;
+      for (const id of note.reask.ids) if (open.has(id)) covered.add(id);
+    });
+    return open.size > 0 && [...open].every((id) => covered.has(id));
+  }
+
   threadOf(messageId: string): ModelThread | undefined {
     return this.byMessage.get(messageId)?.thread;
   }
@@ -1044,11 +1076,12 @@ class ThreadStateModel {
     return id;
   }
 
-  private addAgent(thread: ModelThread, tick: number, store: InboxStore): void {
+  private addAgent(thread: ModelThread, tick: number, store: InboxStore, session: string | null = "ses_x"): void {
     const id = this.take();
     const message: ModelMessage = {
       id,
       author: "agent",
+      session,
       note: null,
       tick,
       replyKeys: new Set(),
@@ -1131,7 +1164,7 @@ class ThreadStateModel {
         this.threads.set(id, thread);
         if (route) this.sessionRoots.set(route, id);
       }
-      this.addAgent(thread, tick, store);
+      this.addAgent(thread, tick, store, session);
       if (key !== null) this.keyed.set(`${project}\0${key}`, op.body);
       return "ok";
     }
@@ -1320,6 +1353,27 @@ class ThreadStateModel {
       case "draft":
         thread.draft = op.words;
         return "ok";
+      case "reask": {
+        // The store's order: a replayed key, the archive, the person's own message, then what is open.
+        if (message.reaskKeys?.has(op.key)) return "replayed";
+        if (message.replyKeys.has(op.key)) return "refused:idempotency_key_reused";
+        if (this.closedByArchive(thread, message)) return "refused:thread_resolved";
+        if (message.author !== "agent") return "refused:validation_error";
+        const session = message.session ?? null;
+        const group = thread.messages.filter(
+          (m) => m.author === "agent" && (session !== null ? m.session === session : m === message) && !this.closedByArchive(thread, m),
+        );
+        const questions = group.flatMap((m) => m.questions);
+        const asked = questions.filter((q) => this.recordState(q) === "open");
+        if (asked.length === 0) return "refused:nothing_to_reask";
+        // Picks not sent go with the note.
+        for (const q of questions) if (this.recordState(q) === "picked") q.sent = true;
+        message.replyKeys.add(op.key);
+        (message.reaskKeys ??= new Set()).add(op.key);
+        this.addPerson(thread, tick, null);
+        thread.messages[thread.messages.length - 1]!.reask = { session, ids: asked.map((q) => q.id) };
+        return "ok";
+      }
       case "personStart":
       case "send":
         return "noop";
@@ -1469,8 +1523,23 @@ function checkThreadState(world: StateWorld): void {
       expect(store.message(m.id)?.thread_id).toBe(t.id);
       expect(store.questionsOf(m.id).map((q) => q.state)).toEqual(m.questions.map((q) => model.state(t, m, q)));
     }
-    // A question still waiting on the person keeps its thread in Stopped, Holding or Waiting.
-    if (t.messages.some((m) => store.questionsOf(m.id).some((q) => q.state === "open"))) expect(SHW).toContain(row.section);
+    // Invariant 3, read from the questions and the notes themselves (never the row's flag): every open
+    // question is either in a Re-ask note that still waits, or keeps the thread in Stopped, Holding or Waiting.
+    const thread = store.thread(row.thread_id)!;
+    const openIds = thread.messages.flatMap((m) => (m.questions ?? []).filter((q) => q.state === "open").map((q) => `${m.id}/${q.key}`));
+    const inWaitingNote = (id: string) =>
+      thread.messages.some((note, i) => {
+        if (!note.reask?.includes(id)) return false;
+        const asked = thread.messages.find((m) => m.id === note.reply_to);
+        const by = note.to ?? (asked?.author.kind === "agent" ? { host: asked.author.host ?? "", session: asked.author.session } : null);
+        if (!by) return false;
+        // Host and session, as the store compares them.
+        return !thread.messages
+          .slice(i + 1)
+          .some((m) => m.author.kind === "agent" && m.author.session === by.session && (m.author.host ?? "") === (by.host ?? ""));
+      });
+    if (openIds.some((id) => !inWaitingNote(id))) expect(SHW).toContain(row.section);
+    expect(row.reask_pending === true).toBe(!model.archived(t) && model.reaskPending(t));
     // An archived thread never counts.
     if (inboxRowArchived(row)) expect(row.unread).toBe(false);
   }
@@ -1668,6 +1737,26 @@ describe("the thread-state model", () => {
       }),
       { numRuns: 100, seed: 20261013 },
     );
+  });
+
+  test("Re-ask (rule 2a): another session's question after a note, the note's questions superseded by someone else, the person's words after it", () => {
+    const sectionAfter = (ops: Op[]) => {
+      const world = stateWorld();
+      for (const op of ops) expect(stateStep(world, op).outcome).toBe("ok");
+      return world.store.listRow(world.ids[0]!)!.section;
+    };
+    const ask: Op = { op: "send", root: 0, body: STATE_BODIES.two, key: null, session: "ses_a" };
+    const reask: Op = { op: "reask", target: 0, key: "r1" };
+    // The note waits on ses_a: Sent.
+    expect(sectionAfter([ask, reask])).toBe("sent");
+    // Another session (the reply op writes as ses_x) asks a Stopped question in the thread: it waits on the person.
+    expect(sectionAfter([ask, reask, { op: "reply", target: 0, body: STATE_BODIES.stop }])).toBe("stopped");
+    // Someone else supersedes every question the note lists: the note stops waiting, though ses_a never wrote.
+    expect(sectionAfter([ask, reask, { op: "supersede", target: 0, whole: true, body: STATE_BODIES.news }])).not.toBe("sent");
+    // The person writes words after the note: still Sent (the note still waits, and their reply waits on the agent).
+    expect(sectionAfter([ask, reask, { op: "personSend", target: 0, key: "s1", words: "ok", skip: false }])).toBe("sent");
+    // ses_a writes again: the note no longer waits, and its open questions ask again.
+    expect(sectionAfter([ask, reask, { op: "send", root: 0, body: STATE_BODIES.news, key: null, session: "ses_a" }])).toBe("stopped");
   });
 
   test("Archive then Unarchive loses no message, question or pick", () => {
@@ -2013,6 +2102,9 @@ function traceEventOf(op: Op, world: StateWorld, labels: TraceLabels): TraceEven
       return { type: "set_aside_note", thread };
     case "deliver":
       return { type: "delivered", thread };
+    // Re-ask runs in the property runs only: the trace fixtures were drawn without it.
+    case "reask":
+      return null;
     case "ack":
       return { type: op.on ? "ack" : "unack", message: labels.label(target) };
   }

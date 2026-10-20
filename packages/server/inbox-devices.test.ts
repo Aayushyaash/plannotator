@@ -308,7 +308,7 @@ describe("the device door, on the binary", () => {
       ["POST", "control/stop"],
       ["GET", "attachments/att_x"],
       ["POST", "projects/prj_x/delete"],
-      // A reply draft is read only on the door (7.61): the phone writes none.
+      // A reply draft is read only on the door (7.62): the phone writes none.
       ["POST", "threads/msg_x/draft"],
       ["POST", "threads/msg_x/draft/delete"],
       // Shared drafts stay the window's (never seen by phones) until that is ruled otherwise.
@@ -1126,7 +1126,7 @@ describe("the door's parity routes, in process (7.39 to 7.49)", () => {
     return { root, ledger, inbox, base, token, door, poll };
   };
 
-  test("7.61: a thread's reply draft, read only; the row's unsent rides the list", async () => {
+  test("7.62: a thread's reply draft, read only; the row's unsent rides the list", async () => {
     const { ledger, inbox, base, door } = await world();
     const project = inbox.store.ensureProject({ name: "ledger", root: ledger });
     const asked = inbox.store.sendMessage({ project_id: project.id, author: { kind: "agent", host: "claude-code", session: "ses-d", name: null }, body: "The build is green." }).message;

@@ -18,7 +18,7 @@
  * event log (shared/inbox/reply-drafts.ts): agents, the MCP and search never
  * see them. A change tells every open window (`event: drafts` on the window's
  * stream), so its list reads the rows' `unsent` again. The phone's door
- * forwards the GET only (read-only, contract 7.61).
+ * forwards the GET only (read-only, contract 7.62).
  */
 
 import { checkServerSession, INBOX_SERVER_SESSION_MISMATCH_ERROR, serverSessionMismatchBody } from "@plannotator/core/server-session";

@@ -19,6 +19,10 @@
  *             set-aside note came after; an agent's next message (or the
  *             person's own reply) brings it back, with no write; but a
  *             thread holding unsent work is placed in new instead (below)
+ *   sent      the person's Re-ask note is the last message (approval
+ *             "inbox-reask"): it waits on the agent to ask again, whatever
+ *             is still open, read by the agent or not; a draft there keeps
+ *             its Draft label but never moves the row out of Sent
  *   stopped   an open question says the agent cannot go on (`Stopped:`)
  *   holding   an open question names work that waits (`Holds up:`)
  *   waiting   any other open question
@@ -73,14 +77,17 @@ import {
 export type InboxSectionFacts = Pick<
   InboxListRow,
   "resolved_at" | "questions" | "answered_not_sent" | "sent" | "unseen"
-> & { read_at?: string | null; back_from_archive?: boolean; unsent?: InboxRowUnsent | null };
+> & { read_at?: string | null; back_from_archive?: boolean; reask_pending?: boolean; unsent?: InboxRowUnsent | null };
 
 export { inboxHasUnsent };
 
 export function inboxSectionOf(row: InboxSectionFacts): InboxSectionId {
   if (row.resolved_at !== null && row.back_from_archive !== true) return "quiet";
   const unsent = inboxHasUnsent(row.unsent);
-  if (row.read_at != null) return unsent ? "new" : "quiet";
+  // Re-ask first: while its note waits on the agent, unsent work never moves the row (approval "inbox-reask").
+  if (row.read_at != null) return unsent && row.reask_pending !== true ? "new" : "quiet";
+  // The person's Re-ask note is the last message: it waits on the agent (approval "inbox-reask").
+  if (row.reask_pending === true) return "sent";
   if (row.questions.open > 0) {
     if (row.questions.stopped) return "stopped";
     if (row.questions.holds_up.length > 0) return "holding";
