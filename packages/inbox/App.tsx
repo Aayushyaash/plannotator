@@ -453,6 +453,9 @@ function Inbox() {
   /** The one toast (Mark read, Archive) with its Undo, and what the live region last said. */
   const [toast, setToast] = useState<InboxToastModel | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** When the toast's timer ends, and what was left of it while a swipe holds it. */
+  const toastDeadline = useRef(0);
+  const toastLeft = useRef<number | null>(null);
   const [said, setSaid] = useState('');
   /** The thread whose reply box opens once it is on screen (the warning toast's Reply). */
   const [replyFor, setReplyFor] = useState<string | null>(null);
@@ -1245,18 +1248,40 @@ function Inbox() {
   const dismissToast = useCallback(() => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = null;
+    toastLeft.current = null;
     setToast(null);
   }, []);
   /** The window's one toast: a new one replaces the last, so two never stack. */
-  const showToast = (next: Omit<InboxToastModel, 'id'>, ms = MARK_READ_UNDO_MS) => {
+  const armToastTimer = (ms: number) => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    setToast({ ...next, id: Date.now() });
-    say(toastSpeech(next, phone));
+    toastDeadline.current = Date.now() + ms;
     toastTimer.current = setTimeout(() => {
       toastTimer.current = null;
       setToast(null);
     }, ms);
   };
+  const showToast = (next: Omit<InboxToastModel, 'id'>, ms = MARK_READ_UNDO_MS) => {
+    toastLeft.current = null;
+    setToast({ ...next, id: Date.now() });
+    say(toastSpeech(next, phone));
+    armToastTimer(ms);
+  };
+  /** A swipe in progress pauses the toast's timer; a spring-back resumes it (at least 1.5 s more, so it never vanishes on release). */
+  const holdToast = useCallback((held: boolean) => {
+    if (held) {
+      if (!toastTimer.current) return;
+      clearTimeout(toastTimer.current);
+      toastTimer.current = null;
+      toastLeft.current = Math.max(0, toastDeadline.current - Date.now());
+      return;
+    }
+    if (toastLeft.current === null) return;
+    const left = toastLeft.current;
+    toastLeft.current = null;
+    armToastTimer(Math.max(left, 1500));
+    // armToastTimer reads only refs and setToast, so the first render's copy serves.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   /** A write that failed: its message, whole (it may wrap). */
   const showError = (cause: unknown) =>
     showToast({ icon: 'warn', lead: cause instanceof Error ? cause.message : 'The thread did not change.', wrap: true });
@@ -2243,7 +2268,7 @@ function Inbox() {
           onClosed={() => setAgentNote('shown')}
         />
       )}
-      {toast && soundDialog !== 'open' && !agentNoteOpen && <InboxToast toast={toast} phone={phone} />}
+      {toast && soundDialog !== 'open' && !agentNoteOpen && <InboxToast toast={toast} phone={phone} onDismiss={dismissToast} onHold={holdToast} />}
       <SearchHost
         mounted={searchMounted}
         open={searchOpen}

@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { MentionSource } from '@plannotator/ui/utils/mentions';
 import {
   formatInboxVideoTime,
@@ -907,13 +907,20 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
   showLinkNoteRef.current = showLinkNote;
   const onLinkedRef = useRef(props.onLinked);
   onLinkedRef.current = props.onLinked;
+  /** A page just opened from a link: its Back takes focus once drawn. */
+  const focusLinkedBack = useRef(false);
+  const linkedBackRef = useRef<HTMLButtonElement>(null);
   // Another file or version: its own page, no stack.
-  useEffect(() => setLinkedStack([]), [attachment.id, effectiveVersion]);
+  useEffect(() => {
+    setLinkedStack([]);
+    focusLinkedBack.current = false;
+  }, [attachment.id, effectiveVersion]);
   // The page the route names: back to one already in the stack, or read and pushed.
   const linkedRequest = isHtml ? (props.linked ?? null) : null;
   useEffect(() => {
     if (!linkedRequest) {
       setLinkedStack([]);
+      focusLinkedBack.current = false;
       return;
     }
     const { relative, hash } = splitLinked(linkedRequest);
@@ -930,7 +937,8 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
         if (cancelled) return;
         setLinkedStack((stack) => [...stack.filter((p) => p.attachmentId === attachment.id), { ...page, relative, hash, attachmentId: attachment.id }]);
         announce(`${page.name}. It is not attached, so comments are off.`);
-        requestAnimationFrame(() => sectionRef.current?.querySelector<HTMLElement>('[data-linked-back]')?.focus({ preventScroll: true }));
+        // Back takes focus once React has drawn it (the layout effect below), never on a guessed frame.
+        focusLinkedBack.current = true;
       })
       .catch((cause) => {
         if (cancelled) return;
@@ -943,6 +951,18 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
       cancelled = true;
     };
   }, [linkedRequest, attachment.id, announce]);
+  // A page just opened from a link: focus goes to its Back, after the commit that draws it (a frame
+  // callback could run first, find no button, and leave focus behind). The page can be drawn well after
+  // it was read (a deep link or reload names it before the file's view is read), so focus the person
+  // moved into a field meanwhile (the reply box) stays there.
+  useLayoutEffect(() => {
+    if (!focusLinkedBack.current || !linkedTop || !view) return;
+    const back = linkedBackRef.current;
+    if (!back) return;
+    focusLinkedBack.current = false;
+    if (isEditableTarget(document.activeElement)) return;
+    back.focus({ preventScroll: true });
+  }, [linkedTop, view]);
   // A fragment is replayed once: cleared after the page had time to take it, so a remount does not scroll again and the same #hash works twice.
   useEffect(() => {
     if (!linkFragment || linkFragment.id !== attachment.id || !view) return;
@@ -1449,7 +1469,7 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
             // A page the attached page links to, not attached: read-only (comments belong to attachments).
             <div className="ib-linked" data-linked-page={linkedTop.name}>
               <div className="ib-linkband" ref={linkBandRef} role="group" aria-label={`${linkedTop.name}, linked from ${attachment.name}`}>
-                <button type="button" className="ib-btn ib-sm" onClick={linkedBack} data-linked-back="">
+                <button ref={linkedBackRef} type="button" className="ib-btn ib-sm" onClick={linkedBack} data-linked-back="">
                   <Icon name="chevL" size={13} />
                   <span className="ib-linkband-back">Back to {linkedStack.length > 1 ? linkedStack[linkedStack.length - 2]!.name : attachment.name}</span>
                 </button>
