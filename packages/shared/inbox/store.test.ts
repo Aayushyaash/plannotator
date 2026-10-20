@@ -51,6 +51,7 @@ function view(store: InboxStore) {
       sections: store.listSections(project.id),
     })),
     sections: store.listSections(),
+    cards: store.listCards().map((card) => store.cardWire(card)),
   };
 }
 
@@ -119,7 +120,48 @@ type Op =
   // The addressed session's connection delivered what the person sent it in the thread (bridge `delivered`).
   | { op: "deliver"; target: number }
   // 👍 Looks good on a message, or its Undo (POST /api/inbox/messages/:id/ack): silent, and a Mark read.
-  | { op: "ack"; target: number; on: boolean };
+  | { op: "ack"; target: number; on: boolean }
+  // The Board (approval "inbox-board"): an agent's card call, or the person's move, on a card linked to a thread.
+  | { op: "card"; target: number; card: CardOp };
+
+/** One card call: made from the target's thread, or a write to the n-th card (wrapping). */
+type CardOp = { kind: "create" } | { kind: "move"; n: number; column: string; person: boolean; you: boolean; reason: boolean } | { kind: "say"; n: number } | { kind: "restore"; n: number };
+
+const cardOpArb: fc.Arbitrary<CardOp> = fc.oneof(
+  fc.record({ kind: fc.constant("create" as const) }),
+  fc.record({
+    kind: fc.constant("move" as const),
+    n: fc.nat(),
+    column: fc.constantFrom("asked", "designing", "your_look", "building", "your_review", "shipped", "icebox", "dropped"),
+    person: fc.boolean(),
+    you: fc.boolean(),
+    reason: fc.boolean(),
+  }),
+  fc.record({ kind: fc.constant("say" as const), n: fc.nat() }),
+  fc.record({ kind: fc.constant("restore" as const), n: fc.nat() }),
+);
+
+/** Run one card op; card ids are kept apart from message ids. Refusals (InboxError) are part of the space. */
+function runCard(store: InboxStore, op: CardOp, target: string | undefined, cardIds: string[]): void {
+  const agent = { kind: "agent" as const, host: "test", session: "ses_x", name: null };
+  if (op.kind === "create") {
+    if (!target) return;
+    const message = store.message(target)!;
+    cardIds.push(store.createCard({ project_id: message.project_id, by: agent, threads: [target] }).card.id);
+    return;
+  }
+  const id = cardIds[op.n % Math.max(1, cardIds.length)];
+  if (!id) return;
+  if (op.kind === "say") store.updateCard(id, { by: agent, say: "still on it" });
+  else if (op.kind === "restore") store.updateCard(id, { by: { kind: "person" }, restore: true });
+  else
+    store.updateCard(id, {
+      by: op.person ? { kind: "person" } : agent,
+      column: op.column,
+      ...(op.you ? { you: "look at it" } : {}),
+      ...(op.reason ? { reason: "moot" } : {}),
+    });
+}
 
 /** What the person writes when they start a thread (compose). */
 const PERSON_BODIES = ["Idea: group the list by session.", "Add a retry budget to the relay."] as const;
@@ -154,7 +196,11 @@ const opArb: fc.Arbitrary<Op> = fc.oneof(
   }),
   fc.record({ op: fc.constant("deliver" as const), target: fc.nat() }),
   fc.record({ op: fc.constant("ack" as const), target: fc.nat(), on: fc.boolean() }),
+  fc.record({ op: fc.constant("card" as const), target: fc.nat(), card: cardOpArb }),
 );
+
+/** The card ids the generic ops made, per store (a card op aims at them, not at messages). */
+const cardIdsOf = new WeakMap<InboxStore, string[]>();
 
 /** What one op did: wrote, wrote nothing (no target, or no question to pick), replayed a key, or was refused with a code. */
 type Outcome = "ok" | "noop" | "replayed" | `refused:${string}`;
@@ -287,6 +333,12 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
         if (!target) return "noop";
         store.ackMessage(target, op.on);
         return "ok";
+      case "card": {
+        const cardIds = cardIdsOf.get(store) ?? [];
+        cardIdsOf.set(store, cardIds);
+        runCard(store, op.card, target, cardIds);
+        return "ok";
+      }
     }
   } catch (error) {
     if (!(error instanceof InboxError)) throw error;
@@ -504,7 +556,8 @@ describe("InboxStore invariants", () => {
       | { op: "seen"; target: number }
       | { op: "personReply"; target: number; key: string }
       | { op: "personStart"; project: number; key: string; session: string; name: string | null; auto: boolean }
-      | { op: "name"; target: number; session: string; thread: string };
+      | { op: "name"; target: number; session: string; thread: string }
+      | { op: "card"; target: number; card: CardOp };
     const routeOpArb: fc.Arbitrary<RouteOp> = fc.oneof(
       {
         arbitrary: fc.record({
@@ -534,6 +587,8 @@ describe("InboxStore invariants", () => {
       }),
       // An agent's reply that names a thread the person started (approval "inbox-agent-names-own-thread").
       fc.record({ op: fc.constant("name" as const), target: fc.nat(), session: fc.constantFrom("ses_a", "ses_b"), thread: fc.constantFrom("alpha", "Beta", "gamma") }),
+      // The Board's cards (approval "inbox-board"), mixed in: they must route nothing and move no row.
+      { arbitrary: fc.record({ op: fc.constant("card" as const), target: fc.nat(), card: cardOpArb }), weight: 3 },
     );
 
     fc.assert(
@@ -541,10 +596,19 @@ describe("InboxStore invariants", () => {
         const dir = dataDir();
         const store = InboxStore.open(dir);
         const ids: string[] = [];
+        const cardIds: string[] = [];
         const pick = (n: number) => ids[n % Math.max(1, ids.length)];
         for (const op of ops) {
           try {
-            if (op.op === "send") {
+            if (op.op === "card") {
+              // A card line changes no thread, no section and no list row: the person's list reads the same.
+              const before = JSON.stringify({ sections: store.listSections(), threads: store.threadIds().map((id) => store.threadSummary(id)) });
+              try {
+                runCard(store, op.card, pick(op.target), cardIds);
+              } finally {
+                expect(JSON.stringify({ sections: store.listSections(), threads: store.threadIds().map((id) => store.threadSummary(id)) })).toBe(before);
+              }
+            } else if (op.op === "send") {
               const project = store.ensureProject({ name: `repo${op.project}`, root: `/work/repo${op.project}` });
               const r = store.sendMessage({
                 project_id: project.id,

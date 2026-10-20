@@ -103,8 +103,27 @@ import { inboxBlobPath, inboxBlobSizes, removeUnusedInboxBlobs } from "./attachm
 import { inboxMarkupNamesOf, removeInboxMarkups } from "./markups";
 import { pendingInboxUploadBlobs, removeUnusedInboxUploadFiles } from "./uploads";
 import { inboxDraftsBytes } from "./drafts";
+import { INBOX_CARD_PR_HINT, parseInboxCardPr } from "./cards";
+import {
+  INBOX_CARD_COLUMN_LABELS,
+  INBOX_CARD_LINE_MAX,
+  INBOX_CARD_LINKS_MAX,
+  INBOX_CARD_REASON_MAX,
+  INBOX_CARD_TITLE_MAX,
+  inboxCardColumnIndex,
+  inboxCardWire,
+  isInboxCardColumn,
+  isInboxCardLiveColumn,
+  isInboxCardPersonColumn,
+  normalizeInboxCardText,
+  type InboxCard,
+  type InboxCardColumn,
+  type InboxCardPr,
+  type InboxCardWire,
+} from "@plannotator/core/inbox-types";
 import {
   ANNOTATIONS_FILE,
+  CARDS_FILE,
   LEGACY_DECISIONS_FILE,
   INBOX_PROJECTS_DIR,
   SEQ_FLOOR_FILE,
@@ -436,6 +455,8 @@ export class InboxStore {
   private readonly personNamed = new Map<string, string[]>();
   /** The person's annotations on attachments, by id. */
   private readonly annotations = new Map<string, InboxAnnotationRecord>();
+  /** The Board's cards, by id (approval "inbox-board"). Read by nothing that routes or lists threads. */
+  private readonly cards = new Map<string, InboxCard>();
   /** A guided review's files by its snapshot's sha256 (a blob never changes). */
   private readonly guideFileSets = new Map<string, ReadonlyMap<string, DiffFile>>();
   private readonly tornFiles = new Set<string>();
@@ -475,7 +496,7 @@ export class InboxStore {
       // left on disk and never applied, but its seqs still count, so a seq is
       // never handed out twice.
       this.seq = Math.max(this.seq, legacySeqFloor(join(folder, LEGACY_DECISIONS_FILE)));
-      for (const name of [PROJECT_FILE, MESSAGES_FILE, QUESTIONS_FILE, ANNOTATIONS_FILE]) {
+      for (const name of [PROJECT_FILE, MESSAGES_FILE, QUESTIONS_FILE, ANNOTATIONS_FILE, CARDS_FILE]) {
         const path = join(folder, name);
         let text: string;
         try {
@@ -574,6 +595,10 @@ export class InboxStore {
       }
       case "annotation":
         this.annotations.set(line.record.id, line.record);
+        break;
+      case "card":
+        // Cards are their own records: nothing here touches routing or the list.
+        this.cards.set(line.record.id, line.record);
         break;
     }
   }
@@ -1795,7 +1820,7 @@ export class InboxStore {
         perThread.set(threadId, threadBytes);
       }
       for (const sha256 of projectBlobs) bytes += blobSizes.get(sha256) ?? 0;
-      for (const name of [PROJECT_FILE, MESSAGES_FILE, QUESTIONS_FILE, LEGACY_DECISIONS_FILE, ANNOTATIONS_FILE]) {
+      for (const name of [PROJECT_FILE, MESSAGES_FILE, QUESTIONS_FILE, LEGACY_DECISIONS_FILE, ANNOTATIONS_FILE, CARDS_FILE]) {
         let text: string;
         try {
           text = readFileSync(join(folder, name), "utf8");
@@ -1804,8 +1829,8 @@ export class InboxStore {
         }
         bytes += Buffer.byteLength(text);
         total += Buffer.byteLength(text);
-        // The project line, and an older store's decisions file, count for the project, not a thread.
-        if (name === PROJECT_FILE || name === LEGACY_DECISIONS_FILE) continue;
+        // The project line, an older store's decisions file and the cards count for the project, not a thread.
+        if (name === PROJECT_FILE || name === LEGACY_DECISIONS_FILE || name === CARDS_FILE) continue;
         for (const raw of text.split("\n")) {
           const line = parseInboxLine(raw);
           if (!line) continue;
@@ -2964,6 +2989,7 @@ export class InboxStore {
     this.namedThreads.clear();
     this.personNamed.clear();
     this.annotations.clear();
+    this.cards.clear();
     this.tornFiles.clear();
     this.load();
     const used = pendingInboxUploadBlobs(this.dir);
@@ -3469,5 +3495,328 @@ export class InboxStore {
       out.set(session, { id: message.thread_id, subject: this.threadSubject(message.thread_id), at: message.created_at, project_id: message.project_id });
     }
     return out;
+  }
+
+  // ─────────────────────────── the Board's cards ───────────────────────────
+  //
+  // Approval "inbox-board" (2026-10-20). A card is its own record in its
+  // project's cards.jsonl: append-only snapshots on the store's one seq
+  // counter, so the event stream carries them, and read by nothing that
+  // routes or lists threads. Who may move a card (COLUMNS.md, set d): an agent
+  // moves its work through the live columns, ships it and may drop it with a
+  // reason; only the person puts a card in the Icebox or brings one back from
+  // it, and only the person restores a card they dropped. Nothing moves a card
+  // by guessing: a linked PR that merges is shown, never acted on.
+
+  card(id: string): InboxCard | null {
+    return this.cards.get(id) ?? null;
+  }
+
+  /** A card as readers get it: amber derived now, and only the linked threads that still exist. */
+  cardWire(card: InboxCard): InboxCardWire {
+    const wire = inboxCardWire(card, this.now().getTime());
+    const threads = card.threads.filter((id) => this.messages.get(id)?.thread_id === id);
+    return threads.length === card.threads.length ? wire : { ...wire, threads };
+  }
+
+  /**
+   * Cards in the Board's column order, then the latest move first. Filters:
+   * the projects; the columns; the agent session a card belongs to.
+   */
+  listCards(filter: { projectIds?: ReadonlySet<string> | null; columns?: ReadonlySet<InboxCardColumn> | null; agentSession?: string | null } = {}): InboxCard[] {
+    const out: InboxCard[] = [];
+    for (const card of this.cards.values()) {
+      if (filter.projectIds && !filter.projectIds.has(card.project_id)) continue;
+      if (filter.columns && !filter.columns.has(card.column)) continue;
+      if (filter.agentSession && !(card.agent?.kind === "agent" && card.agent.session === filter.agentSession)) continue;
+      out.push(card);
+    }
+    return out.sort(
+      (a, b) => inboxCardColumnIndex(a.column) - inboxCardColumnIndex(b.column) || b.moved_at.localeCompare(a.moved_at) || a.id.localeCompare(b.id),
+    );
+  }
+
+  /** An agent's create is idempotent on its key, per project. */
+  private cardByKey(projectId: string, key: string): InboxCard | null {
+    for (const card of this.cards.values()) if (card.project_id === projectId && card.idempotency_key === key) return card;
+    return null;
+  }
+
+  private appendCard(card: InboxCard, at: string): void {
+    const project = this.projectsById.get(card.project_id);
+    if (!project) throw new InboxError("project_not_found", `No project ${card.project_id}.`);
+    this.write(join(this.projectFolder(project), CARDS_FILE), {
+      v: INBOX_RECORD_VERSION,
+      seq: this.seq + 1,
+      at,
+      kind: "card",
+      id: card.id,
+      record: card,
+    });
+    // An older Inbox never reads cards.jsonl: the floor keeps it from handing out a card's seq again.
+    try {
+      this.keepSeqFloor();
+    } catch {
+      // Best effort: the line is written; only a downgrade would read the floor.
+    }
+  }
+
+  /** The thread roots `ids` (thread or message ids) name, each in `projectId`. */
+  private cardThreads(ids: readonly unknown[], projectId: string): string[] {
+    const out: string[] = [];
+    for (const id of ids) {
+      if (typeof id !== "string" || !id.trim()) throw new InboxError("validation_error", "thread_id: a thread or message id.", { field: "thread_id" });
+      const message = this.messages.get(id.trim());
+      if (!message) throw new InboxError("thread_not_found", `No thread or message ${id.trim()}.`);
+      if (message.project_id !== projectId) {
+        const project = this.project(message.project_id);
+        throw new InboxError(
+          "card_other_project",
+          `Thread ${message.thread_id} is in project ${project?.name ?? message.project_id} (${project?.root ?? "?"}), not this card's: a card links threads of its own project only.`,
+        );
+      }
+      if (!out.includes(message.thread_id)) out.push(message.thread_id);
+    }
+    return out;
+  }
+
+  private cardPrs(values: readonly unknown[]): InboxCardPr[] {
+    const out: InboxCardPr[] = [];
+    for (const value of values) {
+      const pr = parseInboxCardPr(value);
+      if (!pr) throw new InboxError("validation_error", `${INBOX_CARD_PR_HINT} Not a PR: ${JSON.stringify(String(value).slice(0, 200))}.`, { field: "pr" });
+      if (!out.some((known) => known.ref === pr.ref)) out.push(pr);
+    }
+    return out;
+  }
+
+  private cardText(value: unknown, field: string, max: number): string {
+    const result = normalizeInboxCardText(value, field, max);
+    if ("error" in result) throw new InboxError("validation_error", result.error, { field });
+    return result.text;
+  }
+
+  private cardColumn(value: unknown): InboxCardColumn {
+    if (!isInboxCardColumn(value)) {
+      throw new InboxError("validation_error", `column: one of ${Object.keys(INBOX_CARD_COLUMN_LABELS).join(", ")}.`, { field: "column" });
+    }
+    return value;
+  }
+
+  /**
+   * A new card in `project_id`. From a thread (`threads`), the title defaults
+   * to the thread's subject. It starts in Asked unless a column is given: a
+   * live column, or Shipped for work already done; the Icebox only by the
+   * person, Dropped never. An agent that puts it in Your look or Your review
+   * says what the person owes (`you`). The agent that makes a card is the
+   * session it belongs to. Idempotent on `idempotency_key` per project.
+   */
+  createCard(input: {
+    project_id: string;
+    by: InboxAuthor;
+    title?: unknown;
+    column?: unknown;
+    say?: unknown;
+    you?: unknown;
+    threads?: readonly unknown[];
+    prs?: readonly unknown[];
+    idempotency_key?: unknown;
+  }): { card: InboxCard; replayed: boolean } {
+    const project = this.projectsById.get(input.project_id);
+    if (!project) throw new InboxError("project_not_found", `No project ${input.project_id}.`);
+    const byAgent = input.by.kind === "agent";
+    const threads = this.cardThreads(input.threads ?? [], project.id);
+    let titleValue = input.title;
+    if ((titleValue === undefined || titleValue === null || titleValue === "") && threads.length > 0) {
+      const subject = this.threadSubject(threads[0]!) ?? "";
+      titleValue = [...subject.replace(/\s+/g, " ").trim()].slice(0, INBOX_CARD_TITLE_MAX).join("");
+    }
+    if (titleValue === undefined || titleValue === null || titleValue === "") {
+      throw new InboxError("validation_error", "title: a short title (or thread_id, whose subject it takes).", { field: "title" });
+    }
+    const title = this.cardText(titleValue, "title", INBOX_CARD_TITLE_MAX);
+    const key = input.idempotency_key === undefined || input.idempotency_key === null || input.idempotency_key === "" ? null : input.idempotency_key;
+    if (key !== null && typeof key !== "string") throw new InboxError("validation_error", "idempotency_key: a string.", { field: "idempotency_key" });
+    if (key !== null) {
+      const known = this.cardByKey(project.id, key);
+      if (known) {
+        if (known.title !== title) throw new InboxError("idempotency_key_reused", "This idempotency_key made another card.", { card_id: known.id });
+        return { card: known, replayed: true };
+      }
+    }
+    const column = input.column === undefined || input.column === null ? "asked" : this.cardColumn(input.column);
+    if (column === "dropped") throw new InboxError("validation_error", "column: a new card starts in a live column (or shipped), never dropped.", { field: "column" });
+    if (column === "icebox" && byAgent) throw this.iceboxRefusal();
+    const said = input.say === undefined || input.say === null ? null : this.cardText(input.say, "say", INBOX_CARD_LINE_MAX);
+    const you: string | null = input.you === undefined || input.you === null ? null : this.cardText(input.you, "you", INBOX_CARD_LINE_MAX);
+    if (you !== null && !isInboxCardPersonColumn(column)) throw this.youRefusal();
+    if (byAgent && isInboxCardPersonColumn(column) && you === null) throw this.youRequired(column);
+    const prs = this.cardPrs(input.prs ?? []);
+    this.checkLinkCounts(threads.length, prs.length);
+    const at = this.stamp();
+    const card: InboxCard = {
+      id: inboxId("crd"),
+      project_id: project.id,
+      title,
+      column,
+      you,
+      said,
+      threads,
+      prs,
+      agent: byAgent ? input.by : null,
+      created_at: at,
+      created_by: input.by,
+      moved_at: at,
+      heard_at: at,
+      heard_by: input.by,
+      dropped: null,
+      aside_from: null,
+      idempotency_key: key,
+    };
+    this.appendCard(card, at);
+    return { card, replayed: false };
+  }
+
+  /**
+   * One write to a card: any of a move (`column`), the agent's last word
+   * (`say`), the person's line (`you`), a rename, more threads or PRs, and a
+   * drop's `reason`. Every write counts as hearing from the card (amber).
+   * `restore` (the person) puts a card in the Icebox or Dropped back where it
+   * was. The rules are the column rules (COLUMNS.md, set d):
+   *  - only the person puts a card in the Icebox, or moves one out of it;
+   *  - an agent drops with a reason; only the person restores what they dropped;
+   *  - an agent that moves a card into Your look or Your review says what the
+   *    person owes (`you`), and `you` is kept only in those columns.
+   */
+  updateCard(
+    id: string,
+    input: {
+      by: InboxAuthor;
+      column?: unknown;
+      say?: unknown;
+      you?: unknown;
+      title?: unknown;
+      threads?: readonly unknown[];
+      prs?: readonly unknown[];
+      reason?: unknown;
+      restore?: boolean;
+    },
+  ): InboxCard {
+    const card = this.cards.get(id);
+    if (!card) throw new InboxError("card_not_found", `No card ${id}.`);
+    const byAgent = input.by.kind === "agent";
+    const given = (value: unknown) => value !== undefined && value !== null;
+    if (
+      !given(input.column) &&
+      !given(input.say) &&
+      !given(input.you) &&
+      !given(input.title) &&
+      !(input.threads && input.threads.length > 0) &&
+      !(input.prs && input.prs.length > 0) &&
+      !input.restore
+    ) {
+      throw new InboxError("validation_error", "Nothing to change: pass column, say, you, title, thread_id or pr.");
+    }
+    let column = card.column;
+    if (input.restore) {
+      if (byAgent) throw new InboxError("card_person_only", "Only the person restores a card from the Icebox or Dropped.");
+      if (card.column !== "icebox" && card.column !== "dropped") {
+        throw new InboxError("validation_error", `Card ${id} is in ${INBOX_CARD_COLUMN_LABELS[card.column]}, not the Icebox or Dropped: nothing to restore.`);
+      }
+      column = card.aside_from ?? "asked";
+    } else if (given(input.column)) {
+      column = this.cardColumn(input.column);
+    }
+    const moves = column !== card.column;
+    if (moves && byAgent) {
+      if (column === "icebox") throw this.iceboxRefusal();
+      if (card.column === "icebox") {
+        throw new InboxError("card_iceboxed", "The person put this card in the Icebox (paused); only they bring it back. You can still say or link.");
+      }
+      if (card.column === "dropped" && card.dropped?.by.kind === "person") {
+        throw new InboxError("card_dropped_by_person", "The person dropped this card; only they restore it. You can still say or link.");
+      }
+    }
+    let dropped = card.dropped;
+    if (moves && column === "dropped") {
+      const reason = given(input.reason) ? this.cardText(input.reason, "reason", INBOX_CARD_REASON_MAX) : null;
+      if (byAgent && reason === null) throw new InboxError("validation_error", "reason: an agent drops a card with a reason (one line the person reads).", { field: "reason" });
+      dropped = { at: this.stamp(), by: input.by, reason };
+    } else if (given(input.reason)) {
+      throw new InboxError("validation_error", "reason: only with a drop (column dropped).", { field: "reason" });
+    } else if (moves) {
+      dropped = null;
+    }
+    let you = card.you;
+    if (moves && !isInboxCardPersonColumn(column)) you = null;
+    if (given(input.you)) {
+      if (!isInboxCardPersonColumn(column)) throw this.youRefusal();
+      you = this.cardText(input.you, "you", INBOX_CARD_LINE_MAX);
+    } else if (moves && byAgent && isInboxCardPersonColumn(column)) {
+      throw this.youRequired(column);
+    }
+    const said = given(input.say) ? this.cardText(input.say, "say", INBOX_CARD_LINE_MAX) : card.said;
+    const title = given(input.title) ? this.cardText(input.title, "title", INBOX_CARD_TITLE_MAX) : card.title;
+    const threads = [...card.threads];
+    for (const thread of this.cardThreads(input.threads ?? [], card.project_id)) if (!threads.includes(thread)) threads.push(thread);
+    const prs = [...card.prs];
+    for (const pr of this.cardPrs(input.prs ?? [])) if (!prs.some((known) => known.ref === pr.ref)) prs.push(pr);
+    this.checkLinkCounts(threads.length, prs.length);
+    const at = this.stamp();
+    // Leaving a live column (or Shipped) for the Icebox or Dropped remembers it, so restoring goes back there.
+    const asideFrom =
+      moves && (column === "icebox" || column === "dropped")
+        ? isInboxCardLiveColumn(card.column) || card.column === "shipped"
+          ? card.column
+          : card.aside_from
+        : moves
+          ? null
+          : card.aside_from;
+    const next: InboxCard = {
+      ...card,
+      title,
+      column,
+      you,
+      said,
+      threads,
+      prs,
+      moved_at: moves ? at : card.moved_at,
+      heard_at: at,
+      heard_by: input.by,
+      dropped,
+      aside_from: asideFrom,
+    };
+    this.appendCard(next, at);
+    return next;
+  }
+
+  private checkLinkCounts(threads: number, prs: number): void {
+    if (threads > INBOX_CARD_LINKS_MAX || prs > INBOX_CARD_LINKS_MAX) {
+      throw new InboxError("validation_error", `A card links at most ${INBOX_CARD_LINKS_MAX} threads and ${INBOX_CARD_LINKS_MAX} PRs.`);
+    }
+  }
+
+  private iceboxRefusal(): InboxError {
+    return new InboxError(
+      "card_icebox_person_only",
+      "Only the person puts a card in the Icebox (a pause is their call). Keep it in its column and say where it stands, or drop it with a reason.",
+      { field: "column" },
+    );
+  }
+
+  private youRefusal(): InboxError {
+    return new InboxError(
+      "validation_error",
+      "you: what the person owes shows only in Your look and Your review. Move the card there with it, or use say for your own last word.",
+      { field: "you" },
+    );
+  }
+
+  private youRequired(column: InboxCardColumn): InboxError {
+    return new InboxError(
+      "validation_error",
+      `you: a card moved into ${INBOX_CARD_COLUMN_LABELS[column]} says what the person owes, one line (e.g. "pick one of the five hero options").`,
+      { field: "you" },
+    );
   }
 }

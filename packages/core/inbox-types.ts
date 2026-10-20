@@ -17,12 +17,15 @@
 import type { QuestionAnswer, QuestionKind } from "./question-block";
 import type { InboxAnnotationRecord, InboxAttachment, InboxAttachmentKind, InboxInlineImage } from "./inbox-attachments";
 import type { InboxRowDelivery } from "./inbox-delivery";
+import type { InboxCard } from "./inbox-cards";
 
 // The attachment shapes and file rules (step 2) live in their own module and
 // reach the Inbox through this published entry, so core's export map is unchanged.
 export * from "./inbox-attachments";
 export * from "./inbox-open-in";
 export * from "./inbox-delivery";
+// The Board's cards (approval "inbox-board"), the same way.
+export * from "./inbox-cards";
 // The surface bridge's messages (the phone, PLAN step S1), the same way.
 export * from "./inbox-surface-bridge";
 
@@ -51,8 +54,8 @@ export function ulid(now: number = Date.now()): string {
   return timePart + randomPart;
 }
 
-/** `upl`: a file the person uploaded for a message; `drf`: a draft of one (compose). */
-export type InboxIdPrefix = "msg" | "prj" | "ses" | "dec" | "dev" | "upl" | "drf";
+/** `upl`: a file the person uploaded for a message; `drf`: a draft of one (compose); `crd`: a Board card. */
+export type InboxIdPrefix = "msg" | "prj" | "ses" | "dec" | "dev" | "upl" | "drf" | "crd";
 
 export function inboxId(prefix: InboxIdPrefix, now?: number): string {
   return `${prefix}_${ulid(now)}`;
@@ -67,6 +70,8 @@ const ID_RE: Record<InboxIdPrefix, RegExp> = {
   dev: /^dev_[0-9A-HJKMNP-TV-Z]{26}$/,
   upl: /^upl_[0-9A-HJKMNP-TV-Z]{26}$/,
   drf: /^drf_[0-9A-HJKMNP-TV-Z]{26}$/,
+  /** A Board card (approval "inbox-board"). */
+  crd: /^crd_[0-9A-HJKMNP-TV-Z]{26}$/,
 };
 
 export function isInboxId(prefix: InboxIdPrefix, value: unknown): value is string {
@@ -944,14 +949,16 @@ export interface InboxThread {
 
 // ─────────────────────────────── Lines ───────────────────────────────
 
-export type InboxRecordKind = "project" | "message" | "question" | "annotation";
+/** `card`: a Board card (approval "inbox-board"); a reader that does not know a kind skips its lines. */
+export type InboxRecordKind = "project" | "message" | "question" | "annotation" | "card";
 
 /** One line of the store: a full snapshot of one record. */
 export type InboxLine =
   | { v: 1; seq: number; at: string; kind: "project"; id: string; record: InboxProject }
   | { v: 1; seq: number; at: string; kind: "message"; id: string; record: InboxMessage }
   | { v: 1; seq: number; at: string; kind: "question"; id: string; record: InboxQuestionRecord }
-  | { v: 1; seq: number; at: string; kind: "annotation"; id: string; record: InboxAnnotationRecord };
+  | { v: 1; seq: number; at: string; kind: "annotation"; id: string; record: InboxAnnotationRecord }
+  | { v: 1; seq: number; at: string; kind: "card"; id: string; record: InboxCard };
 
 // ─────────────────────────────── Health ───────────────────────────────
 
