@@ -749,6 +749,12 @@ export function subscribeInboxEvents(
     /** Whether a notification can reach the person now (inbox-windows.ts); never called by an older Inbox. */
     onReach?: (reach: InboxNotifyReach) => void;
     /**
+     * A row's delivery may have moved with the live sessions (a turn started or
+     * ended, a session went away): no store line, so the list is read again.
+     * Never called by an older Inbox.
+     */
+    onDeliveries?: () => void;
+    /**
      * The stream (re)connected: the server's `hello`. A reconnect carries the
      * URL it was first opened with, so its `permission=` may be stale (a grant
      * since, a restarted Inbox that forgot the window): report again here.
@@ -773,6 +779,7 @@ export function subscribeInboxEvents(
       // A malformed frame changes nothing.
     }
   });
+  source.addEventListener('deliveries', () => handlers.onDeliveries?.());
   source.addEventListener('record', (event) => {
     let parsed: InboxEvent | null = null;
     try {

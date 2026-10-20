@@ -512,13 +512,15 @@ test("a Sent row follows the agent's read in place, without an action: its state
   await page.locator('.ib-pfoot').getByRole('button', { name: 'Send' }).click();
   const row = page.locator(`.ib-lbody [data-thread-id="${world.threads.named}"]`);
   await expect(row).toHaveAttribute('data-section', 'sent');
-  await expect(row).toContainText('Saved for Claude Code');
+  // The delivery glyph (approval "inbox-row-delivery"): saved, an agent reads it later.
+  const tick = row.locator('.ib-tick');
+  await expect(tick).toHaveAttribute('data-tick', 'saved');
   const before = await rowOrder(page);
 
   // The agent reads the reply (as a wake's delivery or wait_for_reply would): the server lists the thread as Quiet.
   await claude2.readThread(world.threads.named!);
   await expect(row).toHaveAttribute('data-section', 'quiet');
-  await expect(row).not.toContainText('Saved for');
+  await expect(tick).toHaveAttribute('data-tick', 'delivered');
   expect(await rowOrder(page)).toEqual(before);
   await page.keyboard.press('Escape');
   await expect(pane).toHaveCount(0);

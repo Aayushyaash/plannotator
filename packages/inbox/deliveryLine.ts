@@ -13,7 +13,14 @@
  * it when it next reads this thread". Pure: Thread.tsx draws it.
  */
 
-import { inboxEngineTooOldForSendNow, inboxLoadedPredatesSendNow, type InboxSessionOutdated } from '@plannotator/core/inbox-types';
+import {
+  inboxDeliveryState,
+  inboxEngineTooOldForSendNow,
+  inboxLoadedPredatesSendNow,
+  type InboxDeliveryReason,
+  type InboxDeliveryState,
+  type InboxSessionOutdated,
+} from '@plannotator/core/inbox-types';
 
 /** How the session the message goes to is connected now (the sessions route's `asker.connection`). */
 export interface RecipientConnection {
@@ -83,7 +90,7 @@ export function restartNote(name: string, connection: RecipientConnection | null
   };
 }
 
-export type DeliveryLineState = 'delivered' | 'undelivered' | 'saved' | 'queued' | 'sending';
+export type DeliveryLineState = InboxDeliveryState;
 
 export interface DeliveryLine {
   state: DeliveryLineState;
@@ -119,28 +126,58 @@ export interface DeliveryLineInput {
 
 export function deliveryLine(input: DeliveryLineInput): DeliveryLine {
   const { name } = input;
-  if (input.deliveredAt) return { state: 'delivered', text: `Delivered to ${name}, ${input.time(input.deliveredAt)}` };
-  if (input.undelivered) {
-    return { state: 'undelivered', text: `Not delivered. That ${input.undelivered.host} session stopped before it took this. If it is resumed, it still gets it.` };
+  // The state is the shared rule's (packages/core/inbox-delivery.ts, through @plannotator/core/inbox-types), which also decides the list row's glyph.
+  const decision = inboxDeliveryState({
+    delivered: !!input.deliveredAt,
+    undelivered: !!input.undelivered,
+    askerEnded: !!input.askerEnded,
+    wakes: input.wakes,
+    sendingNow: input.sendingNow,
+    connection: input.connection,
+  });
+  const text = deliveryText(decision.reason, {
+    name,
+    at: input.deliveredAt,
+    time: input.time,
+    undeliveredHost: input.undelivered?.host ?? name,
+    endedName: input.askerEnded?.name ?? name,
+  });
+  return {
+    state: decision.state,
+    text,
+    ...(decision.reason === 'ended' ? { ended: true } : {}),
+    ...(decision.reason === 'working' ? { sendNow: decision.sendNow } : {}),
+  };
+}
+
+/** The words for each case of the rule: the thread's line, and the list row's tooltip. */
+export function deliveryText(
+  reason: InboxDeliveryReason,
+  words: { name: string; at: string | null; time: (iso: string) => string; undeliveredHost: string; endedName: string },
+): string {
+  const { name } = words;
+  switch (reason) {
+    case 'delivered':
+      return words.at ? `Delivered to ${name}, ${words.time(words.at)}` : `Delivered to ${name}`;
+    case 'undelivered':
+      return `Not delivered. That ${words.undeliveredHost} session stopped before it took this. If it is resumed, it still gets it.`;
+    case 'ended':
+      return `Saved for ${words.endedName}. The session that asked has ended, so it waits here until an agent reads this thread.`;
+    case 'reads':
+      return `Saved for ${name}. It sees it when it next reads this thread.`;
+    case 'sending_now':
+      return `Sending to ${name} now…`;
+    case 'working':
+      return `Queued · ${name} is working; it gets this when its turn ends.`;
+    case 'idle':
+      return `Sending to ${name}…`;
+    case 'away':
+      return `Queued for ${name}; it gets this when its session is back.`;
+    case 'next_turn':
+      return `Queued for ${name}; it gets this as its next turn.`;
+    case 'ack_pending':
+      return `Goes to ${name} in a few seconds`;
   }
-  if (input.askerEnded) {
-    return {
-      state: 'saved',
-      ended: true,
-      text: `Saved for ${input.askerEnded.name}. The session that asked has ended, so it waits here until an agent reads this thread.`,
-    };
-  }
-  if (!input.wakes) return { state: 'saved', text: `Saved for ${name}. It sees it when it next reads this thread.` };
-  const connection = input.connection;
-  // Pressed, and the session can take it now. While it cannot (its own Ask this session question holds
-  // it), the reply waits for the turn to end: it reads as queued.
-  if (input.sendingNow && !(connection?.busy === true && !connection.send_now)) return { state: 'sending', text: `Sending to ${name} now…` };
-  if (connection?.busy === true) {
-    return { state: 'queued', text: `Queued · ${name} is working; it gets this when its turn ends.`, sendNow: connection.send_now && !input.sendingNow };
-  }
-  if (connection?.busy === false) return { state: 'sending', text: `Sending to ${name}…` };
-  if (connection === null) return { state: 'queued', text: `Queued for ${name}; it gets this when its session is back.` };
-  return { state: 'queued', text: `Queued for ${name}; it gets this as its next turn.` };
 }
 
 /** The Sent row's line in the list, which knows no connection: queued for a waking agent, saved otherwise. */

@@ -653,6 +653,34 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-row .ib-c { color: var(--muted-foreground); font-size: var(--ib-fs-13, 13px); text-align: right; white-space: nowrap; }
 .ib-row .ib-t { color: var(--muted-foreground); font-size: var(--ib-fs-13, 13px); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ib-row.ib-sent .ib-p, .ib-row.ib-sent .ib-s { color: var(--muted-foreground); font-weight: 400; }
+/*
+ * The delivery glyph before a row's time (DeliveryTick.tsx, approval "inbox-row-delivery", "Ticks"):
+ * clock queued, dots sending, ✓ saved, ✓✓ delivered, a triangle not delivered. The shape tells the
+ * state; the tone only helps. Tones step toward the text colour, as the Soft badges' words do, so a
+ * palette's amber or red reads on the card in light and dark. The time column keeps its width: the
+ * glyph sits in the gap to its left.
+ */
+.pn-inbox {
+  --ib-tick-queued: var(--ib-badge-hold-fg-soft);
+  --ib-tick-undelivered: var(--ib-badge-stop-fg-soft);
+  --ib-tick-delivered: color-mix(in oklab, var(--success) 70%, var(--foreground));
+  --ib-tick-sending: color-mix(in oklab, var(--primary) 80%, var(--foreground));
+}
+.ib-tickt { display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; vertical-align: middle; }
+.ib-row .ib-t:has(.ib-tickt) { overflow: visible; }
+.ib-tick { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; flex: none; color: var(--muted-foreground); }
+.pn-inbox .ib-tick svg.ib-ic { width: 15px; height: 15px; }
+.ib-tick[data-tick="queued"] { color: var(--ib-tick-queued); }
+.ib-tick[data-tick="sending"] { color: var(--ib-tick-sending); }
+.ib-tick[data-tick="delivered"] { color: var(--ib-tick-delivered); }
+.ib-tick[data-tick="undelivered"] { color: var(--ib-tick-undelivered); }
+.pn-inbox .ib-dcheck { stroke-width: 1.7; }
+.ib-dots { display: inline-flex; align-items: center; gap: 2px; }
+.ib-dots i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.3; animation: ib-dots 1.2s ease-in-out infinite; }
+.ib-dots i:nth-child(2) { animation-delay: 0.2s; }
+.ib-dots i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes ib-dots { 0%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .ib-dots i { animation: none; opacity: 0.85; } }
 .ib-badge { display: inline-flex; align-items: center; height: 22px; padding: 0 7px; border-radius: 6px; border: 1px solid color-mix(in oklch, var(--foreground) 35%, transparent); font-size: var(--ib-fs-12-5, 12.5px); font-weight: 550; white-space: nowrap; justify-self: start; flex: none; }
 .ib-nrow { padding: 10px 12px; border-bottom: 1px solid var(--ib-hair); display: flex; flex-direction: column; gap: 4px; width: 100%; text-align: left; }
 .ib-nrow .ib-l1 { display: flex; align-items: center; gap: 8px; font-size: var(--ib-fs-14, 14px); }
