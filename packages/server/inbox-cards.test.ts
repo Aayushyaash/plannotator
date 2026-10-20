@@ -15,7 +15,7 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { INBOX_TEXT_COMPLETE_META_KEY, inboxAgentTool, inboxToolCall, inboxToolResultText, parseInboxToolList } from "@plannotator/shared/inbox/connection";
 import { INBOX_CARD_ACTION_ON } from "@plannotator/core/inbox-types";
 import { startInboxServer, type InboxServer } from "./inbox";
-import { INBOX_MCP_TOOLS } from "./inbox-mcp";
+import { INBOX_MCP_TOOLS, INBOX_SERVED_TOOLS } from "./inbox-mcp";
 
 const roots: string[] = [];
 const servers: InboxServer[] = [];
@@ -85,7 +85,7 @@ describe.if(INBOX_CARD_ACTION_ON)("the card tool", () => {
     expect(made.isError).toBeUndefined();
     expect(made._meta?.[INBOX_TEXT_COMPLETE_META_KEY]).toBe(true);
     const id = made.structuredContent.card.id as string;
-    expect(made.structuredContent.card).toMatchObject({ title: "Hero scene timers", column: "asked", said: "lane started", threads: [threadId], amber: false });
+    expect(made.structuredContent.card).toMatchObject({ title: "Hero scene timers", column: "asked", said: "lane started", threads: [threadId] });
     expect(made.structuredContent.card.agent).toEqual({ kind: "agent", host: "claude-code", session: "ses_a", name: "Claude Code" });
     // The connection hands the model the text alone, and it names the card.
     expect(inboxToolResultText(made).text).toContain(id);
@@ -176,62 +176,96 @@ describe.if(INBOX_CARD_ACTION_ON)("a card call writes no project, and tolerates 
   });
 });
 
-// Held back with INBOX_CARD_ACTION_ON: skipped while the Inbox does not serve the card tool.
-describe.if(INBOX_CARD_ACTION_ON)("the window's card routes and the event stream", () => {
-  test("GET filters by project and column; POST is the person's move, icebox, drop and restore; card lines reach the stream", async () => {
-    const { base, card, other, call } = await world();
-    const a = (await card({ op: "create", title: "Pricing page", column: "building" })).structuredContent.card;
-    const b = (await card({ op: "create", title: "Solutions page" })).structuredContent.card;
-    await call("card", { op: "create", title: "Web thing", project_path: other, agent_session: "ses_a" });
+// Served whether or not the agents' card action is on: the person's routes and the stream.
+describe("the window's card routes and the event stream", () => {
+  test("GET filters by project and column; POST is the person's move, icebox, drop and restore; an agent's drop waits until the person sees Dropped; card lines reach the stream", async () => {
+    const { base, server, project, other } = await world();
+    const { store } = server;
+    const here = store.projectByRoot(project)!;
+    const there = store.projectByRoot(other)!;
+    const agent = { kind: "agent" as const, host: "claude-code", session: "ses_a", name: "Claude Code" };
+    const a = store.createCard({ project_id: here.id, by: agent, title: "Pricing page", column: "building" }).card;
+    const b = store.createCard({ project_id: here.id, by: agent, title: "Solutions page" }).card;
+    const c = store.createCard({ project_id: there.id, by: agent, title: "Web thing" }).card;
 
     const cursor = ((await (await fetch(`${base}/api/inbox/threads`)).json()) as { cursor: number }).cursor;
-    const all = (await (await fetch(`${base}/api/inbox/cards`)).json()) as { cards: { id: string }[] };
-    // (The seed messages made the two projects; the cards made none.)
+    const all = (await (await fetch(`${base}/api/inbox/cards`)).json()) as { cards: Record<string, unknown>[]; dropped_unseen: number };
     expect(all.cards).toHaveLength(3);
-    const building = (await (await fetch(`${base}/api/inbox/cards?project=${a.project_id}&column=building,your_review`)).json()) as { cards: { id: string }[] };
-    expect(building.cards.map((c) => c.id)).toEqual([a.id]);
+    expect(all.dropped_unseen).toBe(0);
+    // No derived stall flag on the wire: the card's age is its heard_at.
+    for (const card of all.cards) expect(Object.keys(card)).not.toContain("amber");
+    const building = (await (await fetch(`${base}/api/inbox/cards?project=${here.id}&column=building,your_review`)).json()) as { cards: { id: string }[] };
+    expect(building.cards.map((card) => card.id)).toEqual([a.id]);
     expect((await fetch(`${base}/api/inbox/cards?column=later`)).status).toBe(422);
     expect((await fetch(`${base}/api/inbox/cards?project=prj_00000000000000000000000000`)).status).toBe(404);
 
-    const post = (id: string, body: Record<string, unknown>, headers: Record<string, string> = {}) =>
-      fetch(`${base}/api/inbox/cards/${id}`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
-    const iced = await post(b.id, { op: "icebox" });
+    const post = (path: string, body: Record<string, unknown>, headers: Record<string, string> = {}) =>
+      fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+    const iced = await post(`/api/inbox/cards/${b.id}`, { op: "icebox" });
     expect(iced.status).toBe(200);
     expect(((await iced.json()) as { card: object }).card).toMatchObject({ column: "icebox", aside_from: "asked" });
     // The agent cannot bring it back; the person can.
-    expect((await card({ op: "move", card_id: b.id, column: "designing" })).content[0]!.text).toStartWith("card_iceboxed:");
-    expect(((await (await post(b.id, { op: "restore" })).json()) as { card: { column: string } }).card.column).toBe("asked");
-    expect(((await (await post(a.id, { op: "drop", reason: "not now" })).json()) as { card: { dropped: { reason: string } } }).card.dropped.reason).toBe("not now");
-    expect((await card({ op: "move", card_id: a.id, column: "building" })).content[0]!.text).toStartWith("card_dropped_by_person:");
-    expect(((await (await post(a.id, { op: "move", column: "your_review" })).json()) as { card: { column: string } }).card.column).toBe("your_review");
+    expect(() => store.updateCard(b.id, { by: agent, column: "designing" })).toThrow();
+    expect(((await (await post(`/api/inbox/cards/${b.id}`, { op: "restore" })).json()) as { card: { column: string } }).card.column).toBe("asked");
+    expect(((await (await post(`/api/inbox/cards/${a.id}`, { op: "drop", reason: "not now" })).json()) as { card: { dropped: object } }).card.dropped).toMatchObject({ reason: "not now" });
+    expect(((await (await post(`/api/inbox/cards/${a.id}`, { op: "move", column: "your_review" })).json()) as { card: { column: string } }).card.column).toBe("your_review");
+
+    // An agent's drop waits for the person: counted, by project, until they look at Dropped.
+    store.updateCard(b.id, { by: agent, column: "dropped", reason: "folded into the pricing work" });
+    store.updateCard(c.id, { by: agent, column: "dropped", reason: "moot" });
+    const unseen = (await (await fetch(`${base}/api/inbox/cards`)).json()) as { dropped_unseen: number };
+    expect(unseen.dropped_unseen).toBe(2);
+    expect(((await (await fetch(`${base}/api/inbox/cards?project=${here.id}`)).json()) as { dropped_unseen: number }).dropped_unseen).toBe(1);
+    const looked = (await (await post("/api/inbox/cards/dropped/seen", { project: here.id })).json()) as { cards: { id: string; dropped: { seen_at: string | null } }[] };
+    expect(looked.cards.map((card) => card.id)).toEqual([b.id]);
+    expect(looked.cards[0]!.dropped.seen_at).not.toBeNull();
+    expect(((await (await fetch(`${base}/api/inbox/cards`)).json()) as { dropped_unseen: number }).dropped_unseen).toBe(1);
+    expect(((await (await post("/api/inbox/cards/dropped/seen", {})).json()) as { cards: { id: string }[] }).cards.map((card) => card.id)).toEqual([c.id]);
+    expect((await post("/api/inbox/cards/dropped/seen", { project: "nope" })).status).toBe(422);
+    expect((await fetch(`${base}/api/inbox/cards/dropped/seen`)).status).toBe(405);
 
     // Guards: a bad op, an unknown card, another site, a stale tab.
-    expect((await post(a.id, { op: "fly" })).status).toBe(422);
-    expect((await post("crd_00000000000000000000000000", { op: "icebox" })).status).toBe(404);
-    expect((await post("nope", { op: "icebox" })).status).toBe(422);
-    expect((await post(a.id, { op: "icebox" }, { Origin: "https://evil.example", "Sec-Fetch-Site": "cross-site" })).status).toBe(403);
-    expect((await post(a.id, { op: "icebox", serverSession: "another-session" })).status).toBe(409);
+    expect((await post(`/api/inbox/cards/${a.id}`, { op: "fly" })).status).toBe(422);
+    expect((await post("/api/inbox/cards/crd_00000000000000000000000000", { op: "icebox" })).status).toBe(404);
+    expect((await post("/api/inbox/cards/nope", { op: "icebox" })).status).toBe(422);
+    expect((await post(`/api/inbox/cards/${a.id}`, { op: "icebox" }, { Origin: "https://evil.example", "Sec-Fetch-Site": "cross-site" })).status).toBe(403);
+    expect((await post(`/api/inbox/cards/${a.id}`, { op: "icebox", serverSession: "another-session" })).status).toBe(409);
+    expect((await post("/api/inbox/cards/dropped/seen", { serverSession: "another-session" })).status).toBe(409);
     expect((await fetch(`${base}/api/inbox/cards`, { method: "POST" })).status).toBe(405);
 
     // The event stream carries the card lines after the cursor, on the one counter.
-    // A replay gives each record's current line once: cards a and b, both changed after the cursor.
+    // A replay gives each record's current line once: a, b and c all changed after the cursor.
     const controller = new AbortController();
     const response = await fetch(`${base}/api/inbox/events?cursor=${cursor}`, { signal: controller.signal });
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
     let text = "";
-    while ((text.match(/"kind":"card"/g) ?? []).length < 2) {
+    while ((text.match(/"kind":"card"/g) ?? []).length < 3) {
       const { value, done } = await reader.read();
       if (done) break;
       text += decoder.decode(value);
     }
     controller.abort();
     const events = [...text.matchAll(/^data: (.+)$/gm)].map((m) => JSON.parse(m[1]!)).filter((event) => event.kind === "card");
-    expect(events.map((event) => event.id).sort()).toEqual([a.id, b.id].sort());
+    expect(events.map((event) => event.id).sort()).toEqual([a.id, b.id, c.id].sort());
     for (const event of events) {
       expect(event.seq).toBeGreaterThan(cursor);
       expect(event.card.id).toBe(event.id);
-      expect(typeof event.card.amber).toBe("boolean");
     }
+  });
+});
+
+// The action held back: the Inbox does not serve the card tool, and a card call says so.
+describe.if(!INBOX_CARD_ACTION_ON)("the card action held back", () => {
+  test("the tool is not served, so a call is refused as an unknown tool", async () => {
+    const { server, card } = await world();
+    const response = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    expect(await response.text()).not.toContain('"name":"card"');
+    expect(INBOX_SERVED_TOOLS).not.toContain("card");
+    expect((await card({ op: "list" }).catch((error: Error) => ({ isError: true, content: [{ text: error.message }] }))).isError).toBe(true);
   });
 });

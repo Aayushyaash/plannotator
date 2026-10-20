@@ -12,9 +12,11 @@
  * person's columns (Your look, Your review) shows "You: …", what the person
  * owes; in the agents' columns it shows the agent's last word.
  *
- * Amber is derived, never stored: a card in a live column that has not been
- * heard from for two days. Nothing moves a card by guessing: a merged PR is
- * shown, never acted on.
+ * A card shows how long ago anyone last wrote to it (`heard_at`, "2d ago");
+ * no rule decides that a card is stalled (the owner dropped amber,
+ * 2026-10-20). An agent's drop reaches the person: it stays unseen
+ * (`dropped.seen_at` null) until they look at Dropped. Nothing moves a card
+ * by guessing: a merged PR is shown, never acted on.
  *
  * Browser-safe and dependency-free; re-exported by `inbox-types`.
  */
@@ -29,9 +31,10 @@ import type { InboxAuthor } from "./inbox-types";
  * tool cost (INBOX_TOOL_COST) goes back to the size without it. After
  * flipping it, run `bun run scripts/sync-mod-inbox-tools.ts` (the Claude Code
  * mod's bundled tool list is generated from a real Inbox). The store, the
- * window's card routes and the event stream are unaffected.
+ * window's card routes and the event stream are unaffected. Off since the
+ * owner's answer (2026-10-20): it is switched on with the Board page (step 2).
  */
-export const INBOX_CARD_ACTION_ON: boolean = true;
+export const INBOX_CARD_ACTION_ON: boolean = false;
 
 /** Every column a card can be in, in the Board's order. */
 export const INBOX_CARD_COLUMNS = ["asked", "designing", "your_look", "building", "your_review", "shipped", "icebox", "dropped"] as const;
@@ -55,9 +58,6 @@ export const INBOX_CARD_COLUMN_LABELS: Readonly<Record<InboxCardColumn, string>>
   icebox: "Icebox",
   dropped: "Dropped",
 };
-
-/** A card in a live column turns amber when nobody has been heard from for this long. */
-export const INBOX_CARD_AMBER_MS = 2 * 24 * 60 * 60 * 1000;
 
 /** The longest title, in characters. */
 export const INBOX_CARD_TITLE_MAX = 120;
@@ -95,6 +95,13 @@ export interface InboxCardDrop {
   by: InboxAuthor;
   /** Required from an agent, optional from the person. */
   reason: string | null;
+  /**
+   * When the person saw this drop: null while an agent's drop waits for them
+   * (the Board says "N dropped by an agent", with the reasons, until they
+   * look at Dropped: `POST /api/inbox/cards/dropped/seen`). A drop the person
+   * made is seen when made.
+   */
+  seen_at: string | null;
 }
 
 /**
@@ -128,7 +135,7 @@ export interface InboxCard {
   created_by: InboxAuthor;
   /** When the card last changed column. */
   moved_at: string;
-  /** The last write by anyone (create, move, say, link, ship, drop): amber reads it. */
+  /** The last write by anyone (create, move, say, link, ship, drop): the card shows its age ("2d ago"). */
   heard_at: string;
   heard_by: InboxAuthor;
   /** Set while the card is in Dropped. */
@@ -139,21 +146,12 @@ export interface InboxCard {
   idempotency_key: string | null;
 }
 
-/** A card as every reader gets it: the record plus what is derived now. */
-export interface InboxCardWire extends InboxCard {
-  /** Not heard from for two days, in a live column (never in Shipped, Icebox or Dropped). */
-  amber: boolean;
-}
+/** A card as every reader gets it: the record, its `threads` only those that still exist. */
+export type InboxCardWire = InboxCard;
 
-/** Whether a card shows amber at `nowMs`. */
-export function inboxCardAmber(card: Pick<InboxCard, "column" | "heard_at">, nowMs: number): boolean {
-  if (!isInboxCardLiveColumn(card.column)) return false;
-  const heard = Date.parse(card.heard_at);
-  return Number.isFinite(heard) && nowMs - heard >= INBOX_CARD_AMBER_MS;
-}
-
-export function inboxCardWire(card: InboxCard, nowMs: number): InboxCardWire {
-  return { ...card, amber: inboxCardAmber(card, nowMs) };
+/** An agent's drop the person has not seen yet. */
+export function isInboxCardDropUnseen(card: Pick<InboxCard, "column" | "dropped">): boolean {
+  return card.column === "dropped" && card.dropped !== null && card.dropped.by.kind === "agent" && card.dropped.seen_at === null;
 }
 
 /** The line a card shows under its title: "You: …" in the person's columns, the agent's last word otherwise. */

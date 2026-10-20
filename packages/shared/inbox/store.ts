@@ -112,8 +112,8 @@ import {
   INBOX_CARD_REASON_MAX,
   INBOX_CARD_TITLE_MAX,
   inboxCardColumnIndex,
-  inboxCardWire,
   isInboxCardColumn,
+  isInboxCardDropUnseen,
   isInboxCardLiveColumn,
   isInboxCardPersonColumn,
   normalizeInboxCardText,
@@ -3514,11 +3514,27 @@ export class InboxStore {
     return this.cards.get(id) ?? null;
   }
 
-  /** A card as readers get it: amber derived now, and only the linked threads that still exist. */
+  /** A card as readers get it: only the linked threads that still exist. */
   cardWire(card: InboxCard): InboxCardWire {
-    const wire = inboxCardWire(card, this.now().getTime());
     const threads = card.threads.filter((id) => this.messages.get(id)?.thread_id === id);
-    return threads.length === card.threads.length ? wire : { ...wire, threads };
+    return threads.length === card.threads.length ? card : { ...card, threads };
+  }
+
+  /**
+   * The person looked at Dropped: every agent's drop they had not seen (in
+   * `projectIds`, or everywhere) is marked seen, one line per card. Not a
+   * write to the card itself: `heard_at` stays. Answers the cards it marked.
+   */
+  markCardDropsSeen(projectIds: ReadonlySet<string> | null = null): InboxCard[] {
+    const marked: InboxCard[] = [];
+    for (const card of this.listCards({ projectIds, columns: new Set(["dropped"]) })) {
+      if (!isInboxCardDropUnseen(card)) continue;
+      const at = this.stamp();
+      const next: InboxCard = { ...card, dropped: { ...card.dropped!, seen_at: at } };
+      this.appendCard(next, at);
+      marked.push(next);
+    }
+    return marked;
   }
 
   /**
@@ -3687,7 +3703,7 @@ export class InboxStore {
   /**
    * One write to a card: any of a move (`column`), the agent's last word
    * (`say`), the person's line (`you`), a rename, more threads or PRs, and a
-   * drop's `reason`. Every write counts as hearing from the card (amber).
+   * drop's `reason`. Every write counts as hearing from the card (`heard_at`).
    * `restore` (the person) puts a card in the Icebox or Dropped back where it
    * was. The rules are the column rules (COLUMNS.md, set d):
    *  - only the person puts a card in the Icebox, or moves one out of it;
@@ -3748,7 +3764,9 @@ export class InboxStore {
     if (moves && column === "dropped") {
       const reason = given(input.reason) ? this.cardText(input.reason, "reason", INBOX_CARD_REASON_MAX) : null;
       if (byAgent && reason === null) throw new InboxError("validation_error", "reason: an agent drops a card with a reason (one line the person reads).", { field: "reason" });
-      dropped = { at: this.stamp(), by: input.by, reason };
+      const at = this.stamp();
+      // An agent's drop waits for the person to see it; one they made is seen when made.
+      dropped = { at, by: input.by, reason, seen_at: byAgent ? null : at };
     } else if (given(input.reason)) {
       throw new InboxError("validation_error", "reason: only with a drop (column dropped).", { field: "reason" });
     } else if (moves) {

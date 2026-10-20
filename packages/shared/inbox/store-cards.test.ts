@@ -1,18 +1,18 @@
 /**
  * The Board's cards in the store (approval "inbox-board", step 1): the
- * column rules (COLUMNS.md, set d), derived amber, links, idempotency, the
- * one seq counter, and the round trip from disk. The failures these guard: an
- * agent pausing the person's work (Icebox), a stale "You: …" following a card
- * out of the person's columns, amber stored or shown where it never belongs,
+ * column rules (COLUMNS.md, set d), last heard, an agent's drop waiting for
+ * the person, links, idempotency, the one seq counter, and the round trip from
+ * disk. The failures these guard: an agent pausing the person's work (Icebox),
+ * a stale "You: …" following a card out of the person's columns, an agent's
+ * drop the person never hears of, a "seen" that passes for news from the card,
  * a card line that breaks the event log's counter, and a card that does not
  * read back after a restart or a deletion.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import fc from "fast-check";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { INBOX_CARD_AMBER_MS, INBOX_CARD_COLUMNS, inboxCardAmber, type InboxAuthor, type InboxCardColumn } from "@plannotator/core/inbox-types";
+import { isInboxCardDropUnseen, type InboxAuthor } from "@plannotator/core/inbox-types";
 import { parseInboxCardPr } from "./cards";
 import { InboxError, parseInboxLine } from "./schema";
 import { InboxStore } from "./store";
@@ -220,37 +220,51 @@ describe("cards: who moves a card (COLUMNS.md, set d)", () => {
   });
 });
 
-describe("cards: amber is derived", () => {
-  test("a live card turns amber two days after it was last heard from; any write clears it; never in Shipped, Icebox or Dropped", () => {
+describe("cards: last heard, and an agent's drop reaching the person", () => {
+  test("every write moves heard_at; nothing else is derived (no amber, no stall flag)", () => {
     const { store, project, advance, dir } = world();
     const { card } = store.createCard({ project_id: project.id, by: AGENT, title: "Portless", column: "building" });
-    advance(INBOX_CARD_AMBER_MS - 1);
-    expect(store.cardWire(store.card(card.id)!).amber).toBe(false);
-    advance(1);
-    expect(store.cardWire(store.card(card.id)!).amber).toBe(true);
-    // Stored nowhere: the line on disk has no amber field.
-    expect(readFileSync(join(dir, "inbox", "projects", project.key, "cards.jsonl"), "utf8")).not.toContain("amber");
-    store.updateCard(card.id, { by: AGENT, say: "still on it" });
-    expect(store.cardWire(store.card(card.id)!).amber).toBe(false);
-    for (const [by, column] of [[AGENT, "shipped"], [PERSON, "icebox"]] as const) {
-      store.updateCard(card.id, { by, column });
-      advance(10 * INBOX_CARD_AMBER_MS);
-      expect(store.cardWire(store.card(card.id)!).amber).toBe(false);
-    }
-    store.updateCard(card.id, { by: PERSON, column: "dropped" });
-    advance(INBOX_CARD_AMBER_MS);
-    expect(store.cardWire(store.card(card.id)!).amber).toBe(false);
+    advance(3 * 24 * 60 * 60 * 1000);
+    const wire = store.cardWire(store.card(card.id)!);
+    expect(wire.heard_at).toBe(card.heard_at);
+    expect(Object.keys(wire).sort()).toEqual(Object.keys(card).sort());
+    expect(readFileSync(join(dir, "inbox", "projects", project.key, "cards.jsonl"), "utf8")).not.toMatch(/amber|stale/);
+    const said = store.updateCard(card.id, { by: OTHER, say: "still on it" });
+    expect(said.heard_at).not.toBe(card.heard_at);
+    expect(said.heard_by).toEqual(OTHER);
   });
 
-  test("inboxCardAmber over every column and age", () => {
-    fc.assert(
-      fc.property(fc.constantFrom(...INBOX_CARD_COLUMNS), fc.integer({ min: 0, max: 10 * INBOX_CARD_AMBER_MS }), (column: InboxCardColumn, age) => {
-        const heard = "2026-10-20T00:00:00.000Z";
-        const amber = inboxCardAmber({ column, heard_at: heard }, Date.parse(heard) + age);
-        const live = !["shipped", "icebox", "dropped"].includes(column);
-        expect(amber).toBe(live && age >= INBOX_CARD_AMBER_MS);
-      }),
-    );
+  test("an agent's drop is unseen until the person looks at Dropped; theirs is seen when made; looking writes once and is not news from the card", () => {
+    const { store, project, advance } = world();
+    const other = store.ensureProject({ name: "web", root: "/work/web" });
+    const a = store.createCard({ project_id: project.id, by: AGENT, title: "vite 8" }).card;
+    const b = store.createCard({ project_id: project.id, by: AGENT, title: "Polylane" }).card;
+    const c = store.createCard({ project_id: other.id, by: AGENT, title: "Web" }).card;
+    const dropA = store.updateCard(a.id, { by: AGENT, column: "dropped", reason: "folded into the Forge move" });
+    expect(dropA.dropped).toMatchObject({ by: AGENT, reason: "folded into the Forge move", seen_at: null });
+    expect(isInboxCardDropUnseen(dropA)).toBe(true);
+    const dropB = store.updateCard(b.id, { by: PERSON, column: "dropped" });
+    expect(dropB.dropped!.seen_at).toBe(dropB.dropped!.at);
+    expect(isInboxCardDropUnseen(dropB)).toBe(false);
+    store.updateCard(c.id, { by: AGENT, column: "dropped", reason: "moot" });
+
+    advance(60_000);
+    const seqs: number[] = [];
+    store.subscribe((line) => seqs.push(line.seq));
+    const marked = store.markCardDropsSeen(new Set([project.id]));
+    expect(marked.map((card) => card.id)).toEqual([a.id]);
+    expect(seqs).toHaveLength(1);
+    const seen = store.card(a.id)!;
+    expect(seen.dropped!.seen_at).not.toBeNull();
+    // Looking is not hearing from the card.
+    expect(seen.heard_at).toBe(dropA.heard_at);
+    // The other project's drop still waits; looking again writes nothing.
+    expect(isInboxCardDropUnseen(store.card(c.id)!)).toBe(true);
+    expect(store.markCardDropsSeen(new Set([project.id]))).toEqual([]);
+    expect(store.markCardDropsSeen().map((card) => card.id)).toEqual([c.id]);
+    // A drop the agent makes again after a restore waits again.
+    store.updateCard(a.id, { by: AGENT, column: "asked" });
+    expect(isInboxCardDropUnseen(store.updateCard(a.id, { by: AGENT, column: "dropped", reason: "again" }))).toBe(true);
   });
 });
 

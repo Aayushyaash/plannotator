@@ -179,6 +179,18 @@ describe.if(INBOX_CARD_ACTION_ON)("plannotator card", () => {
   }, 30_000);
 });
 
+// The action held back (INBOX_CARD_ACTION_ON false): the command says so, and changes nothing.
+describe.if(!INBOX_CARD_ACTION_ON)("plannotator card while the card action is held back", () => {
+  test("exits 1 saying this Inbox does not offer cards yet", async () => {
+    const box = sandbox();
+    const listed = await card(box, ["list"]);
+    expect(listed.code).toBe(1);
+    expect(listed.stdout).toBe("");
+    expect(listed.stderr).toContain("This Plannotator Inbox does not offer cards yet.");
+    expect(existsSync(box.browserMarker)).toBe(false);
+  }, 30_000);
+});
+
 describe("parseCardCommand", () => {
   test("maps words and flags onto the tool's fields", () => {
     expect(parseCardCommand(["move", "crd_x", "building", "--say", "PR open", "--pr", "o/r#1", "--project", "../web", "--json"])).toEqual({

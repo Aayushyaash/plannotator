@@ -19,6 +19,7 @@ import {
   INBOX_CARD_COLUMNS,
   INBOX_CARD_LIVE_COLUMNS,
   inboxAgentName,
+  isInboxCardDropUnseen,
   type InboxAuthor,
   type InboxCardColumn,
   type InboxCardWire,
@@ -48,8 +49,10 @@ export function cardLineText(card: InboxCardWire): string {
   const parts = [`- ${card.id}`, JSON.stringify(card.title), INBOX_CARD_COLUMN_LABELS[card.column]];
   if (card.you && (card.column === "your_look" || card.column === "your_review")) parts.push(`You: ${JSON.stringify(card.you)}`);
   if (card.said) parts.push(`said ${JSON.stringify(card.said)}`);
-  parts.push(`heard ${shortTime(card.heard_at)}${card.amber ? " (2 days or more: amber)" : ""}`);
-  if (card.dropped) parts.push(`dropped${card.dropped.reason ? `: ${JSON.stringify(card.dropped.reason)}` : ""}`);
+  parts.push(`heard ${shortTime(card.heard_at)}`);
+  if (card.dropped) {
+    parts.push(`dropped${card.dropped.reason ? `: ${JSON.stringify(card.dropped.reason)}` : ""}${isInboxCardDropUnseen(card) ? " (the person has not seen it yet)" : ""}`);
+  }
   if (card.threads.length > 0) parts.push(`threads ${card.threads.join(", ")}`);
   if (card.prs.length > 0) parts.push(`PRs ${card.prs.map((pr) => pr.ref).join(", ")}`);
   if (card.agent?.kind === "agent") parts.push(`agent ${inboxAgentName(card.agent)}${card.agent.session ? ` (${card.agent.session})` : ""}`);

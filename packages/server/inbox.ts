@@ -46,6 +46,7 @@ import {
   INBOX_APP_ID,
   INBOX_CARD_COLUMNS,
   isInboxCardColumn,
+  isInboxCardDropUnseen,
   type InboxCardColumn,
   INBOX_SOUND_DEFAULT_VOLUME,
   INBOX_TEXT_SIZE_DEFAULT,
@@ -765,7 +766,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       }
     }
     const cards = store.listCards({ projectIds: project ? new Set([project]) : null, columns }).map((card) => store.cardWire(card));
-    return { serverSession, cursor: store.cursor(), cards };
+    // An agent's drops the person has not seen, in the project (or everywhere): the Board's "N dropped by an agent".
+    const droppedUnseen = store.listCards({ projectIds: project ? new Set([project]) : null, columns: new Set(["dropped"]) }).filter(isInboxCardDropUnseen).length;
+    return { serverSession, cursor: store.cursor(), cards, dropped_unseen: droppedUnseen };
   };
 
   /**
@@ -1324,7 +1327,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       case "annotation":
         return { seq: line.seq, kind: line.kind, id: line.id, annotation: line.record };
       case "card":
-        // A Board card (approval "inbox-board"): amber derived now. A reader that does not know the kind skips it.
+        // A Board card (approval "inbox-board"). A reader that does not know the kind skips it.
         return { seq: line.seq, kind: line.kind, id: line.id, card: store.cardWire(line.record) };
     }
   };
@@ -1957,6 +1960,19 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       if (path === "/api/inbox/cards") {
         if (req.method !== "GET") return json({ error: "Use GET." }, 405);
         return json(cardsModel(url));
+      }
+      // The person looked at Dropped: an agent's drops there are seen (in `project`, or everywhere).
+      if (path === "/api/inbox/cards/dropped/seen") {
+        if (req.method !== "POST") return json({ error: "Use POST." }, 405);
+        const body = await readBody(req);
+        if (checkServerSession(body, serverSession) === "mismatch") return json(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409);
+        let projectIds: Set<string> | null = null;
+        if (body.project !== undefined && body.project !== null) {
+          if (!isInboxId("prj", body.project)) throw new InboxError("validation_error", "project: a prj_ id.", { field: "project" });
+          if (!store.project(body.project)) throw new InboxError("project_not_found", `No project ${body.project}.`);
+          projectIds = new Set([body.project]);
+        }
+        return json({ cards: store.markCardDropsSeen(projectIds).map((card) => store.cardWire(card)) });
       }
       const cardMatch = /^\/api\/inbox\/cards\/([A-Za-z0-9_]+)$/.exec(path);
       if (cardMatch) {

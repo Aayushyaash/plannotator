@@ -143,16 +143,18 @@ export async function runCardCommand(argv: readonly string[], deps: CardCommandD
     return 1;
   }
   const answer = mcpAnswerOf(text);
+  // The card action held back (INBOX_CARD_ACTION_ON), or an Inbox older than the Board: no card tool.
+  const noCards = (text: string) => /tool card not found|unknown tool/i.test(text);
   if (!answer || answer.error) {
-    err(`${answer?.error?.message ?? "Plannotator Inbox gave no answer."}\n`);
+    const message = answer?.error?.message ?? "Plannotator Inbox gave no answer.";
+    err(noCards(message) ? "This Plannotator Inbox does not offer cards yet.\n" : `${message}\n`);
     return 1;
   }
   const result = answer.result as { content?: { type?: string; text?: string }[]; structuredContent?: unknown; isError?: boolean } | undefined;
   const body = (result?.content ?? []).map((part) => part.text ?? "").join("\n");
   if (result?.isError) {
     err(`${body || "The card call was refused."}\n`);
-    // An Inbox older than the Board has no card tool.
-    if (/not found|unknown tool/i.test(body) && !/^card_/.test(body)) err("This Plannotator Inbox has no cards yet; update Plannotator.\n");
+    if (noCards(body)) err("This Plannotator Inbox does not offer cards yet.\n");
     return 1;
   }
   out(parsed.json ? `${JSON.stringify(result?.structuredContent ?? null, null, 2)}\n` : `${body}\n`);

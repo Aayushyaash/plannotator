@@ -138,7 +138,7 @@ The mod is off in `claude -p`, in SDK runs and on Windows. There the tool is not
 
 ### Pi
 
-Install the [Pi extension](/docs/getting-started/installation/#pi), then run `plannotator inbox`: it turns the inbox tool on for Pi when it finds the extension. The tool is off by default on Pi, because Pi sends every tool's full definition with each request: the inbox tool adds about 9 KB to every request, roughly 2,400 tokens depending on the model. To turn it on yourself:
+Install the [Pi extension](/docs/getting-started/installation/#pi), then run `plannotator inbox`: it turns the inbox tool on for Pi when it finds the extension. The tool is off by default on Pi, because Pi sends every tool's full definition with each request: the inbox tool adds about 7 KB to every request, roughly 2,000 tokens depending on the model. To turn it on yourself:
 
 ```bash
 export PLANNOTATOR_INBOX_TOOL=1
@@ -148,7 +148,7 @@ Start a new Pi session (or `/reload`). A reply arrives as a follow-up message on
 
 ### OpenCode
 
-Add the [OpenCode plugin](/docs/getting-started/installation/#opencode), then run `plannotator inbox`: it turns the inbox tool on for OpenCode when it finds the plugin in your global opencode config. The tool is off by default on OpenCode, for the same reason as Pi (about 9 KB per request, roughly 2,400 tokens). To turn it on yourself:
+Add the [OpenCode plugin](/docs/getting-started/installation/#opencode), then run `plannotator inbox`: it turns the inbox tool on for OpenCode when it finds the plugin in your global opencode config. The tool is off by default on OpenCode, for the same reason as Pi (about 7 KB per request, roughly 2,000 tokens). To turn it on yourself:
 
 ```bash
 export PLANNOTATOR_INBOX_TOOL=1
@@ -231,7 +231,6 @@ The stdio command fills in the project (its working folder) and a session id for
 | `resolve_message` | Resolve (archive) or reopen a thread |
 | `get_guide_brief` | Get the brief for writing a guided review, with an example that works as it is |
 | `submit_guide` | Send a guided review: a guide plus its patch, or a snapshot |
-| `card` | Keep a card on your Board for work that outlasts the agent's reply: a lane started, a PR opened, something it promised to send. One short call creates it, moves it, says where it is, links a thread or a PR, ships it or drops it (with a reason), and lists the agent's cards. Only you put a card in the Icebox or bring one back, and only you restore a card you dropped. A card nobody has written to for 2 days turns amber. The Board page that shows cards comes in a later release |
 
 No tool answers, approves or sends anything for you.
 
@@ -274,7 +273,6 @@ Everything lives under `~/.plannotator/inbox/` (or `$PLANNOTATOR_DATA_DIR/inbox/
 | `projects/<name>-<hash>/` | One folder per project: `project.json`, plus `messages.jsonl`, `questions.jsonl` and `annotations.jsonl`, which grow by appending lines (a `decisions.jsonl` an older Inbox wrote, when it kept decisions, stays as it was; it is kept only so sequence numbers are never reused, and its decisions are never shown) |
 | `blobs/<sha256>` | The version of each attached file as it was sent, a copy of each image a message shows, and each guided review |
 | `markups/<sha256>.png` | The images you marked up when commenting on an image attachment, and the frames your video comments carry (`.jpg`) |
-| `projects/<name>-<hash>/cards.jsonl` | The project's Board cards, appended like the rest. A card is its own record: it never moves a thread or changes your list |
 | `seq.json` | The highest event number ever written, kept across deletions |
 | `agents.json` | The agents `plannotator inbox` found or connected, so it never adds one back that you turned off |
 | `drafts/` | Messages you started and did not send, one file each. They never reach an agent, a phone or search |
