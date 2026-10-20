@@ -6,6 +6,7 @@
  * comment; on a phone a tap follows and a press-and-hold pins, and the
  * release after a hold follows nothing. On a touchscreen laptop (touch seen,
  * then a mouse drag) a selection across a link still quotes the link's words.
+ * Shift-click joins more elements, a link among them, to one comment.
  *
  * Two surfaces: a local HTML file (`plannotator annotate index.html`, the
  * srcdoc viewer) and a live app (`plannotator annotate http://localhost:<port>/`,
@@ -174,6 +175,47 @@ test('a local HTML file, armed: a plain click follows the link, a Cmd/Ctrl-click
       await expect(frame.locator('h1')).toHaveText('Detail page');
       await expect(composer).toHaveCount(0);
       await shot(page, 'annotate-2-click-follows');
+    } finally {
+      await context.close();
+    }
+  } finally {
+    await close();
+  }
+});
+
+/**
+ * A click with Shift held down first, as a person makes it: the composer over
+ * the page lets the pointer through while Shift is held, once the pointer is
+ * over the page (waited for here, so the press lands on the page, not the composer).
+ */
+async function shiftClick(page: Page, target: Locator) {
+  const box = (await target.boundingBox())!;
+  const x = box.x + Math.min(10, box.width / 2);
+  const y = box.y + box.height / 2;
+  await page.keyboard.down('Shift');
+  await page.mouse.move(x, y);
+  await expect.poll(() => page.evaluate(([px, py]) => document.elementFromPoint(px!, py!)?.tagName, [x, y])).toBe('IFRAME');
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.keyboard.up('Shift');
+}
+
+test('a local HTML file, armed: shift-click joins more elements to one comment, a link among them', async ({ browser }) => {
+  const { url, close } = await annotate(writeSite);
+  try {
+    const { context, page } = await newSession(browser, url, { viewport: { width: 1280, height: 860 } });
+    try {
+      const frame = page.frameLocator('iframe[sandbox]');
+      await expect(frame.locator('h1')).toHaveText('Report index');
+      await frame.locator('h1').click();
+      const composer = page.locator('[data-comment-popover]');
+      await expect(composer).toBeVisible();
+      await shiftClick(page, frame.locator('#lead'));
+      await shiftClick(page, frame.getByRole('link', { name: 'the detail page' }));
+      await expect(page.locator('[data-target-chip]')).toHaveCount(3);
+      // The link was added, not followed.
+      await expect(frame.locator('h1')).toHaveText('Report index');
+      await shot(page, 'annotate-shift-click-three-targets');
     } finally {
       await context.close();
     }

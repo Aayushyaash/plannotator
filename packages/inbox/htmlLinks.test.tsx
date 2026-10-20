@@ -8,7 +8,10 @@
  * tab, and Back returns; a link to another attachment of the thread opens it
  * in the pane as a new history entry; an image in the folder that is not
  * attached opens in the lightbox through the page's asset route; another
- * site opens a new tab; a PDF says why it does not open.
+ * site opens a new tab; a PDF says why it does not open. A pinpoint draft on
+ * the page arms shift-click multi-select without a cap of 0, so more elements
+ * join the one comment (the bridge's selection and multi-target messages played
+ * from the frame).
  *
  * DOM-gated: runs under DOM_TESTS=1 (happy-dom), from the test.yml DOM list.
  */
@@ -54,7 +57,7 @@ function loopback(path: string, method = 'GET', body?: string): Promise<{ status
   });
 }
 
-const TESTS = 6;
+const TESTS = 7;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -244,4 +247,39 @@ test.skipIf(!hasDom)('a file that is neither attached nor a page or image says w
   // Outside the page's folder.
   await clickLink(sheetFrame(el), '../../elsewhere.html');
   await until(() => el.querySelector('[data-link-note]')!.textContent!.includes('outside this page'), 'the outside note');
+});
+
+test.skipIf(!hasDom)('a pin on the page arms shift-click: more elements join the one comment', async () => {
+  const el = await renderSheet();
+  const frame = sheetFrame(el);
+  // What the pane posts into the page (the arm the bridge waits for).
+  const posted: Array<Record<string, unknown>> = [];
+  const realPost = frame.contentWindow!.postMessage.bind(frame.contentWindow);
+  (frame.contentWindow as unknown as { postMessage: (data: unknown, ...rest: unknown[]) => void }).postMessage = (data: unknown, ...rest: unknown[]) => {
+    if (data && typeof data === 'object') posted.push(data as Record<string, unknown>);
+    return (realPost as (...args: unknown[]) => void)(data, ...rest);
+  };
+  const fromPage = (data: Record<string, unknown>) =>
+    act(async () => {
+      window.dispatchEvent(new MessageEvent('message', { source: frame.contentWindow, data }));
+    });
+  const rect = { top: 10, left: 10, width: 120, height: 24 };
+  await fromPage({
+    type: 'plannotator-bridge-selection',
+    text: 'Guided narrative: contact sheet',
+    rect,
+    pinpoint: true,
+    targetKey: 'ht-1',
+    targetLabel: 'Heading',
+    anchor: { selector: 'h1', tagName: 'h1', text: 'Guided narrative: contact sheet' },
+  });
+  await until(() => document.querySelector('[data-comment-popover]') !== null, 'the composer');
+  const arm = posted.find((m) => m.type === 'plannotator-bridge-arm-multi-select');
+  expect(arm).toBeDefined();
+  // No cap of 0: the bridge would refuse every shift-click.
+  expect(arm!.max === undefined || (arm!.max as number) > 0).toBe(true);
+  for (const [key, text] of [['ht-2', 'Three directions.'], ['ht-3', 'A: Story page']]) {
+    await fromPage({ type: 'plannotator-bridge-multi-target-added', key, label: 'Element', text, rect, anchor: { selector: `#${key}`, tagName: 'p', text } });
+  }
+  await until(() => document.querySelectorAll('[data-target-chip]').length === 3, 'three targets on the one comment');
 });
