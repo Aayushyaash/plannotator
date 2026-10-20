@@ -54,10 +54,15 @@ export function toastSpeech(toast: Pick<InboxToastModel, 'lead' | 'detail' | 'on
  * show whole: a detail that does not fit one line wraps to a second.
  *
  * `onDismiss` closes it early (the ×, a swipe): the window drops it and its
- * Undo with it, never performing the undo.
+ * Undo with it, never performing the undo. `onHold(true)` while a swipe is
+ * in progress pauses its timer; `onHold(false)` on a spring-back resumes it.
  */
-export function InboxToast({ toast, phone = false, onDismiss }: { toast: InboxToastModel; phone?: boolean; onDismiss?: () => void }) {
-  return phone ? <PhoneToast key={toast.id} toast={toast} onDismiss={onDismiss} /> : <DesktopToast key={toast.id} toast={toast} onDismiss={onDismiss} />;
+export function InboxToast({ toast, phone = false, onDismiss, onHold }: { toast: InboxToastModel; phone?: boolean; onDismiss?: () => void; onHold?: (held: boolean) => void }) {
+  return phone ? (
+    <PhoneToast key={toast.id} toast={toast} onDismiss={onDismiss} onHold={onHold} />
+  ) : (
+    <DesktopToast key={toast.id} toast={toast} onDismiss={onDismiss} onHold={onHold} />
+  );
 }
 
 function toastClass(toast: InboxToastModel, phone: boolean, closable: boolean): string {
@@ -124,9 +129,9 @@ function ToastBody({ toast, phone, onDismiss }: { toast: InboxToastModel; phone:
  * (owner, 2026-10-18: a toast is brief, so it may cover Reply or a file's
  * strip for a moment rather than move around them).
  */
-function DesktopToast({ toast, onDismiss }: { toast: InboxToastModel; onDismiss?: () => void }) {
+function DesktopToast({ toast, onDismiss, onHold }: { toast: InboxToastModel; onDismiss?: () => void; onHold?: (held: boolean) => void }) {
   const ref = useRef<HTMLDivElement>(null);
-  const swipe = useSwipeAway(ref, onDismiss);
+  const swipe = useSwipeAway(ref, onDismiss, onHold);
   return (
     <div ref={ref} className={toastClass(toast, false, !!onDismiss)} data-inbox-toast="" {...swipe}>
       <ToastBody toast={toast} phone={false} onDismiss={onDismiss} />
@@ -161,10 +166,10 @@ function useFootHeight(): number | null {
  * A phone's toast: across the window above the thread's foot, its words and
  * Undo (a 44 px target), never Reply (the foot has it) or the Z hint.
  */
-function PhoneToast({ toast, onDismiss }: { toast: InboxToastModel; onDismiss?: () => void }) {
+function PhoneToast({ toast, onDismiss, onHold }: { toast: InboxToastModel; onDismiss?: () => void; onHold?: (held: boolean) => void }) {
   const foot = useFootHeight();
   const ref = useRef<HTMLDivElement>(null);
-  const swipe = useSwipeAway(ref, onDismiss);
+  const swipe = useSwipeAway(ref, onDismiss, onHold);
   return (
     <div
       ref={ref}
@@ -202,14 +207,17 @@ const reducedMotion = () => typeof window !== 'undefined' && !!window.matchMedia
  * nothing slides: it goes, or snaps back.
  *
  * The slide-out plays on an inert copy, so the window drops the toast (and
- * its Undo, `Z` included) the moment the person lets go.
+ * its Undo, `Z` included) the moment the person lets go. While a drag is in
+ * progress its timer is paused (`onHold`), and resumed on a spring-back.
+ * Once a drag starts, the entrance animation is turned off inline, so a
+ * spring-back never replays it.
  *
  * Focus: the toast never takes it, but a person may Tab to Undo or the ×.
  * Whenever the toast leaves (the ×, a swipe, Undo, its timer) with focus
- * inside it, focus goes back where it came from, else to the page's heading,
- * never to the page body.
+ * inside it, focus goes back where it came from, else to the open pane's
+ * visible header, else the page's heading, never to the page body.
  */
-function useSwipeAway(ref: RefObject<HTMLDivElement | null>, onDismiss?: () => void) {
+function useSwipeAway(ref: RefObject<HTMLDivElement | null>, onDismiss?: () => void, onHold?: (held: boolean) => void) {
   const drag = useRef<{ id: number; x: number; y: number; dx: number; on: boolean; samples: { x: number; t: number }[] } | null>(null);
   const cameFrom = useRef<HTMLElement | null>(null);
 
@@ -232,6 +240,7 @@ function useSwipeAway(ref: RefObject<HTMLDivElement | null>, onDismiss?: () => v
 
   const settle = (el: HTMLElement, dx: number) => {
     el.classList.remove('ib-toast-dragging');
+    onHold?.(false);
     el.style.translate = '';
     el.style.opacity = '';
     if (dx === 0 || reducedMotion() || typeof el.animate !== 'function') return;
@@ -317,6 +326,9 @@ function useSwipeAway(ref: RefObject<HTMLDivElement | null>, onDismiss?: () => v
           // A pointer the browser no longer tracks: the drag still works while it stays over the toast.
         }
         el.classList.add('ib-toast-dragging');
+        // Inline, so removing the class on a spring-back never replays the entrance.
+        el.style.animation = 'none';
+        onHold?.(true);
         window.getSelection?.()?.removeAllRanges();
       }
       state.dx = dx;
@@ -335,16 +347,26 @@ function fadeAt(dx: number, el: HTMLElement): number {
   return Math.max(0.35, 1 - (Math.abs(dx) / width) * 0.5);
 }
 
-/** Focus back where it was before the toast had it, else the page's heading (or the main content), never the body. */
+/**
+ * Focus back where it was before the toast had it; else the open pane's
+ * visible header (the thread's `‹ Inbox`, or its subject); else the page's
+ * heading or the main content. Never the body: each candidate is tried in
+ * turn until one actually takes focus (a hidden one cannot).
+ */
 function returnFocus(cameFrom: HTMLElement | null) {
   const usable = (node: HTMLElement | null): node is HTMLElement =>
     !!node && node.isConnected && !node.closest('[data-inbox-toast]') && !node.closest('[inert]') && !(node as HTMLButtonElement).disabled;
-  if (usable(cameFrom)) {
-    cameFrom.focus({ preventScroll: true });
-    if (document.activeElement === cameFrom) return;
-  }
-  const target = document.querySelector<HTMLElement>('.ib-main h1') ?? document.querySelector<HTMLElement>('main.ib-main');
-  if (!target) return;
-  if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
-  target.focus({ preventScroll: true });
+  const visible = (node: HTMLElement) => (typeof node.checkVisibility === 'function' ? node.checkVisibility({ visibilityProperty: true } as CheckVisibilityOptions) : true);
+  const take = (node: HTMLElement | null, makeFocusable = false): boolean => {
+    if (!usable(node) || !visible(node)) return false;
+    if (makeFocusable && !node.hasAttribute('tabindex')) node.setAttribute('tabindex', '-1');
+    node.focus({ preventScroll: true });
+    return document.activeElement === node;
+  };
+  if (take(cameFrom)) return;
+  const pane = [...document.querySelectorAll<HTMLElement>('section.ib-pane')].find(visible) ?? null;
+  for (const back of pane?.querySelectorAll<HTMLElement>('.ib-phead .ib-pback') ?? []) if (take(back)) return;
+  if (take(pane?.querySelector<HTMLElement>('.ib-subject') ?? null, true)) return;
+  if (take(document.querySelector<HTMLElement>('.ib-main h1'), true)) return;
+  take(document.querySelector<HTMLElement>('main.ib-main'), true);
 }

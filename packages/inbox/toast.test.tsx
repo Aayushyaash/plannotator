@@ -103,7 +103,7 @@ function windowWith(thread: boolean): HTMLElement {
   return host;
 }
 
-function show(toast: Omit<InboxToastModel, 'id'>, phone = false, into?: HTMLElement, onDismiss?: () => void): HTMLElement {
+function show(toast: Omit<InboxToastModel, 'id'>, phone = false, into?: HTMLElement, onDismiss?: () => void, onHold?: (held: boolean) => void): HTMLElement {
   const target = into ?? (() => {
     host = document.createElement('div');
     document.body.appendChild(host);
@@ -112,7 +112,7 @@ function show(toast: Omit<InboxToastModel, 'id'>, phone = false, into?: HTMLElem
   const mount = document.createElement('div');
   target.appendChild(mount);
   root = createRoot(mount);
-  act(() => root!.render(<InboxToast toast={{ id: 1, ...toast }} phone={phone} onDismiss={onDismiss} />));
+  act(() => root!.render(<InboxToast toast={{ id: 1, ...toast }} phone={phone} onDismiss={onDismiss} onHold={onHold} />));
   return target.querySelector('[data-inbox-toast]') as HTMLElement;
 }
 
@@ -185,27 +185,33 @@ describe.skipIf(!hasDom)('swipe a toast away (owner, 2026-10-20)', () => {
   const swipeable = (phone = false) => {
     let dismissed = 0;
     let undone = 0;
-    const toast = show({ icon: 'check', lead: 'Marked read', detail: 'Moves to Quiet', onUndo: () => undone++ }, phone, undefined, () => dismissed++);
+    const holds: boolean[] = [];
+    const toast = show({ icon: 'check', lead: 'Marked read', detail: 'Moves to Quiet', onUndo: () => undone++ }, phone, undefined, () => dismissed++, (held) => holds.push(held));
     boxAt(toast, 460, 840, 400, 40);
-    return { toast, count: () => ({ dismissed, undone }) };
+    return { toast, holds, count: () => ({ dismissed, undone }) };
   };
 
   for (const phone of [false, true]) {
     const where = phone ? 'a phone' : 'a desktop';
-    test(`${where}: a drag past 40% of the width dismisses it, and never undoes`, () => {
-      const { toast, count } = swipeable(phone);
+    test(`${where}: a drag past 40% of the width dismisses it, and never undoes; its timer was held from the drag's start`, () => {
+      const { toast, holds, count } = swipeable(phone);
       // Slow (no flick), 200 px of a 400 px toast: half its width.
       drag(toast, [[600, 860], [610, 861], [680, 862], [740, 862], [800, 862]]);
       expect(count()).toEqual({ dismissed: 1, undone: 0 });
+      expect(holds).toEqual([true]);
     });
 
-    test(`${where}: a short drag springs back and keeps it`, () => {
-      const { toast, count } = swipeable(phone);
+    test(`${where}: a short drag springs back and keeps it; its timer resumes, and the entrance does not replay`, () => {
+      const { toast, holds, count } = swipeable(phone);
       drag(toast, [[600, 860], [610, 860], [625, 860], [640, 860], [655, 860], [670, 860]]);
       expect(count()).toEqual({ dismissed: 0, undone: 0 });
-      // Back where it was: nothing left on it from the drag.
+      // Held while dragged, resumed on the spring-back.
+      expect(holds).toEqual([true, false]);
+      // Back where it was: nothing left on it from the drag but the entrance kept off (removing
+      // ib-toast-dragging would otherwise bring back `animation: ib-toast-in` and replay it).
       expect(toast.style.translate).toBe('');
       expect(toast.style.opacity).toBe('');
+      expect(toast.style.animation).toBe('none');
       expect(toast.classList.contains('ib-toast-dragging')).toBe(false);
     });
   }
@@ -226,11 +232,13 @@ describe.skipIf(!hasDom)('swipe a toast away (owner, 2026-10-20)', () => {
   });
 
   test('a vertical drag is the page\'s, a cancelled drag springs back, and a drag that starts on a button is the button\'s', () => {
-    const { toast, count } = swipeable(true);
+    const { toast, holds, count } = swipeable(true);
     drag(toast, [[600, 860], [602, 840], [604, 760], [700, 700]]);
     expect(count().dismissed).toBe(0);
+    expect(holds).toEqual([]);
     drag(toast, [[600, 860], [620, 860], [800, 860]], 'pointercancel');
     expect(count().dismissed).toBe(0);
+    expect(holds).toEqual([true, false]);
     drag(toast, [[600, 860], [620, 860], [800, 860]], 'pointerup', toast.querySelector('[data-toast-undo]') as HTMLElement);
     expect(count()).toEqual({ dismissed: 0, undone: 0 });
   });
@@ -288,5 +296,33 @@ test.skipIf(!hasDom)('an error keeps its message whole and may wrap, with no act
     act(() => root?.unmount());
     host?.remove();
     root = null;
+  }
+});
+
+test.skipIf(!hasDom)('a toast leaving with focus inside and nowhere to return it gives focus to the open pane\'s visible header, never the body', () => {
+  // A phone with a thread open: the list's heading is hidden, so the thread's ‹ Inbox takes focus.
+  const page = document.createElement('div');
+  page.className = 'pn-inbox';
+  const main = document.createElement('main');
+  main.className = 'ib-main';
+  const heading = document.createElement('h1');
+  heading.textContent = 'Inbox';
+  heading.style.display = 'none';
+  main.appendChild(heading);
+  const pane = document.createElement('section');
+  pane.className = 'ib-pane';
+  pane.innerHTML = '<div class="ib-phead"><button type="button" class="ib-pback">Inbox</button></div><h2 class="ib-subject" tabindex="-1">Invoice list</h2>';
+  main.appendChild(pane);
+  page.appendChild(main);
+  document.body.appendChild(page);
+  try {
+    const toast = show({ icon: 'check', lead: 'Archived', onUndo: () => {} }, true, page, () => {});
+    // Focus arrives from nowhere (the body), then the toast goes.
+    act(() => (toast.querySelector('[data-toast-dismiss]') as HTMLButtonElement).focus());
+    act(() => root?.unmount());
+    root = null;
+    expect(document.activeElement).toBe(pane.querySelector('.ib-pback'));
+  } finally {
+    page.remove();
   }
 });

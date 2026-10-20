@@ -688,6 +688,23 @@ for (const phone of [
       await toast.getByRole('button', { name: 'Undo' }).click();
       await expect(read).toHaveAttribute('aria-pressed', 'false');
 
+      // Undo and the × are 8 px apart and their 44 px targets meet in the middle: a tap 2 px past the Undo pill
+      // is still Undo (the thread moves back); one 6 px past it is the × (the toast goes, the thread stays read).
+      const tapPast = async (px: number) => {
+        await read.click();
+        await expect(read).toHaveAttribute('aria-pressed', 'true');
+        await expect(toast).toBeVisible();
+        const undoBox = (await toast.locator('[data-toast-undo]').boundingBox())!;
+        await page.touchscreen.tap(undoBox.x + undoBox.width + px, undoBox.y + undoBox.height / 2);
+      };
+      await tapPast(2);
+      await expect(read).toHaveAttribute('aria-pressed', 'false');
+      await tapPast(6);
+      await expect(toast).toHaveCount(0);
+      await expect(read).toHaveAttribute('aria-pressed', 'true');
+      await read.click();
+      await expect(read).toHaveAttribute('aria-pressed', 'false');
+
       // Swipe it away with a finger (touch pointer events): a short drag springs back, one past 40% of its
       // width dismisses it, and its Undo goes with it (the thread stays read).
       const swipe = (distance: number) =>
