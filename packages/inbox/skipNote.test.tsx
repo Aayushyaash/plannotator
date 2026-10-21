@@ -53,11 +53,11 @@ type ThreadModel = {
 };
 const readThread = async (id: string) => JSON.parse((await loopback(`/api/inbox/threads/${id}`)).text) as ThreadModel;
 
-const TESTS = 4;
+const TESTS = 5;
 
 beforeAll(async () => {
   if (!hasDom) return;
-  dir = realpathSync(mkdtempSync(join(tmpdir(), 'plannotator-inbox-wordsonly-dom-')));
+  dir = realpathSync(mkdtempSync(join(tmpdir(), 'plannotator-inbox-skipnote-dom-')));
   mkdirSync(join(dir, 'bin'));
   writeFileSync(join(dir, 'bin', 'tailscale'), '#!/bin/sh\nexit 1\n');
   chmodSync(join(dir, 'bin', 'tailscale'), 0o755);
@@ -278,4 +278,24 @@ test.skipIf(!hasDom)('a pick, then Skip and a note, Send at once: the skip and t
   const body = await sentReply();
   expect(body).toContain('Skipped\nNote: Not this sprint');
   expect(body).not.toContain('Cards');
+}, 20_000);
+
+test.skipIf(!hasDom)('Re-ask pressed while a pick and a note are still saving: the picks go as a reply with the note, no error', async () => {
+  current = await openStopped();
+  act(() => (cards(el())[0]!.querySelector('[data-question-option] input') as HTMLInputElement).click());
+  await until(async () => (await readThread(world.stopped)).thread.messages[0]!.questions![0]!.state === 'picked', 'the first pick saved');
+  await settle();
+  // The second question is still open as drawn: Re-ask is offered.
+  expect(el().querySelector('[data-reask]')).not.toBeNull();
+  // Pick the second and write a note on the first; Re-ask before either save lands.
+  act(() => (cards(el())[1]!.querySelector('[data-question-option] input') as HTMLInputElement).click());
+  note(cards(el())[0]!, 'Keep it simple');
+  act(() => (el().querySelector('[data-reask]') as HTMLButtonElement).click());
+  const body = await sentReply();
+  // Nothing is open any more, so no Re-ask note: one plain reply carrying both picks and the note.
+  expect(body).toContain('### Q1. Which layout should the invoice list use? (line 4)\nAnswer: Cards\nNote: Keep it simple');
+  expect(body).toContain('### Q2. Should overdue invoices sort to the top? (line 13)\nAnswer: Yes');
+  const qs = (await readThread(world.stopped)).thread.messages[0]!.questions!;
+  expect(qs.map((q) => q.state)).toEqual(['sent', 'sent']);
+  expect(qs[0]!.answer).toMatchObject({ selected: ['Cards'], note: 'Keep it simple' });
 }, 20_000);

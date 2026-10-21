@@ -2034,10 +2034,18 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     setReasking(true);
     setError(null);
     let went = 0;
-    const total = reaskList.reduce((n, t) => n + (t.kind === 'picks' ? t.replies.length : 1), 0);
+    let total = 0;
     try {
-      // A pick still being saved goes too: wait for it.
+      // A pick still being saved goes too: wait for it, then take the targets
+      // from the thread as saved (threadRef), not as drawn when Re-ask was
+      // pressed: a note just saved has a newer revision, a question just
+      // picked is no longer open.
       await pickChain.current;
+      const targets = resolved && !cameBack ? [] : reaskTargets(threadRef.current.messages, liveMessage);
+      const freshNotes = targets.filter((t) => t.kind === 'reask');
+      // The routed note follows the session the person chose for, wherever its latest message is now.
+      const routedNote = single ? (freshNotes.find((t) => t.session === single.session) ?? null) : null;
+      total = targets.reduce((n, t) => n + (t.kind === 'picks' ? t.replies.length : 1), 0);
       if (!reaskKeys.current) reaskKeys.current = new Map();
       const keyFor = (id: string) => {
         const key = reaskKeys.current!.get(id) ?? crypto.randomUUID();
@@ -2045,14 +2053,14 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
         return key;
       };
       // A session with only picks: a plain reply carries them, so the Re-ask strands none (owner's rule 2).
-      for (const target of reaskList.filter((t) => t.kind === 'picks')) {
+      for (const target of targets.filter((t) => t.kind === 'picks')) {
         for (const reply of target.replies) {
           await inboxApi.reply(reply.message.id, { idempotency_key: keyFor(`picks:${reply.message.id}`), words: '', questions: reply.questions, skip_unanswered: false });
           went += 1;
         }
       }
-      for (const target of notes) {
-        await inboxApi.reask(target.message.id, { idempotency_key: keyFor(target.message.id), ...(to && target === single ? { to } : {}) });
+      for (const target of freshNotes) {
+        await inboxApi.reask(target.message.id, { idempotency_key: keyFor(target.message.id), ...(to && target === routedNote ? { to } : {}) });
         went += 1;
       }
       reaskKeys.current = null;
