@@ -30,7 +30,7 @@ import {
   type UpdateDetails,
   type WhatsNewModel,
 } from './api';
-import { addOwnThreads, filterSections, heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread, showBroughtIn, waitingCount, type OpenThread } from './held';
+import { addOwnThreads, adoptKeepingOpen, filterSections, heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread, showBroughtIn, waitingCount, type OpenThread } from './held';
 import { hasMovingDelivery } from './rowDelivery';
 import {
   captureSettle,
@@ -73,6 +73,8 @@ import { AboutBlock, FailedDialog, RestartDialog, UpdateDialog, WhatsNewPage } f
 import { unsentReply } from './unsent';
 import { InboxToast, type InboxToastModel, toastSpeech } from './components/Toast';
 import { canToggleRead, MARK_READ_UNDO_MS, markReadToast } from './markRead';
+import { threadLink, type RowMenuAction } from './rowMenu';
+import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import { newBatchId, projectAllArchived, projectBatchToast, projectsWithReadable, type ProjectAction } from './projectMenu';
 import { lookBoundary } from './folding';
 import { latestAgentSeq } from './seenOnSight';
@@ -131,6 +133,8 @@ const SIDEBAR_OPEN_COOKIE = 'plannotator-inbox-sidebar-open';
 const COMPOSE_LAST_COOKIE = 'plannotator-inbox-compose-last';
 /** How often the Drafts page reads its drafts again, so each chip follows its session. */
 const DRAFTS_REFRESH_MS = 10_000;
+/** How long the refresh icon shows after a click on Inbox: one turn (inbox.css `ib-refresh-turn`, 500 ms), then back to the inbox icon. */
+const REFRESH_SPIN_MS = 600;
 /** Settings → Agents re-reads the agents this often while open, so "Open sessions" follows the sessions as they restart. */
 const AGENTS_SESSIONS_REFRESH_MS = 5_000;
 /** A look seen on sight that the server did not take is sent again this many times, 1 s, 2 s, 4 s… apart. */
@@ -364,6 +368,8 @@ function Inbox() {
   useTabCount(useMemo(() => (latest ? inboxTabCount(latest.sections) : 0), [latest]));
   /** The list on screen: held until the person acts (the "N new" notice). */
   const [shown, setShown] = useState<InboxListSection[] | null>(null);
+  const shownRef = useRef(shown);
+  shownRef.current = shown;
   const [thread, setThread] = useState<InboxThread | null>(null);
   /** The open thread's own list row, from its read: an archived thread has none in the list. */
   const [threadRow, setThreadRow] = useState<InboxListRow | null>(null);
@@ -534,6 +540,10 @@ function Inbox() {
     litTimers.current = [];
   }, []);
   useEffect(() => clearLit, [clearLit]);
+  /** Clicking Inbox with a thread open: the close adopts the refresh's read instead of settling (refreshInbox). */
+  const refreshPending = useRef(false);
+  /** The refresh signal: the Inbox row's (or the list title's) refresh icon turns once. */
+  const [refreshSpin, setRefreshSpin] = useState<{ key: number; scope: string | null } | null>(null);
   /** The settle waiting out its beat after a thread closed (settle.ts). */
   const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /**
@@ -580,17 +590,29 @@ function Inbox() {
    * Read the list; `adopt` puts it on screen (an action, Show, or nothing on
    * screen yet), sliding the rows to their places when `slide` says so.
    */
-  const refreshList = useCallback(async (adopt: boolean, slide = false) => {
+  const refreshList = useCallback(async (adopt: boolean, slide = false, refresh?: { light?: boolean; keepOpen?: boolean }) => {
     try {
       const next = await inboxApi.list();
       setPageSession(next.serverSession);
       setLatest(next);
       if (adopt && slide) armSlide();
+      // Show's light for a refresh (clicking Inbox): the rows it brings in, against the list on screen now.
+      if (adopt && refresh?.light) showFrom.current = shownRef.current;
+      // A refresh beside an open thread keeps that thread's row where it is on screen (held.ts adoptKeepingOpen).
+      const keep = adopt && refresh?.keepOpen ? routeRef.current.thread : null;
       setUpdate(next.update);
       setUpdated(next.updated ?? null);
       setRestartClaudeCode(next.restart_claude_code ?? 0);
       // Held: the order waits for an action, but each row's own state (a delivery, an agent's read) follows at once.
-      setShown((current) => (adopt || current === null || !hasRows(current) ? next.sections : refreshHeldRows(current, next.sections, heldOpen())));
+      setShown((current) =>
+        current === null || !hasRows(current)
+          ? next.sections
+          : adopt
+            ? keep
+              ? adoptKeepingOpen(current, next.sections, keep)
+              : next.sections
+            : refreshHeldRows(current, next.sections, heldOpen()),
+      );
       setLoadError(null);
       return next;
     } catch (cause) {
@@ -858,6 +880,11 @@ function Inbox() {
     }
     const closed = before.thread;
     if (!closed) return;
+    // Closed by clicking Inbox: the refresh's read is adopted whole (refreshInbox), so nothing settles here.
+    if (refreshPending.current) {
+      closing.current = null;
+      return;
+    }
     closing.current = { threadId: closed, asOf: latestRef.current?.sections.flatMap((section) => section.threads).find((row) => row.thread_id === closed) ?? null };
     const active = document.activeElement;
     if (body && lastInput === 'keyboard' && (!active || active === document.body)) rowElement(body, closed)?.focus({ preventScroll: true });
@@ -1243,6 +1270,60 @@ function Inbox() {
     setSaid('');
     setTimeout(() => setSaid(text), 30);
   };
+  /**
+   * Click Inbox to refresh (the owner, 2026-10-20: "Just click inbox, it
+   * refreshes"): clicking Inbox, or the project folder the list shows, or the
+   * list header's title, while that list is on screen reads the list again and
+   * adopts it as Show does (held rows settle, new rows come in and light up,
+   * "N new · Show" goes away), with the drafts, settings and the open thread
+   * read again too: what a page reload would bring, and nothing more (no look
+   * is recorded, so the tab's count and the rows' New stay as the server says).
+   * `closeThread`: the sidebar's row with a thread open keeps today's behaviour
+   * (the thread closes) and refreshes as well; the list adopts what it reads
+   * instead of settling the person's own reads a beat later.
+   */
+  const refreshSpinTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (refreshSpinTimer.current) clearTimeout(refreshSpinTimer.current);
+  }, []);
+  /** A refresh is reading: another click waits for it (a second read would light nothing and take the first one's light). */
+  const refreshing = useRef(false);
+  const refreshInbox = async (scope: string | null, closeThread: boolean) => {
+    if (refreshing.current) return;
+    refreshing.current = true;
+    try {
+      await refreshInboxNow(scope, closeThread);
+    } finally {
+      refreshing.current = false;
+    }
+  };
+  const refreshInboxNow = async (scope: string | null, closeThread: boolean) => {
+    const label = scope ? (projects.find((p) => p.id === scope)?.name ?? 'Project') : 'Inbox';
+    // The brief signal plays whether or not anything changed: the icon turns once.
+    setRefreshSpin((last) => ({ key: (last?.key ?? 0) + 1, scope }));
+    if (refreshSpinTimer.current) clearTimeout(refreshSpinTimer.current);
+    refreshSpinTimer.current = setTimeout(() => setRefreshSpin(null), REFRESH_SPIN_MS);
+    if (closeThread) {
+      refreshPending.current = true;
+      go({ page: 'inbox', project: scope, thread: null });
+    }
+    cancelSettle();
+    closing.current = null;
+    // After a key, focus stays where it is (the row or title pressed); Show's own focus move is not wanted here.
+    focusAfterShow.current = false;
+    listOrder.current = [...(listBody(rootRef.current)?.querySelectorAll('[data-thread-id]') ?? [])].map((el) => el.getAttribute('data-thread-id')!);
+    const next = await refreshList(true, true, { light: true, keepOpen: true });
+    refreshPending.current = false;
+    if (!next) {
+      say(`${label} could not refresh`);
+      return;
+    }
+    void refreshDrafts();
+    void refreshSettings();
+    const open = routeRef.current.thread;
+    if (open) void refreshThread(open);
+    say(`${label} refreshed`);
+  };
   const dismissToast = useCallback(() => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = null;
@@ -1366,6 +1447,8 @@ function Inbox() {
 
   /** Archive (the MCP's resolve) or Unarchive, with Undo. */
   const archive = async (threadId: string, rootId: string, next: boolean) => {
+    const before = rowOf(threadId);
+    const open = routeRef.current.thread;
     try {
       await inboxApi.resolve(rootId, next);
     } catch (cause) {
@@ -1375,18 +1458,40 @@ function Inbox() {
     // The list leaves archived threads out (Settings lists them). While the
     // thread is open its row stays where it is, shown archived; it goes when
     // the person leaves the thread.
-    if (next && routeRef.current.thread === threadId) {
+    // A row archived from its menu while another thread is open does the same (the list holds still).
+    if (next && routeRef.current.thread !== null) {
       const at = new Date().toISOString();
       setShown((current) => (current ? markHeldRowArchived(current, threadId, at) : current));
     }
     await afterWrite();
     if (next) {
       // The thread's foot says the next message starts a new thread.
-      showToast({ icon: 'archive', lead: 'Archived', onUndo: () => void archive(threadId, rootId, false) });
+      // From a row's menu, a thread that is not the open one: the subject says which (as Mark read's toast).
+      const detail = threadId !== open && before ? `“${before.subject ?? '(no subject)'}”` : undefined;
+      showToast({ icon: 'archive', lead: 'Archived', ...(detail ? { detail } : {}), onUndo: () => void archive(threadId, rootId, false) });
     } else {
       dismissToast();
       say('Unarchived.');
     }
+  };
+
+  /**
+   * A thread row's right-click menu. Copy link and Copy thread ID say so in
+   * the window's one toast; Mark read, Move back and Archive are the row's
+   * hover action and the header's, with their toasts.
+   */
+  const rowAction = (row: InboxListRow, action: RowMenuAction) => {
+    if (action === 'read' || action === 'unread') return void markRead(row.thread_id, action === 'read');
+    if (action === 'archive') return void archive(row.thread_id, row.thread_id, true);
+    const text = action === 'copy-link' ? threadLink(row.thread_id, settings, window.location.origin) : row.thread_id;
+    void copyTextToClipboard(text).then((ok) =>
+      showToast(
+        ok
+          ? { icon: 'check', lead: action === 'copy-link' ? 'Link copied' : 'Thread ID copied', detail: `“${row.subject ?? '(no subject)'}”` }
+          : { icon: 'warn', lead: "Couldn't copy" },
+        4200,
+      ),
+    );
   };
 
   /**
@@ -1869,9 +1974,10 @@ function Inbox() {
     showFrom.current = null;
     if (showBefore && shown) {
       const ids = showBroughtIn(showBefore, shown);
-      clearLit();
-      setLit(new Set());
+      // A read that brings nothing in (Show again, a second refresh) leaves the light already on as it is.
       if (ids.size > 0) {
+        clearLit();
+        setLit(new Set());
         const start = from ? SHOW_LIT_AFTER_SLIDE_MS : 0;
         litTimers.current.push(
           setTimeout(() => setLit(ids), start),
@@ -2048,6 +2154,9 @@ function Inbox() {
               <TabSleptLine slept={notifications.slept} onDismiss={notifications.dismissSlept} />
             ) : null
           }
+          // The title refreshes the list it names, the thread beside it staying open (the list adopts, as Show does).
+          onRefresh={() => void refreshInbox(route.project, false)}
+          refreshSpin={refreshSpin && refreshSpin.scope === route.project ? refreshSpin.key : null}
           onShowNew={() => {
             // Show's line goes away with the press: after a key, focus goes to the first row it brought in.
             focusAfterShow.current = lastInput === 'keyboard';
@@ -2057,6 +2166,7 @@ function Inbox() {
           }}
           onOpen={openRow}
           onMarkRead={(row) => void markRead(row.thread_id, true)}
+          onRowAction={rowAction}
           onSearch={(opener) => openSearch(opener)}
           onCompose={(opener) => openCompose({}, opener)}
           phone={phone}
@@ -2171,8 +2281,13 @@ function Inbox() {
             onCompose={(opener) => openCompose({}, opener)}
             draftsCount={drafts?.length ?? 0}
             onDrafts={() => go({ page: 'drafts', project: null, thread: null })}
-            onInbox={() => go({ page: 'inbox', project: null, thread: null })}
-            onProject={(projectId) => go({ page: 'inbox', project: projectId, thread: null })}
+            // On the list it shows, Inbox (or a project) refreshes; with a thread open it closes it as before, and refreshes.
+            onInbox={() => (route.page === 'inbox' && route.project === null ? void refreshInbox(null, route.thread !== null) : go({ page: 'inbox', project: null, thread: null }))}
+            onProject={(projectId) =>
+              route.page === 'inbox' && route.project === projectId ? void refreshInbox(projectId, route.thread !== null) : go({ page: 'inbox', project: projectId, thread: null })
+            }
+            refreshes={route.page === 'inbox' && route.thread === null}
+            refreshSpin={refreshSpin}
             onSettings={() => go({ page: 'settings', project: null, thread: null })}
             onUpdate={pressUpdate}
             onWhatsNew={openWhatsNew}

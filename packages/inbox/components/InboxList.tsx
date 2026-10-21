@@ -11,6 +11,8 @@ import { ListColumnEdge } from '../shell/ListColumnEdge';
 import { SidebarTrigger, useSidebar } from '../shell/sidebar';
 import { offersRowMarkRead } from '../markRead';
 import { useNarrowerThan } from '../narrower';
+import { ThreadRowMenu } from './RowMenu';
+import type { RowMenuAction } from '../rowMenu';
 import { rowTimeIso } from '../rowDelivery';
 import { TimeWithTick } from './DeliveryTick';
 
@@ -32,6 +34,13 @@ export interface InboxListProps {
   /** The one-time notifications line (record 6.1), above everything else. */
   ask?: ReactNode;
   onShowNew: () => void;
+  /**
+   * The title, pressed, refreshes the list it names (click Inbox to refresh):
+   * ↻ beside it on hover with the tooltip, one turn on a click. Absent: a plain heading.
+   */
+  onRefresh?: () => void;
+  /** A refresh of this list just ran: the title's icon turns once (the key restarts the turn). */
+  refreshSpin?: number | null;
   onOpen: (row: InboxListRow) => void;
   /** The row's hover action (a row that waits on the person): Mark read, without opening it. Absent: no action. */
   onMarkRead?: (row: InboxListRow) => void;
@@ -53,6 +62,11 @@ export interface InboxListProps {
    * agent): each lights up briefly where it landed (`data-lit`, inbox.css).
    */
   lit?: ReadonlySet<string>;
+  /**
+   * The row's right-click menu (Copy link, Copy thread ID, Mark read or
+   * Move back, Archive). Absent: no menu, the browser's own.
+   */
+  onRowAction?: (row: InboxListRow, action: RowMenuAction) => void;
 }
 
 /**
@@ -172,7 +186,7 @@ export const WIDE_ROWS_MIN_LIST_WIDTH = 900;
  * row has one, leads the subject cell, so a row starts at the list's left edge
  * instead of after an empty block.
  */
-function WideRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow; selected: boolean; filtered: boolean; lit: boolean; onOpen: () => void }) {
+function WideRow({ row, selected, filtered, lit, keys, onOpen }: { row: InboxListRow; selected: boolean; filtered: boolean; lit: boolean; keys?: string; onOpen: () => void }) {
   const badge = badgeOf(row);
   const sent = row.section === 'sent';
   const badgeEl = badge && <span className={badgeClass(row)}>{badge}</span>;
@@ -183,6 +197,8 @@ function WideRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow; 
       onClick={onOpen}
       aria-current={selected ? 'true' : undefined}
       data-thread-id={row.thread_id}
+      // The row's menu (RowMenu.tsx); a click opens the thread, so no aria-haspopup.
+      aria-keyshortcuts={keys}
       data-section={row.section}
       data-lit={lit ? '' : undefined}
     >
@@ -207,10 +223,10 @@ function WideRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow; 
  * never opens the thread. The action is the row's sibling (a button cannot
  * hold a button).
  */
-function RowWithAction({ row, onMarkRead, children }: { row: InboxListRow; onMarkRead?: (row: InboxListRow) => void; children: ReactNode }) {
+function RowWithAction({ row, menu, onMarkRead, children }: { row: InboxListRow; menu: boolean; onMarkRead?: (row: InboxListRow) => void; children: ReactNode }) {
   const offer = onMarkRead && offersRowMarkRead(row);
   return (
-    <div className="ib-rw" data-row={row.thread_id}>
+    <div className="ib-rw" data-row={row.thread_id} data-menu={menu ? '' : undefined}>
       {children}
       {offer && (
         <Tip content={`Mark read (E): out of the top until ${agentName(rowAgent(row))} writes again`}>
@@ -233,7 +249,7 @@ function RowWithAction({ row, onMarkRead, children }: { row: InboxListRow; onMar
   );
 }
 
-function NarrowRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow; selected: boolean; filtered: boolean; lit: boolean; onOpen: () => void }) {
+function NarrowRow({ row, selected, filtered, lit, keys, onOpen }: { row: InboxListRow; selected: boolean; filtered: boolean; lit: boolean; keys?: string; onOpen: () => void }) {
   const badge = badgeOf(row);
   const count = countOf(row);
   return (
@@ -243,6 +259,8 @@ function NarrowRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow
       onClick={onOpen}
       aria-current={selected ? 'true' : undefined}
       data-thread-id={row.thread_id}
+      // The row's menu (RowMenu.tsx); a click opens the thread, so no aria-haspopup.
+      aria-keyshortcuts={keys}
       data-section={row.section}
       data-lit={lit ? '' : undefined}
     >
@@ -269,7 +287,7 @@ function NarrowRow({ row, selected, filtered, lit, onOpen }: { row: InboxListRow
  * badge, the thread's name, the question count, the guided review mark),
  * which wraps rather than pushing anything off the row.
  */
-function PhoneRow({ row, filtered, lit, onOpen }: { row: InboxListRow; filtered: boolean; lit: boolean; onOpen: () => void }) {
+function PhoneRow({ row, filtered, lit, menu, keys, onOpen }: { row: InboxListRow; filtered: boolean; lit: boolean; menu: boolean; keys?: string; onOpen: () => void }) {
   const badge = badgeOf(row);
   const count = countOf(row);
   const guide = row.guide && row.section !== 'sent';
@@ -280,6 +298,9 @@ function PhoneRow({ row, filtered, lit, onOpen }: { row: InboxListRow; filtered:
       className={`ib-mrow${row.unread ? ' ib-u' : ''}${row.section === 'sent' ? ' ib-sent' : ''}`}
       onClick={onOpen}
       data-thread-id={row.thread_id}
+      // The row's menu (RowMenu.tsx); a click opens the thread, so no aria-haspopup.
+      aria-keyshortcuts={keys}
+      data-menu={menu ? '' : undefined}
       data-section={row.section}
       data-lit={lit ? '' : undefined}
     >
@@ -336,9 +357,22 @@ export function InboxList(props: InboxListProps) {
   // main sidebar, which holds its own New message, is closed (the peek does not count as open).
   const headerCompose = isMobile || !sidebarDocked;
   const columnId = useId();
+  const refreshHintId = useId();
   const resizable = props.narrow && !isMobile;
   const visible = props.sections.filter((s) => s.threads.length > 0);
   const lit = (row: InboxListRow) => props.lit?.has(row.thread_id) === true;
+  // The row whose right-click menu is open: a muted background, as the project row's.
+  const [menuRow, setMenuRow] = useState<string | null>(null);
+  const rowOf = (threadId: string) => {
+    for (const section of props.sections) {
+      const row = section.threads.find((r) => r.thread_id === threadId);
+      if (row) return row;
+    }
+    return null;
+  };
+  const onRowAction = props.onRowAction;
+  // Shift+F10 opens a row's menu (the context-menu key too), named on each row for assistive technology.
+  const rowKeys = onRowAction ? 'Shift+F10' : undefined;
   // The row callbacks keep one identity for the list's life (they call the latest props), so a row whose
   // data did not change is not rendered again when the list is (ListRow is memoized on its row's content).
   const latest = useRef(props);
@@ -360,9 +394,34 @@ export function InboxList(props: InboxListProps) {
     >
       <div className="ib-lhead">
         <SidebarTrigger />
-        <Tip content={props.title} cut>
-          <h1 dir="auto">{props.title}</h1>
-        </Tip>
+        {props.onRefresh ? (
+          <h1 dir="auto" className="ib-lhead-h">
+            {/* The full name in the tooltip too, for a project name the header cuts. */}
+            <Tip content={props.title === 'Inbox' ? 'Refresh' : `Refresh ${props.title}`}>
+              <button
+                type="button"
+                className="ib-lhead-title"
+                onClick={props.onRefresh}
+                aria-describedby={refreshHintId}
+                data-list-refresh=""
+                data-refreshing={props.refreshSpin != null ? '' : undefined}
+              >
+                <span className="ib-lhead-tt">{props.title}</span>
+                <Icon key={props.refreshSpin ?? 'rest'} name="refresh" size={16} className="ib-ic-refresh" />
+              </button>
+            </Tip>
+          </h1>
+        ) : (
+          <Tip content={props.title} cut>
+            <h1 dir="auto">{props.title}</h1>
+          </Tip>
+        )}
+        {/* The button's description, outside the h1 so the heading reads only the name. */}
+        {props.onRefresh && (
+          <span id={refreshHintId} hidden>
+            Refresh the list
+          </span>
+        )}
         {props.path && (
           <Tip content={props.path} cut>
             <span className="ib-path">{props.path}</span>
@@ -390,7 +449,16 @@ export function InboxList(props: InboxListProps) {
           </Tip>
         )}
       </div>
-        <div className="ib-lbody" ref={bodyRef}>
+        <ThreadRowMenu
+          ref={bodyRef}
+          className="ib-lbody"
+          rowOf={rowOf}
+          canMarkRead={props.onMarkRead !== undefined}
+          onTarget={setMenuRow}
+          onAction={(row, action) => onRowAction?.(row, action)}
+          disabled={!onRowAction}
+          held={props.selectedThreadId !== null}
+        >
           {props.ask}
           {props.notice && (
             <button type="button" className="ib-notice" onClick={props.onShowNew} data-inbox-notice="">
@@ -428,12 +496,14 @@ export function InboxList(props: InboxListProps) {
                       onOpen={openRow}
                       onMarkRead={props.onMarkRead ? markRead : undefined}
                       day={day}
+                      menu={menuRow === row.thread_id}
+                      keys={rowKeys}
                     />
                   ))}
               </div>
             );
           })}
-        </div>
+        </ThreadRowMenu>
       {resizable && <ListColumnEdge controls={columnId} />}
     </section>
   );
@@ -449,6 +519,10 @@ interface ListRowProps {
   onMarkRead?: (row: InboxListRow) => void;
   /** Today's date: the row's time is written against it (shortTime). */
   day: string;
+  /** Its right-click menu is open (RowMenu.tsx): the muted background. */
+  menu: boolean;
+  /** `aria-keyshortcuts` for the row's menu (Shift+F10), when the list has one. */
+  keys?: string;
 }
 
 /**
@@ -457,15 +531,15 @@ interface ListRowProps {
  * list update renders only the rows that changed.
  */
 const ListRow = memo(
-  function ListRow({ row, shape, filtered, selected, lit, onOpen, onMarkRead }: ListRowProps) {
+  function ListRow({ row, shape, filtered, selected, lit, onOpen, onMarkRead, menu, keys }: ListRowProps) {
     const open = () => onOpen(row);
-    if (shape === 'phone') return <PhoneRow row={row} filtered={filtered} lit={lit} onOpen={open} />;
+    if (shape === 'phone') return <PhoneRow row={row} filtered={filtered} lit={lit} menu={menu} keys={keys} onOpen={open} />;
     return (
-      <RowWithAction row={row} onMarkRead={onMarkRead}>
+      <RowWithAction row={row} menu={menu} onMarkRead={onMarkRead}>
         {shape === 'narrow' ? (
-          <NarrowRow row={row} filtered={filtered} lit={lit} selected={selected} onOpen={open} />
+          <NarrowRow row={row} filtered={filtered} lit={lit} keys={keys} selected={selected} onOpen={open} />
         ) : (
-          <WideRow row={row} filtered={filtered} lit={lit} selected={selected} onOpen={open} />
+          <WideRow row={row} filtered={filtered} lit={lit} keys={keys} selected={selected} onOpen={open} />
         )}
       </RowWithAction>
     );
@@ -476,6 +550,8 @@ const ListRow = memo(
     a.selected === b.selected &&
     a.lit === b.lit &&
     a.day === b.day &&
+    a.menu === b.menu &&
+    a.keys === b.keys &&
     a.onOpen === b.onOpen &&
     a.onMarkRead === b.onMarkRead &&
     sameValue(a.row, b.row),

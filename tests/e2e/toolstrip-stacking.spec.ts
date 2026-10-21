@@ -216,6 +216,22 @@ async function checkStepListAbove(page: Page, label: string): Promise<void> {
   await expect(list).toHaveCount(0);
 }
 
+/**
+ * The move to (400, 400) before goto does not always survive the navigation: on CI's Linux Chromium the new
+ * document can still take the pointer to be at (0, 0), on the peek's edge strip, and once the file closes the
+ * sidebar the peek opens 600 ms later and floats over everything, a full-screen file included (seen on CI: the
+ * sidebar's logo and title "painted over" the full-screen strip, and the peek over the thread beside a file).
+ * The peek closes only when the pointer leaves it, so enter it and leave, then make sure it is gone.
+ */
+async function closeSidebarPeek(page: Page): Promise<void> {
+  const peek = page.locator('[data-sidebar-peek][data-visible]');
+  if ((await peek.count()) > 0) {
+    await page.mouse.move(60, 450);
+    await page.mouse.move(700, 450);
+  }
+  await expect(peek, 'the sidebar peek is closed before the strip is probed').toHaveCount(0);
+}
+
 test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(() => {
@@ -263,6 +279,7 @@ test('Inbox: the attached document never paints over the toolstrip, beside the t
             await page.locator('[data-full-view-comments]').click();
             await expect(page.locator('.ib-view.ib-drawer')).toBeVisible();
           }
+          await closeSidebarPeek(page);
           await checkSurface(page, `${layout.label}-${look}`, '[data-attachment-pane] .ib-docscroll', '[data-attachment-pane] .ib-toolstrip');
           await checkTablePopoutCovers(page, `${layout.label}-${look}`, '[data-attachment-pane] .ib-docscroll', '[data-attachment-pane] .ib-toolstrip');
           if (!layout.options.isMobile) await checkStepListAbove(page, `${layout.label}-${look}`);

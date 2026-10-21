@@ -970,7 +970,7 @@ that state out of `Viewer`, exactly as with `AnnotationToolstrip`'s
 
 ### 3. `CommentPopover` `mentionSource` — an `@` mention source for the composer
 
-> **Agent tags (unreleased, after 0.53.0; opt-in, byte-identical when absent):** `MentionSource.kinds?: readonly ('user' | 'agent')[]` (default `['user']`) is the kinds `mentionMatches` offers; `MentionSource.matchDetail?: boolean` (default `true`) whether a query also matches `detail`; `MentionPerson.group?: string` makes `MentionPicker` draw each run of one group as `role="group"` (`data-mention-group`) labelled by its heading (`data-mention-group-heading`), the option ids unchanged (`<id>-option-<flat index>`); `MentionSource.renderNotice?: (tagged: readonly MentionPerson[]) => ReactNode` is drawn under the composer field in both `CommentPopover` layouts. The Plannotator Inbox uses all four to tag agent sessions in a file comment. `mentionGroups(people)` (`components/MentionPicker`) is the run splitter, exported for a host that draws its own grouped list.
+> **Agent tags (ui 0.53.1; opt-in, byte-identical when absent):** `MentionSource.kinds?: readonly ('user' | 'agent')[]` (default `['user']`) is the kinds `mentionMatches` offers; `MentionSource.matchDetail?: boolean` (default `true`) whether a query also matches `detail`; `MentionPerson.group?: string` makes `MentionPicker` draw each run of one group as `role="group"` (`data-mention-group`) labelled by its heading (`data-mention-group-heading`), the option ids unchanged (`<id>-option-<flat index>`); `MentionSource.renderNotice?: (tagged: readonly MentionPerson[]) => ReactNode` is drawn under the composer field in both `CommentPopover` layouts. The Plannotator Inbox uses all four to tag agent sessions in a file comment. `mentionGroups(people)` (`components/MentionPicker`) is the run splitter, exported for a host that draws its own grouped list.
 
 > **0.43.2 additions (opt-in, byte-identical when absent):** `MentionSource.heading?: string | null` draws one non-selectable heading row (`data-mention-heading`, e.g. "People in this workspace") above the list; `MentionPerson.avatar?: { url?, initials?, tint? }` draws an avatar (`data-mention-avatar="image" | "initials"`) before the label — an `<img>` when `url` is set, else `initials` (defaulting to the label's first letter) on a disc tinted with `tint` (any CSS color; absent means the muted surface). Neither the grammar, the keyboard state machine, `onMentionsChange`, `onPickBlocked` nor `Annotation.mentions` changes.
 
@@ -1726,6 +1726,31 @@ Everything host-facing that changed between ui 0.50.0 / core 0.25.10 and this pa
 - **"Ask this session" announcement (#1690):** new `components/AskSessionAnnouncementDialog`, `utils/askSessionAnnouncement` (cookie `plannotator-announce-ask-session-seen`) and `hooks/useFirstRunAnnouncementWindow`. Plannotator's apps mount it; nothing in the library mounts it for a host.
 - **gruvbox palette (#1721):** sets `--diffs-addition-color-override` (dark `#b8bb26`, light `#79740e`), so added diff lines draw in gruvbox green instead of the text colour. This changed the guides.show viewer stylesheet (see "Publishing & versioning").
 
+## Two fewer forced layouts on document open (ui 0.53.1)
+
+No API change. Two reads that forced a synchronous layout every time a
+`Viewer` mounted are gone (found by the Workspaces perf program: a warm
+document open spent most of its mount task in forced layouts):
+
+- **`useVimSelection`** no longer resets on a mount, or on a `contentVersion`
+  change, while vim was never on. The reset (state, focus, HUD, and the page
+  selection inside the viewer through `window.getSelection()`) now runs only
+  when vim goes from on to off. Behaviour change a host may notice: with vim
+  off, a selection already inside the viewer's container is no longer
+  cleared when the document mounts or its content changes; it is left to the
+  browser, as on any page. Turning vim off still clears it, and a selection
+  outside the container is never touched (0.46.1).
+- **`AnnotationToolstrip`**'s buttons no longer read `offsetWidth` in a layout
+  effect. The label's width comes from layout: a hidden copy of the label sits
+  in a one-column grid whose column animates `0fr` -> `1fr`, and the visible
+  label is placed beside the icon with `inset-inline-start` (so it follows the
+  icon under `dir="rtl"`) and clipped by the button. Collapsed
+  size, padding, gap, the 180 ms curve, compact / iconOnly / touch rules and
+  colours are unchanged; an expanded button is now its exact subpixel width
+  (up to 0.5 px wider than the integer `offsetWidth` it used before). The
+  button still carries the label twice in its text (the old hidden measure
+  span did too); the copy is `aria-hidden`.
+
 ## Viewer `answerOnly` (ui 0.53.0)
 
 Additive, one optional `Viewer` prop; Plannotator passes none, so its render is unchanged. Added for the Plannotator Inbox window (`packages/inbox`), which shows an agent's message with answerable `:::question` cards and takes no comments on the message text.
@@ -1734,7 +1759,7 @@ Additive, one optional `Viewer` prop; Plannotator passes none, so its render is 
 - Inside, `Viewer` computes `authoringOff = readOnly || answerOnly` and uses it wherever it used `readOnly` for authoring; the question and checkbox handlers still read `readOnly`. Absent or false, every path is the one it was.
 - The article keeps its card padding; a host that wants the bare text (as the Inbox does) overrides it from its own CSS on `[data-print-region="article"]`.
 
-## Viewer `textComments` (after ui 0.53.0)
+## Viewer `textComments` (ui 0.53.1)
 
 Additive, one optional `Viewer` prop; Plannotator's plan review and annotate pass none, so their render is unchanged. Added for the Plannotator Inbox (approval "inbox-message-comments", 2026-10-19), where the person comments on the words of an agent's message.
 

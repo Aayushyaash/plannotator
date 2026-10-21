@@ -415,6 +415,21 @@ button.ib-mut { border-radius: 6px; }
 .ib-nav.ib-on .ib-n { color: var(--ib-cur-fg); }
 .ib-nav.ib-on, .ib-proj.ib-on { background: var(--ib-cur-bg); color: var(--ib-cur-fg); font-weight: 550; box-shadow: var(--ib-cur-shadow); }
 .ib-nav .ib-ic { color: var(--muted-foreground); }
+/* Inbox in the sidebar, on the list it shows: its icon becomes ↻ on hover (or keyboard focus) and turns once on a click. */
+.ib-nav-ics { display: inline-grid; flex: none; }
+.ib-nav-ics > svg.ib-ic { grid-area: 1 / 1; }
+.ib-nav-inbox svg.ib-ic-refresh { visibility: hidden; }
+@media (hover: hover) {
+  .ib-nav-inbox[data-refreshes]:hover svg.ib-ic-inbox { visibility: hidden; }
+  .ib-nav-inbox[data-refreshes]:hover svg.ib-ic-refresh { visibility: visible; }
+}
+.ib-nav-inbox[data-refreshes]:focus-visible svg.ib-ic-inbox, .ib-nav-inbox[data-refreshing] svg.ib-ic-inbox { visibility: hidden; }
+.ib-nav-inbox[data-refreshes]:focus-visible svg.ib-ic-refresh, .ib-nav-inbox[data-refreshing] svg.ib-ic-refresh { visibility: visible; }
+.pn-inbox [data-refreshing] svg.ib-ic-refresh { animation: ib-refresh-turn 500ms cubic-bezier(0.3, 0.7, 0.3, 1); }
+@keyframes ib-refresh-turn { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .pn-inbox [data-refreshing] svg.ib-ic-refresh { animation: none; }
+}
 .ib-nav.ib-on .ib-ic { color: var(--primary); }
 .ib-nav:disabled { opacity: 0.55; }
 /* Keyboard focus on a row-like item (a sidebar row, a project, the Quiet band, a fold line, a message's
@@ -432,6 +447,12 @@ button.ib-mut { border-radius: 6px; }
 .ib-proj .ib-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ib-proj .ib-n { margin-left: auto; font-size: var(--ib-fs-12-5, 12.5px); color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
 .ib-proj.ib-proj-quiet { color: var(--muted-foreground); }
+/* The project the list shows refreshes it when pressed (click Inbox to refresh): ↻ after its name on hover or keyboard focus, one turn on a click. */
+.pn-inbox .ib-proj svg.ib-ic-refresh { flex: none; color: var(--muted-foreground); visibility: hidden; }
+@media (hover: hover) {
+  .pn-inbox .ib-proj[data-refreshes]:hover svg.ib-ic-refresh { visibility: visible; }
+}
+.pn-inbox .ib-proj[data-refreshes]:focus-visible svg.ib-ic-refresh, .pn-inbox .ib-proj[data-refreshing] svg.ib-ic-refresh { visibility: visible; }
 .ib-side-empty { font-size: var(--ib-fs-13, 13px); color: var(--muted-foreground); padding: 2px 9px; line-height: 1.5; }
 /* The project menu (design record "inbox-project-menu", approved 2026-10-14): the row and its ⋯ are two buttons
    side by side (the Settings row's pattern). ⋯ shows on hover, on keyboard focus and while its menu is open, in
@@ -463,6 +484,8 @@ button.ib-mut { border-radius: 6px; }
 .ib-pmi:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 .ib-pmi[data-disabled] { opacity: 0.5; }
 .ib-pm-title { display: none; }
+/* The thread rows' right-click menu (RowMenu.tsx): the project menu's look, with a line between copying and the writes. */
+.ib-pm-sep { height: 1px; margin: 4px 2px; background: var(--border); }
 .ib-pm-scrim { display: none; }
 /* One project's list when every thread in it is archived. */
 .ib-empty-list { padding: 40px 22px; color: var(--muted-foreground); font-size: var(--ib-fs-14, 14px); line-height: 1.6; }
@@ -609,6 +632,17 @@ dialog.ib-dlg::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-lhead { height: 60px; display: flex; align-items: center; gap: 12px; padding: 0 22px; flex: none; }
 /* One line each: a long project name and its folder are cut with "…" (the full text is their hover text), the folder first; neither wraps out of the 60 px header. */
 .ib-lhead h1 { font-size: var(--ib-fs-20, 20px); font-weight: 650; margin: 0; letter-spacing: -0.01em; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Click Inbox to refresh: the title is a button that re-reads the list it names. ↻ beside it on hover
+   or keyboard focus, one turn on a click (App.tsx refreshInbox). The h1 lets the focus ring show; the
+   name inside cuts with "…". */
+.ib-lhead h1.ib-lhead-h { display: flex; overflow: visible; }
+.ib-lhead-title { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; padding: 0; margin: 0; border: 0; background: none; color: inherit; font: inherit; letter-spacing: inherit; cursor: pointer; border-radius: 6px; }
+.ib-lhead-tt { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pn-inbox .ib-lhead-title svg.ib-ic-refresh { flex: none; color: var(--muted-foreground); opacity: 0; transition: opacity 120ms ease-out; }
+@media (hover: hover) {
+  .pn-inbox .ib-lhead-title:hover svg.ib-ic-refresh { opacity: 1; }
+}
+.pn-inbox .ib-lhead-title:focus-visible svg.ib-ic-refresh, .pn-inbox .ib-lhead-title[data-refreshing] svg.ib-ic-refresh { opacity: 1; }
 .ib-lhead .ib-path { font-family: var(--font-mono); font-size: var(--ib-fs-12, 12px); color: var(--muted-foreground); min-width: 0; flex: 0 1000000 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ib-lbody { padding: 0 10px 10px; overflow-y: auto; flex: 1; min-height: 0; position: relative; }
 /* A row that left the rows on screen when the list settled (settle.ts): a copy drawn where it was, fading
@@ -745,6 +779,10 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 .ib-row, .ib-nrow { border-bottom-color: var(--ib-row-line); }
 :is(.ib-row, .ib-nrow)::before { border-radius: var(--ib-rl-sm-s, 8px); }
 :is(.ib-row, .ib-nrow):hover::before { background: var(--ib-hover) !important; }
+/* A row whose right-click menu is open keeps the hover's muted pill while the pointer is on the menu (RowMenu.tsx). */
+.ib-rw[data-menu] :is(.ib-row, .ib-nrow)::before { background: var(--ib-hover) !important; }
+.ib-rw[data-menu] :is(.ib-row, .ib-nrow).ib-sel::before { background: var(--ib-sel-hover) !important; }
+.ib-mrow[data-menu] { background: var(--ib-hover-s, color-mix(in oklch, var(--muted) 50%, transparent)); }
 /* Rows that wait on nobody (Sent, Quiet): the subject steps back. Off, each row keeps today's colour: a wide
    row's subject takes its row's, a narrow row's is quiet text (`.ib-nrow .ib-l2 .ib-s`). */
 .ib-row[data-section="quiet"] .ib-s { color: var(--ib-quiet-dim, currentcolor); }

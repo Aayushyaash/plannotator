@@ -109,3 +109,52 @@ test.skipIf(!hasDom)('a row that did not render again opens with the latest onOp
   });
   expect(opened).toEqual(['second:msg_3']);
 });
+
+test.skipIf(!hasDom)("opening a row's right-click menu renders only that row again, and so does closing it", async () => {
+  host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  const sections = read();
+  const drawWithMenu = () =>
+    act(() => {
+      root!.render(
+        <SidebarProvider>
+          <div className="pn-inbox">
+            <InboxList
+              title="Inbox"
+              path={null}
+              sections={sections}
+              filtered={false}
+              narrow={false}
+              selectedThreadId={null}
+              notice={null}
+              onShowNew={() => {}}
+              onOpen={() => {}}
+              onRowAction={() => {}}
+            />
+          </div>
+        </SidebarProvider>,
+      );
+    });
+  drawWithMenu();
+  const shortTime = spyOn(format, 'shortTime');
+  try {
+    const target = host.querySelector<HTMLElement>('[data-thread-id="msg_5"]')!;
+    await act(async () => {
+      target.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 200, clientY: 100 }));
+    });
+    expect(document.querySelector('[data-row-menu="msg_5"]')).not.toBeNull();
+    expect(host.querySelector('[data-row="msg_5"]')!.hasAttribute('data-menu')).toBe(true);
+    expect(shortTime.mock.calls.length).toBe(1);
+
+    shortTime.mockClear();
+    await act(async () => {
+      (document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(document.querySelector('[data-row-menu]')).toBeNull();
+    expect(host.querySelector('[data-row="msg_5"]')!.hasAttribute('data-menu')).toBe(false);
+    expect(shortTime.mock.calls.length).toBe(1);
+  } finally {
+    shortTime.mockRestore();
+  }
+});

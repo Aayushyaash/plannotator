@@ -170,9 +170,11 @@ jobs:
           packages/inbox/ack.test.tsx
           packages/inbox/wordsOnlyTwoAsks.test.tsx
           packages/inbox/projectMenu.test.tsx
+          packages/inbox/rowMenu.test.tsx
           packages/inbox/fileBack.test.tsx
           packages/inbox/archived.test.tsx
           packages/inbox/openStaysPut.test.tsx
+          packages/inbox/clickToRefresh.test.tsx
           packages/inbox/tabCountWindow.test.tsx
           packages/inbox/phoneList.test.tsx
           packages/inbox/listLabels.test.tsx
