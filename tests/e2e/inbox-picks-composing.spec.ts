@@ -10,7 +10,8 @@
  * then clicks more answers with the mouse while the words have focus. Every
  * click saves a pick (read back from the server), and the box lists every
  * answer live under the words; the words are never rewritten. Then Send: the
- * words once, the answers once. Last, the box on a phone in WebKit.
+ * words once, the answers once. Last, the box on an iPhone 15's screen
+ * (touch and mobile layout, in the config's Chromium).
  *
  * `PLANNOTATOR_PICKS_LEGACY=1` runs only the save half (no list asserted),
  * for an older binary (`PLANNOTATOR_E2E_BINARY=~/.local/bin/plannotator`).
@@ -19,7 +20,7 @@
  * PNGs land in .local/proof/picks-composing/ (or PLANNOTATOR_PICKS_SHOTS).
  */
 
-import { devices, expect, test, webkit, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { devices, expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -188,13 +189,15 @@ test('desktop: answers clicked while writing the reply save, and the box lists t
   expect(world.errors).toEqual([]);
 });
 
-test('phone (WebKit, iPhone 15): the box lists the answers', async () => {
-  test.skip(legacy, 'the list is new');
-  const threadId = await ask('Billing screens on a phone', 'billing-phone');
-  const phoneBrowser = await webkit.launch();
-  try {
-    const context = await phoneBrowser.newContext({ ...devices['iPhone 15'] });
-    const page = await context.newPage();
+// The iPhone 15's screen, touch and mobile layout in the config's own browser: launching WebKit by hand
+// from this Chromium project dies on the CI runner (as inbox-refresh.spec.ts notes). inbox-mobile.spec.ts
+// covers the window in WebKit itself.
+const { defaultBrowserType: _phoneBrowser, ...iPhone } = devices['iPhone 15'];
+test.describe('a phone (iPhone 15 screen)', () => {
+  test.use(iPhone);
+  test('the box lists the answers, capped with the keyboard up', async ({ page }) => {
+    test.skip(legacy, 'the list is new');
+    const threadId = await ask('Billing screens on a phone', 'billing-phone');
     await page.goto(`${world.url}#thread=${threadId}`);
     const pane = page.locator('section.ib-pane');
     const cards = pane.locator('fieldset[data-question-key]');
@@ -215,7 +218,11 @@ test('phone (WebKit, iPhone 15): the box lists the answers', async () => {
     await expect(box).toHaveValue('Cards: the list is short.');
     // More answers than fit: the list holds about two and a half rows and scrolls, so the box
     // never eats the thread with the keyboard up.
+    // One tap at a time, each seen saved (two taps close together read as a double tap in Chromium's touch emulation).
+    await page.waitForTimeout(600);
     await choice(2, 'Code after').tap();
+    await expect.poll(() => states(threadId)).toEqual(['picked', 'picked', 'picked', 'open', 'picked', 'open']);
+    await page.waitForTimeout(600);
     await choice(3, 'Footer').tap();
     await expect(list).toContainText('Your 5 answers go with this reply');
     const rows = list.locator('.ib-ranswers-l');
@@ -230,8 +237,5 @@ test('phone (WebKit, iPhone 15): the box lists the answers', async () => {
     const boxTop = (await pane.locator('.ib-rbox').boundingBox())!.y;
     expect(boxTop).toBeGreaterThan(120);
     await shot(page, '2-phone-keyboard-up');
-    await context.close();
-  } finally {
-    await phoneBrowser.close();
-  }
+  });
 });
