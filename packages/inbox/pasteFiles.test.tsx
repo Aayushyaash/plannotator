@@ -51,6 +51,8 @@ let posted: { path: string; body: Record<string, unknown> }[] = [];
 let replyGate: Promise<void> | null = null;
 /** Set: the next reply POST reaches the server, and the window is told it failed (it went through). */
 let replyFailsAfter = false;
+/** The Inbox is down: a reply and a thread read fail before reaching it. */
+let inboxDown = false;
 
 function loopback(path: string, method = 'GET', body?: string | Buffer, headers: Record<string, string> = {}): Promise<{ status: number; text: string }> {
   return new Promise((done, fail) => {
@@ -114,7 +116,7 @@ beforeAll(async () => {
   mkdirSync(join(dir, 'bin'));
   writeFileSync(join(dir, 'bin', 'tailscale'), '#!/bin/sh\nexit 1\n');
   chmodSync(join(dir, 'bin', 'tailscale'), 0o755);
-  child = Bun.spawn(['bun', SERVER_SCRIPT, join(dir, 'data'), join(dir, 'projects'), '6'], {
+  child = Bun.spawn(['bun', SERVER_SCRIPT, join(dir, 'data'), join(dir, 'projects'), '7'], {
     env: { ...process.env, DOM_TESTS: '0', PLANNOTATOR_DATA_DIR: join(dir, 'data'), HOME: dir, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, PLANNOTATOR_INBOX_CONNECT: '0', PLANNOTATOR_BROWSER: NO_BROWSER },
     stdout: 'pipe',
     stderr: 'inherit',
@@ -151,6 +153,7 @@ beforeEach(() => {
     const body = init?.body ? String(init.body) : undefined;
     if (method === 'POST') posted.push({ path, body: body ? JSON.parse(body) : {} });
     const isReply = method === 'POST' && path.endsWith('/reply');
+    if (inboxDown && (isReply || /\/api\/inbox\/threads\/[^/?]+$/.test(path))) throw new TypeError('Failed to fetch');
     if (isReply && replyGate) await replyGate;
     const answer = await loopback(path, method, body);
     if (isReply && replyFailsAfter) {
@@ -172,6 +175,8 @@ beforeEach(() => {
 
 afterEach(() => {
   if (!hasDom) return;
+  inboxDown = false;
+  replyFailsAfter = false;
   act(() => root?.unmount());
   host?.remove();
   root = null;
@@ -385,7 +390,7 @@ test.skipIf(!hasDom)('a file pasted while a Send is in flight stays in the box f
   }
 }, 30_000);
 
-test.skipIf(!hasDom)('a Send that went through but answered an error: a retry with the same contents replays it; changed contents are a new reply, never dropped as the old one', async () => {
+test.skipIf(!hasDom)('a Send that went through but answered an error is read back: the box closes, and the reply is in the thread once', async () => {
   const el = await renderApp(`#thread=${world.waiting}`);
   await until(() => el.querySelectorAll('fieldset[data-question-key]').length === 1, 'the question');
   act(() => button(el, 'Reply').click());
@@ -394,26 +399,34 @@ test.skipIf(!hasDom)('a Send that went through but answered an error: a retry wi
   type(text, 'Looks off.');
   replyFailsAfter = true;
   act(() => button(el, 'Send').click());
-  await until(() => !!el.querySelector('.ib-error'), 'the error');
-  const keys = () => posted.filter((p) => p.path.endsWith('/reply')).map((p) => p.body.idempotency_key as string);
-  // The same contents again: the same key, answered as the reply that went through.
-  replyFailsAfter = true;
-  act(() => button(el, 'Send').click());
-  await until(() => keys().length === 2, 'the retry');
-  await until(() => !!el.querySelector('.ib-error'), 'the error again');
-  expect(keys()[1]).toBe(keys()[0]);
+  // The reply went (its key is in the thread): finished as if the answer had come.
+  await until(() => el.querySelector('.ib-rbox') === null, 'the box closed');
+  expect(el.querySelector('.ib-error')).toBeNull();
+  const model = JSON.parse((await loopback(`/api/inbox/threads/${world.waiting}`)).text) as { thread: { messages: InboxMessage[] } };
+  expect(model.thread.messages.filter((m) => m.author.kind === 'person')).toHaveLength(1);
+}, 30_000);
 
-  // Now a screenshot is pasted and words added: a new key, a new reply carrying them.
+test.skipIf(!hasDom)('a Send the Inbox never got, then a file pasted and the same words sent again: the file rides the new reply, never lost', async () => {
+  const el = await renderApp(`#thread=${world.waiting}`);
+  await until(() => el.querySelectorAll('fieldset[data-question-key]').length === 1, 'the question');
+  act(() => button(el, 'Reply').click());
+  await until(() => replyBox(el) !== null, 'the reply box');
+  const text = replyBox(el)!.querySelector('textarea') as HTMLTextAreaElement;
+  type(text, 'Here is the screen.');
+  inboxDown = true;
+  act(() => button(el, 'Send').click());
+  await until(() => !!el.querySelector('.ib-error'), 'the error');
+  inboxDown = false;
+  // The person pastes the screenshot they meant to send, and sends the same words again.
   expect(paste(text, { files: [image()] })).toBe(true);
   await until(() => tiles(replyBox(el)!)[0]?.getAttribute('data-compose-file') === 'done', 'the upload');
-  type(text, 'Looks off. Here is the screen.');
   act(() => button(el, 'Send').click());
   await until(() => el.querySelector('.ib-rbox') === null, 'the Send');
-  expect(keys()).toHaveLength(3);
-  expect(keys()[2]).not.toBe(keys()[0]);
+  const reply = posted.filter((p) => p.path.endsWith('/reply')).at(-1)!;
+  expect((reply.body.uploads as string[]).length).toBe(1);
   const model = JSON.parse((await loopback(`/api/inbox/threads/${world.waiting}`)).text) as { thread: { messages: InboxMessage[] } };
   const mine = model.thread.messages.filter((m) => m.author.kind === 'person');
-  expect(mine).toHaveLength(2);
-  expect(mine[1]!.body.startsWith('Looks off. Here is the screen.')).toBe(true);
-  expect(mine[1]!.attachments).toHaveLength(1);
+  expect(mine).toHaveLength(1);
+  expect(mine[0]!.body.startsWith('Here is the screen.')).toBe(true);
+  expect(mine[0]!.attachments).toHaveLength(1);
 }, 30_000);

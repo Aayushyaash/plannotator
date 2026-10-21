@@ -219,7 +219,9 @@ test.skipIf(!hasDom)('Keep draft: the sidebar\'s Drafts row and the Drafts page 
   key('Escape');
   act(() => (dialog()!.querySelector('[data-compose-keep]') as HTMLButtonElement).click());
   await until(() => dialog() === null, 'compose closed');
-  await until(() => el.querySelector('[data-drafts-nav]')?.textContent === 'Drafts1', 'the Drafts row');
+  // The Drafts row counts the threads holding unsent work too (the world's picks not sent, approval "inbox-reply-drafts").
+  const replies = (JSON.parse((await loopback('/api/inbox/drafts')).text) as { replies?: unknown[] }).replies?.length ?? 0;
+  await until(() => el.querySelector('[data-drafts-nav]')?.textContent === `Drafts${1 + replies}`, 'the Drafts row');
   expect(document.querySelector('[data-inbox-toast]')?.textContent).toContain('It waits under Drafts and never sends itself.');
 
   act(() => (el.querySelector('[data-drafts-nav]') as HTMLButtonElement).click());
@@ -245,7 +247,7 @@ test.skipIf(!hasDom)('a live session: To is prefilled, Send starts the thread ad
   const el = await renderApp('#drafts');
   await until(() => el.querySelectorAll('[data-draft-id]').length === 1, 'the draft row');
   await until(() => el.querySelector('[data-draft-chip]')?.textContent === 'No agent chosen', 'the chip');
-  act(() => (el.querySelector('.ib-draft-open') as HTMLButtonElement).click());
+  act(() => (el.querySelector('[data-draft-id] .ib-draft-open') as HTMLButtonElement).click());
   await until(() => dialog()?.querySelector('[data-compose-to="ses_live_dom"]') !== null && dialog() !== null, 'To prefilled');
   expect(dialog()!.querySelector('[data-compose-status]')?.textContent).toBe('Claude Code takes it as its next turn.');
   act(() => (dialog()!.querySelector('[data-compose-send]') as HTMLButtonElement).click());
@@ -262,7 +264,9 @@ test.skipIf(!hasDom)('a live session: To is prefilled, Send starts the thread ad
   // The row that opened it is gone: focus goes to the Drafts heading (no other draft), never the page.
   await until(() => document.activeElement === el.querySelector('[data-drafts-page] h1'), 'focus on the Drafts heading');
   expect(await drafts()).toEqual([]);
-  await until(() => el.querySelector('[data-drafts-nav]') === null, 'no Drafts row');
+  // No message draft left: the Drafts row counts only the threads holding unsent work (none: no row).
+  const replies = (JSON.parse((await loopback('/api/inbox/drafts')).text) as { replies?: unknown[] }).replies?.length ?? 0;
+  await until(() => (el.querySelector('[data-drafts-nav]')?.textContent ?? 'Drafts0') === `Drafts${replies}`, 'the Drafts row without the message');
   const sections = (JSON.parse((await loopback('/api/inbox/threads')).text) as { sections: InboxListSection[] }).sections;
   const row = sections.flatMap((s) => s.threads).find((t) => t.subject === 'Idea: group the list by session')!;
   expect(row).toMatchObject({ section: 'sent', addressee: { host: 'claude-code', session: 'ses_live_dom' } });
@@ -443,7 +447,7 @@ test.skipIf(!hasDom)('the thread chip follows the message until typed in; typed,
   expect(saved.map((d) => d.thread_name)).toEqual([undefined]);
   act(() => (el.querySelector('[data-drafts-nav]') as HTMLButtonElement).click());
   await until(() => el.querySelectorAll('[data-draft-id]').length === 1, 'the draft row');
-  act(() => (el.querySelector('.ib-draft-open') as HTMLButtonElement).click());
+  act(() => (el.querySelector('[data-draft-id] .ib-draft-open') as HTMLButtonElement).click());
   await until(() => dialog()?.querySelector('[data-compose-to="ses_named"]') != null && chipInput()?.value === 'Paste bug', 'reopened, named from the message');
 
   // A typed name is kept by the draft, as typed.

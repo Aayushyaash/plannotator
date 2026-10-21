@@ -368,7 +368,7 @@ export function RestartDialog({ update, subject, onRestart, onCancel }: { update
       <ul className="ib-what" style={{ marginTop: 14 }}>
         <li>
           <Icon name="info" />
-          <span>Your reply to “{subject}” is not sent and will be lost. Picks and comments are saved.</span>
+          <span>The files pasted into your reply to “{subject}” are not saved and will be lost. Its words, picks and comments are kept as a draft.</span>
         </li>
       </ul>
       <div className="ib-acts-row">

@@ -189,9 +189,9 @@ async function renderApp(hash = '') {
   return host;
 }
 
-/** Open the reply box: Reply, or "Edit the reply" while comments wait for a Send. */
+/** Open the reply box: Reply, or "Edit draft" while comments wait for a Send. */
 function openReply(el: ParentNode) {
-  const open = [...el.querySelectorAll('button')].find((b) => /^(Reply|Edit the reply)$/.test(b.textContent?.replace(/\s+/g, ' ').trim() ?? ''));
+  const open = [...el.querySelectorAll('button')].find((b) => /^(Reply|Edit draft)$/.test(b.textContent?.replace(/\s+/g, ' ').trim() ?? ''));
   if (!open) throw new Error('no Reply');
   act(() => open.click());
 }

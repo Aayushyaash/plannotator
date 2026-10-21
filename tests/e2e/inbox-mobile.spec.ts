@@ -390,7 +390,7 @@ for (const phone of [
 
       // A pick, then the reply box: 16 px text, above the foot's 44 px actions.
       await pane.getByText('Retry with the same idempotency key').click();
-      await pane.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' }).click();
+      await pane.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' }).click();
       const box = pane.getByRole('textbox', { name: 'Reply to Claude Code' });
       await expect(box).toBeVisible();
       expect(await box.evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(16);
@@ -580,7 +580,7 @@ for (const phone of [
       await expect(pane.getByRole('heading', { name: /Stripe 409/ })).toBeVisible();
       // One of the two questions picked: the reply box's chip offers Keep open for the other.
       await pane.getByText('Retry with the same idempotency key').click();
-      await pane.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' }).click();
+      await pane.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' }).click();
       const chip = pane.locator('.ib-skipchip').first();
       await expect(chip).toBeVisible();
       const keep = chip.getByRole('button', { name: 'Keep open' });
@@ -677,7 +677,7 @@ for (const phone of [
       await expect(read).toHaveAttribute('aria-pressed', 'false');
 
       // With the reply box open the foot is much taller: the toast still sits above it.
-      await pane.locator('.ib-pfoot').getByRole('button', { name: /^(Reply|Edit the reply)$/ }).click();
+      await pane.locator('.ib-pfoot').getByRole('button', { name: /^(Reply|Edit draft)$/ }).click();
       await expect(pane.locator('.ib-pfoot textarea')).toBeVisible();
       await read.click();
       await expect(toast).toBeVisible();
@@ -835,7 +835,7 @@ for (const narrow of [
         expect(await overlaps(page, '.ib-fline.ib-is-open', '.ib-mk, .ib-fl-nm, .ib-fl-meta, .ib-fl-tm')).toEqual([]);
         expect(await overlaps(page, '.ib-phead', '.ib-pback, .ib-hbtn, .ib-phsubj[data-on], .ib-ptool')).toEqual([]);
         expect(await cardFits(page)).toEqual([]);
-        // A pick: the foot gains "Not sent" and the skip chip, and wraps rather than running past the pane.
+        // A pick: the foot gains "Draft · 1 pick" and the skip chip, and wraps rather than running past the pane.
         await pane.getByText('Retry with the same idempotency key').click();
         await expect(pane.locator('.ib-pfoot .ib-skipchip')).toBeVisible();
         const foot = await pane.locator('.ib-pfoot').evaluate((el) => {
@@ -956,7 +956,7 @@ test.describe('a desktop window', () => {
         send.boundingBox(),
         keep.boundingBox(),
         foot.locator('.ib-skipchip').boundingBox(),
-        foot.getByText('Not sent', { exact: true }).boundingBox(),
+        foot.locator('[data-draft-foot]').boundingBox(),
       ]);
       const right = Math.min(paneBox!.x + paneBox!.width, width);
       for (const [name, box] of [['Send', sendBox], ['Keep open', keepBox], ['the skip chip', chipBox]] as const) {
@@ -964,7 +964,7 @@ test.describe('a desktop window', () => {
         expect(box!.x + box!.width, `${name} at ${width}px`).toBeLessThanOrEqual(right);
         expect(box!.y + box!.height, `${name} at ${width}px`).toBeLessThanOrEqual(footBox!.y + footBox!.height);
       }
-      // "Not sent" stays one line (it was squeezed to two).
+      // "Draft · 1 pick" stays one line ("Not sent" was once squeezed to two).
       expect(notSent!.height, `at ${width}px`).toBeLessThan(24);
       // A tap on Keep open lands on it.
       await keep.click();

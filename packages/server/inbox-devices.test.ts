@@ -308,6 +308,9 @@ describe("the device door, on the binary", () => {
       ["POST", "control/stop"],
       ["GET", "attachments/att_x"],
       ["POST", "projects/prj_x/delete"],
+      // A reply draft is read only on the door (7.62): the phone writes none.
+      ["POST", "threads/msg_x/draft"],
+      ["POST", "threads/msg_x/draft/delete"],
       // Shared drafts stay the window's (never seen by phones) until that is ruled otherwise.
       ["GET", "drafts"],
       ["POST", "drafts/drf_x"],
@@ -1122,6 +1125,27 @@ describe("the door's parity routes, in process (7.39 to 7.49)", () => {
     };
     return { root, ledger, inbox, base, token, door, poll };
   };
+
+  test("7.62: a thread's reply draft, read only; the row's unsent rides the list", async () => {
+    const { ledger, inbox, base, door } = await world();
+    const project = inbox.store.ensureProject({ name: "ledger", root: ledger });
+    const asked = inbox.store.sendMessage({ project_id: project.id, author: { kind: "agent", host: "claude-code", session: "ses-d", name: null }, body: "The build is green." }).message;
+    expect(((await (await door(`threads/${asked.id}/draft`)).json()) as Json).draft).toBeNull();
+    const saved = await fetch(`${base}/api/inbox/threads/${asked.id}/draft`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ serverSession: inbox.serverSession, body: "Ship it, but keep the totals", base: null }),
+    });
+    expect(saved.status).toBe(200);
+    const read = (await (await door(`threads/${asked.id}/draft`)).json()) as Json;
+    expect(read.draft).toMatchObject({ v: 1, thread_id: asked.id, body: "Ship it, but keep the totals" });
+    const list = (await (await door("threads")).json()) as Json;
+    const row = list.sections.flatMap((s: Json) => s.threads).find((r: Json) => r.thread_id === asked.id);
+    expect(row.unsent).toEqual({ reply_at: read.draft.updated_at, picks: 0, comments: 0 });
+    // Writing a draft is the window's: the door has no route for it.
+    const refused = await door(`threads/${asked.id}/draft`, { body: { idempotency_key: "draft-1", body: "x", base: null } });
+    expect(refused.status).toBe(404);
+  });
 
   test("7.39 to 7.41: the live sessions, a thread the phone starts (replayed by its key, refusals unchanged), and Send to another session", async () => {
     const { ledger, inbox, door, poll } = await world();

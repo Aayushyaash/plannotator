@@ -1,6 +1,8 @@
+import type { InboxReplyDraftRow } from '@plannotator/core/inbox-types';
 import type { DraftView } from '../api';
-import { shortTime, whenTime } from '../format';
-import { HostMark, Icon } from '../icons';
+import { agentName, shortTime, whenTime } from '../format';
+import { AuthorMark, HostMark, Icon } from '../icons';
+import { DraftLabel, rowUnsent, unsentWords } from '../components/DraftLabel';
 import { Tip } from '../components/Tip';
 import { SidebarTrigger } from '../shell/sidebar';
 import { draftChip, draftSnippet, hostLabel, subjectPreview } from './model';
@@ -18,7 +20,15 @@ export function DraftsPage({
   onOpen,
   onDelete,
   onCompose,
+  replies = [],
+  onOpenReply,
 }: {
+  /**
+   * Open threads holding unsent work (approval "inbox-reply-drafts"): reply
+   * words, picks, comments. Listed above the messages; a row opens its thread.
+   */
+  replies?: readonly InboxReplyDraftRow[];
+  onOpenReply?: (row: InboxReplyDraftRow) => void;
   drafts: readonly DraftView[] | null;
   error: string | null;
   phone: boolean;
@@ -32,16 +42,62 @@ export function DraftsPage({
       <div className="ib-dh">
         <SidebarTrigger />
         <h1 tabIndex={-1}>Drafts</h1>
-        {list.length > 0 && <span className="ib-drafts-n">{list.length} not sent</span>}
+        {list.length + replies.length > 0 && <span className="ib-drafts-n">{list.length + replies.length} not sent</span>}
         {phone && (
           <button type="button" className="ib-lhead-compose" aria-label="New message" aria-haspopup="dialog" onClick={(event) => onCompose(event.currentTarget)}>
             <Icon name="compose" size={20} />
           </button>
         )}
       </div>
-      <p className="ib-dsub">Messages you started but did not send. A draft never sends itself: open one, pick a live agent, and send it.</p>
+      <p className="ib-dsub">
+        {replies.length > 0 ? 'Replies and messages you started but did not send. ' : 'Messages you started but did not send. '}
+        A draft never sends itself: open one{replies.length > 0 ? '' : ', pick a live agent,'} and send it.
+      </p>
       {error && <div className="ib-error">{error}</div>}
-      {drafts && list.length === 0 && <p className="ib-drafts-empty">No drafts. Closing a message you did not send asks whether to keep it here.</p>}
+      {replies.length > 0 && onOpenReply && (
+        <>
+          <h2 className="ib-drafts-h">Replies not sent</h2>
+          <div className="ib-drafts-list" role="list" aria-label="Replies not sent" data-reply-drafts="">
+            {replies.map((row) => {
+              const unsent = row.unsent!;
+              const subject = row.subject ?? '(no subject)';
+              return (
+                <div className="ib-draft" role="listitem" key={row.thread_id} data-reply-draft={row.thread_id}>
+                  <button
+                    type="button"
+                    className="ib-draft-open"
+                    onClick={() => onOpenReply(row)}
+                    aria-label={`Open thread: ${subject}. Draft: ${unsentWords(rowUnsent(unsent), false)}.${unsent.reply_at ? ` Saved ${whenTime(unsent.reply_at)}` : ''}`}
+                  >
+                    <span className="ib-draft-mk">
+                      <AuthorMark author={row.author} big />
+                    </span>
+                    <span className="ib-draft-t">
+                      <span className="ib-draft-to" dir="auto">
+                        Reply to <b>{agentName(row.author)}</b> in <bdi>{row.project.name}</bdi>
+                      </span>
+                      <span className="ib-draft-s" dir="auto">
+                        {subject}
+                      </span>
+                      {row.reply_preview && (
+                        <span className="ib-draft-sn" dir="auto">
+                          {row.reply_preview}
+                        </span>
+                      )}
+                    </span>
+                    <span className="ib-draft-meta">
+                      {unsent.reply_at && <span className="ib-draft-when">Saved {shortTime(unsent.reply_at)}</span>}
+                      <DraftLabel unsent={unsent} />
+                    </span>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          {list.length > 0 && <h2 className="ib-drafts-h">Messages</h2>}
+        </>
+      )}
+      {drafts && list.length === 0 && replies.length === 0 && <p className="ib-drafts-empty">No drafts. Closing a message you did not send asks whether to keep it here.</p>}
       <div className="ib-drafts-list" role="list">
         {list.map((draft) => {
           const subject = subjectPreview(draft.body) ?? '(no words yet)';

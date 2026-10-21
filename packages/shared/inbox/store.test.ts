@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { questionKey, type QuestionAnswer } from "@plannotator/core/question-block";
 import { parseInboxQuestionBlocks } from "@plannotator/core/inbox-questions";
-import { INBOX_SECTIONS, inboxRowOffersMarkRead, inboxThreadNameKey, type InboxListRow, type InboxListSection, type InboxSectionId } from "@plannotator/core/inbox-types";
+import { INBOX_SECTIONS, inboxHasUnsent, inboxRowOffersMarkRead, inboxThreadNameKey, type InboxListRow, type InboxListSection, type InboxSectionId } from "@plannotator/core/inbox-types";
 // The sidebar's counts, from the code that computes them.
 import { waitingCount } from "../../inbox/held";
 import { inboxArchivedRows, inboxListSections, inboxRowArchived } from "./list";
@@ -121,6 +121,9 @@ type Op =
   | { op: "deliver"; target: number }
   // 👍 Looks good on a message, or its Undo (POST /api/inbox/messages/:id/ack): silent, and a Mark read.
   | { op: "ack"; target: number; on: boolean }
+  // The person types in the thread's reply box (a reply draft, saved), or empties it (deleted).
+  // Approval "inbox-reply-drafts": a thread holding unsent work never sits in Quiet.
+  | { op: "draft"; target: number; words: boolean }
   // Re-ask (POST /api/inbox/messages/:id/reask): a note asking the session that wrote it for its open questions again.
   | { op: "reask"; target: number; key: string }
   // The Board (approval "inbox-board"): an agent's card call, or the person's move, on a card linked to a thread.
@@ -335,6 +338,12 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
         if (!target) return "noop";
         store.ackMessage(target, op.on);
         return "ok";
+      case "draft": {
+        if (!target) return "noop";
+        const thread = threadOf(target);
+        store.saveReplyDraft(thread, { body: op.words ? "Cards, but keep the totals" : "", base: store.replyDraft(thread)?.updated_at ?? null });
+        return "ok";
+      }
       case "card": {
         const cardIds = cardIdsOf.get(store) ?? [];
         cardIdsOf.set(store, cardIds);
@@ -919,6 +928,8 @@ function stateOpArbOf(body: fc.Arbitrary<string>, agentKeys: boolean): fc.Arbitr
           { arbitrary: fc.record({ op: fc.constant("deliver" as const), target: fc.nat() }), weight: 1 },
           // 👍 Looks good and its Undo, in the property runs only (the trace fixtures were drawn without it).
           { arbitrary: fc.record({ op: fc.constant("ack" as const), target: fc.nat(), on: fc.boolean() }), weight: 2 },
+          // A reply draft saved or emptied, in the property runs only (outside the event log: traces never see it).
+          { arbitrary: fc.record({ op: fc.constant("draft" as const), target: fc.nat(), words: fc.boolean() }), weight: 2 },
           // Re-ask, in the property runs only; "s1" is also a Send's key, so a key used by the other is exercised.
           { arbitrary: fc.record({ op: fc.constant("reask" as const), target: fc.nat(), key: fc.constantFrom("r1", "r2", "s1") }), weight: 2 },
         ]
@@ -986,6 +997,8 @@ interface ModelThread {
   checked: number;
   /** Questions a set-aside note named and no reopened note took back. */
   told: Set<string>;
+  /** Words in the reply box, saved as a reply draft. */
+  draft?: boolean;
 }
 
 const SHW: readonly InboxSectionId[] = ["stopped", "holding", "waiting"];
@@ -1098,10 +1111,16 @@ class ThreadStateModel {
     return t.resolved && !this.back(t);
   }
 
+  /** The person's unsent work: reply-box words, or picks not sent (comments are not modelled). */
+  unsent(t: ModelThread): boolean {
+    return t.draft === true || this.counts(t).picked > 0;
+  }
+
   /** The section, strongest reason first (the doc's table "Sections"). */
   section(t: ModelThread): InboxSectionId {
     if (this.archived(t)) return "quiet";
-    if (this.readHolds(t)) return "quiet";
+    // A thread holding unsent work never sits in Quiet (unless archived): it is in New, unless a Re-ask waits.
+    if (this.readHolds(t)) return this.unsent(t) && !this.reaskPending(t) ? "new" : "quiet";
     // A Re-ask note waits until the session it went to writes again: Sent, whatever is open.
     if (this.reaskPending(t)) return "sent";
     const c = this.counts(t);
@@ -1111,7 +1130,14 @@ class ThreadStateModel {
     const last = [...t.messages].reverse().find((m) => m.note === null)!;
     if (last.author === "person" && t.checked < last.tick) return "sent";
     if (this.unseen(t) > 0) return "new";
-    return "quiet";
+    return this.unsent(t) ? "new" : "quiet";
+  }
+
+  /** Bold: a section that waits on the person, except New held only by the person's own words. */
+  unread(t: ModelThread): boolean {
+    const section = this.section(t);
+    if (section === "new") return this.unseen(t) > 0 || this.counts(t).picked > 0;
+    return SHWN.includes(section);
   }
 
   /**
@@ -1418,6 +1444,9 @@ class ThreadStateModel {
         message.ack = { readTick: thread.read, made: thread.read !== before };
         return "ok";
       }
+      case "draft":
+        thread.draft = op.words;
+        return "ok";
       case "reask": {
         // The store's order: a replayed key, the archive, the person's own message, then what is open.
         if (message.reaskKeys?.has(op.key)) return "replayed";
@@ -1562,6 +1591,9 @@ function checkThreadState(world: StateWorld): void {
       waiting_on_person: row.waiting_on_person,
       messages: row.message_count,
       ack: (row.ack ?? null) !== null,
+      unread: row.unread,
+      draft: (row.unsent?.reply_at ?? null) !== null,
+      picks: row.unsent?.picks ?? 0,
     }).toEqual({
       section: model.section(t),
       archived: model.archived(t),
@@ -1574,7 +1606,12 @@ function checkThreadState(world: StateWorld): void {
       waiting_on_person: model.waitingOnPerson(t),
       messages: t.messages.length,
       ack: model.readHolds(t) && (lastAgent?.ack ?? null) !== null,
+      unread: model.unread(t),
+      draft: t.draft === true,
+      picks: model.unsent(t) ? row.questions.picked : 0,
     });
+    // Unsent work (reply words, picks, comments) never sits in Quiet unless the thread is archived.
+    if (inboxHasUnsent(row.unsent) && !inboxRowArchived(row)) expect(row.section).not.toBe("quiet");
     // ...on where each message landed and on every question's state.
     for (const m of t.messages) {
       expect(store.message(m.id)?.thread_id).toBe(t.id);
@@ -1613,9 +1650,12 @@ function checkThreadState(world: StateWorld): void {
   for (const project of store.listProjects()) {
     expect(waitingCount(views.exclude, project.id)).toBe(rows.filter((r) => r.project.id === project.id && SHW.includes(r.section)).length);
   }
+  // Bold is every row in Stopped, Holding, Waiting and New, except one in New only for the person's own words.
   const unread = rows.filter((r) => r.unread).length;
-  expect(inSections(views.include, SHWN)).toBe(unread);
-  expect(inSections(views.exclude, SHWN)).toBe(unread);
+  const draftOnly = rows.filter((r) => r.section === "new" && !r.unread).length;
+  for (const r of rows) if (r.section === "new" && !r.unread) expect(r.unseen === 0 && !r.answered_not_sent && inboxHasUnsent(r.unsent)).toBe(true);
+  expect(inSections(views.include, SHWN) - draftOnly).toBe(unread);
+  expect(inSections(views.exclude, SHWN) - draftOnly).toBe(unread);
   // Replay determinism: the store read again from disk gives the same rows and threads.
   expect(windowView(InboxStore.open(world.dir))).toEqual(windowView(store));
 }
@@ -1926,7 +1966,9 @@ function batchStep(world: StateWorld, item: Exclude<BatchItem, { kind: "op" }>, 
     // The model decides which threads the batch takes, by its own rules.
     const threads = modelThreadsOf(world, done!.projectId).filter((t) => !world.model.archived(t));
     if (item.action === "read") {
-      const waits = threads.filter((t) => SHWN.includes(world.model.section(t))).map((t) => t.id);
+      // Every bold row: a row in New only for the person's own unsent words waits on nobody (approval "inbox-reply-drafts"),
+      // and a thread whose Mark read still stands (unsent work keeps it in New) is not marked again.
+      const waits = threads.filter((t) => world.model.unread(t) && !world.model.readHolds(t)).map((t) => t.id);
       expect(new Set(done!.read)).toEqual(new Set(waits));
       for (const id of done!.read) modelSingle(world, { op: "read", target: 0, read: true }, id, created, tick);
     } else {

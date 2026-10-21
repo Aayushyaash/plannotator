@@ -128,6 +128,8 @@ const ALLOWLIST: readonly DoorRoute[] = [
   // `reask`: Re-ask, the agent asks its open questions again in one message (7.61).
   { method: "POST", route: /^messages\/([^/]+)\/(picks|reply|resolve|to|ack|send-now|reask)$/, window: (m) => `/api/inbox/messages/${m[1]}/${m[2]}` },
   { method: "POST", route: /^threads\/([^/]+)\/delete$/, window: (m) => `/api/inbox/threads/${m[1]}/delete` },
+  // The thread's reply draft (the words typed on the computer and not sent), read only: contract 7.62.
+  { method: "GET", route: /^threads\/([^/]+)\/draft$/, window: (m) => `/api/inbox/threads/${m[1]}/draft` },
   { method: "GET", route: /^threads\/([^/]+)\/attachments$/, window: (m) => `/api/inbox/threads/${m[1]}/attachments` },
   { method: "GET", route: /^attachments\/([^/]+)\/view$/, window: (m) => `/api/inbox/attachments/${m[1]}/view` },
   // An image's bytes, a video's (by Range) and any kind's download (by Range

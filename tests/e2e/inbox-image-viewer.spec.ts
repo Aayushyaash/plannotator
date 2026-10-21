@@ -355,7 +355,7 @@ test('Send carries the comment on the image in the message, named by its path an
   const page = world.page;
   await pane().getByRole('button', { name: /^Close / }).click();
   const waiting = world.claude.waitForReply(world.threadId, 40);
-  await page.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' }).click();
+  await page.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' }).click();
   await page.getByRole('textbox', { name: /^Reply to / }).fill('One note on B.');
   await page.locator('.ib-pfoot').getByRole('button', { name: 'Send' }).click();
   const reply = await waiting;

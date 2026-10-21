@@ -59,7 +59,7 @@ export type MarkReadPlace = 'open' | 'held' | 'list';
  * pane. What the agent is told is the thread's Read banner's to say.
  */
 export function markReadToast(
-  before: Pick<InboxListRow, 'subject' | 'author' | 'questions'> & { resolved_at?: string | null },
+  before: Pick<InboxListRow, 'subject' | 'author' | 'questions'> & { resolved_at?: string | null; unsent?: InboxListRow['unsent'] },
   place: MarkReadPlace,
 ): MarkReadToast {
   const subject = `“${before.subject ?? '(no subject)'}”`;
@@ -72,6 +72,9 @@ export function markReadToast(
   }
   // A thread that came back from the archive goes back there; any other goes to Quiet.
   const archived = (before.resolved_at ?? null) !== null;
+  // Words typed in the reply box, or comments waiting, keep it out of Quiet (approval "inbox-reply-drafts"; Mark read closes the picks).
+  const kept = !archived && before.unsent != null && (before.unsent.reply_at !== null || before.unsent.comments > 0);
+  if (kept) return { lead: 'Marked read', phoneLead: 'Read', detail: place === 'open' ? 'Your draft keeps it in New' : `${subject} · your draft keeps it in New`, warn: false };
   if (place === 'open') return { lead: 'Marked read', phoneLead: 'Read', detail: archived ? 'Goes back to Archived' : 'Moves to Quiet', warn: false };
   return { lead: archived ? 'Back in Archived' : 'Moved to Quiet', detail: subject, warn: false };
 }
