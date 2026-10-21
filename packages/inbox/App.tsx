@@ -30,6 +30,7 @@ import {
   type UpdateDetails,
   type WhatsNewModel,
 } from './api';
+import { prepareInboxEvents } from './sharedEvents';
 import { addOwnThreads, adoptKeepingOpen, filterSections, heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread, showBroughtIn, waitingCount, type OpenThread } from './held';
 import { hasMovingDelivery } from './rowDelivery';
 import {
@@ -788,6 +789,8 @@ function Inbox() {
     let deliveriesTimer: ReturnType<typeof setTimeout> | null = null;
     let draftsTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
+    // Listen to the tabs' shared stream before the first read, so nothing passed on between the read and the subscription is lost (sharedEvents.ts).
+    prepareInboxEvents();
     void (async () => {
       const first = await refreshList(true);
       void refreshSettings();

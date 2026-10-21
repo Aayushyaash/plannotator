@@ -1007,6 +1007,11 @@ export interface InboxHealth {
   update: InboxUpdate | null;
   /** Whether a notification can reach the person now (additive; absent from an older Inbox). */
   notify_reach?: InboxNotifyReach;
+  /**
+   * Event streams open now, the windows' and the phone door's (additive). The
+   * Inbox tabs of one browser origin share one stream (packages/inbox/sharedEvents.ts).
+   */
+  event_streams?: number;
 }
 
 /** What an Inbox window reports about its browser's notification permission for its own origin. */

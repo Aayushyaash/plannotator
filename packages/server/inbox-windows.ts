@@ -11,6 +11,15 @@
  * stream by `WINDOW_GRACE_MS`, so an EventSource reconnect (or a report that
  * lands before the stream) keeps what the page said.
  *
+ * Tabs share one event stream (packages/inbox/sharedEvents.ts): one tab, the
+ * leader, holds the stream for every Inbox tab of its origin and passes the
+ * events on. A follower holds no stream, so it reports `served_by`, the
+ * leader's window id, and counts as open while that leader's record exists
+ * (its stream is open, or closed less than the grace ago, which covers a
+ * handover). A tab that closes reports `gone` (a beacon at pagehide, or the
+ * leader, which watches each follower's Web Lock and sees a crashed tab
+ * release it): it stops counting at once.
+ *
  * Everything is in memory: a restart forgets the windows, and they report
  * again as their streams reconnect.
  */
@@ -47,6 +56,10 @@ export function parseWindowOrigin(value: unknown): string | null {
 
 interface WindowRecord {
   streams: number;
+  /** The leader whose event stream serves this follower (no stream of its own), or null. */
+  servedBy: string | null;
+  /** The tab said it closed: not counted, kept for the grace (followers it served still count). */
+  gone: boolean;
   permission: InboxWindowPermission;
   origin: string | null;
   via: "local" | "tailnet";
@@ -56,8 +69,14 @@ interface WindowRecord {
 export interface InboxWindows {
   /** An event stream opened for `id`; call the answer when it closes. */
   connect(id: string, report: { permission: InboxWindowPermission | null; origin: string | null; via: "local" | "tailnet" }): () => void;
-  /** The page's report: its permission (and origin) changed. */
-  report(id: string, report: { permission: InboxWindowPermission; origin: string | null; via: "local" | "tailnet" }): void;
+  /**
+   * The page's report: its permission (and origin) changed. `servedBy`: the
+   * leader whose stream this follower tab listens to (absent or null for a
+   * tab with its own stream). A report also takes back an earlier `gone`.
+   */
+  report(id: string, report: { permission: InboxWindowPermission; origin: string | null; via: "local" | "tailnet"; servedBy?: string | null }): void;
+  /** The tab closed (its pagehide beacon, or the leader saw its lock released): it stops counting now. */
+  leave(id: string): void;
   /** What Settings shows: open windows and how many can notify. */
   reach(enabled: boolean): InboxNotifyReach;
   /** Called when `reach` may have changed. */
@@ -77,8 +96,16 @@ export function createInboxWindows(options: { graceMs?: number } = {}): InboxWin
     last = key;
     for (const listener of listeners) listener();
   };
+  /** A window counts while it holds a stream, or while the leader serving it is known (its grace covers a handover). */
+  const isOpen = (w: WindowRecord): boolean => {
+    if (w.gone) return false;
+    if (w.streams > 0) return true;
+    if (!w.servedBy) return false;
+    const leader = windows.get(w.servedBy);
+    return leader !== undefined && leader !== w && (leader.streams > 0 || leader.drop !== null);
+  };
   const summary = () => {
-    const open = [...windows.values()].filter((w) => w.streams > 0);
+    const open = [...windows.values()].filter(isOpen);
     const allowed = open.filter((w) => w.permission === "granted");
     return {
       windows: open.length,
@@ -89,17 +116,22 @@ export function createInboxWindows(options: { graceMs?: number } = {}): InboxWin
   const scheduleDrop = (id: string, record: WindowRecord) => {
     if (record.drop) clearTimeout(record.drop);
     record.drop = setTimeout(() => {
-      if (windows.get(id) === record && record.streams === 0) {
-        windows.delete(id);
-        changed();
+      record.drop = null;
+      if (windows.get(id) !== record || record.streams > 0) return;
+      // A follower still served by a live leader stays (checked again a grace later).
+      if (!record.gone && isOpen(record)) {
+        scheduleDrop(id, record);
+        return;
       }
+      windows.delete(id);
+      changed();
     }, graceMs);
     (record.drop as { unref?: () => void }).unref?.();
   };
   const recordOf = (id: string, via: "local" | "tailnet"): WindowRecord => {
     let record = windows.get(id);
     if (!record) {
-      record = { streams: 0, permission: "unknown", origin: null, via, drop: null };
+      record = { streams: 0, servedBy: null, gone: false, permission: "unknown", origin: null, via, drop: null };
       windows.set(id, record);
     }
     return record;
@@ -113,6 +145,7 @@ export function createInboxWindows(options: { graceMs?: number } = {}): InboxWin
       if (record.permission === "unknown" && report.permission) record.permission = report.permission;
       if (record.origin === null && report.origin) record.origin = report.origin;
       record.via = report.via;
+      record.gone = false;
       record.streams += 1;
       if (record.drop) {
         clearTimeout(record.drop);
@@ -133,7 +166,18 @@ export function createInboxWindows(options: { graceMs?: number } = {}): InboxWin
       record.permission = report.permission;
       if (report.origin) record.origin = report.origin;
       record.via = report.via;
-      // A report before the stream (or after it closed) is kept for the grace only.
+      record.gone = false;
+      record.servedBy = report.servedBy && report.servedBy !== id ? report.servedBy : null;
+      // A report before the stream (or after it closed) is kept for the grace only
+      // (a follower's, for as long as its leader is known: see scheduleDrop).
+      if (record.streams === 0) scheduleDrop(id, record);
+      changed();
+    },
+    leave(id) {
+      const record = windows.get(id);
+      if (!record || record.gone) return;
+      record.gone = true;
+      // Kept for the grace, so followers it served still count until they report their new leader.
       if (record.streams === 0) scheduleDrop(id, record);
       changed();
     },
