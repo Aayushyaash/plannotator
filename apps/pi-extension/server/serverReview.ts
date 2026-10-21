@@ -15,7 +15,7 @@ import { handleHostControl, resolveHostControlToken, type HostControl } from "./
 import { createRequestHostGuard } from "./request-host-guard.ts";
 import { refuseCrossOriginWrite } from "./request-origin-guard.ts";
 import { createReviewDraftSession, prDraftTargetKey, type ReviewDraftKeys } from "../generated/review-draft.ts";
-import { agentToolSaveFailed, loadConfig, saveConfig, detectGitUser, getServerConfig, parseReviewAnalysisConfig, resolveAIEnabled, resolveSharingEnabled, resolveClaudeSandbox, resolveCursorSandbox, resolveFeedbackHistory, resolveGuideHistory, resolveGuideShareUrl, resolveGitRemoteCheck, resolveReviewProgress } from "../generated/config.ts";
+import { agentSwitchConfigToSave, agentToolSaveFailed, loadConfig, saveConfig, detectGitUser, getServerConfig, parseReviewAnalysisConfig, resolveAIEnabled, resolveSharingEnabled, resolveClaudeSandbox, resolveCursorSandbox, resolveFeedbackHistory, resolveGuideHistory, resolveGuideShareUrl, resolveGitRemoteCheck, resolveReviewProgress } from "../generated/config.ts";
 import { currentPiHost } from "../pi-host.ts";
 import { appendFeedbackRecord, countChangedFiles, deriveFeedbackProject, type FeedbackDecision, type FeedbackReviewTarget } from "../generated/feedback-archive.ts";
 import { isFaviconStyle, type FaviconStyle } from "../generated/favicon.ts";
@@ -3637,8 +3637,12 @@ export async function startReviewServer(options: {
 				return;
 			}
 			try {
-				const body = (await parseBody(req)) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; updateCheck?: unknown; agentTool?: unknown; reviewAnalysis?: Record<string, unknown>; conventionalComments?: boolean };
+				const body = (await parseBody(req)) as { agentSwitch?: unknown; displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; updateCheck?: unknown; agentTool?: unknown; reviewAnalysis?: Record<string, unknown>; conventionalComments?: boolean };
 				const toSave: Record<string, unknown> = {};
+				// OpenCode's agent switch (#1390): a known shape or nothing is saved.
+				const agentSwitch = agentSwitchConfigToSave(body);
+				if (agentSwitch === null) return json(res, { error: "Invalid agentSwitch" }, 400);
+				if (agentSwitch !== undefined) toSave.agentSwitch = agentSwitch;
 				if (body.displayName !== undefined) toSave.displayName = body.displayName;
 				if (body.diffOptions !== undefined) toSave.diffOptions = body.diffOptions;
 				if (body.theme !== undefined) toSave.theme = body.theme;

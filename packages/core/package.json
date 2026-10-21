@@ -1,6 +1,6 @@
 {
   "name": "@plannotator/core",
-  "version": "0.25.13",
+  "version": "0.25.14",
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
@@ -16,6 +16,7 @@
     "./annotatable": "./annotatable.ts",
     "./annotation-threads": "./annotation-threads.ts",
     "./agent-jobs": "./agent-jobs.ts",
+    "./agent-switch": "./agent-switch.ts",
     "./agent-terminal": "./agent-terminal.ts",
     "./browser-paths": "./browser-paths.ts",
     "./code-file": "./code-file.ts",

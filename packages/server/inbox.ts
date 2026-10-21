@@ -84,6 +84,7 @@ import {
 import { getPlannotatorDataDir } from "@plannotator/shared/data-dir";
 import { normalizeStableVersion, readUpdateState } from "@plannotator/shared/update-check";
 import { isLoopbackHostHeader } from "@plannotator/shared/loopback-host";
+import { prepareAppHtml, prewarmAppHtml } from "@plannotator/shared/app-html";
 import type { InboxSearchIndex, InboxSearchIndexOptions } from "@plannotator/shared/inbox/search";
 import { createInboxSearchRoutes } from "./inbox-search";
 import { inboxSkillsRoute } from "./inbox-skills";
@@ -448,6 +449,57 @@ const WINDOW_CSP = [
 /** `/` before the window is built (a source run, the server tests). */
 const NOT_BUILT_PAGE =
   '<!doctype html><meta charset="utf-8"><title>Plannotator Inbox</title><p data-inbox-not-built>The Inbox window is not built: run <code>bun run build:hook</code>.</p>';
+
+/** The window page's security headers, on every answer for `/`. */
+const WINDOW_PAGE_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "no-referrer",
+  "Content-Security-Policy": WINDOW_CSP,
+} as const;
+
+/** One tag per page body, computed once (the page is ~22 MB; it changes only with the binary). */
+let windowPageTag: { page: string; etag: string } | null = null;
+function windowPageEtag(page: string): string {
+  if (windowPageTag?.page !== page) windowPageTag = { page, etag: `W/"${Bun.hash(page).toString(36)}"` };
+  return windowPageTag.etag;
+}
+
+function etagMatches(header: string | null, etag: string): boolean {
+  if (!header) return false;
+  const bare = etag.replace(/^W\//, "");
+  return header.split(",").some((tag) => {
+    const t = tag.trim();
+    return t === "*" || t.replace(/^W\//, "") === bare;
+  });
+}
+
+/**
+ * `/` through the tailnet listener (#2032): the page compressed as remote-mode
+ * and `--tailscale` sessions serve theirs (#1617, `packages/shared/app-html.ts`),
+ * brotli in practice since serve is HTTPS. The window's own loopback port keeps
+ * the uncompressed `no-store` answer: on loopback the transfer is free and the
+ * one-time compression pass only delays the first load.
+ *
+ * Cache: `private, no-cache` with a weak ETag, not `no-store`. The page is the
+ * same bytes until a restart to update swaps the binary, and a phone on cellular
+ * opens it many times a day, so a revalidation that answers 304 saves the ~5 MB
+ * body; `no-cache` still asks every time, so a new build is never missed. The tag
+ * is weak because the br, gzip and identity bodies are one page (one tag fits all
+ * three under `Vary: Accept-Encoding`). The data routes stay `no-store`.
+ * The listener's checks (owner login, served Host, Sec-Fetch-Site) ran before this.
+ */
+async function tailnetWindowPage(req: Request, page: string): Promise<Response> {
+  const etag = windowPageEtag(page);
+  const cacheHeaders = { "Cache-Control": "private, no-cache", ETag: etag, Vary: "Accept-Encoding" };
+  if (etagMatches(req.headers.get("if-none-match"), etag)) {
+    return new Response(null, { status: 304, headers: { ...WINDOW_PAGE_HEADERS, ...cacheHeaders } });
+  }
+  const prepared = await prepareAppHtml(page, req.headers.get("accept-encoding"), true);
+  const headers = { ...prepared.headers, ...WINDOW_PAGE_HEADERS, ...cacheHeaders, "Content-Type": "text/html; charset=utf-8" };
+  // A Buffer is a valid fetch body; the lib types lag.
+  return new Response(req.method === "HEAD" ? null : (prepared.body as BodyInit), { headers });
+}
 
 function errorResponse(error: unknown): Response {
   if (error instanceof InboxError) {
@@ -2242,15 +2294,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         const canonical = inboxCanonicalRedirect(req, url, port, via);
         if (canonical) return canonical;
         const page = options.htmlContent ?? NOT_BUILT_PAGE;
+        if (via === "tailnet") return tailnetWindowPage(req, page);
         return new Response(req.method === "HEAD" ? null : page, {
-          headers: {
-            "Content-Type": "text/html; charset=utf-8",
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-            "X-Frame-Options": "DENY",
-            "Referrer-Policy": "no-referrer",
-            "Content-Security-Policy": WINDOW_CSP,
-          },
+          headers: { ...WINDOW_PAGE_HEADERS, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
         });
       }
       if (path === "/favicon.png" && req.method === "GET") return handleFavicon();
@@ -2331,6 +2377,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     port: () => port,
     registry: () => registry,
     dispatch: (req) => handle(req, "tailnet"),
+    // Compress the page for the tailnet before the first phone asks (#2032).
+    onListen: () => prewarmAppHtml(options.htmlContent ?? NOT_BUILT_PAGE, "br"),
     tailscale: options.tailscale,
     flag: options.publishTailnet === true,
     maxRequestBodySize: INBOX_MAX_REQUEST_BYTES,

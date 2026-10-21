@@ -29,9 +29,11 @@ import {
   openedText,
   parseReadyFile,
   pickerFile,
+  planApprovalPathOf,
   privateDirArgv,
   pruneArgv,
   RECENT_MESSAGES_SUBJECT,
+  removeFileArgv,
   recentAssistantTexts,
   SETTLED_BY,
   SETTLED_DIR,
@@ -48,6 +50,7 @@ import {
   isTrustablePlanPath,
   MAX_PLAN_FILE_BYTES,
   normalizePlanForHash,
+  planApprovalRecord,
   planCallAction,
   planWaitingStatus,
   revisedDenyText,
@@ -1117,6 +1120,7 @@ export class PlannotatorMod {
       this.passing.set(input.tool_use_id, action.approval)
       this.approval = null
       await this.persistApproval()
+      await this.recordPassingApproval(input.tool_use_id, action.approval)
       return { pass: true }
     }
 
@@ -1208,8 +1212,33 @@ export class PlannotatorMod {
   }
 
   /** The approved ExitPlanMode call finished (allowed or not). */
-  onPlanCallSettled(toolUseId: string): void {
+  async onPlanCallSettled(toolUseId: string): Promise<void> {
     this.passing.delete(toolUseId)
+    // Its record for the classic hook goes with it: answered or not, the call is over.
+    const { path } = planApprovalPathOf(this.session.dataDir, this.session.sessionId, toolUseId)
+    await this.host.run(removeFileArgv(path), { timeoutMs: 5_000 }).catch(() => undefined)
+  }
+
+  /**
+   * The approved call, recorded for the plugin's own PermissionRequest command
+   * hook while it is in flight (plan.ts `PLAN_APPROVALS_DIR`, #2007). Where an
+   * organization's guard plugin sends `classic.PermissionRequest` past this
+   * mod, that hook answers the call with this approval instead of opening a
+   * second review. Elsewhere this mod answers first and the record is only
+   * removed. A record that cannot be written leaves the call as it was.
+   */
+  private async recordPassingApproval(toolUseId: string, approval: PendingApproval): Promise<void> {
+    try {
+      const { dir, path } = planApprovalPathOf(this.session.dataDir, this.session.sessionId, toolUseId)
+      const made = await this.host.run(privateDirArgv(dir), { timeoutMs: 5_000 })
+      if (made.exitCode !== 0) {
+        this.host.debug(`plan approval record: could not make ${dir} (exit ${made.exitCode})`)
+        return
+      }
+      await this.host.writeFile(path, JSON.stringify(planApprovalRecord(approval, await this.host.now())))
+    } catch (error) {
+      this.host.debug(`plan approval record not written: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   // --- Watching and delivery -------------------------------------------------
