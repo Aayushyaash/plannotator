@@ -282,7 +282,7 @@ export function agentAnswer(answer: QuestionAnswer | null | undefined): AgentAns
  */
 export function answerWords(answer: AgentAnswer | undefined): string {
   if (!answer) return "";
-  if (answer.skipped) return answer.by_reply ? "skipped (not answered in the reply)" : "skipped";
+  if (answer.skipped) return answer.by_reply ? "skipped by the person" : "skipped";
   const parts = (answer.selected ?? []).map((label) => JSON.stringify(label));
   if (answer.other) parts.push(`Other: ${JSON.stringify(answer.other)}`);
   if (answer.text) parts.push(JSON.stringify(answer.text));
@@ -337,10 +337,30 @@ export function questionWords(q: AgentQuestionRef, withPrompt = false, withAnswe
  * exactly (then nothing is cut).
  */
 function answersSectionEnd(lines: readonly string[], at: number): number | null {
-  if (lines[at + 1] !== "" || !/^\d+ of \d+ questions? answered\./.test(lines[at + 2] ?? "") || lines[at + 3] !== "") return null;
-  let i = at + 4;
+  if (lines[at + 1] !== "") return null;
+  // One reply for one session (approval "inbox-explicit-skip"): a sub-section per message,
+  // `### Your message <id>`, each with the same grammar one level down.
+  if (/^### Your message msg_[A-Za-z0-9]+$/.test(lines[at + 2] ?? "")) {
+    let i = at + 2;
+    let groups = 0;
+    while (i < lines.length && /^### Your message msg_[A-Za-z0-9]+$/.test(lines[i]!)) {
+      if (lines[i + 1] !== "") return null;
+      const end = answerBlocksEnd(lines, i + 2, "####");
+      if (end === null) return null;
+      i = end;
+      groups += 1;
+    }
+    return groups > 0 ? i : null;
+  }
+  return answerBlocksEnd(lines, at + 2, "###");
+}
+
+/** The "N of M questions answered." line at `from`, a blank line, then `<h> …` blocks of answer lines; the index after them. */
+function answerBlocksEnd(lines: readonly string[], from: number, h: "###" | "####"): number | null {
+  if (!/^\d+ of \d+ questions? answered\./.test(lines[from] ?? "") || lines[from + 1] !== "") return null;
+  let i = from + 2;
   let blocks = 0;
-  while (i < lines.length && lines[i]!.startsWith("### ")) {
+  while (i < lines.length && lines[i]!.startsWith(`${h} `)) {
     i += 1;
     let body = 0;
     while (i < lines.length && lines[i] !== "") {
@@ -348,7 +368,7 @@ function answersSectionEnd(lines: readonly string[], at: number): number | null 
       i += 1;
       body += 1;
     }
-    if (body === 0 && !/^### Unanswered$/.test(lines[i - 1] ?? "")) return null;
+    if (body === 0 && lines[i - 1] !== `${h} Unanswered`) return null;
     blocks += 1;
     // The block's closing blank line; the section ends at the end of the text.
     if (i < lines.length) i += 1;

@@ -274,8 +274,8 @@ test.skipIf(!hasDom)('picks made while the reply box is open save, and the box l
   await settle();
   expect(answerRows(el)[0]).toBe('Q1 Which layout should the invoice list use? A dense table');
   expect(textarea(el).value).toBe('Cards because the list is short.');
-  // Keep the last two open, then Send: the words once, every answer once.
-  act(() => (el.querySelector('[data-skip-toggle]') as HTMLButtonElement).click());
+  // The last two stay open by default (approval "inbox-explicit-skip"), then Send: the words once, every answer once.
+  expect(el.querySelector('[data-skip-chip]')?.getAttribute('data-skip-chip')).toBe('keep');
   await until(async () => (await serverQuestions(message))[0]!.answer?.selected?.[0] === 'A dense table', 'the changed pick saved');
   const sends = [...el.querySelectorAll('.ib-rbox ~ .ib-acts button, .ib-acts button')].filter((b) => b.textContent?.trim() === 'Send');
   act(() => (sends.at(-1) as HTMLButtonElement).click());

@@ -2237,12 +2237,14 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
                 idempotency_key: body.idempotency_key as string,
                 feedback: typeof body.feedback === "string" ? body.feedback : undefined,
                 annotation_ids: body.annotation_ids as never,
-                skip_unanswered: body.skip_unanswered === true,
+                // The questions the person chose to skip ("Skip them"): only these. The old
+                // `skip_unanswered` flag is ignored (approval "inbox-explicit-skip", 2026-10-21).
+                skip: body.skip,
               });
             } catch (error) {
               removeInboxAttachmentFiles(store.dir, attachments);
-              // A skip-only target whose questions closed meanwhile: a no-op, so
-              // the rest of a multi-message Send still goes.
+              // A skip-only Send whose questions closed meanwhile: a no-op, so
+              // the rest of a Send to several sessions still goes.
               if (error instanceof InboxError && error.code === "nothing_to_send") {
                 return json({ message_id: messageId, questions: store.questionsOf(messageId), reply: null, replayed: false, nothing_to_send: true });
               }
