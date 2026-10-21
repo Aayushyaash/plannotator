@@ -385,7 +385,13 @@ export class InboxSearchIndex {
 
   private listen(): void {
     if (this.unsubscribe) return;
-    this.unsubscribe = this.store.subscribe((line) => this.noteLine(line));
+    const lines = this.store.subscribe((line) => this.noteLine(line));
+    // A reply draft writes no line but moves its thread's section (the status filter reads it).
+    const drafts = this.store.onReplyDraftChange((threadId) => this.facts.delete(threadId));
+    this.unsubscribe = () => {
+      lines();
+      drafts();
+    };
   }
 
   /** A store line marks what it touches; the next search (or a short timer) re-indexes it. */
@@ -406,6 +412,9 @@ export class InboxSearchIndex {
         break;
       }
       case "annotation":
+        // Not indexed, but a comment waiting for a Send moves its thread's section (`unsent`).
+        this.facts.delete(line.record.thread_id);
+        return;
       case "card":
         return;
     }

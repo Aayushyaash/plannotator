@@ -147,8 +147,8 @@ test('the person picks on question 1 and starts a reply', async () => {
   const pane = page.locator('section.ib-pane');
   await expect(pane.getByRole('heading', { name: 'Which way should the worker go on a Stripe 409?' })).toBeVisible();
   await pane.getByText(PICK, { exact: true }).click();
-  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M, not sent$/)).toBeVisible();
-  await page.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' }).click();
+  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M · in your draft$/)).toBeVisible();
+  await page.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' }).click();
   await page.getByRole('textbox', { name: 'Reply to Claude Code' }).fill(WORDS);
   await expect(page.locator('[data-picks-chip]')).toHaveText('1 pick');
   await shot('1-picked-and-typing');

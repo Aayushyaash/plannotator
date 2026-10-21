@@ -18,6 +18,8 @@ import type {
   InboxThread,
   InboxComposeProject,
   InboxDraft,
+  InboxReplyDraft,
+  InboxReplyDraftRow,
   InboxDraftStatus,
   InboxUpload,
 } from '@plannotator/core/inbox-types';
@@ -392,6 +394,11 @@ export function setPageSession(value: string): void {
   if (pageSession === null) pageSession = value;
 }
 
+/** The page's serverSession (null before the first list read), for a keepalive request built by hand. */
+export function pageServerSession(): string | null {
+  return pageSession;
+}
+
 async function post<T>(path: string, body: Record<string, unknown>): Promise<T> {
   return readJson<T>(
     await fetch(path, {
@@ -573,6 +580,11 @@ export const inboxApi = {
       uploads?: string[];
       /** The sessions the person tagged with `@` (approval "inbox-tag-agents"): each one gets this reply too. */
       tags?: { host?: string | null; session: string; label?: string }[];
+      /**
+       * This reply carries the reply box's words: their draft goes (approval "inbox-reply-drafts"),
+       * named by the `updated_at` they were saved as, so a newer draft from another window stays.
+       */
+      clear_draft?: string;
     },
   ) => post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reply`, input),
   /**
@@ -665,7 +677,18 @@ export const inboxApi = {
     post<{ thread_id: string; message: InboxMessage; project?: { id: string; name: string; root: string }; replayed: boolean }>('/api/inbox/messages', { ...input }),
   readdress: (messageId: string, to: { host: string; session: string }) =>
     post<{ message: InboxMessage; row: InboxListRow | null }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/to`, { to }),
-  drafts: () => get<{ serverSession: string; drafts: DraftView[] }>('/api/inbox/drafts'),
+  /** `replies` (additive): open threads holding unsent work; an older Inbox sends none. */
+  drafts: () => get<{ serverSession: string; drafts: DraftView[]; replies?: InboxReplyDraftRow[] }>('/api/inbox/drafts'),
+  // Reply drafts (approval "inbox-reply-drafts"): the reply box's words per thread.
+  replyDraft: (threadId: string) => get<{ draft: InboxReplyDraft | null }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/draft`),
+  /** Save (compare-and-set on `base`, the `updated_at` last read; null to create); an empty body deletes it. */
+  saveReplyDraft: (threadId: string, body: string, base: string | null, baseBody: string | null = null) =>
+    post<{ draft: InboxReplyDraft | null }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/draft`, {
+      body,
+      base,
+      ...(baseBody !== null ? { base_body: baseBody } : {}),
+    }),
+  discardReplyDraft: (threadId: string) => post<{ ok: true; deleted: boolean }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/draft/delete`, {}),
   saveDraft: (id: string, input: { body: string; to: InboxDraft['to']; project: InboxDraft['project']; files: string[]; base: string | null; thread_name?: string }) =>
     post<{ draft: DraftView }>(`/api/inbox/drafts/${encodeURIComponent(id)}`, { ...input }),
   deleteDraft: (id: string) => post<{ ok: true; deleted: boolean }>(`/api/inbox/drafts/${encodeURIComponent(id)}/delete`, {}),
@@ -780,6 +803,8 @@ export function subscribeInboxEvents(
      * since, a restarted Inbox that forgot the window): report again here.
      */
     onConnect?: () => void;
+    /** A reply draft was saved or discarded (`event: drafts`, approval "inbox-reply-drafts"); never called by an older Inbox. */
+    onDrafts?: (threadId: string) => void;
   },
   /** This window, so the server counts it (and what its browser allows) while the stream is open. */
   win?: { id: string; permission: InboxWindowPermission; origin: string },
@@ -795,6 +820,14 @@ export function subscribeInboxEvents(
   source.addEventListener('reach', (event) => {
     try {
       handlers.onReach?.(JSON.parse((event as MessageEvent<string>).data) as InboxNotifyReach);
+    } catch {
+      // A malformed frame changes nothing.
+    }
+  });
+  source.addEventListener('drafts', (event) => {
+    try {
+      const data = JSON.parse((event as MessageEvent<string>).data) as { thread_id?: unknown };
+      if (typeof data.thread_id === 'string') handlers.onDrafts?.(data.thread_id);
     } catch {
       // A malformed frame changes nothing.
     }

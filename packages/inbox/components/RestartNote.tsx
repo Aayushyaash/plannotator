@@ -1,18 +1,17 @@
 /**
- * Telling the person when an agent session needs a restart after an update
- * (owner approval "restart-warning", 2026-10-19; design record not in this
- * repo). Two pieces:
- *  - `RestartLine`: under the person's reply, when the session it goes to is
- *    working and has no Send now because it runs an older plugin ("Steps"):
- *    the reason, then "How to reload" folded open on click: type
- *    `/reload-plugins` in that Claude Code, which loads the new plugin and
- *    keeps the session (amendment 2, 2026-10-20: the owner checked it live);
- *    only if the note is still there after that, `/exit` (which stops the
- *    turn it is working on) and a copyable `cd <folder> && claude --resume
- *    <id>`; and that the reply waits here.
- *  - `CopyCommand`: the Copy button both places use. A copy says so in a
- *    polite live region ("Restart command copied.").
- * No keyboard shortcut. Real buttons with names; the disclosure uses
+ * Telling the person when a Claude Code session needs `/reload-plugins` after
+ * an update (owner approval "restart-warning", 2026-10-19, simplified
+ * 2026-10-21: the obvious path leads, alone). Pieces:
+ *  - `ReloadLead`: one large sentence, "Type /reload-plugins in …", with a
+ *    Copy that copies `/reload-plugins`. When the installed plugin is itself
+ *    behind this Inbox, two steps instead: the update command with Copy, then
+ *    `/reload-plugins`.
+ *  - `Fold`: the manual path, folded by default behind one question.
+ *  - `RestartLine`: under the person's reply when the session it goes to has
+ *    no Send now because it runs an older plugin. The lead, then "Still no
+ *    Send now after reloading?" opening `/exit` and the resume command.
+ *  - `CopyCommand`: every Copy button. A copy says so in a polite live region.
+ * No keyboard shortcut. Real buttons with names; the fold uses
  * aria-expanded / aria-controls.
  */
 
@@ -25,6 +24,8 @@ import { Icon } from '../icons';
 export const RESTART_COPIED_MS = 2000;
 export const RESTART_COPIED_ANNOUNCEMENT = 'Restart command copied.';
 export const UPDATE_COPIED_ANNOUNCEMENT = 'Update command copied.';
+export const RELOAD_COMMAND = '/reload-plugins';
+export const RELOAD_COPIED_ANNOUNCEMENT = '/reload-plugins copied.';
 
 /** Copy a command, with a short "Copied" and one polite announcement. */
 export function CopyCommand({ text, label, short = 'Copy', announcement = RESTART_COPIED_ANNOUNCEMENT }: { text: string; label: string; short?: string; announcement?: string }) {
@@ -61,7 +62,7 @@ export function CopyCommand({ text, label, short = 'Copy', announcement = RESTAR
 }
 
 /** A command on its own line, with Copy. */
-function CommandLine({ text, label, announcement }: { text: string; label: string; announcement?: string }) {
+export function CommandLine({ text, label, announcement }: { text: string; label: string; announcement?: string }) {
   return (
     <div className="ib-rw-cmd">
       <code>{text}</code>
@@ -70,58 +71,84 @@ function CommandLine({ text, label, announcement }: { text: string; label: strin
   );
 }
 
-/** The note's text with `/reload-plugins` drawn as code, as the steps draw it (and never broken mid-word). */
-function withCommandCode(text: string): ReactNode {
-  const parts = text.split('/reload-plugins');
-  return parts.flatMap((part, i) => (i === 0 ? [part] : [<code key={i}>/reload-plugins</code>, part]));
+/** Copy `/reload-plugins`. */
+function ReloadCopy() {
+  return <CopyCommand text={RELOAD_COMMAND} label="Copy /reload-plugins" announcement={RELOAD_COPIED_ANNOUNCEMENT} />;
 }
 
-/** The line under the reply: why there is no Send now, and how to bring it back. */
-export function RestartLine({ note, name }: { note: RestartNote; name: string }) {
+/**
+ * The one thing to do, large and alone: "Type /reload-plugins {where}." with
+ * Copy. With `updateCommand` (the installed plugin is behind this Inbox), two
+ * numbered steps: the update command, then `/reload-plugins`.
+ */
+export function ReloadLead({ where, updateCommand }: { where: string; updateCommand?: string | null }) {
+  if (updateCommand) {
+    return (
+      <ol className="ib-rl-lead ib-rl-two" data-reload-lead="update_plugin">
+        <li>
+          <span>Update the plugin:</span>
+          <CommandLine text={updateCommand} label="Copy the command that updates Plannotator's Claude Code plugin" announcement={UPDATE_COPIED_ANNOUNCEMENT} />
+        </li>
+        <li>
+          <div className="ib-rl-line">
+            <span>
+              Then type <code>{RELOAD_COMMAND}</code> {where}.
+            </span>
+            <ReloadCopy />
+          </div>
+        </li>
+      </ol>
+    );
+  }
+  return (
+    <p className="ib-rl-lead ib-rl-line" data-reload-lead="restart">
+      <span>
+        Type <code>{RELOAD_COMMAND}</code> {where}.
+      </span>
+      <ReloadCopy />
+    </p>
+  );
+}
+
+/** The manual path, folded by default behind one question. */
+export function Fold({ question, children }: { question: string; children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const id = useId();
-  const stepsId = `${id}-steps`;
+  return (
+    <div className="ib-rl-fold">
+      <button type="button" className="ib-rw-lnk" aria-expanded={open} aria-controls={id} data-restart-toggle="" onClick={() => setOpen((was) => !was)}>
+        <span>{question}</span>
+        <Icon name="chevD" className="ib-rw-chev" />
+      </button>
+      <div className="ib-rw-steps" id={id} hidden={!open} data-restart-steps="">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** Under the reply: what brings Send now back, then the manual path, folded. */
+export function RestartLine({ note, name }: { note: RestartNote; name: string }) {
   const updating = note.fix === 'update_plugin';
   return (
-    <>
-      <span className="ib-rw-note" data-restart-note={note.fix}>
-        <Icon name="refresh" />
-        <span>
-          {withCommandCode(note.text)}
-          <button type="button" className="ib-rw-lnk" aria-expanded={open} aria-controls={stepsId} data-restart-toggle="" onClick={() => setOpen((was) => !was)}>
-            <span>{open ? 'Hide steps' : updating ? 'How to update' : 'How to reload'}</span>
-            <Icon name="chevD" className="ib-rw-chev" />
-          </button>
-        </span>
-      </span>
-      <div className="ib-rw-steps" id={stepsId} hidden={!open} data-restart-steps="">
-        <ol>
-          {updating && note.updateCommand && (
-            <li>
-              Update the plugin, in any terminal:
-              <CommandLine text={note.updateCommand} label="Copy the command that updates Plannotator's Claude Code plugin" announcement={UPDATE_COPIED_ANNOUNCEMENT} />
-            </li>
-          )}
-          <li data-restart-reload="">
-            Type <code>/reload-plugins</code> in that {name}. It loads the new plugin and keeps the session; nothing is interrupted.
-          </li>
-        </ol>
-        {/* The fallback, only if the reload did not clear the note: exit and resume the same session. */}
-        <div className="ib-rw-fallback" data-restart-fallback="">
+    <div className="ib-rw-note" data-restart-note={note.fix}>
+      <ReloadLead where={`in that ${name} to get Send now`} updateCommand={updating ? note.updateCommand : null} />
+      <Fold question="Still no Send now after reloading?">
+        <div data-restart-fallback="">
           {note.command ? (
             <>
-              If this note is still here after that, type <code>/exit</code> in that {name}, then run:
+              Type <code>/exit</code> in that {name}, then run:
               <CommandLine text={note.command} label={`Copy the command that restarts this ${name} session`} />
             </>
           ) : (
             <>
-              If this note is still here after that, type <code>/exit</code> in that {name}, then run <code>claude --resume</code> in its folder and pick the session.
+              Type <code>/exit</code> in that {name}, then run <code>claude --resume</code> in its folder and pick the session.
             </>
           )}
-          <p className="ib-rw-warn">Exiting stops the turn it is working on; to keep it, wait until it finishes.</p>
+          <p className="ib-rw-warn">/exit stops the turn it is working on.</p>
         </div>
-        <p className="ib-rw-after">Your reply waits here until then.</p>
-      </div>
-    </>
+        <p className="ib-rw-after">Your reply waits here.</p>
+      </Fold>
+    </div>
   );
 }

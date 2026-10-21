@@ -18,7 +18,7 @@ import { configurePlannotatorUI } from '@plannotator/ui/configure';
 import { selectionToolbarShowing } from './selectionToolbar';
 import { storage } from '@plannotator/ui/utils/storage';
 import type { SkillCatalogEntry } from '@plannotator/ui/utils/skillReferences';
-import type { InboxHealth, InboxListRow, InboxListSection, InboxQuestion, InboxThread } from '@plannotator/core/inbox-types';
+import type { InboxHealth, InboxListRow, InboxListSection, InboxQuestion, InboxReplyDraftRow, InboxThread } from '@plannotator/core/inbox-types';
 import {
   InboxApiError,
   inboxApi,
@@ -70,7 +70,7 @@ import { useInboxSound } from './sound';
 import { notificationLine, SoundIntroDialog } from './components/SoundIntro';
 import { GuidePane } from './components/GuidePane';
 import { AboutBlock, FailedDialog, RestartDialog, UpdateDialog, WhatsNewPage } from './components/Updates';
-import { unsentReply } from './unsent';
+import { leaveOnPurpose, unsentReply } from './unsent';
 import { InboxToast, type InboxToastModel, toastSpeech } from './components/Toast';
 import { canToggleRead, MARK_READ_UNDO_MS, markReadToast } from './markRead';
 import { threadLink, type RowMenuAction } from './rowMenu';
@@ -452,6 +452,10 @@ function Inbox() {
   /** Where focus goes once compose closes or a draft row goes: the opener, else `focusFallback(next)`. */
   const pendingFocus = useRef<{ opener: HTMLElement | null; next: string | null } | null>(null);
   const [drafts, setDrafts] = useState<DraftView[] | null>(null);
+  /** Open threads holding unsent work (approval "inbox-reply-drafts"): the Drafts row counts them, its page lists them. */
+  const [replyDrafts, setReplyDrafts] = useState<InboxReplyDraftRow[]>([]);
+  /** Raised when the open thread's reply draft changed (`event: drafts`): the thread reads it again. */
+  const [draftChanged, setDraftChanged] = useState(0);
   const [draftsError, setDraftsError] = useState<string | null>(null);
   const [lastSent, setLastSent] = useState<string | null>(() => storage.getItem(COMPOSE_LAST_COOKIE));
   /** The one toast (Mark read, Archive) with its Undo, and what the live region last said. */
@@ -710,6 +714,7 @@ function Inbox() {
     try {
       const next = await inboxApi.drafts();
       setDrafts(next.drafts);
+      setReplyDrafts(next.replies ?? []);
       setDraftsError(null);
     } catch (cause) {
       setDraftsError(cause instanceof Error ? cause.message : String(cause));
@@ -779,6 +784,7 @@ function Inbox() {
     let unsubscribe = () => {};
     let timer: ReturnType<typeof setTimeout> | null = null;
     let deliveriesTimer: ReturnType<typeof setTimeout> | null = null;
+    let draftsTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
     void (async () => {
       const first = await refreshList(true);
@@ -794,6 +800,19 @@ function Inbox() {
             void refreshList(false).then((next) => next && flushNotifications(next));
             const open = routeRef.current.thread;
             if (open) void refreshThread(open);
+            // Picks and comments are unsent work too: the Drafts row follows them.
+            void refreshDrafts();
+          }, 80);
+        },
+        // A reply draft was saved or discarded (here or in another window): the rows' `unsent` and the Drafts row.
+        // Its own timer: sharing the record timer let a draft save cancel a record's pending reads (the open thread's).
+        onDrafts: (threadId) => {
+          // The open thread's own copy of its draft follows at once (the foot's Send carries those words).
+          if (threadId === routeRef.current.thread) setDraftChanged((n) => n + 1);
+          if (draftsTimer) clearTimeout(draftsTimer);
+          draftsTimer = setTimeout(() => {
+            void refreshList(false);
+            void refreshDrafts();
           }, 80);
         },
         onStatus: (next, nextUpdated, nextRestart) => {
@@ -819,8 +838,9 @@ function Inbox() {
       unsubscribe();
       if (timer) clearTimeout(timer);
       if (deliveriesTimer) clearTimeout(deliveriesTimer);
+      if (draftsTimer) clearTimeout(draftsTimer);
     };
-  }, [refreshList, refreshSettings, refreshThread, observeEvent, flushNotifications, setNotifyReach, windowReport, reportWindow]);
+  }, [refreshList, refreshSettings, refreshThread, refreshDrafts, observeEvent, flushNotifications, setNotifyReach, windowReport, reportWindow]);
 
   // Opening a thread: read it, record the look, and update its row in place.
   // While any thread is open the list holds still (settle.ts): the look
@@ -1650,6 +1670,8 @@ function Inbox() {
       try {
         const health = await inboxApi.health();
         if (health.serverSession !== before) {
+          // The person already chose to restart (asked first when a reply would be lost): no second question.
+          leaveOnPurpose();
           window.location.reload();
           return;
         }
@@ -2103,6 +2125,8 @@ function Inbox() {
   } else if (route.page === 'drafts') {
     main = (
       <DraftsPage
+        replies={replyDrafts}
+        onOpenReply={(row) => go({ page: 'inbox', project: null, thread: row.thread_id })}
         drafts={drafts}
         error={draftsError}
         phone={phone}
@@ -2190,6 +2214,7 @@ function Inbox() {
             onAck={(messageId, on, agent) => void acknowledge(thread.thread_id, messageId, on, agent)}
             onArchive={(next) => void archive(thread.thread_id, thread.messages[0]!.id, next)}
             replyRequest={replyFor}
+            draftChanged={draftChanged}
             onReplyOpened={() => setReplyFor(null)}
             onQuestions={patchQuestions}
             onChanged={afterWrite}
@@ -2279,7 +2304,7 @@ function Inbox() {
             updated={updated}
             onSearch={(opener) => openSearch(opener)}
             onCompose={(opener) => openCompose({}, opener)}
-            draftsCount={drafts?.length ?? 0}
+            draftsCount={(drafts?.length ?? 0) + replyDrafts.length}
             onDrafts={() => go({ page: 'drafts', project: null, thread: null })}
             // On the list it shows, Inbox (or a project) refreshes; with a thread open it closes it as before, and refreshes.
             onInbox={() => (route.page === 'inbox' && route.project === null ? void refreshInbox(null, route.thread !== null) : go({ page: 'inbox', project: null, thread: null }))}

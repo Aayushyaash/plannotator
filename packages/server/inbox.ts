@@ -125,6 +125,7 @@ import { inboxBodyForAgent, inboxUploadAttachments, removeInboxAttachmentFiles, 
 import { createInboxLiveSessions } from "./inbox-sessions";
 import { claudePluginBehindInbox, claudeRestartCommand, claudeSessionOutdated, CLAUDE_PLUGIN_UPDATE_COMMAND, createClaudePluginInstallReader, piSessionOutdated } from "./inbox-restart";
 import { createInboxCompose, INBOX_UPLOAD_SWEEP_MS } from "./inbox-compose";
+import { createInboxReplyDrafts } from "./inbox-reply-drafts";
 import { createInboxTagsRoute } from "./inbox-tags";
 import { createInboxDevices, DOOR_PREFIX } from "./inbox-devices";
 import type { PairingProbes } from "./inbox-pairing-checks";
@@ -565,6 +566,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   let baseUrl = "";
   let portChanged = false;
   const statusListeners = new Set<() => void>();
+  /** A reply draft was saved or deleted (inbox-reply-drafts.ts): the windows' streams say `event: drafts`. */
+  const draftListeners = new Set<(threadId: string) => void>();
   // The Inbox windows open now and whether any can show a notification (inbox-windows.ts).
   const windows = createInboxWindows({ graceMs: options.windowGraceMs });
   const binaryPath = options.binaryPath !== undefined ? options.binaryPath : version !== "dev" ? process.execPath : null;
@@ -1382,6 +1385,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         // Windows only: the phone's door (contract 7.9) gets hello, record, status and the heartbeat.
         const sendReach = () => send(`event: reach\ndata: ${JSON.stringify(windows.reach(notificationsState().enabled))}\n\n`);
         const stopReach = windowId ? windows.subscribe(sendReach) : () => {};
+        // A reply draft changed (any window's, or this one's): the list reads the rows' `unsent` again. Windows only.
+        const onDraft = (threadId: string) => send(`event: drafts\ndata: ${JSON.stringify({ thread_id: threadId })}\n\n`);
+        if (windowId) draftListeners.add(onDraft);
         if (windowId) sendReach();
         // A row's delivery moved with the live sessions (no store line): windows only, like `reach`.
         const sendDeliveries = () => send(`event: deliveries\ndata: {}\n\n`);
@@ -1392,6 +1398,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
           unsubscribe();
           statusListeners.delete(onStatus);
           stopReach();
+          draftListeners.delete(onDraft);
           deliveryListeners.delete(sendDeliveries);
           leave();
         };
@@ -1652,6 +1659,16 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     json,
   });
   compose.sweep();
+  // Reply drafts: the words typed in a thread's reply box, kept per thread (packages/server/inbox-reply-drafts.ts).
+  const replyDrafts = createInboxReplyDrafts({
+    store,
+    serverSession,
+    readBody: (req) => readBody(req),
+    json,
+    onChange: (threadId) => {
+      for (const listener of draftListeners) listener(threadId);
+    },
+  });
   const uploadSweep = setInterval(() => compose.sweep(), INBOX_UPLOAD_SWEEP_MS);
   (uploadSweep as { unref?: () => void }).unref?.();
 
@@ -1968,6 +1985,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       // Compose: live sessions in every project, a new thread, Send to another session, drafts and uploads.
       const composed = await compose.route(req, url);
       if (composed) return composed;
+      // Reply drafts: the reply box's words per thread (approval "inbox-reply-drafts").
+      const drafted = await replyDrafts.route(req, url);
+      if (drafted) return drafted;
 
       // The Board's cards (approval "inbox-board", step 1): the person's read and moves.
       if (path === "/api/inbox/cards") {
@@ -2170,6 +2190,12 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
                 return json({ message_id: messageId, questions: store.questionsOf(messageId), reply: null, replayed: false, nothing_to_send: true });
               }
               throw error;
+            }
+            // The Send that carried the reply box's words: its draft goes (a replay too, since the first one sent them),
+            // a compare-and-set on the `updated_at` those words were saved as, so another window's newer draft stays.
+            if (typeof body.clear_draft === "string") {
+              const threadId = store.message(messageId)?.thread_id;
+              if (threadId && store.clearSentReplyDraft(threadId, body.clear_draft)) for (const listener of draftListeners) listener(threadId);
             }
             if (result.replayed) removeInboxAttachmentFiles(store.dir, attachments);
             // Sent: the uploads are the reply's attachments now.

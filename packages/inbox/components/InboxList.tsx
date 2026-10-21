@@ -11,6 +11,8 @@ import { ListColumnEdge } from '../shell/ListColumnEdge';
 import { SidebarTrigger, useSidebar } from '../shell/sidebar';
 import { offersRowMarkRead } from '../markRead';
 import { useNarrowerThan } from '../narrower';
+import { inboxHasUnsent } from '@plannotator/core/inbox-types';
+import { DraftLabel } from './DraftLabel';
 import { ThreadRowMenu } from './RowMenu';
 import type { RowMenuAction } from '../rowMenu';
 import { rowTimeIso } from '../rowDelivery';
@@ -110,12 +112,15 @@ function subjectOf(row: InboxListRow): string {
   return row.subject ?? '(no subject)';
 }
 
-function countOf(row: InboxListRow): string {
+function countOf(row: InboxListRow): ReactNode {
   // A Quiet row says why it is there: archived (resolved), or marked read.
   if (row.section === 'quiet' && row.resolved_at !== null && row.back_from_archive !== true) return 'Archived';
+  // What the person has not sent (approval "inbox-reply-drafts"): "Draft · Your reply, 2 picks".
+  if (row.unsent && inboxHasUnsent(row.unsent)) return <DraftLabel unsent={row.unsent} />;
   // Marked read with 👍 Looks good: the row says so in place of "Read".
   if (row.section === 'quiet' && (row.read_at ?? null) !== null && row.ack) return `👍 ${row.ack.label}`;
   if (row.section === 'quiet' && (row.read_at ?? null) !== null) return 'Read';
+  // An older Inbox (no `unsent`): its own words.
   if (row.answered_not_sent) return 'Answered, not sent';
   if (row.section === 'sent' && row.addressee) return `To ${agentName(rowAgent(row))}`;
   return questionCount(row.questions.open);

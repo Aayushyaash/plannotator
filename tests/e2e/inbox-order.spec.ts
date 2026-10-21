@@ -128,7 +128,7 @@ test("a reply to A moves A to Sent; Waiting keeps C, B", async () => {
   const pane = page.locator('section.ib-pane');
   await expect(pane.getByRole('heading', { name: 'Keep the CSV header row?' })).toBeVisible();
   await pane.getByText('Yes', { exact: true }).click();
-  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M, not sent$/)).toBeVisible();
+  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M · in your draft$/)).toBeVisible();
   await page.locator('.ib-pfoot').getByRole('button', { name: 'Send' }).click();
   const row = page.locator(`.ib-lbody [data-thread-id="${threads.pi}"]`);
   await expect(row).toHaveAttribute('data-section', 'sent');

@@ -291,7 +291,7 @@ export function holdingsOf(message: InboxMessageWire, options: { delivered: bool
   const picks = questions.filter((q) => q.state !== 'sent' && isPicked(q)).length;
   const open = questions.filter((q) => q.state !== 'sent' && !isPicked(q)).length;
   const sent = questions.filter((q) => q.state === 'sent').length;
-  if (picks > 0) out.push({ kind: 'picks', text: `${plural(picks, 'pick')}, not sent`, say: `${plural(picks, 'pick')} not sent`, count: picks });
+  if (picks > 0) out.push({ kind: 'picks', text: `${plural(picks, 'pick')} in your draft`, say: `${plural(picks, 'pick')} in your draft`, count: picks });
   if (open > 0) out.push({ kind: 'open', text: `${open} open ${open === 1 ? 'question' : 'questions'}`, say: `${open} open ${open === 1 ? 'question' : 'questions'}`, count: open });
   if (sent > 0 && open === 0 && picks === 0) out.push({ kind: 'answered', text: `${sent} answered`, say: `${plural(sent, 'question')} answered`, count: sent });
   const files = message.attachments?.length ?? 0;

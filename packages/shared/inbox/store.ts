@@ -59,6 +59,7 @@ import {
   type InboxProject,
   type InboxQuestion,
   type InboxQuestionRecord,
+  type InboxReplyDraft,
   type InboxSupersededBy,
   type InboxListRow,
   type InboxListSection,
@@ -81,7 +82,7 @@ import {
   type InboxQuestionState,
   type InboxRowDelivery,
 } from "@plannotator/core/inbox-types";
-import { inboxListSections, inboxRowUnread, inboxSectionOf } from "./list";
+import { inboxHasUnsent, inboxListSections, inboxRowUnread, inboxSectionOf } from "./list";
 import { inboxProjectLabels } from "./project-name";
 import { inboxAckLine } from "./connection";
 import type { QuestionAnswer } from "@plannotator/core/question-block";
@@ -105,6 +106,7 @@ import { inboxBlobPath, inboxBlobSizes, removeUnusedInboxBlobs } from "./attachm
 import { inboxMarkupNamesOf, removeInboxMarkups } from "./markups";
 import { pendingInboxUploadBlobs, removeUnusedInboxUploadFiles } from "./uploads";
 import { inboxDraftsBytes } from "./drafts";
+import { checkInboxReplyDraftInput, readInboxReplyDrafts, removeInboxReplyDraft, writeInboxReplyDraft } from "./reply-drafts";
 import { INBOX_CARD_PR_HINT, parseInboxCardPr } from "./cards";
 import {
   INBOX_CARD_COLUMN_LABELS,
@@ -470,12 +472,21 @@ export class InboxStore {
   private readonly personNamed = new Map<string, string[]>();
   /** The person's annotations on attachments, by id. */
   private readonly annotations = new Map<string, InboxAnnotationRecord>();
+  /** Per thread, its annotations waiting for a Send (not sent, not removed): a row's `unsent.comments`. */
+  private readonly unsentAnnotations = new Map<string, number>();
+  /**
+   * The words typed in each thread's reply box and not sent (reply-drafts.ts),
+   * by thread id: files outside the event log, read at load and kept here.
+   */
+  private readonly replyDrafts = new Map<string, InboxReplyDraft>();
   /** The Board's cards, by id (approval "inbox-board"). Read by nothing that routes or lists threads. */
   private readonly cards = new Map<string, InboxCard>();
   /** A guided review's files by its snapshot's sha256 (a blob never changes). */
   private readonly guideFileSets = new Map<string, ReadonlyMap<string, DiffFile>>();
   private readonly tornFiles = new Set<string>();
   private readonly listeners = new Set<InboxListener>();
+  /** Told when a thread's reply draft is saved or deleted (no store line is written for it). */
+  private readonly replyDraftListeners = new Set<(threadId: string) => void>();
   /** How many times the store was read again from disk (a deletion): a reader's derived view is stale once it changes. */
   private reloads = 0;
   private readonly now: () => Date;
@@ -502,6 +513,8 @@ export class InboxStore {
       // Best effort (Windows, a filesystem without modes).
     }
     this.seq = Math.max(this.seq, this.readSeqFloor());
+    this.replyDrafts.clear();
+    for (const [threadId, draft] of readInboxReplyDrafts(this.dir)) this.replyDrafts.set(threadId, draft);
     const projectsDir = join(this.dir, INBOX_PROJECTS_DIR);
     if (!existsSync(projectsDir)) return;
     const lines: InboxLine[] = [];
@@ -609,7 +622,7 @@ export class InboxStore {
         break;
       }
       case "annotation":
-        this.annotations.set(line.record.id, line.record);
+        this.setAnnotation(line.record);
         break;
       case "card":
         // Cards are their own records: nothing here touches routing or the list.
@@ -707,6 +720,22 @@ export class InboxStore {
   subscribe(listener: InboxListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** A thread's reply draft was saved or deleted: its row's `unsent` (and section) changed with no store line. */
+  onReplyDraftChange(listener: (threadId: string) => void): () => void {
+    this.replyDraftListeners.add(listener);
+    return () => this.replyDraftListeners.delete(listener);
+  }
+
+  private replyDraftChanged(threadId: string): void {
+    for (const listener of this.replyDraftListeners) {
+      try {
+        listener(threadId);
+      } catch {
+        // A listener's failure never fails the save.
+      }
+    }
   }
 
   /**
@@ -1095,11 +1124,18 @@ export class InboxStore {
         summary.questions.open > 0 ||
         summary.questions.picked > 0 ||
         replyUnread);
+    const draft = this.replyDrafts.get(threadId) ?? null;
+    // Comments waiting for a Send: on attached files, the guided review, the messages (kept per thread).
+    const comments = this.unsentAnnotations.get(threadId) ?? 0;
+    const unsent = draft !== null || summary.questions.picked > 0 || comments > 0
+      ? { reply_at: draft?.updated_at ?? null, picks: summary.questions.picked, comments }
+      : null;
     const statesOf = (message: InboxMessage) => askingStates?.get(message.id) ?? [];
     const asking = askingStates ? inboxAskingMessage(messages, statesOf, inboxDefaultSkip(messages, statesOf)) : null;
     const delivery = this.rowDelivery(root, lastReal, asking, sent, recipients, root.resolved_at !== null && !agentAfterArchive);
     const facts = {
       ...summary,
+      unsent,
       delivery,
       agent_after_archive: agentAfterArchive,
       back_from_archive: backFromArchive,
@@ -1120,7 +1156,9 @@ export class InboxStore {
       ...(participants.length > 1 ? { participants } : {}),
     };
     const section = inboxSectionOf(facts);
-    return { ...facts, section, unread: inboxRowUnread(section) };
+    // In New only for the person's own unsent words or comments: not bold.
+    const draftOnly = section === "new" && unseen === 0 && !facts.answered_not_sent && inboxHasUnsent(unsent);
+    return { ...facts, section, unread: inboxRowUnread(section, draftOnly) };
   }
 
   /** The live sessions the rows' delivery reads (the server's); null forgets them. */
@@ -1822,7 +1860,7 @@ export class InboxStore {
     const blobSizes = inboxBlobSizes(this.dir);
     // Every blob once in the total; a project and a thread count each blob they use once.
     // Drafts count in the total (compose); their files, uploaded or not yet sent, are blobs already counted.
-    let total = [...blobSizes.values()].reduce((sum, size) => sum + size, 0) + inboxDraftsBytes(this.dir);
+    let total = [...blobSizes.values()].reduce((sum, size) => sum + size, 0) + inboxDraftsBytes(this.dir) + this.replyDraftsBytes();
     for (const project of this.listProjects()) {
       const folder = this.projectFolder(project);
       const perThread = new Map<string, number>();
@@ -3012,8 +3050,24 @@ export class InboxStore {
     });
   }
 
-  private restoreAnnotation(record: InboxAnnotationRecord): void {
+  /** Every write to `annotations` goes here, so the per-thread unsent count follows it. */
+  private setAnnotation(record: InboxAnnotationRecord): void {
+    const unsent = (r: InboxAnnotationRecord | undefined) => (r && r.sent_reply_id === null && r.removed_at === null ? 1 : 0);
+    const before = this.annotations.get(record.id);
     this.annotations.set(record.id, record);
+    if (before && before.thread_id !== record.thread_id) this.bumpUnsent(before.thread_id, -unsent(before));
+    this.bumpUnsent(record.thread_id, unsent(record) - (before && before.thread_id === record.thread_id ? unsent(before) : 0));
+  }
+
+  private bumpUnsent(threadId: string, delta: number): void {
+    if (delta === 0) return;
+    const next = (this.unsentAnnotations.get(threadId) ?? 0) + delta;
+    if (next > 0) this.unsentAnnotations.set(threadId, next);
+    else this.unsentAnnotations.delete(threadId);
+  }
+
+  private restoreAnnotation(record: InboxAnnotationRecord): void {
+    this.setAnnotation(record);
     const key = `annotation:${record.id}`;
     const line = this.latest.get(key);
     if (line && line.kind === "annotation") this.latest.set(key, { ...line, record });
@@ -3036,6 +3090,75 @@ export class InboxStore {
   }
 
   // ─────────────────────────── deleting ───────────────────────────
+
+  // ─────────────────────────── reply drafts ───────────────────────────
+
+  /** The words typed in a thread's reply box and not sent, or null. */
+  replyDraft(threadId: string): InboxReplyDraft | null {
+    return this.replyDrafts.get(threadId) ?? null;
+  }
+
+  /**
+   * Save the reply box's words for a thread (a compare-and-set on
+   * `updated_at`: `base` is the `updated_at` the writer last read, null to
+   * create; another tab's newer save is `409 draft_conflict` with it). An empty
+   * body (whitespace only) deletes the draft and answers null. Never a line in
+   * the event log: agents, the MCP and search never see it.
+   */
+  saveReplyDraft(threadId: string, input: { body?: unknown; base?: unknown; base_body?: unknown }): InboxReplyDraft | null {
+    const root = this.messages.get(threadId);
+    if (!root || root.thread_id !== threadId) throw new InboxError("thread_not_found", `No thread ${threadId}.`);
+    const { body, base, baseBody } = checkInboxReplyDraftInput(input);
+    const existing = this.replyDrafts.get(threadId) ?? null;
+    // `base_body`: the words this window wrote last. A save sent as the page goes may carry a base read
+    // before that write's answer came back; the draft still holding those words is the window's own.
+    const ownWords = baseBody !== null && existing !== null && existing.body === baseBody;
+    if ((existing?.updated_at ?? null) !== base && !ownWords) {
+      throw new InboxError(
+        "draft_conflict",
+        existing ? "This reply changed in another window since you opened it." : "This reply's draft was discarded or sent in another window.",
+        { draft: existing },
+      );
+    }
+    if (body.trim() === "") {
+      this.deleteReplyDraft(threadId);
+      return null;
+    }
+    const at = this.stamp();
+    // Strictly later than the last save, so a compare-and-set within one millisecond still tells the two apart.
+    const updatedAt = existing && at <= existing.updated_at ? new Date(Date.parse(existing.updated_at) + 1).toISOString() : at;
+    const draft: InboxReplyDraft = { v: 1, thread_id: threadId, body, created_at: existing?.created_at ?? at, updated_at: updatedAt };
+    writeInboxReplyDraft(this.dir, draft);
+    this.replyDrafts.set(threadId, draft);
+    this.replyDraftChanged(threadId);
+    return draft;
+  }
+
+  /**
+   * The Send that carried the reply box's words: drop the draft only while it is
+   * still the one those words were saved as (`updated_at`), so a newer draft
+   * another window saved meanwhile stays. True when it went.
+   */
+  clearSentReplyDraft(threadId: string, updatedAt: string): boolean {
+    const existing = this.replyDrafts.get(threadId);
+    if (!existing || existing.updated_at !== updatedAt) return false;
+    return this.deleteReplyDraft(threadId);
+  }
+
+  /** Drop a thread's reply draft (Discard); true when there was one. */
+  deleteReplyDraft(threadId: string): boolean {
+    const had = this.replyDrafts.delete(threadId);
+    const removed = removeInboxReplyDraft(this.dir, threadId) || had;
+    if (removed) this.replyDraftChanged(threadId);
+    return removed;
+  }
+
+  /** Bytes the reply drafts take on disk (Settings → Storage). */
+  private replyDraftsBytes(): number {
+    let total = 0;
+    for (const draft of this.replyDrafts.values()) total += Buffer.byteLength(`${JSON.stringify(draft)}\n`);
+    return total;
+  }
 
   /**
    * Delete a thread: its messages, questions and annotations are dropped from
@@ -3115,6 +3238,7 @@ export class InboxStore {
     this.namedThreads.clear();
     this.personNamed.clear();
     this.annotations.clear();
+    this.unsentAnnotations.clear();
     this.cards.clear();
     this.tornFiles.clear();
     this.load();
@@ -3129,6 +3253,12 @@ export class InboxStore {
       if (message.guide) used.add(message.guide.sha256);
     }
     removeUnusedInboxBlobs(this.dir, used);
+    // A deleted thread's reply draft goes with it.
+    for (const threadId of [...this.replyDrafts.keys()]) {
+      if (this.messages.get(threadId)?.thread_id === threadId) continue;
+      removeInboxReplyDraft(this.dir, threadId);
+      this.replyDrafts.delete(threadId);
+    }
     // A person's sent uploads are files under inbox/uploads/<att_id>/: they go with their message.
     removeUnusedInboxUploadFiles(this.dir, attachmentIds);
     const stillNamed = this.markupsOf(() => true);

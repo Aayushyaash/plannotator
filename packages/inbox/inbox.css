@@ -3523,10 +3523,27 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
  * A session that needs a restart after an update (owner approval "restart-warning", 2026-10-19):
  * the line under a reply ("Steps"), the sidebar's "Reload Claude Code N", Settings → Agents' "Open sessions".
  */
-.ib-rw-note { flex-basis: 100%; display: flex; align-items: flex-start; gap: 6px; color: var(--muted-foreground); font-size: var(--ib-fs-12-5, 12.5px); line-height: 1.5; min-width: 0; }
-.pn-inbox .ib-rw-note > svg.ib-ic { width: 14px; height: 14px; flex: none; margin-top: 2px; }
-.ib-rw-note > span { min-width: 0; overflow-wrap: anywhere; }
-.ib-rw-note code { font-family: var(--font-mono); font-size: var(--ib-fs-12, 12px); white-space: nowrap; }
+/* The lead (simplified 2026-10-21): one large line with Copy, the manual path folded under it. */
+.ib-rw-note, .ib-rl { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: var(--ib-lr-sm, 10px); border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border)); background: color-mix(in srgb, var(--warning) 7%, var(--card)); color: var(--foreground); min-width: 0; box-sizing: border-box; }
+.ib-rw-note { flex-basis: 100%; max-width: 640px; font-size: var(--ib-fs-13, 13px); line-height: 1.5; }
+.ib-rl { grid-column: 1 / -1; margin: 4px 0 2px; padding: 12px 14px; font-size: var(--ib-fs-13, 13px); line-height: 1.5; }
+.ib-rl-lead { margin: 0; color: var(--foreground); font-size: var(--ib-fs-14, 14px); font-weight: 550; min-width: 0; }
+.ib-rl .ib-rl-lead { font-size: var(--ib-fs-15, 15px); }
+.ib-rl-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.ib-rl-line code { font-family: var(--font-mono); font-size: 0.93em; font-weight: 600; padding: 1px 5px; border-radius: 5px; background: color-mix(in oklch, var(--foreground) 8%, transparent); white-space: nowrap; }
+ol.ib-rl-two { padding: 0 0 0 20px; list-style: decimal; display: flex; flex-direction: column; gap: 8px; width: 100%; box-sizing: border-box; }
+ol.ib-rl-two > li { min-width: 0; }
+ol.ib-rl-two > li::marker { color: var(--muted-foreground); }
+ol.ib-rl-two .ib-rw-cmd { font-weight: 400; margin-top: 6px; }
+.ib-rl > .ib-rw-sess { margin: 0; width: 100%; box-sizing: border-box; background: var(--card); }
+.ib-rl .ib-rw-sess .ib-rw-sw { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 0 10px; }
+.ib-rl .ib-rw-sess .ib-rw-srow { padding-top: 6px; padding-bottom: 6px; min-height: 32px; box-sizing: border-box; }
+.ib-rl-fold { width: 100%; min-width: 0; }
+.pn-inbox .ib-rl-fold > .ib-rw-lnk { margin-left: 0; font-size: var(--ib-fs-12-5, 12.5px); color: var(--muted-foreground); font-weight: 500; }
+.ib-rl-fold > .ib-rw-steps { margin: 8px 0 0; max-width: none; }
+.ib-rl-fold .ib-rl-manual { margin: 0 0 8px; color: var(--muted-foreground); }
+.ib-rl-fold .ib-rl-manual code { font-family: var(--font-mono); font-size: var(--ib-fs-12, 12px); color: var(--foreground); }
+.ib-rl-fold .ib-rw-sess { margin: 0; }
 .pn-inbox .ib-rw-lnk { color: var(--primary); font: inherit; font-weight: 550; background: none; border: 0; padding: 0; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; vertical-align: baseline; }
 .pn-inbox .ib-rw-lnk:hover { text-decoration: underline; text-underline-offset: 2px; }
 .pn-inbox .ib-rw-lnk .ib-rw-chev { width: 12px; height: 12px; transition: transform 150ms ease-out; }
@@ -3568,11 +3585,13 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
   .pn-inbox .ib-rw-copy { height: 32px; }
   .pn-inbox .ib-rw-copy::after { content: ''; position: absolute; inset: -6px -4px; }
   .ib-rw-steps { margin-left: 0; }
-  .ib-rw-sess { grid-column: 1 / -1; }
+  .ib-rw-sess, .ib-rl { grid-column: 1 / -1; }
+  .pn-inbox .ib-rl-fold > .ib-rw-lnk { min-height: 44px; }
+  .pn-inbox .ib-rl-fold > .ib-rw-lnk::after { content: none; }
   .ib-rw-cmd { flex-wrap: wrap; }
 }
 /* The steps: /reload-plugins first; /exit and the resume command only as the fallback, quieter. */
-.ib-rw-steps .ib-rw-fallback { margin: 10px 0 0; padding-top: 8px; border-top: 1px solid color-mix(in oklch, var(--border) 60%, transparent); color: var(--muted-foreground); }
+.ib-rw-steps [data-restart-fallback] { color: var(--muted-foreground); }
 .ib-rw-steps .ib-rw-warn { margin: 6px 0 0; color: var(--muted-foreground); }
 
 /* A sent reply's tag chip carries its agent's mark over the `@` (approved shot 5): the `@` is drawn clear and the mark sits in its place, in a layer of the message's own (tagHighlight.ts). */
@@ -3581,6 +3600,44 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
 .ib-tg-mark { position: absolute; display: inline-flex; align-items: center; justify-content: center; }
 .ib-tg-mark .ib-mk, .ib-tg-mark .ib-mk > svg, .ib-tg-mark .ib-mk > img { width: 100%; height: 100%; }
 
+/* ── Draft (approval "inbox-reply-drafts", variant Label): what the person has not sent. ──
+   The row's count slot reads "Draft · Your reply, 2 picks", the word in the accent colour (never colour
+   alone: the word says it); the reply box carries a soft pill with when it was saved and Discard; the
+   thread's foot reads "Draft · 2 picks" before Send / Edit draft. */
+.pn-inbox {
+  --ib-draft-fg: color-mix(in oklab, var(--primary) 85%, var(--foreground));
+  --ib-draft-bg: color-mix(in oklab, var(--primary) 11%, transparent);
+}
+.ib-draft-l { color: var(--muted-foreground); white-space: nowrap; }
+.ib-draft-l > b { color: var(--ib-draft-fg); font-weight: 600; }
+.ib-draft-pill { display: inline-flex; align-items: center; flex: none; height: 20px; padding: 0 8px; border-radius: 999px; background: var(--ib-draft-bg); color: var(--ib-draft-fg); font-size: var(--ib-fs-12, 12px); font-weight: 600; }
+.ib-draft-head { display: flex; align-items: center; gap: 8px; }
+/* Whom the reply goes to gives way first (cut with "…"); the pill, the time and Discard keep their place. */
+.ib-draft-for { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ib-draft-saved, .ib-draft-discard { flex: none; white-space: nowrap; }
+.ib-draft-head .ib-sp { flex: 1; }
+/* Both windows hold words: this window's are not saved, and the person chooses (Keep mine / Discard).
+   The line wraps; the two buttons stay together on one line, far enough apart that their hit areas
+   (the ::after boxes) never meet: 6 px each side on a desktop, 8 px on a phone. */
+.ib-draft-head[data-draft-conflict] { flex-wrap: wrap; row-gap: 4px; }
+.ib-draft-head[data-draft-conflict] .ib-draft-saved { flex: 1 1 12em; min-width: 0; white-space: normal; color: var(--foreground); }
+.ib-draft-acts { display: inline-flex; flex: none; align-items: center; gap: 20px; white-space: nowrap; }
+@media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
+  .ib-draft-acts { gap: 24px; }
+}
+.ib-draft-saved { color: var(--muted-foreground); }
+.ib-draft-discard { position: relative; border: 0; background: transparent; padding: 0 2px; color: var(--muted-foreground); font: inherit; cursor: pointer; border-radius: 4px; }
+.ib-draft-discard::after { content: ''; position: absolute; inset: -8px -6px; }
+.ib-draft-discard:hover { color: var(--foreground); text-decoration: underline; }
+.ib-draft-discard:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.ib-draft-foot { display: inline-flex; align-items: center; gap: 6px; margin-right: 4px; min-width: 0; white-space: nowrap; }
+.ib-draft-foot .ib-st { margin-right: 0; }
+.ib-drafts-h { margin: 18px 0 8px; font-size: var(--ib-fs-13, 13px); font-weight: 600; color: var(--muted-foreground); }
+.ib-draft-meta .ib-draft-l { font-size: var(--ib-fs-12-5, 12.5px); }
+@media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
+  .ib-draft-discard::after { inset: -14px -8px; }
+  .ib-drafts .ib-drafts-h { margin-inline: 16px; }
+}
 /* Re-ask (approval "inbox-reask"): the person's note in the thread, one line, its body behind a disclosure. */
 .ib-reask { margin: 2px 0 0; }
 .ib-reask-l { display: flex; align-items: flex-start; gap: 8px; margin: 0; font-size: var(--ib-fs-13-5, 13.5px); line-height: 1.5; color: var(--foreground); }

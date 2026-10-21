@@ -76,9 +76,16 @@ async function openReply(page: Page, threadId: string): Promise<ReturnType<Page[
   await page.goto(`${world.url}#thread=${threadId}`);
   const pane = page.locator('section.ib-pane');
   await expect(pane.locator('h2.ib-subject')).toBeVisible();
-  await pane.locator('.ib-pfoot').getByRole('button', { name: 'Reply', exact: true }).click();
+  // Words an earlier test left are kept as the thread's reply draft, which reopens the box by
+  // itself once read (approval "inbox-reply-drafts"); the read can land between the check and
+  // the click, so a click that finds no Reply is tried again. The test starts from an empty box.
   const box = pane.getByRole('textbox', { name: /^Reply to/ });
+  const reply = pane.locator('.ib-pfoot').getByRole('button', { name: /^(Reply|Edit draft)$/ });
+  for (let attempt = 0; attempt < 10 && !(await box.isVisible()); attempt += 1) {
+    await reply.click({ timeout: 1_000 }).catch(() => {});
+  }
   await expect(box).toBeVisible();
+  await box.fill('');
   return box;
 }
 

@@ -25,6 +25,8 @@ import { PILL_BAND_PX, atEnd, followBy, lookThrough, measureFirstLines, unseenAr
 import { GuideCard } from './GuideCard';
 import { inboxMessageImageBase, inlineImageRefFromSrc, markTallImage } from '../images';
 import { reportUnsentReply } from '../unsent';
+import { useReplyDraft } from '../replyDraft';
+import { conflictText, DraftHead, DraftFootNote } from './DraftLabel';
 import { canToggleRead } from '../markRead';
 import { NewMessageButton, NewMessageComposer, NewMessagePopover, hostName, useLiveSessions, type NewMessageMode } from './NewMessage';
 import { deliveryLine, restartNote, type DeliveryLine, type RecipientConnection } from '../deliveryLine';
@@ -72,7 +74,8 @@ const noop = () => {};
 const isSuperseded = (cause: unknown): boolean => cause instanceof InboxApiError && cause.code === 'question_superseded';
 const NO_ANNOTATIONS: never[] = [];
 /** An unsent pick's tag on its card (MessageBody's statusLabel). */
-const NOT_SENT_STATUS = { label: 'Not sent', tone: 'open' } as const;
+// A pick saved and not sent is part of the person's draft (approval "inbox-reply-drafts": "Draft" replaces "Not sent").
+const NOT_SENT_STATUS = { label: 'Draft', tone: 'open' } as const;
 const NO_IDS: ReadonlySet<string> = new Set();
 /** The reply box starts with no files: they come only from a paste (compose's tiles and upload path). */
 const NO_UPLOADS: InboxUpload[] = [];
@@ -500,7 +503,7 @@ export function MessageBody({
     [message.questions, readOnly],
   );
 
-  // A pick not sent yet tags its card "Not sent", not "Answered" (the footer says when it was picked);
+  // A pick not sent yet tags its card "Draft", not "Answered" (the footer says when it was picked);
   // a sent answer, and a question a Mark read closed, keep the card's own tag.
   const statusLabel = useCallback(
     (question: IndexedQuestion, status: QuestionStatus) => {
@@ -574,6 +577,8 @@ export interface ThreadPaneProps {
   onQuestions: (messageId: string, questions: InboxQuestion[]) => void;
   /** Something was written (a Send, resolve): read the thread and the list again. */
   onChanged: () => Promise<void>;
+  /** Raised each time the Inbox says this thread's reply draft changed (`event: drafts`): the draft is read again. */
+  draftChanged?: number;
   onClose: () => void;
   /** The attachment open beside the thread (`#…&file=att_…`), its version, and an annotation to show. */
   file: { id: string; version: 'current' | 'sent'; focus: string | null; linked?: string | null } | null;
@@ -757,7 +762,43 @@ export function AckPill({
   );
 }
 
-export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
+/**
+ * Per thread, a Send whose reply carrying the words went out but could not be
+ * confirmed (its answer was lost and the thread could not be read: the Inbox
+ * may be down): its key, and what it carried. It holds only while the box
+ * keeps exactly those unsent words: it goes when any thread read shows the
+ * reply landed (the Send is then finished), when the words change or the box
+ * empties, when the person leaves the thread, and after 10 minutes. The next
+ * Send of those words first reads the thread for that reply: there, the Send
+ * is finished and nothing goes again; not there, it is an ordinary new Send.
+ */
+interface UnconfirmedSend {
+  key: string;
+  words: string;
+  uploads: string[];
+  comments: string[];
+  picks: string[];
+  at: number;
+}
+const unconfirmed = new Map<string, UnconfirmedSend>();
+const UNCONFIRMED_MS = 10 * 60_000;
+
+/**
+ * Whether a reply with this idempotency key is in the thread: 'unknown' when
+ * the thread could not be read, 'gone' when the thread no longer exists.
+ */
+async function replyLanded(threadId: string, key: string): Promise<'yes' | 'no' | 'unknown' | 'gone'> {
+  try {
+    const read = await inboxApi.thread(threadId);
+    return read.thread.messages.some((m) => m.author.kind === 'person' && m.idempotency_key === key) ? 'yes' : 'no';
+  } catch (cause) {
+    return cause instanceof InboxApiError && cause.status === 404 ? 'gone' : 'unknown';
+  }
+}
+
+const THREAD_GONE_TEXT = 'This thread was deleted, so nothing was sent.';
+
+export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged = 0, onClose, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
   // "Open in" (OpenIn.tsx): apps on this computer; a new tab only through the tailnet or on a phone.
   const openIn: OpenInSurface | undefined = phone || remote === true ? 'tab' : remote === null ? undefined : 'apps';
   const root = thread.messages[0]!;
@@ -795,6 +836,17 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
 
   const [box, setBox] = useState<{ open: boolean; text: string }>({ open: false, text: '' });
   /**
+   * The reply box's words, kept per thread as a server draft (approval
+   * "inbox-reply-drafts"): saved while typing, back when the thread opens.
+   */
+  const replyDraft = useReplyDraft(thread.thread_id);
+  /** The words a Send carries: the box's, or (the box closed) those kept as its draft. */
+  const boxWords = box.open ? box.text.trim() : ((replyDraft.conflict ?? replyDraft.draft?.body)?.trim() ?? '');
+  /** A draft put back in the box opens it without taking focus (j/k and the page keep working). */
+  const restoringRef = useRef(false);
+  /** The thread whose draft was put back already (once per visit). */
+  const restoredFor = useRef<string | null>(null);
+  /**
    * Files pasted into the reply box (the owner: "paste in images … if I'm
    * focused in a reply"): compose's tiles and upload path. They live with the
    * box: Cancel, Escape, a Send and another thread forget them.
@@ -806,6 +858,11 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
   const [taggedIds, setTaggedIds] = useState<readonly string[]>([]);
   const onTagsChange = useCallback((ids: readonly string[]) => setTaggedIds(ids), []);
   const closeBox = () => {
+    // A Send waiting to be confirmed: read back now, so a reply that went leaves no stale "Draft" foot.
+    const earlier = unconfirmed.get(thread.thread_id);
+    if (earlier) forgetUnconfirmed(earlier, 'closed');
+    // Cancel and Escape keep the words as a draft (saved now); Discard drops them.
+    replyDraft.flush();
     setBox({ open: false, text: '' });
     setTaggedIds([]);
     replyFiles.reset();
@@ -831,6 +888,12 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
    */
   const sendContents = useRef<Map<string, string> | null>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  // The box is read-only while a Send is on its way (approval "inbox-reply-drafts"): the words it carries are
+  // the words in the box, and nothing typed meanwhile can be saved as a draft the Send then clears.
+  useEffect(() => {
+    const el = textRef.current;
+    if (el) el.readOnly = sending;
+  }, [sending, box.open]);
   const bodyRef = useRef<HTMLDivElement>(null);
   const sendRef = useRef<HTMLButtonElement>(null);
   const guardRef = useRef<HTMLDivElement>(null);
@@ -1126,7 +1189,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
   // the Send actually reaches: the latest agent message's when words or
   // annotations ride on it, else the last message a pick or a skip answers.
   // Only finished uploads count: a tile still uploading or refused is not what Send carries.
-  const asking = askingSessionOf(thread, { skip: !keepOpen, carries: (box.open && box.text.trim() !== '') || records.length > 0 || replyUploads.length > 0 });
+  const asking = askingSessionOf(thread, { skip: !keepOpen, carries: boxWords !== '' || records.length > 0 || replyUploads.length > 0 });
   const askerToWatch = asking && askerCanEnd(asking) ? asking.session : null;
   // New message (record 5.x): the project's live sessions, and what the button opened.
   const { model: live, load: loadLive } = useLiveSessions(thread.thread_id, askerToWatch);
@@ -1158,6 +1221,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
   );
   const anyOtherLive = asking !== null && othersLive(asking, live).length > 0;
   const noteId = `ib-asker-note-${thread.thread_id}`;
+  const conflictId = `ib-draft-conflict-${thread.thread_id}`;
   // The choice at Send, when the session that asked has ended.
   const [route, setRoute] = useState<RouteState>(CLOSED_ROUTE);
   /** What the route choice is for: a reply, or a Re-ask (the same choice, its own words). */
@@ -1583,17 +1647,76 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     return () => window.removeEventListener('keydown', onKey);
   }, [one, jumpNew]);
 
+  // Another window (or a phone's Send) saved, sent or discarded this thread's draft, or this one did:
+  // its copy here follows. A box with no edits since its last save or read takes the new words (or
+  // closes when the draft is gone); a box with edits keeps them, and the conflict shows (replyDraft.ts).
+  const reloadDraft = replyDraft.reload;
+  const boxRef = useRef(box);
+  boxRef.current = box;
+  const hasFilesRef = useRef(false);
+  hasFilesRef.current = replyFiles.files.length > 0;
   useEffect(() => {
+    if (draftChanged === 0) return;
+    const local = boxRef.current.open ? boxRef.current.text : null;
+    void reloadDraft(local).then((answer) => {
+      if (!answer?.replaceBox) return;
+      // Typed into meanwhile: those words win, and the next save is refused if the draft moved.
+      if (!boxRef.current.open || boxRef.current.text !== local) return;
+      if (answer.draft) {
+        setBox({ open: true, text: answer.draft.body });
+        announce('This reply changed in another window.');
+      } else {
+        // Sent or discarded elsewhere: nothing of it is left to show (pasted files keep the box open).
+        setBox({ open: hasFilesRef.current, text: '' });
+        if (!hasFilesRef.current) setTaggedIds([]);
+        announce('This reply was sent or discarded in another window.');
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftChanged, reloadDraft]);
+
+  // A conflict appears (both windows hold words): said once in the thread's live region.
+  const conflictShown = replyDraft.conflict !== null;
+  const conflictSentElsewhere = replyDraft.draft === null;
+  useEffect(() => {
+    if (!conflictShown) return;
+    announce(conflictText(conflictSentElsewhere));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conflictShown]);
+
+  // The thread's draft, once read, goes back in the box (open, without focus), unless the person already wrote there.
+  useEffect(() => {
+    if (replyDraft.loadedFor !== thread.thread_id || restoredFor.current === thread.thread_id) return;
+    restoredFor.current = thread.thread_id;
+    // Words a conflict left unsaved here come back before the draft another window holds.
+    const kept = replyDraft.conflict ?? replyDraft.draft?.body ?? null;
+    if (kept === null) return;
+    setBox((current) => {
+      if (current.open && current.text.trim()) return current;
+      if (!current.open) restoringRef.current = true;
+      return { open: true, text: kept };
+    });
+  }, [replyDraft.loadedFor, replyDraft.draft, replyDraft.conflict, thread.thread_id]);
+
+  useEffect(() => {
+    if (restoringRef.current) {
+      restoringRef.current = false;
+      return;
+    }
     if (box.open) textRef.current?.focus();
   }, [box.open]);
 
   // The update control's restart guard: an unsent reply is the one thing a
   // restart (a page reload) would lose.
-  const unsentSubject = box.open && (box.text.trim() || replyFiles.files.length > 0) ? (thread.subject ?? 'this thread') : null;
+  // Words are kept as a draft (and sent as the page goes); only files pasted into the box are not.
+  // The restart guard asks while files pasted into the box, or words not saved yet (a save waiting or on
+  // its way, words a conflict left unsaved: replyDraftUnsaved, read when the guard asks), would be lost.
+  const unsentSubject = thread.subject ?? 'this thread';
+  const unsentFiles = box.open && replyFiles.files.length > 0;
   useEffect(() => {
-    reportUnsentReply(unsentSubject ? { subject: unsentSubject } : null);
+    reportUnsentReply({ subject: unsentSubject, files: unsentFiles });
     return () => reportUnsentReply(null);
-  }, [unsentSubject]);
+  }, [unsentSubject, unsentFiles]);
 
   const questionById = (id: string): InboxQuestion | undefined => {
     for (const message of threadRef.current.messages) {
@@ -1612,6 +1735,11 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
       try {
         const result = await inboxApi.pick(messageId, key, revision, answer);
         for (const q of result.questions) revisions.current.set(`${q.message_id}/${q.key}`, q.revision);
+        // A Send waiting on this chain reads the thread right after it, before
+        // React draws the saved picks: give it the saved questions now, or it
+        // sends a stale revision (refused) or leaves out a note just saved.
+        const latest = threadRef.current;
+        threadRef.current = { ...latest, messages: latest.messages.map((m) => (m.id === messageId ? { ...m, questions: result.questions } : m)) };
         onQuestions(messageId, result.questions);
       } catch (cause) {
         // The agent replaced the question meanwhile: reading the thread again redraws it as Replaced.
@@ -1653,7 +1781,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
       return at ? `Sent ${whenTime(at)}` : 'Sent';
     }
     if (q.state === 'closed' && q.set_aside_at) return `Closed unanswered when you marked it read · ${whenTime(q.set_aside_at)}`;
-    if (q.state === 'picked' && q.picked_at) return `Picked ${whenTime(q.picked_at)}, not sent`;
+    if (q.state === 'picked' && q.picked_at) return `Picked ${whenTime(q.picked_at)} · in your draft`;
     // Re-ask: the person asked the agent for it again; it stays open until the agent replaces it.
     const reaskedBy = reaskedIn(thread.messages, message.id, q);
     if (reaskedBy) return `Asked again ${whenTime(reaskedBy.created_at)}`;
@@ -1684,6 +1812,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
   };
   /** Picks or annotations wait for a Send. */
   const waiting = picksCount > 0 || records.length > 0;
+  /** The box is closed and its words are kept as a draft (Cancel or Escape kept them): Edit draft brings them back. */
+  const draftKept = !box.open && (replyDraft.draft !== null || replyDraft.conflict !== null);
   // What a Send skips: every question still open with no pick (one being
   // saved counts as picked), unless the person pressed Keep open.
   const unanswered = thread.messages.flatMap((m) =>
@@ -1701,7 +1831,9 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     setNewMessage(null);
     setRoute((current) => ({ ...current, open: false, error: null }));
     const draft = withDraft ? picked.map((q) => (q.answer ? `${q.prompt.replace(/[?.!]\s*$/, '')}: ${answerWords(q.answer)}.` : '')).filter(Boolean).join(' ') : '';
-    setBox({ open: true, text: draft });
+    // A draft's words come back as they were; picks only seed the box when there are none.
+    const kept = replyDraft.conflict ?? replyDraft.draft?.body ?? '';
+    setBox({ open: true, text: kept.trim() ? kept : draft });
     setError(null);
   };
 
@@ -1724,6 +1856,107 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     });
   }, []);
 
+  /**
+   * What the person added after a Send that went without its answer (comments, picks, files it did not
+   * carry): said plainly, since they are still to send. Null when nothing was added.
+   */
+  const leftoverText = (earlier: UnconfirmedSend): string | null => {
+    const comments = records.filter((r) => !earlier.comments.includes(r.id)).length;
+    const picks = picked.filter((q) => !earlier.picks.includes(`${q.message_id}/${q.key}`)).length;
+    const files = replyUploads.filter((id) => !earlier.uploads.includes(id)).length;
+    const parts = [
+      comments > 0 ? `${comments} comment${comments === 1 ? '' : 's'}` : null,
+      picks > 0 ? `${picks} pick${picks === 1 ? '' : 's'}` : null,
+      files > 0 ? `${files} file${files === 1 ? '' : 's'}` : null,
+    ].filter((part): part is string => part !== null);
+    if (parts.length === 0) return null;
+    const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
+    return `Your reply went. Not sent yet: ${list}. Press Send to send ${parts.length === 1 && !list.endsWith('s') ? 'it' : 'them'}.`;
+  };
+
+  /** The remembered unconfirmed Send turned out to have landed: finish it, and say what is still to send. */
+  const finishLanded = (earlier: UnconfirmedSend) => {
+    unconfirmed.delete(threadRef.current.thread_id);
+    const leftover = leftoverText(earlier);
+    finishSent(earlier.uploads, true);
+    setError(leftover);
+    announce(leftover ?? 'Your reply went.');
+  };
+
+  /**
+   * The remembered unconfirmed Send stops matching (the words changed or emptied, or the box closed): it is
+   * forgotten, its own clear of the draft is expected (a refused save is this window's doing, never "another
+   * window"), and the thread is read for it, so the line says honestly where the earlier reply is.
+   */
+  const forgetUnconfirmed = (earlier: UnconfirmedSend, after: 'edited' | 'emptied' | 'closed') => {
+    const id = threadRef.current.thread_id;
+    unconfirmed.delete(id);
+    replyDraft.expectOwnClear(earlier.words);
+    const edited = after === 'edited';
+    setError(edited ? 'Your earlier reply may have gone; Send sends your edited words as another reply.' : null);
+    void replyLanded(id, earlier.key).then(async (landed) => {
+      if (threadRef.current.thread_id !== id) return;
+      if (landed === 'yes') {
+        const line = edited ? 'Your earlier reply went; Send sends your edited words as another reply.' : 'Your reply went.';
+        setError(line);
+        announce(line);
+        // Its clear_draft went with it: a closed box's foot no longer shows a draft of those words.
+        if (after === 'closed') await replyDraft.reload(null);
+      } else if (landed === 'no') setError(null);
+      else if (landed === 'gone') setError(THREAD_GONE_TEXT);
+    });
+  };
+
+  // A thread read shows the remembered Send's reply landed: finished now (while the box still holds its words),
+  // or forgotten.
+  useEffect(() => {
+    const earlier = unconfirmed.get(thread.thread_id);
+    if (!earlier) return;
+    if (!thread.messages.some((m) => m.author.kind === 'person' && m.idempotency_key === earlier.key)) return;
+    if (box.open && box.text.trim() === earlier.words) {
+      finishLanded(earlier);
+      void reloadFiles();
+    } else {
+      // The words changed since (or the box is closed): the earlier reply went, the box's words are new.
+      unconfirmed.delete(thread.thread_id);
+      replyDraft.expectOwnClear(earlier.words);
+      const leftover = leftoverText(earlier);
+      const line = box.open && box.text.trim() ? 'Your earlier reply went; Send sends your edited words as another reply.' : (leftover ?? 'Your reply went.');
+      setError(line);
+      announce(line);
+      if (!box.open) void replyDraft.reload(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [thread]);
+
+  // Leaving the thread forgets it: a later Send is always an ordinary one.
+  useEffect(() => {
+    const id = thread.thread_id;
+    return () => {
+      unconfirmed.delete(id);
+    };
+  }, [thread.thread_id]);
+
+  /**
+   * A Send went: the keys and choice reset, the files it carried leave the box (one pasted while it
+   * was in flight keeps it open), the box empties, and its words' draft is done with.
+   */
+  const finishSent = (carriedUploads: readonly string[], carriedWords: boolean) => {
+    sendKeys.current = null;
+    sendContents.current = null;
+    unconfirmed.delete(threadRef.current.thread_id);
+    setRoute(CLOSED_ROUTE);
+    setSkipChoice('auto');
+    const carried = new Set(carriedUploads);
+    const sentFiles = new Set(replyFiles.current().filter((f) => f.upload && carried.has(f.upload.upload_id)).map((f) => f.key));
+    const later = replyFiles.current().some((f) => !sentFiles.has(f.key));
+    replyFiles.forget(sentFiles);
+    setBox({ open: later, text: '' });
+    if (carriedWords) replyDraft.sent();
+    else replyDraft.release();
+    setTaggedIds([]);
+  };
+
   const send = async (options: { despiteReplaced?: boolean; routed?: boolean } = {}) => {
     if (sending) return;
     // A pick was replaced while the person was answering: nothing goes until they have read that.
@@ -1739,7 +1972,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     // The session that asked has ended and another is live: Send asks where
     // the reply goes first (the choice), and sends nothing yet.
     if (askerEnded && anyOtherLive && asking && !options.routed) {
-      const empty = picksCount === 0 && records.length === 0 && !(box.open && box.text.trim()) && replyUploads.length === 0 && !skipping;
+      const empty = picksCount === 0 && records.length === 0 && boxWords === '' && replyUploads.length === 0 && !skipping;
       if (empty) {
         setError('Write a reply or pick an answer first.');
         return;
@@ -1760,23 +1993,75 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     /** Replies of this Send that went (or were already there, a retry's replays). */
     let went = 0;
     let total = 0;
+    /** The Send claimed the thread's draft, and whether it went (else the claim is given back). */
+    let claimed = false;
+    let done = false;
+    /** The reply that carries the box's words, once its POST went out (its idempotency key), and why the Send stopped. */
+    let wordsKey: string | null = null;
+    let failure: unknown = null;
+    /** This Send's words, the requests it posts, and the uploads they carry. */
+    let sendWords = '';
+    const requests: { messageId: string; input: Parameters<typeof inboxApi.reply>[1] }[] = [];
+    let sentUploads: string[] = [];
     try {
       await pickChain.current;
       const current = threadRef.current;
-      const words = box.open ? box.text.trim() : '';
+      // The box's words, or (the box closed) the words kept as its draft: the foot's Send carries them too.
+      // Before anything goes, the draft's saves are answered (a save landing after the Send would bring the
+      // words back), and the Send names the `updated_at` its words were saved as, so the server clears that
+      // draft only, never a newer one another window saved meanwhile.
+      // The Send claims the thread as it starts: the words waiting are saved, every save in flight is
+      // answered, and no save of this thread runs until it ends (the box is read-only meanwhile).
+      // A Send of these same words earlier could not be confirmed (the Inbox was down): its reply is looked for
+      // first. There, that Send is finished and nothing goes again; not there, this is an ordinary new Send.
+      const earlier = unconfirmed.get(current.thread_id);
+      unconfirmed.delete(current.thread_id);
+      if (earlier && Date.now() - earlier.at < UNCONFIRMED_MS && box.open && earlier.words === boxWords) {
+        const landed = await replyLanded(current.thread_id, earlier.key);
+        if (landed === 'unknown') {
+          unconfirmed.set(current.thread_id, earlier);
+          setError('Still no answer from the Inbox, so nothing was sent. Try again in a moment.');
+          return;
+        }
+        if (landed === 'gone') {
+          setError(THREAD_GONE_TEXT);
+          return;
+        }
+        if (landed === 'yes') {
+          // It went. Anything added since stays, named, for an ordinary Send.
+          finishLanded(earlier);
+          await onChanged();
+          await reloadFiles();
+          return;
+        }
+      }
+      let words = boxWords;
+      let draftSavedAs: string | null = null;
+      const savedAs = await replyDraft.claim();
+      claimed = true;
+      if (box.open) {
+        if (words !== '') draftSavedAs = savedAs;
+      } else if (replyDraft.conflict !== null) {
+        // Words another window's change left unsaved here: they go, and the newer draft stays.
+        words = replyDraft.conflict.trim();
+      } else {
+        // The box is closed: the words as the draft holds them now (another window may have changed them).
+        const fresh = await replyDraft.reload(null);
+        const kept = fresh === undefined ? replyDraft.draft : fresh.draft;
+        words = kept?.body.trim() ?? '';
+        draftSavedAs = kept?.updated_at ?? null;
+      }
+      sendWords = words;
       // A pick saved just now, or still being saved when Send was pressed, counts as an answer.
       const skip = skipsUnanswered(skipChoice, sendAnswersAny(current) || sendAnswersAny(thread, pending));
       const pendingAnnotations = records;
       const uploads = box.open ? replyUploads : [];
-      // The tiles this Send carries: a file pasted while it is in flight stays for the next one.
-      const sentFiles = new Set(box.open ? replyFiles.files.filter((f) => f.state === 'done' && f.upload).map((f) => f.key) : []);
       const carries = words !== '' || pendingAnnotations.length > 0 || uploads.length > 0;
       // The latest agent message rides last only to carry the words, the
       // annotations and the pasted files; with none, a target with nothing to send is left out.
       const plain = sendTargetsOf(current, skip).filter((t, index, all) => t.questions.length > 0 || t.skips || (carries && index === all.length - 1));
       // A comment on another session's message rides a reply to that message (routeSendAnnotations).
       const { targets, carried } = routeSendAnnotations(current, plain, pendingAnnotations);
-      total = targets.length;
       if (targets.length === 0) {
         setError('Write a reply or pick an answer first.');
         return;
@@ -1817,7 +2102,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
         const feedback = withSkillsBlock(annotationsFeedback, skills);
         // The agents tagged anywhere in this Send ride the last reply (a tag in a file comment sends the whole reply).
         const tags = sendTags.get(target.message.id) ?? [];
-        await inboxApi.reply(target.message.id, {
+        requests.push({ messageId: target.message.id, input: {
           idempotency_key: sendKeys.current.get(target.message.id) ?? crypto.randomUUID(),
           words: last ? words : '',
           questions: target.questions,
@@ -1827,27 +2112,30 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
           // The pasted files ride the reply that carries the words, as attachments.
           ...(last && uploads.length > 0 ? { uploads } : {}),
           ...(tags.length > 0 ? { tags } : {}),
+          // The reply that carries the box's words: their draft goes with the Send (that draft only).
+          ...(last && words !== '' && draftSavedAs !== null ? { clear_draft: draftSavedAs } : {}),
           // Only a message the ended session asked goes to the session picked;
           // an answer to another session's message still goes to that session.
           ...(to && target.message.author.kind === 'agent' && target.message.author.session === asking?.session ? { to } : {}),
-        });
+        } });
+      }
+      // The tiles this Send carries, by the uploads its requests carry: a file pasted while it is in flight stays.
+      sentUploads = requests.flatMap((r) => r.input.uploads ?? []);
+      total = requests.length;
+      for (const request of requests) {
+        if (request.input.words) wordsKey = request.input.idempotency_key;
+        await inboxApi.reply(request.messageId, request.input);
         went += 1;
       }
-      sendKeys.current = null;
-      sendContents.current = null;
-      setRoute(CLOSED_ROUTE);
-      setSkipChoice('auto');
-      // Only the files this Send carried go; one pasted while it was in flight keeps the box open.
-      const later = replyFiles.current().some((f) => !sentFiles.has(f.key));
-      replyFiles.forget(sentFiles);
-      setBox({ open: later, text: '' });
-      setTaggedIds([]);
+      done = true;
+      finishSent(sentUploads, words !== '');
       setFull(false);
       await onChanged();
       await reloadFiles();
       // The reply and where it is now sit at the foot of the thread.
       requestAnimationFrame(() => bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight }));
     } catch (cause) {
+      failure = cause;
       if (isSuperseded(cause)) {
         // The race: the agent replaced a picked question as the person sent.
         // Nothing went; the thread is read again and the panel says why.
@@ -1866,6 +2154,45 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
       }
       setError(cause instanceof InboxApiError ? cause.message : 'The reply was not sent. Send again to retry.');
     } finally {
+      // Nothing went (or not all of it): the claim is given back and the box's words are saved again.
+      // Unless the reply carrying them may have gone (its POST went out and no clear refusal came back,
+      // e.g. the answer was lost): the thread is read, and a reply with its key there means it went.
+      if (claimed && !done) {
+        const refused = failure instanceof InboxApiError && failure.status >= 400 && failure.status < 500;
+        let wentAnyway: 'yes' | 'unknown' | 'no' | 'gone' = 'no';
+        if (wordsKey !== null && !refused) {
+          wentAnyway = await replyLanded(threadRef.current.thread_id, wordsKey);
+        }
+        if (wentAnyway === 'yes') {
+          // It went (and its clear_draft with it): the Send is finished as if its answer had come.
+          finishSent(sentUploads, sendWords !== '');
+          setError(null);
+          announce('Your reply went.');
+          void onChanged();
+          void reloadFiles();
+        } else if (wentAnyway === 'gone') {
+          replyDraft.release();
+          setError(THREAD_GONE_TEXT);
+        } else if (wentAnyway === 'unknown') {
+          // Not known (the Inbox may be down): the draft stays as it is on the server, the box keeps the
+          // words, and the next Send of them first looks for this reply (unconfirmed).
+          replyDraft.release();
+          unconfirmed.set(threadRef.current.thread_id, {
+            key: wordsKey!,
+            words: sendWords,
+            uploads: sentUploads,
+            comments: requests.flatMap((r) => r.input.annotation_ids ?? []),
+            // The picks a reply carries are the questions it names (their saved picks go with it).
+            picks: requests.flatMap((r) => (r.input.questions ?? []).map((q) => `${r.messageId}/${q.key}`)),
+            at: Date.now(),
+          });
+          setError('The reply may not have gone. Send again: it looks for this one first, so it is not sent twice.');
+        } else {
+          replyDraft.release();
+          const text = textRef.current?.value ?? '';
+          if (text.trim() !== '') replyDraft.save(text);
+        }
+      }
       setSending(false);
     }
   };
@@ -1955,7 +2282,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
   // No Send now because that session runs an older plugin than a restart loads (the "Steps" line,
   // owner approval "restart-warning"): only while the reply waits for a working session.
   const restartName = lastTo ? hostName(lastTo.host) : repliedTo?.author.kind === 'agent' && repliedTo.author.host ? hostName(repliedTo.author.host) : asker;
-  const restart = delivered?.state === 'queued' && !last.deliver_now_at ? restartNote(restartName, recipientConnection) : null;
+  const restart = delivered?.state === 'queued' && !last.deliver_now_at ? restartNote(recipientConnection) : null;
   const [sendNowState, setSendNowState] = useState<{ id: string; busy: boolean; error: string | null } | null>(null);
   const sendNow = async () => {
     setSendNowState({ id: last.id, busy: true, error: null });
@@ -2029,10 +2356,18 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
     setReasking(true);
     setError(null);
     let went = 0;
-    const total = reaskList.reduce((n, t) => n + (t.kind === 'picks' ? t.replies.length : 1), 0);
+    let total = 0;
     try {
-      // A pick still being saved goes too: wait for it.
+      // A pick still being saved goes too: wait for it, then take the targets
+      // from the thread as saved (threadRef), not as drawn when Re-ask was
+      // pressed: a note just saved has a newer revision, a question just
+      // picked is no longer open.
       await pickChain.current;
+      const targets = resolved && !cameBack ? [] : reaskTargets(threadRef.current.messages, liveMessage);
+      const freshNotes = targets.filter((t) => t.kind === 'reask');
+      // The routed note follows the session the person chose for, wherever its latest message is now.
+      const routedNote = single ? (freshNotes.find((t) => t.session === single.session) ?? null) : null;
+      total = targets.reduce((n, t) => n + (t.kind === 'picks' ? t.replies.length : 1), 0);
       if (!reaskKeys.current) reaskKeys.current = new Map();
       const keyFor = (id: string) => {
         const key = reaskKeys.current!.get(id) ?? crypto.randomUUID();
@@ -2040,14 +2375,14 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
         return key;
       };
       // A session with only picks: a plain reply carries them, so the Re-ask strands none (owner's rule 2).
-      for (const target of reaskList.filter((t) => t.kind === 'picks')) {
+      for (const target of targets.filter((t) => t.kind === 'picks')) {
         for (const reply of target.replies) {
           await inboxApi.reply(reply.message.id, { idempotency_key: keyFor(`picks:${reply.message.id}`), words: '', questions: reply.questions, skip_unanswered: false });
           went += 1;
         }
       }
-      for (const target of notes) {
-        await inboxApi.reask(target.message.id, { idempotency_key: keyFor(target.message.id), ...(to && target === single ? { to } : {}) });
+      for (const target of freshNotes) {
+        await inboxApi.reask(target.message.id, { idempotency_key: keyFor(target.message.id), ...(to && target === routedNote ? { to } : {}) });
         went += 1;
       }
       reaskKeys.current = null;
@@ -2701,7 +3036,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
             ref={guardRef}
             questions={staleQuestions}
             thread={thread}
-            words={box.open ? box.text.trim() : ''}
+            words={boxWords}
             otherPicks={picksCount}
             annotations={records.length}
             onAnswerNew={(target) => {
@@ -2731,9 +3066,35 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
           />
         ) : box.open ? (
           <>
-            <div className="ib-reply-l">
-              Reply to {asker} in {thread.project.name}
-            </div>
+            <DraftHead
+              label={`Reply to ${asker} in ${thread.project.name}`}
+              savedAt={box.text.trim() ? (replyDraft.draft?.updated_at ?? null) : null}
+              conflict={
+                replyDraft.conflict !== null
+                  ? {
+                      id: conflictId,
+                      text: conflictText(conflictSentElsewhere),
+                      onKeepMine: () => {
+                        replyDraft.keepMine(box.text);
+                        announce('Your words are saved.');
+                        requestAnimationFrame(() => textRef.current?.focus());
+                      },
+                      onDiscard: () => {
+                        // Only this window's words go: the other window's draft stays and comes into the box.
+                        const theirs = replyDraft.takeTheirs();
+                        setBox({ open: true, text: theirs });
+                        announce(theirs.trim() ? 'Your words were discarded; the other window’s are in the box.' : 'Your words were discarded.');
+                        requestAnimationFrame(() => textRef.current?.focus());
+                      },
+                    }
+                  : null
+              }
+              onDiscard={() => {
+                replyDraft.discard();
+                closeBox();
+                announce('Draft discarded.');
+              }}
+            />
             {staleQuestions.length > 0 && <ChangedNotice questions={staleQuestions} thread={thread} onJump={jumpTo} />}
             <div
               className="ib-rbox"
@@ -2745,12 +3106,20 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
               <InboxComposerField
                 textareaRef={textRef}
                 ariaLabel={`Reply to ${asker}`}
-                ariaDescribedBy={showAskerNote ? noteId : undefined}
+                ariaDescribedBy={[showAskerNote ? noteId : null, replyDraft.conflict !== null ? conflictId : null].filter(Boolean).join(' ') || undefined}
                 placeholder="Write a reply"
                 destination="your reply"
                 tags={composerTags}
                 value={box.text}
-                onChange={(text) => setBox({ open: true, text })}
+                onChange={(text) => {
+                  // Read-only while a Send is on its way: the words it carries are the words in the box.
+                  if (sending) return;
+                  // The words changed (or emptied): a Send waiting to be confirmed no longer matches them.
+                  const earlier = unconfirmed.get(thread.thread_id);
+                  if (earlier && text.trim() !== earlier.words) forgetUnconfirmed(earlier, text.trim() === '' ? 'emptied' : 'edited');
+                  setBox({ open: true, text });
+                  replyDraft.save(text);
+                }}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
                     event.preventDefault();
@@ -2832,16 +3201,16 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
         ) : (
           <>
           <div className="ib-acts">
-            {waiting && <span className="ib-st">Not sent</span>}
-            {waiting && (
+            {(waiting || draftKept) && <DraftFootNote unsent={{ reply: draftKept, picks: picksCount, comments: records.length }} />}
+            {(waiting || draftKept) && (
               <button type="button" className="ib-btn ib-pri" ref={sendRef} onClick={() => void send()} disabled={sending}>
                 <Icon name="send" size={15} />
                 Send
               </button>
             )}
-            <button type="button" className="ib-btn" onClick={() => openBox(picksCount > 0)}>
-              <Icon name="reply" size={15} />
-              {waiting ? 'Edit the reply' : 'Reply'}
+            <button type="button" className="ib-btn" onClick={() => openBox(picksCount > 0)} data-edit-draft={waiting || draftKept ? '' : undefined}>
+              <Icon name={waiting || draftKept ? 'pen' : 'reply'} size={15} />
+              {waiting || draftKept ? 'Edit draft' : 'Reply'}
             </button>
             {/* Re-ask (approval "inbox-reask"): the open questions again, in one message per session. */}
             {reaskShown && (
@@ -2853,7 +3222,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
               </Tip>
             )}
             {/* 👍 Looks good beside Reply: sent to the agent after the Undo window; hidden while a question waits. */}
-            {ackOffered && !waiting && (
+            {ackOffered && !waiting && !draftKept && (
               <Tip
                 content={
                   ackOn

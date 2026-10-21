@@ -44,3 +44,19 @@ describe("the archived set", () => {
     expect(inboxArchivedRows(rows).map((r) => r.thread_id)).toEqual(["msg_a", "msg_b", "msg_c"]);
   });
 });
+
+describe("unsent work and Re-ask", () => {
+  const words = { reply_at: "2026-10-20T10:00:00Z", picks: 0, comments: 0 };
+  test("a thread holding unsent work stays out of Quiet, a Mark read included", () => {
+    expect(inboxSectionOf(facts({ unsent: words }))).toBe("new");
+    expect(inboxSectionOf(facts({ unsent: words, read_at: "2026-10-20T10:01:00Z" }))).toBe("new");
+    expect(inboxSectionOf(facts({ unsent: null }))).toBe("quiet");
+  });
+  test("a Re-ask that waits goes first: Sent (Quiet after a Mark read), whatever the draft", () => {
+    expect(inboxSectionOf(facts({ unsent: words, reask_pending: true, questions: { open: 2, stopped: true, holds_up: [] } }))).toBe("sent");
+    expect(inboxSectionOf(facts({ unsent: words, reask_pending: true, read_at: "2026-10-20T10:01:00Z" }))).toBe("quiet");
+  });
+  test("archived wins over unsent work", () => {
+    expect(inboxSectionOf(facts({ unsent: words, resolved_at: "2026-10-20T10:02:00Z" }))).toBe("quiet");
+  });
+});

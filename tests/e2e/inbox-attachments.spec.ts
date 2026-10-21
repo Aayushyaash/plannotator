@@ -896,8 +896,8 @@ test('Send carries the picks and then the annotations as feedback; wait_for_repl
   const page = world.page;
   await page.getByRole('radio', { name: /Retry with the same idempotency key/ }).click();
   await page.getByRole('radio', { name: /^Yes/ }).click();
-  await expect(page.locator('.ib-pfoot')).toContainText('Not sent');
-  await page.getByRole('button', { name: 'Edit the reply' }).click();
+  await expect(page.locator('.ib-pfoot [data-draft-foot]')).toContainText('Draft');
+  await page.getByRole('button', { name: 'Edit draft' }).click();
   await expect(page.locator('[data-picks-chip]')).toHaveText('2 picks');
   const chip = page.locator('[data-annotations-chip]');
   await expect(chip).toHaveText('3 annotations');

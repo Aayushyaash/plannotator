@@ -254,7 +254,7 @@ test.skipIf(!hasDom)('no replacement: "No longer applies", and the row links to 
 
 test.skipIf(!hasDom)('the stale guard: a pick replaced while the person writes stops Send once, says why, and Esc keeps editing', async () => {
   const el = await render(before());
-  act(() => button(el, 'Edit the reply').click());
+  act(() => button(el, 'Edit draft').click());
   const text = el.querySelector('textarea') as HTMLTextAreaElement;
   // The person types; then the agent replaces question 1.
   act(() => root!.render(pane(after('replace'))));
@@ -296,7 +296,7 @@ test.skipIf(!hasDom)('the stale guard: a pick replaced while the person writes s
 
 test.skipIf(!hasDom)('Answer the new question keeps the draft and goes to the new card', async () => {
   const el = await render(before());
-  act(() => button(el, 'Edit the reply').click());
+  act(() => button(el, 'Edit draft').click());
   act(() => root!.render(pane(after('replace'))));
   await settle();
   act(() => button(el, 'Send').click());

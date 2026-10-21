@@ -73,42 +73,37 @@ describe('the line under a sent reply', () => {
 describe('restartNote', () => {
   const outdated = { loaded: '0.28.21', installed: '0.28.23', fix: 'restart' as const };
   const busy = { busy: true, idle_since: null, send_now: false, outdated, engine: '2.1.305', restart_command: 'cd ~/code/billing-api && claude --resume abc' };
-  test('busy, no Send now, an older plugin: the approved words and the command', () => {
-    expect(restartNote('Claude Code', busy)).toEqual({
-      fix: 'restart',
-      command: 'cd ~/code/billing-api && claude --resume abc',
-      updateCommand: null,
-      text: 'No Send now here: this Claude Code runs an older Plannotator plugin (0.28.21; 0.28.23 is installed). Type /reload-plugins in it to get Send now.',
-    });
+  test('busy, no Send now, an older plugin: the fix is /reload-plugins, with the resume command for the fallback', () => {
+    const note = restartNote(busy)!;
+    expect(note.fix).toBe('restart');
+    expect(note.command).toBe('cd ~/code/billing-api && claude --resume abc');
+    expect(note.updateCommand).toBeNull();
   });
-  test('the same version reinstalled, and an older mod whose version is unknown', () => {
-    expect(restartNote('Claude Code', { ...busy, outdated: { loaded: '0.28.23', installed: '0.28.23', fix: 'restart' } })!.text).toContain('(0.28.23, reinstalled since it started)');
-    expect(restartNote('Claude Code', { ...busy, outdated: { loaded: null, installed: '0.28.23', fix: 'restart' } })!.text).toBe(
-      'No Send now here: this Claude Code runs an older Plannotator plugin (0.28.23 is installed). Type /reload-plugins in it to get Send now.',
-    );
+  test('the same version reinstalled, and an older mod whose version is unknown, still lead with /reload-plugins', () => {
+    expect(restartNote({ ...busy, outdated: { loaded: '0.28.23', installed: '0.28.23', fix: 'restart' } })!.fix).toBe('restart');
+    expect(restartNote({ ...busy, outdated: { loaded: null, installed: '0.28.23', fix: 'restart' } })!.fix).toBe('restart');
   });
   test('the installed plugin is behind this Inbox: update the plugin first', () => {
-    const note = restartNote('Claude Code', { ...busy, outdated: { loaded: '0.28.23', installed: '0.28.23', fix: 'update_plugin', update_command: 'claude plugin update x' } });
+    const note = restartNote({ ...busy, outdated: { loaded: '0.28.23', installed: '0.28.23', fix: 'update_plugin', update_command: 'claude plugin update x' } });
     expect(note!.fix).toBe('update_plugin');
     expect(note!.updateCommand).toBe('claude plugin update x');
-    expect(note!.text).toContain('Update the plugin, then type /reload-plugins in that Claude Code to get Send now.');
   });
   test('a session that loaded a plugin with Send now (0.28.24 on) lacks it for another reason: the line never blames the plugin', () => {
     expect(INBOX_SEND_NOW_SINCE).toBe('0.28.24');
-    expect(restartNote('Claude Code', { ...busy, outdated: { loaded: '0.28.24', installed: '0.28.25', fix: 'restart' } })).toBeNull();
-    expect(restartNote('Claude Code', { ...busy, outdated: { loaded: '0.29.0', installed: '0.29.1', fix: 'restart' } })).toBeNull();
+    expect(restartNote({ ...busy, outdated: { loaded: '0.28.24', installed: '0.28.25', fix: 'restart' } })).toBeNull();
+    expect(restartNote({ ...busy, outdated: { loaded: '0.29.0', installed: '0.29.1', fix: 'restart' } })).toBeNull();
     // A development build counts as having it; an unknown version (an older mod) and anything older do not.
-    expect(restartNote('Claude Code', { ...busy, outdated: { loaded: '0.0.0-dev', installed: '0.28.25', fix: 'restart' } })).toBeNull();
-    expect(restartNote('Claude Code', { ...busy, outdated: { loaded: null, installed: '0.28.25', fix: 'restart' } })).not.toBeNull();
-    expect(restartNote('Claude Code', { ...busy, outdated: { loaded: '0.28.23', installed: '0.28.25', fix: 'restart' } })).not.toBeNull();
+    expect(restartNote({ ...busy, outdated: { loaded: '0.0.0-dev', installed: '0.28.25', fix: 'restart' } })).toBeNull();
+    expect(restartNote({ ...busy, outdated: { loaded: null, installed: '0.28.25', fix: 'restart' } })).not.toBeNull();
+    expect(restartNote({ ...busy, outdated: { loaded: '0.28.23', installed: '0.28.25', fix: 'restart' } })).not.toBeNull();
   });
   test('nothing while idle, with Send now, up to date, for an engine too old, for Pi, or from an older Inbox', () => {
-    expect(restartNote('Claude Code', { ...busy, busy: false })).toBeNull();
-    expect(restartNote('Claude Code', { ...busy, send_now: true })).toBeNull();
-    expect(restartNote('Claude Code', { ...busy, outdated: null })).toBeNull();
-    expect(restartNote('Claude Code', { ...busy, engine: '2.1.290' })).toBeNull();
-    expect(restartNote('Pi', { ...busy, outdated: { loaded: '0.28.20', installed: '0.28.25', fix: 'update_extension' } })).toBeNull();
-    expect(restartNote('Claude Code', { busy: true, idle_since: null, send_now: false })).toBeNull();
-    expect(restartNote('Claude Code', null)).toBeNull();
+    expect(restartNote({ ...busy, busy: false })).toBeNull();
+    expect(restartNote({ ...busy, send_now: true })).toBeNull();
+    expect(restartNote({ ...busy, outdated: null })).toBeNull();
+    expect(restartNote({ ...busy, engine: '2.1.290' })).toBeNull();
+    expect(restartNote({ ...busy, outdated: { loaded: '0.28.20', installed: '0.28.25', fix: 'update_extension' } })).toBeNull();
+    expect(restartNote({ busy: true, idle_since: null, send_now: false })).toBeNull();
+    expect(restartNote(null)).toBeNull();
   });
 });

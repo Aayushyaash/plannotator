@@ -261,7 +261,7 @@ test.skipIf(!hasDom)('read messages fold to lines; the new, the last and one hol
   expect(again.querySelector('[data-middle-fold]')!.textContent).toBe('1 earlier message');
   // Folded by hand, its line says the pick is not sent.
   act(() => (article(again, 'msg_A3')!.querySelector('[data-fold-head]') as HTMLButtonElement).click());
-  expect(holdings(again, 'msg_A3')).toEqual(['picks=1 pick, not sent']);
+  expect(holdings(again, 'msg_A3')).toEqual(['picks=1 pick in your draft']);
 });
 
 test.skipIf(!hasDom)("a folded line's snippet is the person's answers when every question is answered, else the message's first words; and it says what the message holds", async () => {
