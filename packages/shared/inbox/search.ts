@@ -406,6 +406,7 @@ export class InboxSearchIndex {
         break;
       }
       case "annotation":
+      case "card":
         return;
     }
     if (line.kind === "message" || line.kind === "question") {

@@ -28,6 +28,7 @@ import type {
   InboxAgentId,
   InboxAgentsModel,
   InboxAnnotationRecord,
+  InboxCardWire,
   InboxAttachmentState,
   InboxMessageWire,
   InboxNoteAgentId,
@@ -716,7 +717,9 @@ export type InboxEvent =
   /** `first`: the message's first line, not a later rewrite of it (a look, an archive, an Unarchive). Absent from an older Inbox. */
   | { seq: number; kind: 'message'; id: string; first?: boolean; message: InboxMessage }
   | { seq: number; kind: 'question'; id: string; question: InboxQuestion }
-  | { seq: number; kind: 'annotation'; id: string; annotation: InboxAnnotationRecord };
+  | { seq: number; kind: 'annotation'; id: string; annotation: InboxAnnotationRecord }
+  /** A Board card (approval "inbox-board"); absent from an older Inbox. */
+  | { seq: number; kind: 'card'; id: string; card: InboxCardWire };
 
 /** A thread's attachments as they are now, and the person's annotations waiting for a Send. */
 export interface AttachmentsModel {

@@ -17,12 +17,15 @@
 import type { QuestionAnswer, QuestionKind } from "./question-block";
 import type { InboxAnnotationRecord, InboxAttachment, InboxAttachmentKind, InboxInlineImage } from "./inbox-attachments";
 import type { InboxRowDelivery } from "./inbox-delivery";
+import { INBOX_CARD_ACTION_ON, type InboxCard } from "./inbox-cards";
 
 // The attachment shapes and file rules (step 2) live in their own module and
 // reach the Inbox through this published entry, so core's export map is unchanged.
 export * from "./inbox-attachments";
 export * from "./inbox-open-in";
 export * from "./inbox-delivery";
+// The Board's cards (approval "inbox-board"), the same way.
+export * from "./inbox-cards";
 // The surface bridge's messages (the phone, PLAN step S1), the same way.
 export * from "./inbox-surface-bridge";
 
@@ -51,8 +54,8 @@ export function ulid(now: number = Date.now()): string {
   return timePart + randomPart;
 }
 
-/** `upl`: a file the person uploaded for a message; `drf`: a draft of one (compose). */
-export type InboxIdPrefix = "msg" | "prj" | "ses" | "dec" | "dev" | "upl" | "drf";
+/** `upl`: a file the person uploaded for a message; `drf`: a draft of one (compose); `crd`: a Board card. */
+export type InboxIdPrefix = "msg" | "prj" | "ses" | "dec" | "dev" | "upl" | "drf" | "crd";
 
 export function inboxId(prefix: InboxIdPrefix, now?: number): string {
   return `${prefix}_${ulid(now)}`;
@@ -67,6 +70,8 @@ const ID_RE: Record<InboxIdPrefix, RegExp> = {
   dev: /^dev_[0-9A-HJKMNP-TV-Z]{26}$/,
   upl: /^upl_[0-9A-HJKMNP-TV-Z]{26}$/,
   drf: /^drf_[0-9A-HJKMNP-TV-Z]{26}$/,
+  /** A Board card (approval "inbox-board"). */
+  crd: /^crd_[0-9A-HJKMNP-TV-Z]{26}$/,
 };
 
 export function isInboxId(prefix: InboxIdPrefix, value: unknown): value is string {
@@ -959,14 +964,16 @@ export interface InboxThread {
 
 // ─────────────────────────────── Lines ───────────────────────────────
 
-export type InboxRecordKind = "project" | "message" | "question" | "annotation";
+/** `card`: a Board card (approval "inbox-board"); a reader that does not know a kind skips its lines. */
+export type InboxRecordKind = "project" | "message" | "question" | "annotation" | "card";
 
 /** One line of the store: a full snapshot of one record. */
 export type InboxLine =
   | { v: 1; seq: number; at: string; kind: "project"; id: string; record: InboxProject }
   | { v: 1; seq: number; at: string; kind: "message"; id: string; record: InboxMessage }
   | { v: 1; seq: number; at: string; kind: "question"; id: string; record: InboxQuestionRecord }
-  | { v: 1; seq: number; at: string; kind: "annotation"; id: string; record: InboxAnnotationRecord };
+  | { v: 1; seq: number; at: string; kind: "annotation"; id: string; record: InboxAnnotationRecord }
+  | { v: 1; seq: number; at: string; kind: "card"; id: string; record: InboxCard };
 
 // ─────────────────────────────── Health ───────────────────────────────
 
@@ -1310,14 +1317,19 @@ export type InboxToolCostHost = "pi" | "opencode";
  * tokens with o200k_base) before the long field descriptions were shortened
  * (INBOX_AGENT_FIELD_DESCRIPTIONS); 7,058 bytes (1,661 with o200k_base) before
  * Decisions (list_decisions, record_decision) were removed; about 6,390 bytes
- * after (estimated from the generated entry, never re-measured). The current
- * value is measured on Pi with the read_thread window's fields (`expand`,
- * `before`, `after`, `format`) and the `search` action added: 7,328 bytes,
- * 1,732 tokens with o200k_base.
+ * after (estimated from the generated entry, never re-measured); 7,328 bytes
+ * (1,732 with o200k_base) measured on Pi with the read_thread window's fields
+ * (`expand`, `before`, `after`, `format`) and the `search` action added. The
+ * current value adds the Board's `card` action (approval "inbox-board"):
+ * 8,503 bytes, 2,047 tokens with o200k_base, computed from the generated
+ * entry in Pi's request shape (that computation gives 7,325 for the entry Pi
+ * measured at 7,328); the Pi and OpenCode cost tests hold it to 5%. While the
+ * card action is held back (INBOX_CARD_ACTION_ON false), the size without it.
  */
+const INBOX_TOOL_COST_NOW = INBOX_CARD_ACTION_ON ? { bytes: 8503, tokens: 2400 } : { bytes: 7328, tokens: 2000 };
 export const INBOX_TOOL_COST: Readonly<Record<InboxToolCostHost, { bytes: number; tokens: number }>> = {
-  pi: { bytes: 7328, tokens: 2000 },
-  opencode: { bytes: 7328, tokens: 2000 },
+  pi: INBOX_TOOL_COST_NOW,
+  opencode: INBOX_TOOL_COST_NOW,
 };
 
 /** "about 7 KB, roughly 2,000 tokens" for a host's measured cost. */

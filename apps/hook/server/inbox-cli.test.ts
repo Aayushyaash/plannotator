@@ -17,7 +17,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import type { InboxQuestion } from "@plannotator/core/inbox-types";
 import { inboxStatus, isPidAlive, readInboxRegistry, writeInboxRegistry } from "@plannotator/shared/inbox/registry";
 import { startInboxServer } from "@plannotator/server/inbox";
-import { INBOX_MCP_TOOLS } from "@plannotator/server/inbox-mcp";
+import { INBOX_SERVED_TOOLS } from "@plannotator/server/inbox-mcp";
 import { GUIDE_BRIEF_EXAMPLE } from "../../../packages/server/inbox-guides";
 import { runPlannotatorUninstall } from "@plannotator/server/uninstall";
 import { INBOX_MAX_REQUEST_BYTES } from "@plannotator/shared/inbox/connection";
@@ -270,7 +270,7 @@ describe("plannotator inbox mcp (the stdio shim)", () => {
     expect((await inboxStatus(box.dataDir)).state).toBe("running");
     expect(existsSync(box.browserMarker)).toBe(false);
 
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual([...INBOX_MCP_TOOLS].sort());
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual([...INBOX_SERVED_TOOLS].sort());
     const sent = (
       await client.callTool({
         name: "send_message",
