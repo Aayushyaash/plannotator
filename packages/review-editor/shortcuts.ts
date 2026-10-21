@@ -105,19 +105,19 @@ export const reviewEditorShortcuts = defineShortcutScope({
       hint: 'Available when staging is supported (not in PR review mode).',
       displayOrder: 20,
     },
-    nextHunk: {
-      description: 'Jump to next changed hunk',
+    nextChange: {
+      description: 'Next change',
       bindings: ['N'],
-      section: 'File Actions',
-      hint: 'Jumps to the next changed hunk in the active diff.',
-      displayOrder: 30,
+      section: 'File Navigation',
+      hint: 'Scrolls to the next run of changed lines: in the open file, or in All files across the expanded files. Collapsed files and Markdown files shown rendered are skipped.',
+      displayOrder: 50,
     },
-    prevHunk: {
-      description: 'Jump to previous changed hunk',
-      bindings: ['P'],
-      section: 'File Actions',
-      hint: 'Jumps to the previous changed hunk in the active diff.',
-      displayOrder: 40,
+    prevChange: {
+      description: 'Previous change',
+      bindings: ['Shift+N'],
+      section: 'File Navigation',
+      hint: 'Scrolls to the previous run of changed lines.',
+      displayOrder: 60,
     },
   },
 });

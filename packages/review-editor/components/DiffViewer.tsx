@@ -30,7 +30,7 @@ import { ImageDiffPreview } from './ImageDiffPreview';
 import { isFileScopedAnnotation, lineRangeForAnnotation } from '../utils/annotationScope';
 import { lineAnnotationMetadata } from '../utils/annotationDisplay';
 import type { AnnotationScrollTarget } from '../types';
-import { getLineNumberFromNode, getSideFromNode, getDiffSelection, snapshotDiffSelection, type DiffSelectionSnapshot } from '../utils/diffSelection';
+import { getLineNumberFromNode, getSideFromNode, getDiffSelection, snapshotDiffSelection, rangeForGutterClick, type DiffSelectionSnapshot } from '../utils/diffSelection';
 import { isContentConsistentWithPatch } from '../utils/patchConsistency';
 import { hashString } from '../utils/hashString';
 import { markdownPreviewSourcePath, markdownViewsFor, resolveMarkdownView, type MarkdownFileView } from '../utils/markdownPreview';
@@ -50,13 +50,13 @@ import {
   type LineSelectionSource,
 } from '../utils/lineSelectionBehavior';
 import {
-  findHunkLineElement,
-  getElementScrollTop,
-  getHunkTargetLine,
-  resolveTargetHunkIndex,
-  scrollToHunkElement,
-  type HunkLike,
-} from '../utils/hunkNavigation';
+  changeJumpDirection,
+  findChangeElement,
+  listDiffChanges,
+  placementOf,
+  resolveChangeJump,
+  type ChangePlacement,
+} from '../utils/changeNavigation';
 
 interface PierreDiffContentProps {
   filePath: string;
@@ -197,6 +197,10 @@ interface DiffViewerProps {
   prUrl?: string;
   prDiffScope?: string;
   isFocused?: boolean;
+  /** `N` / `Shift+N` step through this file's changes (#1543). On only for the
+   *  focused file of the active single-file panel, so one key never moves two
+   *  diffs. */
+  changeNavigation?: boolean;
   diffStyle: 'split' | 'unified';
   diffOverflow?: 'scroll' | 'wrap';
   diffIndicators?: 'bars' | 'classic' | 'none';
@@ -304,6 +308,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   prUrl,
   prDiffScope,
   isFocused = false,
+  changeNavigation = false,
   diffStyle,
   diffOverflow,
   diffIndicators = 'bars',
@@ -846,9 +851,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   const handleGutterUtilityClick = useCallback((range: SelectedLineRange) => {
     const snapshot = selectionSnapshotRef.current;
     selectionSnapshotRef.current = null;
-    const effectiveRange: SelectedLineRange = snapshot
-      ? { start: snapshot.start, end: snapshot.end, side: snapshot.side }
-      : range;
+    const effectiveRange = rangeForGutterClick(range, snapshot);
     handleLineSelectionInteraction('gutter-comment-action', effectiveRange);
   }, [handleLineSelectionInteraction]);
 
@@ -905,65 +908,52 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   const handlePierreLineSelectionEnd = useCallback((range: SelectedLineRange | null) => {
     handleLineSelectionInteraction('range-gesture', range);
   }, [handleLineSelectionInteraction]);
-  const jumpHunk = useCallback((direction: 'next' | 'prev') => {
+  // N / Shift+N: the next / previous change of this file (#1543). Single-file
+  // diffs are not line-virtualized, so every change's first line is in the DOM.
+  const changes = useMemo(() => listDiffChanges(augmentedDiff?.hunks), [augmentedDiff]);
+  // The change the last jump landed on, while it is still on screen.
+  const changeCursorRef = useRef<number | null>(null);
+  useEffect(() => {
+    changeCursorRef.current = null;
+  }, [changes]);
+  const jumpChange = useCallback((direction: 'next' | 'prev'): boolean => {
     const container = containerRef.current;
-    const hunks = (augmentedDiff?.hunks ?? fileDiff?.hunks ?? []) as HunkLike[];
-    if (!container || hunks.length === 0) return;
-
-    const hunkTops: Array<{ index: number; top: number; el: HTMLElement }> = [];
-    for (let i = 0; i < hunks.length; i++) {
-      const target = getHunkTargetLine(hunks[i]);
-      const el = findHunkLineElement(container, target);
-      if (el) {
-        hunkTops.push({
-          index: i,
-          top: getElementScrollTop(container, el),
-          el,
-        });
-      }
-    }
-
-    if (hunkTops.length === 0) return;
-
-    const targetIdx = resolveTargetHunkIndex(
-      hunkTops.map((h) => h.top),
-      container.scrollTop,
-      direction,
-    );
-
-    if (targetIdx != null) {
-      scrollToHunkElement(hunkTops[targetIdx].el);
-    }
-  }, [augmentedDiff, fileDiff]);
+    if (!container || changes.length === 0) return false;
+    const view = container.getBoundingClientRect();
+    const readingLine = view.top + view.height / 2;
+    const elements = changes.map((change) => findChangeElement(container, change));
+    const placements = elements.map((el): ChangePlacement => {
+      // Not rendered (should not happen here): count it by its order.
+      if (!el) return 'after';
+      return placementOf(el.getBoundingClientRect(), readingLine);
+    });
+    const cursor = changeCursorRef.current;
+    const cursorEl = cursor != null ? elements[cursor] : null;
+    const cursorRect = cursorEl?.getBoundingClientRect();
+    const cursorOnScreen = !!cursorRect && cursorRect.bottom > view.top && cursorRect.top < view.bottom;
+    const target = resolveChangeJump(placements, direction, cursorOnScreen ? cursor : null);
+    if (target == null) return true;
+    const el = elements[target];
+    if (!el) return true;
+    changeCursorRef.current = target;
+    const rect = el.getBoundingClientRect();
+    const top = container.scrollTop + (rect.top - view.top) - view.height / 2 + rect.height / 2;
+    const reduceMotion = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    container.scrollTo({ top: Math.max(0, top), behavior: reduceMotion ? 'auto' : 'smooth' });
+    return true;
+  }, [changes]);
 
   useEffect(() => {
-    if (collapsed || isFocused === false) return;
+    if (!changeNavigation || collapsed || markdownPreviewEnabled) return;
     const handler = (e: KeyboardEvent) => {
-      const el = (e.composedPath?.()[0] ?? e.target) as HTMLElement | null;
-      if (
-        el &&
-        (el.tagName === 'INPUT' ||
-          el.tagName === 'TEXTAREA' ||
-          el.tagName === 'SELECT' ||
-          el.isContentEditable)
-      )
-        return;
-      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-      if (e.key === 'n' || e.key === 'N') {
-        const hunks = (augmentedDiff?.hunks ?? fileDiff?.hunks ?? []) as HunkLike[];
-        if (hunks.length === 0) return;
-        e.preventDefault();
-        jumpHunk('next');
-      } else if (e.key === 'p' || e.key === 'P') {
-        const hunks = (augmentedDiff?.hunks ?? fileDiff?.hunks ?? []) as HunkLike[];
-        if (hunks.length === 0) return;
-        e.preventDefault();
-        jumpHunk('prev');
-      }
+      const direction = changeJumpDirection(e);
+      if (!direction || changes.length === 0) return;
+      if (jumpChange(direction)) e.preventDefault();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [collapsed, isFocused, jumpHunk, augmentedDiff, fileDiff]);
+  }, [changeNavigation, collapsed, markdownPreviewEnabled, changes, jumpChange]);
 
   // Token interaction handlers (code area clicks)
   const handleTokenClick = useCallback((props: DiffTokenEventBaseProps, event: MouseEvent) => {

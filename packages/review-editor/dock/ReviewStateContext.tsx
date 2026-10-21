@@ -36,6 +36,9 @@ export interface ReviewState {
   rawPatch: string;
   focusedFileIndex: number;
   focusedFilePath: string | null;
+  /** A single-file diff panel is the active dock panel (and the guide is not
+   *  open): the file-level keys (`N` / `Shift+N`) act on the focused file. */
+  isDiffPanelActive?: boolean;
   diffStyle: 'split' | 'unified';
   /** Compact touch shells use a session-only style so desktop preferences stay untouched. */
   onDiffStyleChange: (style: 'split' | 'unified') => void;

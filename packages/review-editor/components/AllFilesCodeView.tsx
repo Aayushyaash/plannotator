@@ -31,7 +31,7 @@ import { buildFileTree, getVisualFileOrder } from '../utils/buildFileTree';
 import { fileKind } from '@plannotator/core/file-kind';
 import { getFileKindOrder } from '../utils/fileKindTree';
 import { buildCodeNavRequest } from '../utils/buildCodeNavRequest';
-import { getDiffSelection, getLineNumberFromNode, getSideFromNode, snapshotDiffSelection, type DiffSelectionSnapshot } from '../utils/diffSelection';
+import { getDiffSelection, getLineNumberFromNode, getSideFromNode, snapshotDiffSelection, rangeForGutterClick, type DiffSelectionSnapshot } from '../utils/diffSelection';
 import { isContentConsistentWithPatch } from '../utils/patchConsistency';
 import { hashString } from '../utils/hashString';
 import {
@@ -39,13 +39,15 @@ import {
   type LineSelectionSource,
 } from '../utils/lineSelectionBehavior';
 import {
-  findHunkLineElement,
-  getElementScrollTop,
-  getHunkTargetLine,
-  resolveTargetHunkIndex,
-  scrollToHunkElement,
-  type HunkLike,
-} from '../utils/hunkNavigation';
+  changeJumpDirection,
+  findChangeElement,
+  listDiffChanges,
+  placementOf,
+  renderedUnifiedRange,
+  resolveChangeJump,
+  type ChangePlacement,
+  type DiffChange,
+} from '../utils/changeNavigation';
 import { isContentlessBinaryPatch, isImagePreviewCandidate, isOversizedReviewStubPatch } from '@plannotator/shared/diff-paths';
 import { OversizedFileNotice } from './OversizedFileNotice';
 import { ToolbarHost, type ToolbarHostHandle } from './ToolbarHost';
@@ -2316,7 +2318,7 @@ export const AllFilesCodeView: React.FC<AllFilesCodeViewProps> = ({
       if (snapshot) {
         const snapshotItemId = snapshot.host ? nodeToItemIdRef.current.get(snapshot.host) : undefined;
         if (!snapshot.host || !snapshotItemId || snapshotItemId === item.id) {
-          effectiveRange = { start: snapshot.start, end: snapshot.end, side: snapshot.side };
+          effectiveRange = rangeForGutterClick(range, snapshot);
         }
       }
       handleLineSelectionInteraction('gutter-comment-action', effectiveRange, item);
@@ -2607,39 +2609,78 @@ export const AllFilesCodeView: React.FC<AllFilesCodeViewProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollTargetAnnotation, filePathToItemId, previewItemIds]);
 
-  const jumpHunk = useStableCallback((direction: 'next' | 'prev') => {
-    const container = scrollRef.current;
-    if (!container) return;
+  // N / Shift+N: the next / previous change across the expanded files (#1543).
+  // CodeView renders only a window of files (and of lines within a file), so a
+  // change off screen is placed by its file's order or by the rendered rows,
+  // and the jump goes through CodeView's own line scroll.
+  const changeCursorRef = useRef<{ itemId: string; unifiedIndex: number } | null>(null);
+  const jumpChange = useStableCallback((direction: 'next' | 'prev'): boolean => {
+    const handle = viewerRef.current;
+    const viewer = handle?.getInstance();
+    if (handle == null || viewer == null) return false;
+    const container = viewer.getContainerElement() ?? scrollRef.current;
+    if (container == null) return false;
+    const view = container.getBoundingClientRect();
+    const readingLine = view.top + view.height / 2;
 
-    const hunkTops: Array<{ top: number; el: HTMLElement; itemId: string }> = [];
-    for (const item of identity.items) {
-      if (item.type !== 'diff' || !item.fileDiff?.hunks || isItemCollapsed(item.id)) continue;
-      for (const hunk of item.fileDiff.hunks as HunkLike[]) {
-        const target = getHunkTargetLine(hunk);
-        const el = findHunkLineElement(container, target);
-        if (el) {
-          hunkTops.push({
-            top: getElementScrollTop(container, el),
-            el,
-            itemId: item.id,
-          });
+    const renderedElements = new Map<string, HTMLElement>();
+    for (const rendered of viewer.getRenderedItems()) {
+      if (rendered.type === 'diff' && rendered.element != null) renderedElements.set(rendered.id, rendered.element);
+    }
+    let firstRendered = Infinity;
+    orderedItemIds.forEach((id, index) => {
+      if (renderedElements.has(id) && index < firstRendered) firstRendered = index;
+    });
+
+    const spots: Array<{ itemId: string; change: DiffChange; placement: ChangePlacement; el: HTMLElement | null }> = [];
+    orderedItemIds.forEach((itemId, index) => {
+      const item = handle.getItem(itemId);
+      if (item == null || item.type !== 'diff' || item.collapsed === true) return;
+      const changes = listDiffChanges(item.fileDiff?.hunks);
+      if (changes.length === 0) return;
+      const element = renderedElements.get(itemId);
+      let rows: { min: number; max: number } | null | undefined;
+      for (const change of changes) {
+        if (element == null) {
+          spots.push({ itemId, change, placement: index < firstRendered ? 'before' : 'after', el: null });
+          continue;
         }
+        const el = findChangeElement(element, change);
+        if (el != null) {
+          spots.push({ itemId, change, placement: placementOf(el.getBoundingClientRect(), readingLine), el });
+          continue;
+        }
+        // A row of a rendered file outside its rendered lines.
+        if (rows === undefined) rows = renderedUnifiedRange(element);
+        const placement: ChangePlacement = rows != null
+          ? (change.unifiedIndex < rows.min ? 'before' : 'after')
+          : (element.getBoundingClientRect().bottom <= readingLine ? 'before' : 'after');
+        spots.push({ itemId, change, placement, el: null });
       }
+    });
+    if (spots.length === 0) return false;
+
+    const cursor = changeCursorRef.current;
+    let current: number | null = null;
+    if (cursor != null) {
+      const index = spots.findIndex(
+        (spot) => spot.itemId === cursor.itemId && spot.change.unifiedIndex === cursor.unifiedIndex,
+      );
+      const rect = index === -1 ? null : spots[index].el?.getBoundingClientRect();
+      if (rect && rect.bottom > view.top && rect.top < view.bottom) current = index;
     }
-
-    if (hunkTops.length === 0) return;
-
-    hunkTops.sort((a, b) => a.top - b.top);
-
-    const targetIdx = resolveTargetHunkIndex(
-      hunkTops.map((h) => h.top),
-      container.scrollTop,
-      direction,
-    );
-
-    if (targetIdx != null) {
-      scrollToHunkElement(hunkTops[targetIdx].el);
-    }
+    const target = resolveChangeJump(spots.map((spot) => spot.placement), direction, current);
+    if (target == null) return true;
+    const spot = spots[target];
+    changeCursorRef.current = { itemId: spot.itemId, unifiedIndex: spot.change.unifiedIndex };
+    handle.scrollTo({
+      type: 'line',
+      id: spot.itemId,
+      lineNumber: spot.change.lineNumber,
+      side: spot.change.side,
+      align: 'center',
+    });
+    return true;
   });
 
   useEffect(() => {
@@ -2657,6 +2698,12 @@ export const AllFilesCodeView: React.FC<AllFilesCodeViewProps> = ({
           el.isContentEditable)
       )
         return;
+      // N / Shift+N — the next / previous change (the only Shift key here).
+      const changeDirection = changeJumpDirection(e);
+      if (changeDirection) {
+        if (jumpChange(changeDirection)) e.preventDefault();
+        return;
+      }
       if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       if (orderedItemIds.length === 0) return;
 
@@ -2716,18 +2763,6 @@ export const AllFilesCodeView: React.FC<AllFilesCodeViewProps> = ({
         onStage?.(currentPath);
         return;
       }
-      // n / p — jump to next / previous changed hunk.
-      if (e.key === 'n' || e.key === 'N') {
-        e.preventDefault();
-        jumpHunk('next');
-        return;
-      }
-      if (e.key === 'p' || e.key === 'P') {
-        e.preventDefault();
-        jumpHunk('prev');
-        return;
-      }
-
 
       if (e.key !== '[' && e.key !== ']') return;
       e.preventDefault();
@@ -2759,7 +2794,7 @@ export const AllFilesCodeView: React.FC<AllFilesCodeViewProps> = ({
     canStageFiles,
     canStagePath,
     onStage,
-    jumpHunk,
+    jumpChange,
   ]);
 
   // --- Markdown view: the editing file, and the file a view key acts on ------

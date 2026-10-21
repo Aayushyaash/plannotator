@@ -19,6 +19,10 @@ export function getSideFromNode(node: Node | null): 'additions' | 'deletions' {
   if (current?.nodeType === Node.TEXT_NODE) current = current.parentNode;
   while (current) {
     if (current instanceof HTMLElement) {
+      // A changed row names its own side (unified view has no per-side column).
+      const lineType = current.getAttribute('data-line-type');
+      if (lineType === 'change-deletion') return 'deletions';
+      if (lineType === 'change-addition') return 'additions';
       if (current.hasAttribute('data-deletions')) return 'deletions';
       if (current.hasAttribute('data-additions')) return 'additions';
     }
@@ -64,4 +68,30 @@ export function snapshotDiffSelection(
     side,
     host,
   };
+}
+
+/**
+ * The range a gutter `+` click comments on (#991). With text selected across
+ * several lines, a click on a line inside that selection comments on the
+ * whole selection; a click elsewhere (another line, the other side) comments
+ * on the clicked line as before.
+ */
+export function rangeForGutterClick<T extends {
+  start: number;
+  end: number;
+  side?: 'deletions' | 'additions';
+  endSide?: 'deletions' | 'additions';
+}>(
+  clicked: T,
+  snapshot: DiffSelectionSnapshot | null,
+): T {
+  if (!snapshot) return clicked;
+  if (clicked.side != null && clicked.side !== snapshot.side) return clicked;
+  if (clicked.endSide != null && clicked.endSide !== snapshot.side) return clicked;
+  const low = Math.min(clicked.start, clicked.end);
+  const high = Math.max(clicked.start, clicked.end);
+  if (low < snapshot.start || high > snapshot.end) return clicked;
+  const widened: T = { ...clicked, start: snapshot.start, end: snapshot.end, side: snapshot.side };
+  if (clicked.endSide != null) widened.endSide = snapshot.side;
+  return widened;
 }

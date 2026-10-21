@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   getLineNumberFromNode,
   getSideFromNode,
+  rangeForGutterClick,
   snapshotDiffSelection,
 } from './diffSelection';
 
@@ -32,6 +33,18 @@ describe.skipIf(!hasDom)('diffSelection', () => {
     expect(getSideFromNode(additionsEl)).toBe('additions');
     expect(getSideFromNode(delEl)).toBe('deletions');
     expect(getSideFromNode(neutralEl)).toBe('additions');
+  });
+
+  test('a unified row names its own side: a deleted line inside the shared column is a deletion', () => {
+    const column = document.createElement('code');
+    column.setAttribute('data-additions', '');
+    const deleted = document.createElement('div');
+    deleted.setAttribute('data-line-type', 'change-deletion');
+    const context = document.createElement('div');
+    context.setAttribute('data-line-type', 'context');
+    column.append(deleted, context);
+    expect(getSideFromNode(deleted)).toBe('deletions');
+    expect(getSideFromNode(context)).toBe('additions');
   });
 
   test('guards against collapsed selection by returning null', () => {
@@ -98,5 +111,22 @@ describe.skipIf(!hasDom)('diffSelection', () => {
       side: 'additions',
       host: null,
     });
+  });
+
+  test('a gutter + inside a multi-line selection comments on the whole selection (#991)', () => {
+    const snapshot = { start: 4, end: 8, side: 'additions' as const, host: null };
+    expect(rangeForGutterClick({ start: 6, end: 6, side: 'additions' }, snapshot))
+      .toEqual({ start: 4, end: 8, side: 'additions' });
+    expect(rangeForGutterClick({ start: 4, end: 4, side: 'additions', endSide: 'additions' }, snapshot))
+      .toEqual({ start: 4, end: 8, side: 'additions', endSide: 'additions' });
+  });
+
+  test('a gutter + outside the selection, or on the other side, keeps the clicked line', () => {
+    const snapshot = { start: 4, end: 8, side: 'additions' as const, host: null };
+    const below = { start: 9, end: 9, side: 'additions' as const };
+    const otherSide = { start: 6, end: 6, side: 'deletions' as const };
+    expect(rangeForGutterClick(below, snapshot)).toBe(below);
+    expect(rangeForGutterClick(otherSide, snapshot)).toBe(otherSide);
+    expect(rangeForGutterClick(below, null)).toBe(below);
   });
 });
