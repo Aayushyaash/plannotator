@@ -871,7 +871,7 @@ export async function startPlannotatorServer(
       if (next === plan) return { revision: planRevision, version: versionInfo.version, unchanged: true };
       // Same bookkeeping a resubmission gets from a fresh server.
       slug = generateSlug(next);
-      historySlug = resolveHistorySlug(project, slug);
+      historySlug = resolveHistorySlug(project, slug, { current: historySlug });
       const historyResult = saveToHistory(project, historySlug, next);
       currentPlanPath = historyResult.path;
       previousPlan = historyResult.version > 1 ? getPlanVersion(project, historySlug, historyResult.version - 1) : null;

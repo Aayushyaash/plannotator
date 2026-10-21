@@ -9,12 +9,12 @@
  * `previousPlan` is null, and the UI has nothing to compare against.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startPlannotatorServer } from "./index";
 import { detectProjectName } from "./project";
-import { generateSlug } from "@plannotator/shared/storage";
+import { generateSlug, PLAN_HISTORY_CONTINUE_WINDOW_MS } from "@plannotator/shared/storage";
 
 const MINIMAL_HTML = "<html><body>Plannotator</body></html>";
 const ENV_KEYS = [
@@ -56,10 +56,12 @@ function slugDatedDaysAgo(plan: string, days: number): string {
   return today.replace(/\d{4}-\d{2}-\d{2}$/, earlier);
 }
 
-function seedVersion(dataDir: string, project: string, slug: string, content: string): void {
+function seedVersion(dataDir: string, project: string, slug: string, content: string, ageMs = 0): void {
   const dir = join(dataDir, "history", project, slug);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "001.md"), content, "utf-8");
+  const when = new Date(Date.now() - ageMs);
+  utimesSync(join(dir, "001.md"), when, when);
 }
 
 async function planPayload(plan: string): Promise<{
@@ -94,6 +96,53 @@ describe("plan review spanning a day boundary", () => {
     expect(payload.versionInfo.version).toBe(2);
     expect(payload.versionInfo.totalVersions).toBe(2);
     expect(payload.previousPlan).toBe(yesterday);
+  });
+
+  test("a revision pushed into the open review stays on the continued chain", async () => {
+    const dataDir = process.env.PLANNOTATOR_DATA_DIR!;
+    const project = (await detectProjectName()) ?? "_unknown";
+    const v1 = "# Pushed revision chain\n\nThe version the reviewer annotated.\n";
+    const v2 = "# Pushed revision chain\n\nRevised the next day.\n";
+    const v3 = "# Pushed revision chain\n\nRevised again in the same review.\n";
+    const chain = slugDatedDaysAgo(v1, 1);
+    seedVersion(dataDir, project, chain, v1, 3 * 60 * 60 * 1000);
+
+    const server = await startPlannotatorServer({
+      plan: v2,
+      htmlContent: MINIMAL_HTML,
+      origin: "claude-code",
+      planRevisions: true,
+    });
+    try {
+      expect(server.updatePlan(v3)).toMatchObject({ version: 3, unchanged: false });
+      const payload = await (await fetch(`${server.url}/api/plan`)).json();
+      expect(payload.previousPlan).toBe(v2);
+      const versions = await (await fetch(`${server.url}/api/plan/versions`)).json();
+      expect(versions.slug).toBe(chain);
+      expect(versions.versions).toHaveLength(3);
+      // Nothing was written under today's dated directory.
+      expect(existsSync(join(dataDir, "history", project, generateSlug(v1)))).toBe(false);
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("a same-heading plan after two quiet days starts a new chain", async () => {
+    const dataDir = process.env.PLANNOTATOR_DATA_DIR!;
+    const project = (await detectProjectName()) ?? "_unknown";
+    const plan = "# Implementation Plan\n\nUnrelated work, days later.\n";
+    seedVersion(
+      dataDir,
+      project,
+      slugDatedDaysAgo(plan, 3),
+      "# Implementation Plan\n\nAn older plan.\n",
+      PLAN_HISTORY_CONTINUE_WINDOW_MS + 60 * 60 * 1000,
+    );
+
+    const payload = await planPayload(plan);
+
+    expect(payload.versionInfo.version).toBe(1);
+    expect(payload.previousPlan).toBeNull();
   });
 
   test("still starts at version 1 for a plan with no history", async () => {

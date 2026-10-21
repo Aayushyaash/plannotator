@@ -5,10 +5,11 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, readdirSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSlug, getPlanDir, savePlan, saveToHistory, getPlanVersion, getVersionCount, listVersions, resolveHistorySlug } from "./storage";
+import { PLAN_HISTORY_CONTINUE_WINDOW_MS } from "@plannotator/shared/storage";
 
 const tempDirs: string[] = [];
 
@@ -232,13 +233,19 @@ describe("resolveHistorySlug", () => {
     }
   }
 
-  function seedChain(dataDir: string, project: string, slug: string, versions: string[]): void {
+  /** Seed a chain whose versions were written `ageMs` ago (default: just now). */
+  function seedChain(dataDir: string, project: string, slug: string, versions: string[], ageMs = 0): void {
     const dir = join(dataDir, "history", project, slug);
     mkdirSync(dir, { recursive: true });
+    const when = new Date(Date.now() - ageMs);
     versions.forEach((content, i) => {
-      writeFileSync(join(dir, `${String(i + 1).padStart(3, "0")}.md`), content, "utf-8");
+      const file = join(dir, `${String(i + 1).padStart(3, "0")}.md`);
+      writeFileSync(file, content, "utf-8");
+      utimesSync(file, when, when);
     });
   }
+
+  const HOUR = 60 * 60 * 1000;
 
   test("continues the chain started on an earlier day", () => {
     withDataDir((dataDir) => {
@@ -277,8 +284,8 @@ describe("resolveHistorySlug", () => {
   test("picks the most recent of several earlier chains", () => {
     withDataDir((dataDir) => {
       const project = "several";
-      seedChain(dataDir, project, "recurring-plan-2026-09-18", ["# old"]);
-      seedChain(dataDir, project, "recurring-plan-2026-10-02", ["# newer"]);
+      seedChain(dataDir, project, "recurring-plan-2026-09-18", ["# old"], 30 * HOUR);
+      seedChain(dataDir, project, "recurring-plan-2026-10-02", ["# newer"], 2 * HOUR);
 
       expect(resolveHistorySlug(project, "recurring-plan-2026-10-04")).toBe(
         "recurring-plan-2026-10-02"
@@ -339,6 +346,53 @@ describe("resolveHistorySlug", () => {
       expect(resolveHistorySlug(project, "abandoned-plan-2026-10-04")).toBe(
         "abandoned-plan-2026-10-01"
       );
+    });
+  });
+
+  test("continues the reported case: a revision about 39 hours after v1", () => {
+    withDataDir((dataDir) => {
+      const project = "reported-gap";
+      seedChain(dataDir, project, "inference-capacity-2026-10-02", ["# V1"], 39 * HOUR);
+
+      expect(resolveHistorySlug(project, "inference-capacity-2026-10-04")).toBe(
+        "inference-capacity-2026-10-02"
+      );
+    });
+  });
+
+  test("a same-heading plan after two quiet days starts a new chain", () => {
+    withDataDir((dataDir) => {
+      const project = "generic-heading";
+      seedChain(dataDir, project, "implementation-plan-2026-09-30", ["# Implementation Plan"], PLAN_HISTORY_CONTINUE_WINDOW_MS + HOUR);
+
+      expect(resolveHistorySlug(project, "implementation-plan-2026-10-04")).toBe(
+        "implementation-plan-2026-10-04"
+      );
+    });
+  });
+
+  test("today's chain wins over an older chain written more recently", () => {
+    withDataDir((dataDir) => {
+      const project = "split";
+      seedChain(dataDir, project, "split-plan-2026-10-04", ["# today"], 5 * HOUR);
+      seedChain(dataDir, project, "split-plan-2026-10-03", ["# yesterday"], HOUR);
+
+      expect(resolveHistorySlug(project, "split-plan-2026-10-04")).toBe("split-plan-2026-10-04");
+    });
+  });
+
+  test("an open session keeps its chain while the heading names it", () => {
+    withDataDir((dataDir) => {
+      const project = "session";
+      seedChain(dataDir, project, "session-plan-2026-10-04", ["# today, another session"]);
+
+      expect(
+        resolveHistorySlug(project, "session-plan-2026-10-04", { current: "session-plan-2026-10-01" })
+      ).toBe("session-plan-2026-10-01");
+      // A revision that renames the plan leaves the session's chain.
+      expect(
+        resolveHistorySlug(project, "renamed-plan-2026-10-04", { current: "session-plan-2026-10-01" })
+      ).toBe("renamed-plan-2026-10-04");
     });
   });
 
