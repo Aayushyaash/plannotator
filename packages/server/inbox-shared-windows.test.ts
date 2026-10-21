@@ -117,6 +117,56 @@ test("createInboxWindows: a leader that says gone before its stream closes stops
   windows.stop();
 });
 
+test("createInboxWindows: two tabs naming each other are never counted; followers count only through a leader's own stream", async () => {
+  let clock = 1_000;
+  const windows = createInboxWindows({ graceMs: 80, now: () => clock });
+  // A and B each say the other serves them, and neither holds a stream: no window.
+  windows.report("w-tab-a-0001", { permission: "granted", origin: null, via: "local", servedBy: "w-tab-b-0001" });
+  windows.report("w-tab-b-0001", { permission: "granted", origin: null, via: "local", servedBy: "w-tab-a-0001" });
+  expect(windows.reach(true)).toMatchObject({ windows: 0, allowed: 0 });
+  // Long past the grace, still none (their records may linger; they never count).
+  clock += 10_000;
+  await Bun.sleep(250);
+  expect(windows.reach(true)).toMatchObject({ windows: 0 });
+
+  // C holds a stream and serves A; B is served by A (one link further): only C and A count.
+  const leaveC = windows.connect("w-tab-c-0001", { permission: "granted", origin: null, via: "local" });
+  windows.report("w-tab-a-0001", { permission: "granted", origin: null, via: "local", servedBy: "w-tab-c-0001" });
+  windows.report("w-tab-b-0001", { permission: "granted", origin: null, via: "local", servedBy: "w-tab-a-0001" });
+  expect(windows.reach(true)).toMatchObject({ windows: 2 });
+
+  // A held a stream once: for one grace after it closed, its followers count; then not.
+  const leaveA = windows.connect("w-tab-a-0001", { permission: "granted", origin: null, via: "local" });
+  expect(windows.reach(true)).toMatchObject({ windows: 3 });
+  leaveA();
+  // A itself is served by C again (its report): A, B (through A's recent stream), C.
+  windows.report("w-tab-a-0001", { permission: "granted", origin: null, via: "local", servedBy: "w-tab-c-0001" });
+  expect(windows.reach(true)).toMatchObject({ windows: 3 });
+  clock += 81;
+  expect(windows.reach(true)).toMatchObject({ windows: 2 });
+  leaveC();
+  windows.stop();
+});
+
+test("createInboxWindows: after the whole browser goes, its followers stop counting one grace after the leader's stream closed, and the pages hear it", async () => {
+  const windows = createInboxWindows({ graceMs: 120 });
+  const heard: number[] = [];
+  windows.subscribe(() => heard.push(windows.reach(true).windows));
+  const leave = windows.connect("w-leader-0001", { permission: "granted", origin: null, via: "local" });
+  for (let i = 0; i < 4; i++) windows.report(`w-follow-000${i}`, { permission: "granted", origin: null, via: "local", servedBy: "w-leader-0001" });
+  expect(windows.reach(true)).toMatchObject({ windows: 5 });
+  const closedAt = Date.now();
+  leave();
+  expect(windows.reach(true)).toMatchObject({ windows: 4 });
+  while (windows.reach(true).windows > 0) await Bun.sleep(5);
+  const after = Date.now() - closedAt;
+  // One grace, never two (the old rule kept them through the leader's drop and then their own).
+  expect(after).toBeGreaterThanOrEqual(110);
+  expect(after).toBeLessThan(220);
+  expect(heard.at(-1)).toBe(0);
+  windows.stop();
+});
+
 test("POST /api/inbox/window: served_by and gone are additive; health counts the event streams open", async () => {
   const server = await inbox({ windowGraceMs: 100 });
   expect((await healthOf(server)).event_streams).toBe(0);
@@ -194,5 +244,27 @@ test("GET /api/inbox/events?once=1: the hello and the lines after the cursor, th
   const after = await read(seqs[1]!);
   expect([...after.matchAll(/^id: (\d+)$/gm)].map((m) => Number(m[1]))).toEqual(seqs.slice(2));
   // The response ended (text() resolved) and no stream stayed open.
+  expect((await healthOf(server)).event_streams).toBe(0);
+});
+
+test("GET /api/inbox/events refuses another site's page, and answers the Inbox's own page, the phone's door and agents", async () => {
+  const server = await inbox();
+  const base = `http://127.0.0.1:${server.port}`;
+  const open = async (headers: Record<string, string>, query = "cursor=0&once=1") => fetch(`${base}/api/inbox/events?${query}`, { headers });
+  for (const site of ["cross-site", "same-site"]) {
+    const res = await open({ "Sec-Fetch-Site": site });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { code: string }).code).toBe("cross_origin");
+  }
+  // An Origin naming another server, and `Origin: null` (a sandboxed page), are refused too.
+  expect((await open({ Origin: "http://evil.localhost:1" })).status).toBe(403);
+  expect((await open({ Origin: "null" })).status).toBe(403);
+  // The window (same-origin fetch metadata), the phone's door and agents (no metadata) get the stream.
+  for (const headers of [{ "Sec-Fetch-Site": "same-origin" }, { "Sec-Fetch-Site": "none" }, {}, { Origin: base }]) {
+    const res = await open(headers);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("event: hello");
+  }
+  // A refused stream was never counted.
   expect((await healthOf(server)).event_streams).toBe(0);
 });

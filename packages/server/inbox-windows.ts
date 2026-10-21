@@ -14,9 +14,12 @@
  * Tabs share one event stream (packages/inbox/sharedEvents.ts): one tab, the
  * leader, holds the stream for every Inbox tab of its origin and passes the
  * events on. A follower holds no stream, so it reports `served_by`, the
- * leader's window id, and counts as open while that leader's record exists
- * (its stream is open, or closed less than the grace ago, which covers a
- * handover). A tab that closes reports `gone` (a beacon at pagehide, or the
+ * leader's window id, and counts as open while that leader holds its own
+ * stream, or held one less than the grace ago (a handover). Only a leader's
+ * own stream counts: a tab served by a tab that is itself only served is not
+ * counted, so two tabs naming each other never keep each other open. After the
+ * whole browser goes, its followers stop counting one grace after the
+ * leader's stream closed. A tab that closes reports `gone` (a beacon at pagehide, or the
  * leader, which watches each follower's Web Lock and sees a crashed tab
  * release it): it stops counting at once.
  *
@@ -56,6 +59,8 @@ export function parseWindowOrigin(value: unknown): string | null {
 
 interface WindowRecord {
   streams: number;
+  /** When this window's last stream closed (null: it never held one, or holds one now). */
+  streamEndedAt: number | null;
   /** The leader whose event stream serves this follower (no stream of its own), or null. */
   servedBy: string | null;
   /** The tab said it closed: not counted, kept for the grace (followers it served still count). */
@@ -84,9 +89,12 @@ export interface InboxWindows {
   stop(): void;
 }
 
-export function createInboxWindows(options: { graceMs?: number } = {}): InboxWindows {
+export function createInboxWindows(options: { graceMs?: number; now?: () => number } = {}): InboxWindows {
   const graceMs = options.graceMs ?? WINDOW_GRACE_MS;
+  const now = options.now ?? Date.now;
   const windows = new Map<string, WindowRecord>();
+  /** One timer per closed stream: its followers stop counting a grace later, and the pages hear it. */
+  const expiries = new Set<ReturnType<typeof setTimeout>>();
   const listeners = new Set<() => void>();
   let last = "";
   const changed = () => {
@@ -96,13 +104,16 @@ export function createInboxWindows(options: { graceMs?: number } = {}): InboxWin
     last = key;
     for (const listener of listeners) listener();
   };
-  /** A window counts while it holds a stream, or while the leader serving it is known (its grace covers a handover). */
+  /** The window holds its own stream, or held one less than the grace ago. Never through another tab. */
+  const ownStream = (w: WindowRecord): boolean =>
+    w.streams > 0 || (w.streamEndedAt !== null && now() - w.streamEndedAt < graceMs);
+  /** A window counts while it holds a stream, or while the leader serving it holds (or just held) its own. */
   const isOpen = (w: WindowRecord): boolean => {
     if (w.gone) return false;
     if (w.streams > 0) return true;
     if (!w.servedBy) return false;
     const leader = windows.get(w.servedBy);
-    return leader !== undefined && leader !== w && (leader.streams > 0 || leader.drop !== null);
+    return leader !== undefined && leader !== w && ownStream(leader);
   };
   const summary = () => {
     const open = [...windows.values()].filter(isOpen);
@@ -131,7 +142,7 @@ export function createInboxWindows(options: { graceMs?: number } = {}): InboxWin
   const recordOf = (id: string, via: "local" | "tailnet"): WindowRecord => {
     let record = windows.get(id);
     if (!record) {
-      record = { streams: 0, servedBy: null, gone: false, permission: "unknown", origin: null, via, drop: null };
+      record = { streams: 0, streamEndedAt: null, servedBy: null, gone: false, permission: "unknown", origin: null, via, drop: null };
       windows.set(id, record);
     }
     return record;
@@ -147,6 +158,7 @@ export function createInboxWindows(options: { graceMs?: number } = {}): InboxWin
       record.via = report.via;
       record.gone = false;
       record.streams += 1;
+      record.streamEndedAt = null;
       if (record.drop) {
         clearTimeout(record.drop);
         record.drop = null;
@@ -157,7 +169,17 @@ export function createInboxWindows(options: { graceMs?: number } = {}): InboxWin
         if (closed) return;
         closed = true;
         record.streams = Math.max(0, record.streams - 1);
-        if (record.streams === 0) scheduleDrop(id, record);
+        if (record.streams === 0) {
+          record.streamEndedAt = now();
+          scheduleDrop(id, record);
+          // The followers it served stop counting when the grace ends: tell the pages then.
+          const expiry = setTimeout(() => {
+            expiries.delete(expiry);
+            changed();
+          }, graceMs + 1);
+          (expiry as { unref?: () => void }).unref?.();
+          expiries.add(expiry);
+        }
         changed();
       };
     },
@@ -190,6 +212,8 @@ export function createInboxWindows(options: { graceMs?: number } = {}): InboxWin
     },
     stop() {
       for (const record of windows.values()) if (record.drop) clearTimeout(record.drop);
+      for (const expiry of expiries) clearTimeout(expiry);
+      expiries.clear();
       windows.clear();
       listeners.clear();
     },

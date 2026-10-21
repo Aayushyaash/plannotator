@@ -1885,7 +1885,14 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       if (path === "/api/inbox/threads" && req.method === "GET") return json(listModel(projectFilterOf(url), archivedModeOf(url)));
       if (path === "/api/inbox/threads/archived" && req.method === "GET") return json(archivedModel(url));
       if (path === "/api/inbox/projects" && req.method === "GET") return json({ serverSession, cursor: store.cursor(), projects: projectFolders() });
-      if (path === "/api/inbox/events" && req.method === "GET") return eventStream(req, url, via);
+      if (path === "/api/inbox/events" && req.method === "GET") {
+      // Another site's page must not hold (or time) a stream of everything the Inbox holds:
+      // refused like the other read routes. The phone's door and agents send no fetch metadata.
+      if (!isSameOriginOrNoOrigin(origin, req.headers.get("host") ?? "", req.headers.get("sec-fetch-site"))) {
+        return json({ error: "Cross-origin requests are not accepted.", code: "cross_origin" }, 403);
+      }
+      return eventStream(req, url, via);
+    }
       // A window's report: its browser's notification permission for its own origin changed (inbox-windows.ts).
       if (path === "/api/inbox/window") {
         if (req.method !== "POST") return json({ error: "Use POST." }, 405);

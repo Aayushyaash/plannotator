@@ -18,8 +18,10 @@ import { afterEach, expect, test } from 'bun:test';
 import type { InboxEventFrame, InboxEventHandlers, InboxEventWindow } from './api';
 import { dispatchInboxFrame } from './api';
 import {
+  discardPreparedInboxEvents,
   EVENTS_CHANNEL,
   EVENTS_LOCK,
+  prepareInboxEvents,
   inboxEventsServedBy,
   subscribeSharedInboxEvents,
   WINDOW_LOCK_PREFIX,
@@ -42,17 +44,37 @@ interface Waiter {
 }
 
 class FakeLocks {
-  held = new Map<string, { tab: number; release: () => void }>();
+  held = new Map<string, { tab: number; release: () => void; steal: () => void }>();
   queues = new Map<string, Waiter[]>();
   dead = new Set<number>();
+  /** A paused tab's main thread runs nothing: what the locks tell it waits (`resume`). */
+  paused = new Map<number, (() => void)[]>();
+  steals = 0;
+
+  /** Run `fn` in `tab`'s main thread: at once, or when it resumes. */
+  run(tab: number, fn: () => void): void {
+    const waiting = this.paused.get(tab);
+    if (waiting) waiting.push(fn);
+    else fn();
+  }
 
   managerFor(tab: number) {
     return {
-      request: (name: string, options: { signal?: AbortSignal }, callback: () => unknown): Promise<unknown> =>
+      request: (name: string, options: { signal?: AbortSignal; steal?: boolean }, callback: () => unknown): Promise<unknown> =>
         new Promise((resolve, reject) => {
           if (this.dead.has(tab)) return;
           if (options.signal?.aborted) return reject(new DOMException('aborted', 'AbortError'));
           const waiter: Waiter = { tab, callback, resolve, reject, signal: options.signal };
+          if (options.steal) {
+            // Take the lock now: the holder's request rejects (AbortError) and the lock is free for this one, first in line.
+            this.steals += 1;
+            this.held.get(name)?.steal();
+            const queue = this.queues.get(name) ?? [];
+            queue.unshift(waiter);
+            this.queues.set(name, queue);
+            this.pump(name);
+            return;
+          }
           const queue = this.queues.get(name) ?? [];
           queue.push(waiter);
           this.queues.set(name, queue);
@@ -75,33 +97,45 @@ class FakeLocks {
     const next = queue.shift();
     if (!next) return;
     let released = false;
+    let stolen = false;
     const release = () => {
       if (released) return;
       released = true;
       if (this.held.get(name)?.release === release) this.held.delete(name);
       setTimeout(() => this.pump(name), 0);
     };
-    this.held.set(name, { tab: next.tab, release });
+    const steal = () => {
+      if (released) return;
+      stolen = true;
+      released = true;
+      this.held.delete(name);
+      this.run(next.tab, () => next.reject(new DOMException('stolen', 'AbortError')));
+    };
+    this.held.set(name, { tab: next.tab, release, steal });
     // Granted a task later, as the browser does.
     setTimeout(() => {
-      if (this.dead.has(next.tab)) return release();
-      let out: unknown;
-      try {
-        out = next.callback();
-      } catch (error) {
-        release();
-        return next.reject(error);
-      }
-      Promise.resolve(out).then(
-        (value) => {
+      this.run(next.tab, () => {
+        if (this.dead.has(next.tab) || stolen) return release();
+        let out: unknown;
+        try {
+          out = next.callback();
+        } catch (error) {
           release();
-          next.resolve(value);
-        },
-        (error) => {
-          release();
-          next.reject(error);
-        },
-      );
+          return next.reject(error);
+        }
+        Promise.resolve(out).then(
+          (value) => {
+            if (stolen) return;
+            release();
+            next.resolve(value);
+          },
+          (error) => {
+            if (stolen) return;
+            release();
+            next.reject(error);
+          },
+        );
+      });
     }, 0);
   }
 
@@ -118,6 +152,7 @@ class FakeLocks {
 }
 class FakeHub {
   channels = new Set<FakeChannel>();
+  constructor(readonly locks: FakeLocks) {}
   open(tab: number): FakeChannel {
     const channel = new FakeChannel(this, tab);
     this.channels.add(channel);
@@ -141,7 +176,9 @@ class FakeChannel {
     for (const other of this.hub.channels) {
       if (other === this) continue;
       setTimeout(() => {
-        if (!other.closed && this.hub.channels.has(other)) other.onmessage?.({ data });
+        this.hub.locks.run(other.tab, () => {
+          if (!other.closed && this.hub.channels.has(other)) other.onmessage?.({ data });
+        });
       }, 0);
     }
   }
@@ -153,6 +190,7 @@ class FakeChannel {
 
 /** The server: a store of lines with one seq counter, and the streams open on it. */
 class FakeServer {
+  constructor(readonly locks: FakeLocks) {}
   seq = 0;
   lines: { seq: number; kind: string }[] = [];
   streams = new Set<{ tab: number; push: (frame: InboxEventFrame) => void }>();
@@ -180,7 +218,7 @@ class FakeServer {
     const stream = {
       tab,
       // Frames arrive a task later, in order, like a socket.
-      push: (frame: InboxEventFrame) => setTimeout(() => open && onFrame(frame), 0),
+      push: (frame: InboxEventFrame) => setTimeout(() => this.locks.run(tab, () => open && onFrame(frame)), 0),
     };
     stream.push({ name: 'hello', data: JSON.stringify({ serverSession: 's', cursor: this.seq }), id: null });
     for (const line of this.lines) if (line.seq > cursor) stream.push(this.frameOf(line));
@@ -205,6 +243,7 @@ interface Tab {
   deliveries: number;
   drafts: string[];
   gone: { window: string; unloading: boolean }[];
+  visible: boolean;
   doc: EventTarget;
   win2: EventTarget;
   unsubscribe: () => void;
@@ -212,15 +251,19 @@ interface Tab {
 
 class World {
   locks = new FakeLocks();
-  hub = new FakeHub();
-  server = new FakeServer();
+  hub = new FakeHub(this.locks);
+  server = new FakeServer(this.locks);
+  /** Catch-ups fail while this is set (the Inbox restarting). */
+  catchUpFails = false;
+  /** Timings every tab gets (the leader check, the catch-up retry). */
+  timing: SharedEventsEnv['timing'] = { pingEveryMs: 40, pongTimeoutMs: 30, retryMs: 20, retryMaxMs: 80 };
   tabs = new Map<number, Tab>();
   gone: { by: number; window: string; unloading: boolean }[] = [];
   catchUps: { tab: number; cursor: number }[] = [];
   catchUpDelayMs = 0;
   next = 1;
 
-  open(cursor = this.server.seq): Tab {
+  open(cursor = this.server.seq, options: { visible?: boolean } = {}): Tab {
     const id = this.next++;
     const tab: Tab = {
       id,
@@ -232,6 +275,7 @@ class World {
       deliveries: 0,
       drafts: [],
       gone: [],
+      visible: options.visible ?? false,
       doc: new EventTarget(),
       win2: new EventTarget(),
       unsubscribe: () => {},
@@ -261,6 +305,10 @@ class World {
       catchUp: async (c) => {
         // The server answers with the lines as they are when the request reaches it; the answer can then be slow.
         await tick();
+        if (this.catchUpFails) {
+          this.catchUps.push({ tab: id, cursor: c });
+          throw new Error('down');
+        }
         this.catchUps.push({ tab: id, cursor: c });
         const frames = this.server.lines.filter((line) => line.seq > c).map((line) => this.server.frameOf(line));
         if (this.catchUpDelayMs > 0) await new Promise((done) => setTimeout(done, this.catchUpDelayMs));
@@ -272,6 +320,8 @@ class World {
         this.gone.push({ by: id, window, unloading });
       },
       lifecycle: { document: tab.doc, window: tab.win2 },
+      isVisible: () => tab.visible,
+      timing: this.timing,
     };
     tab.unsubscribe = subscribeSharedInboxEvents(cursor, handlers, tab.win, env);
     this.tabs.set(id, tab);
@@ -297,6 +347,16 @@ class World {
 
   leader(): number | null {
     return this.locks.holder(EVENTS_LOCK);
+  }
+
+  /** The tab's main thread stops (a debugger, a long script): nothing of it runs until `resume`. No freeze event. */
+  pause(tab: Tab): void {
+    if (!this.locks.paused.has(tab.id)) this.locks.paused.set(tab.id, []);
+  }
+  resume(tab: Tab): void {
+    const waiting = this.locks.paused.get(tab.id) ?? [];
+    this.locks.paused.delete(tab.id);
+    for (const fn of waiting) fn();
   }
 }
 
@@ -627,6 +687,149 @@ test('a new leader while a catch-up is in flight: the tab fetches again before i
   expect(w.catchUps.filter((c) => c.tab === f.id).length).toBeGreaterThanOrEqual(2);
 });
 
+test('a leader whose main thread stops (no freeze) loses the stream to a visible follower; it follows when it runs again', async () => {
+  const w = world();
+  const a = w.open();
+  await settle();
+  const b = w.open(w.server.seq, { visible: true });
+  const c = w.open(w.server.seq);
+  await settle(10);
+  expect(w.leader()).toBe(a.id);
+  w.server.write(2);
+  await settle(8);
+  // A stops: it keeps its lock and its stream, and passes nothing on.
+  w.pause(a);
+  w.server.write(3);
+  let peak = 0;
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline && !(b.records.length === 5 && c.records.length === 5)) {
+    peak = Math.max(peak, w.server.streams.size);
+    await new Promise((done) => setTimeout(done, 5));
+  }
+  // B checked, heard nothing, took the lock and leads; C follows it.
+  expect(w.locks.steals).toBe(1);
+  expect(w.leader()).toBe(b.id);
+  expectAll(b, 0, 5);
+  expectAll(c, 0, 5);
+  // Two streams at most while A is stopped (its own is still open on the server).
+  expect(peak).toBeLessThanOrEqual(2);
+  w.server.write(2);
+  await settle(8);
+  expectAll(c, 0, 7);
+  // A runs again: its lock was taken, so it closes its stream and follows B; nothing lost or twice.
+  w.resume(a);
+  await settle(20);
+  expect(w.server.streams.size).toBe(1);
+  expect(w.leader()).toBe(b.id);
+  w.server.write(1);
+  await settle(12);
+  expectAll(a, 0, 8);
+  expectAll(b, 0, 8);
+  expectAll(c, 0, 8);
+  // It is in line again: B closes, A or C leads.
+  w.close(b);
+  w.server.write(1);
+  await settle(16);
+  expect([a.id, c.id] as (number | null)[]).toContain(w.leader());
+  expectAll(a, 0, 9);
+  expectAll(c, 0, 9);
+});
+
+test('a leader that answers is never taken over, however often visible followers check', async () => {
+  const w = world();
+  const a = w.open();
+  await settle();
+  const followers = [w.open(w.server.seq, { visible: true }), w.open(w.server.seq, { visible: true })];
+  for (let i = 0; i < 10; i++) {
+    w.server.write(1);
+    await new Promise((done) => setTimeout(done, 25));
+  }
+  // Each follower checked several times; the leader answered each.
+  expect(w.locks.steals).toBe(0);
+  expect(w.leader()).toBe(a.id);
+  for (const f of followers) expectAll(f, 0, 10);
+});
+
+test('hidden followers never take the stream from a stopped leader; the first that becomes visible does', async () => {
+  const w = world();
+  const a = w.open();
+  await settle();
+  const b = w.open();
+  await settle(8);
+  w.pause(a);
+  w.server.write(2);
+  await new Promise((done) => setTimeout(done, 200));
+  expect(w.locks.steals).toBe(0);
+  expect(b.records).toEqual([]);
+  // B becomes visible: it checks at once, hears nothing, and leads.
+  b.visible = true;
+  b.doc.dispatchEvent(new Event('visibilitychange'));
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline && b.records.length < 2) await new Promise((done) => setTimeout(done, 5));
+  expect(w.locks.steals).toBe(1);
+  expectAll(b, 0, 2);
+  w.resume(a);
+  await settle(20);
+  expect(w.server.streams.size).toBe(1);
+});
+
+test('a catch-up that fails keeps the gap: the frames that came meanwhile wait, and the retry fetches from the old seq', async () => {
+  const w = world();
+  const a = w.open();
+  await settle();
+  const f = w.open();
+  await settle(8);
+  f.doc.dispatchEvent(new Event('freeze'));
+  // F sleeps through 1 and 2 (what the leader passed on while it was frozen never reaches it).
+  w.pause(f);
+  w.server.write(2);
+  await settle(6);
+  w.locks.paused.delete(f.id);
+  w.catchUpFails = true;
+  f.doc.dispatchEvent(new Event('resume'));
+  await settle(6);
+  // 3 and 4 arrive from the leader while F cannot fetch 1 and 2: they wait.
+  w.server.write(2);
+  await settle(6);
+  expect(f.records).toEqual([]);
+  w.catchUpFails = false;
+  // The retry timer (no hello needed) fetches from 0.
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline && f.records.length < 4) await new Promise((done) => setTimeout(done, 5));
+  expectAll(f, 0, 4);
+  expect(w.catchUps.filter((c) => c.tab === f.id).every((c) => c.cursor === 0)).toBe(true);
+  expectAll(a, 0, 4);
+});
+
+test('discardPreparedInboxEvents closes the early channel when no subscription follows', async () => {
+  const g = globalThis as unknown as Record<string, unknown>;
+  const saved = { BroadcastChannel: g.BroadcastChannel, EventSource: g.EventSource, navigator: g.navigator };
+  const closed: string[] = [];
+  class Channel {
+    onmessage: unknown = null;
+    constructor(readonly name: string) {}
+    postMessage() {}
+    close() {
+      closed.push(this.name);
+    }
+  }
+  try {
+    g.BroadcastChannel = Channel;
+    g.EventSource = class {};
+    Object.defineProperty(globalThis, 'navigator', { value: { locks: { request: () => Promise.resolve() } }, configurable: true });
+    prepareInboxEvents();
+    discardPreparedInboxEvents();
+    expect(closed).toEqual([EVENTS_CHANNEL]);
+    // Twice is nothing.
+    discardPreparedInboxEvents();
+    expect(closed).toHaveLength(1);
+  } finally {
+    g.BroadcastChannel = saved.BroadcastChannel;
+    g.EventSource = saved.EventSource;
+    Object.defineProperty(globalThis, 'navigator', { value: saved.navigator, configurable: true });
+  }
+});
+
 test('the channel ignores what is not its own shape', async () => {
   const w = world();
   const a = w.open();
@@ -694,4 +897,66 @@ test('a random life of tabs (opens, closes, crashes, freezes) with an agent writ
       expect(one.tab.records).toEqual(want);
     }
   }
+}, 120_000);
+
+test('a random life with leaders stopping (no freeze) and tabs shown and hidden: at most two streams, every record once per tab', async () => {
+  let seed = 7_2026_1021;
+  const random = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  let steals = 0;
+  for (let round = 0; round < 30; round++) {
+    const w = world();
+    const live: { tab: Tab; from: number; frozen: boolean }[] = [];
+    let paused: Tab | null = null;
+    for (let i = 0; i < 3; i++) live.push({ tab: w.open(w.server.seq, { visible: random() < 0.5 }), from: w.server.seq, frozen: false });
+    await settle();
+    for (let step = 0; step < 50; step++) {
+      const roll = random();
+      if (roll < 0.3) w.server.write(1 + Math.floor(random() * 3));
+      else if (roll < 0.42 && live.length < 10) live.push({ tab: w.open(w.server.seq, { visible: random() < 0.5 }), from: w.server.seq, frozen: false });
+      else if (roll < 0.5 && live.length > 2) {
+        const at = Math.floor(random() * live.length);
+        if (live[at]!.tab !== paused) w.close(live.splice(at, 1)[0]!.tab);
+      } else if (roll < 0.62) {
+        // The leader stops (one at a time), or the stopped one runs again.
+        if (paused) {
+          w.resume(paused);
+          paused = null;
+        } else {
+          const leading = live.find((one) => one.tab.id === w.leader() && !one.frozen);
+          if (leading) {
+            paused = leading.tab;
+            w.pause(paused);
+          }
+        }
+      } else if (roll < 0.75) {
+        const one = live[Math.floor(random() * live.length)]!;
+        one.tab.visible = !one.tab.visible;
+        one.tab.doc.dispatchEvent(new Event('visibilitychange'));
+      } else if (roll < 0.82) {
+        const one = live[Math.floor(random() * live.length)]!;
+        if (one.tab !== paused) {
+          one.tab.doc.dispatchEvent(new Event(one.frozen ? 'resume' : 'freeze'));
+          one.frozen = !one.frozen;
+        }
+      }
+      await new Promise((done) => setTimeout(done, random() < 0.5 ? 0 : 15));
+      expect(w.server.streams.size).toBeLessThanOrEqual(2);
+    }
+    if (paused) w.resume(paused);
+    for (const one of live) if (one.frozen) one.tab.doc.dispatchEvent(new Event('resume'));
+    w.server.write(2);
+    await new Promise((done) => setTimeout(done, 200));
+    await settle(30);
+    steals += w.locks.steals;
+    expect(w.server.streams.size).toBe(1);
+    for (const one of live) {
+      const want = Array.from({ length: w.server.seq - one.from }, (_, i) => one.from + i + 1);
+      expect(one.tab.records).toEqual(want);
+    }
+  }
+  // The rounds did take streams over (the property is not vacuous).
+  expect(steals).toBeGreaterThan(5);
 }, 120_000);

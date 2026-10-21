@@ -54,10 +54,20 @@ export type SharedEventsMessage =
    */
   | { v: 1; type: 'leader'; window: string; from: number; to?: string }
   /** A follower is here (or wants to know the leader): the leader watches its lock and answers. */
-  | { v: 1; type: 'join'; window: string };
+  | { v: 1; type: 'join'; window: string }
+  /** A visible follower asks whether a leader is alive (its main thread runs); the leader answers at once. */
+  | { v: 1; type: 'ping'; window: string; nonce: string }
+  | { v: 1; type: 'pong'; leader: string; to: string; nonce: string };
+
+/** How often a visible follower checks that the leader answers, and how long it waits for the answer. */
+export const LEADER_PING_EVERY_MS = 5000;
+export const LEADER_PONG_TIMEOUT_MS = 3000;
+/** A failed catch-up is tried again after this, doubling up to `CATCH_UP_RETRY_MAX_MS`. */
+export const CATCH_UP_RETRY_MS = 1000;
+export const CATCH_UP_RETRY_MAX_MS = 30_000;
 
 interface LockManagerLike {
-  request(name: string, options: { signal?: AbortSignal }, callback: () => Promise<unknown> | unknown): Promise<unknown>;
+  request(name: string, options: { signal?: AbortSignal; steal?: boolean }, callback: () => Promise<unknown> | unknown): Promise<unknown>;
 }
 
 interface ChannelLike {
@@ -80,6 +90,10 @@ export interface SharedEventsEnv {
   sendGone: (windowId: string, unloading: boolean) => void;
   /** Where `freeze`, `resume` (document) and `pagehide`, `pageshow` (window) arrive; null in tests that drive them. */
   lifecycle: { document: EventTarget; window: EventTarget } | null;
+  /** Whether the person can see this tab (only a visible follower checks on the leader). Default: never. */
+  isVisible?: () => boolean;
+  /** Test knobs for the leader check and the catch-up retry (defaults above). */
+  timing?: { pingEveryMs?: number; pongTimeoutMs?: number; retryMs?: number; retryMaxMs?: number };
 }
 
 export function sharedInboxEventsSupported(): boolean {
@@ -113,6 +127,18 @@ export function prepareInboxEvents(channel: (name: string) => ChannelLike = defa
     if (frames.length < EARLY_FRAMES_MAX) frames.push(event.data);
   };
   early = { channel: opened, frames };
+}
+
+/** The first list read failed: no subscription follows, so the early channel closes. */
+export function discardPreparedInboxEvents(): void {
+  if (!early) return;
+  try {
+    early.channel.onmessage = null;
+    early.channel.close();
+  } catch {
+    // Already closed.
+  }
+  early = null;
 }
 
 /** The leader whose stream serves this tab, for the window's report (`served_by`); null when this tab leads or knows none. */
@@ -179,6 +205,7 @@ export function browserSharedEventsEnv(pieces: Pick<SharedEventsEnv, 'open' | 'd
     catchUp: defaultCatchUp,
     sendGone: defaultSendGone,
     lifecycle: { document, window },
+    isVisible: () => document.visibilityState === 'visible',
     ...pieces,
   };
 }
@@ -220,12 +247,23 @@ function isMessage(value: unknown): value is SharedEventsMessage {
     return typeof m.window === 'string' && typeof m.from === 'number' && Number.isSafeInteger(m.from) && (m.to === undefined || typeof m.to === 'string');
   }
   if (m.type === 'join') return typeof m.window === 'string';
+  if (m.type === 'ping') return typeof m.window === 'string' && typeof m.nonce === 'string';
+  if (m.type === 'pong') return typeof m.leader === 'string' && typeof m.to === 'string' && typeof m.nonce === 'string';
   return false;
 }
 
 /**
  * Subscribe this tab through the shared stream: it leads when it holds the
  * lock, follows otherwise. Answers the unsubscribe.
+ *
+ * A leader whose main thread stops without a `freeze` (a debugger, a long
+ * script in an attached page's frame, a phone's browser suspending a
+ * background tab) keeps its lock and passes nothing on. So a follower the
+ * person can see asks the leader every few seconds (and when it becomes
+ * visible or gets focus); a leader answers from its message handler. No answer
+ * in time: the follower takes the lock (`steal`) and leads. The old leader
+ * learns it lost the lock when it runs again, closes its stream and follows.
+ * Records the two pass on meanwhile are told apart by seq.
  */
 export function subscribeSharedInboxEvents(
   cursor: number,
@@ -233,6 +271,12 @@ export function subscribeSharedInboxEvents(
   win: InboxEventWindow,
   env: SharedEventsEnv,
 ): () => void {
+  const pingEveryMs = env.timing?.pingEveryMs ?? LEADER_PING_EVERY_MS;
+  const pongTimeoutMs = env.timing?.pongTimeoutMs ?? LEADER_PONG_TIMEOUT_MS;
+  const retryMs = env.timing?.retryMs ?? CATCH_UP_RETRY_MS;
+  const retryMaxMs = env.timing?.retryMaxMs ?? CATCH_UP_RETRY_MAX_MS;
+  const isVisible = env.isVisible ?? (() => false);
+
   let lastSeq = cursor;
   let leader: string | null = null;
   let leading = false;
@@ -242,17 +286,26 @@ export function subscribeSharedInboxEvents(
   let closeStream: (() => void) | null = null;
   let releaseLeader: (() => void) | null = null;
   let queued: AbortController | null = null;
+  /** A steal in flight (this tab found the leader not answering). */
+  let stealing = false;
+  /** The lock grant this tab leads under: a rejection of that grant means another tab took the lock. */
+  let tenure: object | null = null;
   let releaseWindowLock: (() => void) | null = null;
   /** The seq this tab's stream started after, while it leads (`from` in its announcements). */
   let ledFrom = 0;
   const watched = new Map<string, AbortController>();
   /** Fetching what this tab missed: frames that arrive meanwhile wait, so records stay in order. */
   let catching = false;
-  /** A catch-up failed (the Inbox restarting): try again at the next hello. */
+  /** A catch-up failed (the Inbox restarting): frames keep waiting, and it is tried again (a timer, the next hello). */
   let behind = false;
   /** Another catch-up was asked for while one ran. */
   let again = false;
   let held: { frame: InboxEventFrame; via: Via }[] = [];
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryDelay = retryMs;
+  /** The leader check in flight: a ping waiting for its pong. */
+  let check: { nonce: string; timer: ReturnType<typeof setTimeout> } | null = null;
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
 
   let channel: ChannelLike;
   let backlog: unknown[] = [];
@@ -271,14 +324,22 @@ export function subscribeSharedInboxEvents(
     }
   };
 
-  /** One frame to this tab's handlers, a record once (by seq); held while a catch-up runs. */
+  /** Keep a frame until the catch-up lands. Past the cap, the oldest records go: the catch-up fetches them again. */
+  const hold = (frame: InboxEventFrame, via: Via) => {
+    held.push({ frame, via });
+    if (held.length <= EARLY_FRAMES_MAX) return;
+    const at = held.findIndex((item) => item.frame.name === 'record');
+    held.splice(at >= 0 ? at : 0, 1);
+  };
+
+  /** One frame to this tab's handlers, a record once (by seq); held while a catch-up runs or is owed. */
   const deliver = (frame: InboxEventFrame, via: Via) => {
     if (stopped) return;
-    if (catching && via !== 'catch-up') {
-      held.push({ frame, via });
+    if (frame.name === 'hello' && behind && !catching && !leading) void catchUp();
+    if ((catching || behind) && via !== 'catch-up') {
+      hold(frame, via);
       return;
     }
-    if (frame.name === 'hello' && behind && !leading) void catchUp();
     const seq = recordSeq(frame);
     if (seq !== null) {
       if (seq <= lastSeq) return;
@@ -286,6 +347,11 @@ export function subscribeSharedInboxEvents(
       trace({ type: 'record', seq, via });
     }
     env.dispatch(frame, handlers);
+  };
+
+  const clearRetry = () => {
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
   };
 
   /** Fetch the lines after this tab's last seq (it slept, or its leader started past it), then what waited. */
@@ -297,18 +363,32 @@ export function subscribeSharedInboxEvents(
       return;
     }
     catching = true;
-    behind = false;
+    clearRetry();
+    let failed = false;
     try {
       const frames = await env.catchUp(lastSeq);
+      if (stopped) return;
+      behind = false;
+      retryDelay = retryMs;
       for (const frame of frames) if (frame.name === 'record') deliver(frame, 'catch-up');
     } catch {
-      behind = true;
+      failed = true;
     } finally {
       catching = false;
-      if (again && !stopped) {
+      if (failed && !stopped) {
+        // Keep holding: delivering the held frames now would move the last seq past the gap, and the gap would never be fetched.
+        behind = true;
+        again = false;
+        trace({ type: 'catch-up-failed', retryInMs: retryDelay });
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          if (behind && !leading) void catchUp();
+        }, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, retryMaxMs);
+      } else if (again && !stopped) {
         again = false;
         void catchUp();
-      } else {
+      } else if (!stopped) {
         const waiting = held;
         held = [];
         for (const item of waiting) deliver(item.frame, item.via);
@@ -356,6 +436,11 @@ export function subscribeSharedInboxEvents(
     leading = true;
     leader = win.id;
     ledFrom = lastSeq;
+    // This tab's own stream replays every line after its last seq: nothing owed, and the held records come again.
+    behind = false;
+    clearRetry();
+    if (!catching) held = [];
+    cancelCheck();
     trace({ type: 'lead', from: ledFrom });
     post({ v: 1, type: 'leader', window: win.id, from: ledFrom });
     closeStream = env.open(lastSeq, (frame) => {
@@ -366,6 +451,7 @@ export function subscribeSharedInboxEvents(
   };
 
   const stepDown = () => {
+    tenure = null;
     if (leading) {
       leading = false;
       trace({ type: 'step-down' });
@@ -378,33 +464,91 @@ export function subscribeSharedInboxEvents(
     releaseLeader = null;
   };
 
-  const queueForLeader = () => {
-    if (stopped || suspended || queued || leading) return;
-    const abort = new AbortController();
-    queued = abort;
+  /** Ask for the stream's lock: in line behind the leader, or (`steal`) at once, taking it from a leader that does not answer. */
+  const acquire = (steal: boolean) => {
+    if (stopped || suspended || leading) return;
+    if (steal) {
+      if (stealing) return;
+      stealing = true;
+      queued?.abort();
+      queued = null;
+    } else if (queued || stealing) {
+      return;
+    }
+    const abort = steal ? null : new AbortController();
+    if (abort) queued = abort;
+    const token = {};
     env.locks
-      .request(EVENTS_LOCK, { signal: abort.signal }, () => {
-        if (queued === abort) queued = null;
-        if (stopped || suspended || abort.signal.aborted) return undefined;
+      .request(EVENTS_LOCK, abort ? { signal: abort.signal } : { steal: true }, () => {
+        if (abort && queued === abort) queued = null;
+        if (steal) stealing = false;
+        if (stopped || suspended || abort?.signal.aborted || leading) return undefined;
+        tenure = token;
         lead();
         return new Promise<void>((release) => {
           releaseLeader = release;
         });
       })
       .catch(() => {
-        if (queued === abort) queued = null;
+        if (abort && queued === abort) queued = null;
+        if (steal) stealing = false;
+        if (tenure !== token) return;
+        // Another tab took the lock while this one did not answer (it was paused): follow that tab.
+        trace({ type: 'stolen' });
+        stepDown();
+        if (stopped || suspended) return;
+        post({ v: 1, type: 'join', window: win.id });
+        acquire(false);
+        void catchUp();
       });
+  };
+  const queueForLeader = () => acquire(false);
+
+  /** A leader answered (or passed something on): its main thread runs. */
+  const cancelCheck = () => {
+    if (!check) return;
+    clearTimeout(check.timer);
+    check = null;
+  };
+  /** A visible follower asks the leader whether it is alive; no answer in time, it takes the stream. */
+  const checkLeader = () => {
+    if (stopped || suspended || leading || stealing || check || !isVisible()) return;
+    const nonce = Math.random().toString(36).slice(2, 12);
+    const timer = setTimeout(() => {
+      if (check?.nonce !== nonce) return;
+      check = null;
+      if (stopped || suspended || leading || !isVisible()) return;
+      trace({ type: 'steal', from: leader });
+      acquire(true);
+    }, pongTimeoutMs);
+    check = { nonce, timer };
+    post({ v: 1, type: 'ping', window: win.id, nonce });
   };
 
   const onMessage = (data: unknown) => {
     if (stopped || !isMessage(data)) return;
     if (data.type === 'frame') {
-      if (data.leader !== win.id && !leading) setLeader(data.leader);
+      if (data.leader !== win.id && !leading) {
+        cancelCheck();
+        // Frames name the leader only for a tab that knows none (a stale leader's last frames must not take the tab back).
+        if (leader === null) setLeader(data.leader);
+      }
       deliver(data.frame, 'channel');
+      return;
+    }
+    if (data.type === 'ping') {
+      if (leading && data.window !== win.id) post({ v: 1, type: 'pong', leader: win.id, to: data.window, nonce: data.nonce });
+      return;
+    }
+    if (data.type === 'pong') {
+      if (data.to !== win.id || leading) return;
+      if (check?.nonce === data.nonce) cancelCheck();
+      if (leader === null) setLeader(data.leader);
       return;
     }
     if (data.type === 'leader') {
       if (data.window === win.id || leading) return;
+      cancelCheck();
       setLeader(data.window);
       // A new leader's announcement: tell it this tab is here (it watches this tab's lock and answers this tab only).
       if (data.to === undefined) post({ v: 1, type: 'join', window: win.id });
@@ -446,6 +590,7 @@ export function subscribeSharedInboxEvents(
   const suspend = () => {
     if (suspended) return;
     suspended = true;
+    cancelCheck();
     stepDown();
     queued?.abort();
     queued = null;
@@ -458,6 +603,7 @@ export function subscribeSharedInboxEvents(
     queueForLeader();
     // Whatever the leader passed on while this tab slept may be gone: fetch from its last seq.
     void catchUp();
+    checkLeader();
   };
   const onFreeze = () => suspend();
   const onResume = () => wake();
@@ -473,10 +619,16 @@ export function subscribeSharedInboxEvents(
     // The server heard `gone` at pagehide: count this tab again.
     handlers.onConnect?.();
   };
+  const onVisible = () => {
+    if (isVisible()) checkLeader();
+  };
   env.lifecycle?.document.addEventListener('freeze', onFreeze);
   env.lifecycle?.document.addEventListener('resume', onResume);
+  env.lifecycle?.document.addEventListener('visibilitychange', onVisible);
   env.lifecycle?.window.addEventListener('pagehide', onPageHide);
   env.lifecycle?.window.addEventListener('pageshow', onPageShow);
+  env.lifecycle?.window.addEventListener('focus', onVisible);
+  pingTimer = setInterval(checkLeader, pingEveryMs);
 
   const self = { servedBy: () => (leading ? null : leader) };
   active = self;
@@ -484,6 +636,10 @@ export function subscribeSharedInboxEvents(
   return () => {
     if (stopped) return;
     stopped = true;
+    cancelCheck();
+    if (pingTimer) clearInterval(pingTimer);
+    pingTimer = null;
+    clearRetry();
     stepDown();
     queued?.abort();
     queued = null;
@@ -491,8 +647,10 @@ export function subscribeSharedInboxEvents(
     releaseWindowLock = null;
     env.lifecycle?.document.removeEventListener('freeze', onFreeze);
     env.lifecycle?.document.removeEventListener('resume', onResume);
+    env.lifecycle?.document.removeEventListener('visibilitychange', onVisible);
     env.lifecycle?.window.removeEventListener('pagehide', onPageHide);
     env.lifecycle?.window.removeEventListener('pageshow', onPageShow);
+    env.lifecycle?.window.removeEventListener('focus', onVisible);
     channel.onmessage = null;
     channel.close();
     if (active === self) active = null;
