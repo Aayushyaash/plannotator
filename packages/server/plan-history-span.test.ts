@@ -145,6 +145,36 @@ describe("plan review spanning a day boundary", () => {
     expect(payload.previousPlan).toBeNull();
   });
 
+  // The other half of the split: plans/ snapshots stay named by the decision
+  // day (listArchivedPlans reads that date back), while history continues.
+  for (const decision of ["approve", "deny"] as const) {
+    test(`${decision} writes plans/{heading}-{today} while history continues an older chain`, async () => {
+      const dataDir = process.env.PLANNOTATOR_DATA_DIR!;
+      const project = (await detectProjectName()) ?? "_unknown";
+      const v1 = `# Archive split ${decision}\n\n- [ ] First step.\n`;
+      const v2 = `# Archive split ${decision}\n\n- [ ] First step, revised.\n`;
+      const chain = slugDatedDaysAgo(v1, 1);
+      seedVersion(dataDir, project, chain, v1, 2 * 60 * 60 * 1000);
+
+      const server = await startPlannotatorServer({ plan: v2, htmlContent: MINIMAL_HTML, origin: "claude-code" });
+      try {
+        expect(existsSync(join(dataDir, "history", project, chain, "002.md"))).toBe(true);
+        const response = await fetch(`${server.url}/api/${decision}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ planSave: { enabled: true }, ...(decision === "deny" ? { feedback: "Change step one." } : {}) }),
+        });
+        expect(response.status).toBe(200);
+        const result = await server.waitForDecision();
+        const status = decision === "approve" ? "approved" : "denied";
+        expect(result.savedPath).toBe(join(dataDir, "plans", `${generateSlug(v2)}-${status}.md`));
+        expect(generateSlug(v2)).not.toBe(chain);
+      } finally {
+        await server.stop();
+      }
+    });
+  }
+
   test("still starts at version 1 for a plan with no history", async () => {
     const plan = "# Brand new plan\n\nNothing came before this.\n";
 

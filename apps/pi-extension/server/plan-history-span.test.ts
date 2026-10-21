@@ -88,6 +88,33 @@ describe("pi plan review spanning a day boundary", () => {
 		}
 	}));
 
+	for (const decision of ["approve", "deny"] as const) {
+		test(`${decision} writes plans/{heading}-{today} while history continues an older chain`, async () => sandboxed(async (dataDir) => {
+			const project = detectProjectName();
+			const v1 = `# Pi archive split ${decision}\n\n- [ ] First step.\n`;
+			const v2 = `# Pi archive split ${decision}\n\n- [ ] First step, revised.\n`;
+			const chain = slugDatedDaysAgo(v1, 1);
+			seedVersion(dataDir, project, chain, v1, 2 * HOUR);
+
+			const server = await startPlanReviewServer({ plan: v2, htmlContent: MINIMAL_HTML, origin: "pi" });
+			try {
+				expect(existsSync(join(dataDir, "history", project, chain, "002.md"))).toBe(true);
+				const response = await fetch(`${server.url}/api/${decision}`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ planSave: { enabled: true }, ...(decision === "deny" ? { feedback: "Change step one." } : {}) }),
+				});
+				expect(response.status).toBe(200);
+				const result = await server.waitForDecision();
+				const status = decision === "approve" ? "approved" : "denied";
+				expect(result.savedPath).toBe(join(dataDir, "plans", `${generateSlug(v2)}-${status}.md`));
+				expect(generateSlug(v2)).not.toBe(chain);
+			} finally {
+				server.stop();
+			}
+		}));
+	}
+
 	test("a same-heading plan after two quiet days starts a new chain", async () => sandboxed(async (dataDir) => {
 		const project = detectProjectName();
 		const plan = "# Implementation Plan\n\nUnrelated work, days later.\n";
