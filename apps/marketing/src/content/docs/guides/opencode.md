@@ -135,17 +135,18 @@ With other plugins, the same rule applies. Only the Plannotator entry becomes a 
 
 ## Approve with annotations
 
-Unlike Claude Code, OpenCode supports feedback on approval. This means:
+OpenCode supports feedback on approval. The header has one decision button: **Approve** with nothing to send, **Send Feedback** once you add annotations. Behind its arrow:
 
-- **Approve** (no annotations) — Agent proceeds with implementation
-- **Approve** (with annotations) — Agent proceeds, but also receives your annotations as notes
-- **Send Feedback** — Plan is rejected. Agent receives your annotations and revises the plan.
+- **Send Feedback**: the plan is rejected. The agent receives your annotations and revises the plan.
+- **Approve with notes**: the agent proceeds, and also receives your annotations as notes.
+- **Approve with a note…** (nothing added yet): approve with a short note.
+- **Approve, discard N annotations…**: approve and drop the annotations, after one confirmation.
 
 This makes it possible to approve a plan while leaving minor suggestions that the agent can incorporate during implementation.
 
 ## Agent switching
 
-OpenCode supports multiple agents. By default, approved plans are handed off to the build agent, while code review feedback stays on your current agent. To change either, configure [Agent switching settings](/docs/getting-started/ui-settings/#agent-switching):
+OpenCode supports multiple agents. By default, approved plans are handed off to the build agent, while code review feedback stays on your current agent. The Approve button names the agent (**Approve → build**), and the decision menu's **After approval, switch to** section changes it on the spot. To change either default, configure [Agent switching settings](/docs/getting-started/ui-settings/#agent-switching):
 
 1. Open **Settings** (gear icon)
 2. Under "Agent Switch", select from available agents or enter a custom agent name

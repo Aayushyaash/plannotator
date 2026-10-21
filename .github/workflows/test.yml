@@ -305,6 +305,7 @@ jobs:
           packages/editor/App.sidebarTabsAgentTerminal.test.tsx
           packages/editor/App.htmlLinkDraft.test.tsx
           packages/editor/App.decisionControl.test.tsx
+          packages/editor/App.planDecisionControl.test.tsx
           packages/editor/App.planRevision.test.tsx
           packages/editor/App.liveVersion.test.tsx
           packages/editor/askSessionDrafts.test.tsx
