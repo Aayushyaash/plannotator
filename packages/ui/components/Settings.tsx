@@ -102,6 +102,10 @@ interface SettingsProps {
    */
   annotateParity?: boolean;
   onUIPreferencesChange?: (prefs: UIPreferences) => void;
+  /** Claude Code's permission mode was changed here (plan review). The host
+   *  keeps its own copy in step, since its Approve sends the mode and its
+   *  decision menu shows it. Optional: hosts that omit it are unchanged. */
+  onPermissionModeChange?: (mode: PermissionMode) => void;
   /** Externally controlled open state (for mobile menu integration) */
   externalOpen?: boolean;
   onExternalClose?: () => void;
@@ -1007,7 +1011,7 @@ const CommentsTab: React.FC = () => {
   );
 };
 
-export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', annotateParity = false, onUIPreferencesChange, externalOpen, onExternalClose, aiProviders = [], gitUser, autoUpdateSetting, updateCheckSetting, agentToolSetting, onAgentToolChange, sinceBaseUnavailable, isCompactTouchLayout = false, onDetectObsidianVaults, agentTerminalAvailable = false, webmcpAvailable = false }) => {
+export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', annotateParity = false, onUIPreferencesChange, onPermissionModeChange, externalOpen, onExternalClose, aiProviders = [], gitUser, autoUpdateSetting, updateCheckSetting, agentToolSetting, onAgentToolChange, sinceBaseUnavailable, isCompactTouchLayout = false, onDetectObsidianVaults, agentTerminalAvailable = false, webmcpAvailable = false }) => {
   const webmcpTools = useWebMcpToolsEnabled();
   const autoUpdate = useConfigValue('autoUpdate');
   const updateChecksOn = updateCheckSetting ? updateCheckSetting.on : true;
@@ -1246,6 +1250,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
   const handlePermissionModeChange = (mode: PermissionMode) => {
     setPermissionMode(mode);
     savePermissionModeSettings(mode);
+    onPermissionModeChange?.(mode);
   };
 
   const handleDefaultNotesAppChange = (app: DefaultNotesApp) => {

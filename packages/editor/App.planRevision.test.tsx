@@ -140,7 +140,7 @@ async function waitFor(check: () => boolean, timeoutMs: number): Promise<void> {
 
 function approveButton(): HTMLButtonElement | undefined {
   return Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
-    // The header button renders a compact "OK" label beside "Approve".
+    // The decision control's primary reads "Approve" with nothing to send.
     (button) => button.textContent?.trim().endsWith("Approve") ?? false,
   );
 }

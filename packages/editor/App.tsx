@@ -71,7 +71,7 @@ import { getObsidianSettings, getEffectiveVaultPath, isObsidianConfigured, CUSTO
 import { getBearSettings } from '@plannotator/ui/utils/bear';
 import { getOctarineSettings, isOctarineConfigured } from '@plannotator/ui/utils/octarine';
 import { getDefaultNotesApp } from '@plannotator/ui/utils/defaultNotesApp';
-import { getAgentSwitchSettings, getEffectiveAgentName } from '@plannotator/ui/utils/agentSwitch';
+import { agentSwitchTargetLabel, getAgentSwitchDefaults, getAgentSwitchSettings, getEffectiveAgentName } from '@plannotator/ui/utils/agentSwitch';
 import { adoptServerSession, noteServerSessionMismatch, withServerSession, withServerSessionQuery } from '@plannotator/ui/utils/serverSession';
 import { ServerSessionReplacedBanner } from '@plannotator/ui/components/ServerSessionReplacedBanner';
 import { getPlanSaveSettings } from '@plannotator/ui/utils/planSave';
@@ -138,6 +138,7 @@ import { useViewportEnvironment } from '@plannotator/ui/hooks/useViewportEnviron
 import {
   getPermissionModeSettings,
   needsPermissionModeSetup,
+  PERMISSION_MODE_OPTIONS,
   type PermissionMode,
 } from '@plannotator/ui/utils/permissionMode';
 import { PermissionModeSetup } from '@plannotator/ui/components/PermissionModeSetup';
@@ -231,7 +232,6 @@ import {
   isAnswersOnlyFeedback,
   isQuestionAnswerRow,
   questionAnswerRemapper,
-  SEND_ANSWERS_LABEL,
 } from './questionDecision';
 import {
   buildQuestionPanelRows,
@@ -306,7 +306,9 @@ import { applyRestoredAnchors } from './restoredAnchors';
 import { annotationOwnsHighlight } from '@plannotator/ui/utils/annotationOwnsHighlight';
 import { blocksForDocument, collectSubmittedAnnotations, mergeExternalAnnotations, mergeExternalsIntoMessageEntries, resolveFeedbackSections } from './feedbackDocuments';
 import { buildDecisionSpec, type DecisionActionId, type DecisionMenuItem } from '@plannotator/ui/utils/decisionSpec';
-import { DecisionNoteDialog, type DecisionHandler } from '@plannotator/ui/components/DecisionControl';
+import { DecisionNoteDialog, type DecisionControlProps, type DecisionHandler } from '@plannotator/ui/components/DecisionControl';
+import { AgentSwitchMenuSection, PermissionModeMenuLine } from '@plannotator/ui/components/PlanDecisionMenuExtras';
+import { resolvePlanDecisionAction } from './planDecision';
 import {
   compactPrimaryIdForDecision,
   compactRowIdForDecisionItem,
@@ -526,8 +528,6 @@ const App: React.FC = () => {
   );
   const [showExport, setShowExport] = useState(false);
   const [showImport, setShowImport] = useState(false);
-  const [showFeedbackPrompt, setShowFeedbackPrompt] = useState(false);
-  const [showClaudeCodeWarning, setShowClaudeCodeWarning] = useState(false);
   const [showExitWarning, setShowExitWarning] = useState(false);
   const [showSourceFileEditWarning, setShowSourceFileEditWarning] = useState(false);
   const [sourceFileEditWarningAction, setSourceFileEditWarningAction] = useState<SourceFileEditWarningAction>('send-feedback');
@@ -1690,7 +1690,7 @@ const App: React.FC = () => {
     if (archive.archiveMode || goalSetupMode) return true;
     if (event.defaultPrevented) return true;
     if (document.querySelector('[data-plannotator-confirm-dialog="true"]')) return true;
-    if (showExport || showImport || showFeedbackPrompt || showClaudeCodeWarning ||
+    if (showExport || showImport ||
         showSourceFileEditWarning ||
         showExitWarning || showAgentWarning || showPermissionModeSetup || pendingPasteImage) return true;
     return submitted || isSubmitting || isExiting;
@@ -1699,8 +1699,6 @@ const App: React.FC = () => {
     goalSetupMode,
     showExport,
     showImport,
-    showFeedbackPrompt,
-    showClaudeCodeWarning,
     showSourceFileEditWarning,
     showExitWarning,
     showAgentWarning,
@@ -3838,10 +3836,13 @@ const App: React.FC = () => {
         const bundle = data.mode === 'annotate-bundle' ? parseAnnotateBundle(data.bundle) : null;
         const folderLike = data.mode === 'annotate-folder' || data.mode === 'annotate-bundle';
         setBundleFiles(bundle);
+        // Whether this host delivers notes sent with an approval: annotate's
+        // gate and, since #1057, plan review (both plan servers advertise it).
+        // Absent (an older server) reads as false.
+        setApprovalNotesSupported(data.approvalNotesSupported === true);
         if (data.mode === 'annotate' || data.mode === 'annotate-last' || folderLike || data.mode === 'annotate-app') {
           setAnnotateMode(true);
           setGate(data.gate ?? false);
-          setApprovalNotesSupported(data.approvalNotesSupported ?? false);
           setClientLease(data.clientLease ?? null);
         }
         if (folderLike) {
@@ -4290,7 +4291,11 @@ const App: React.FC = () => {
   };
 
   // API mode handlers
-  const handleApprove = async () => {
+  // Resolves true once the decision is recorded (L3: a note decision stays
+  // armed after a false). `discardFeedback` is the confirmed "Approve, discard
+  // …" row: the body is a bare approval, so no notes reach the agent even on
+  // a host that would deliver them.
+  const handleApprove = async (options?: { discardFeedback?: boolean }): Promise<boolean> => {
     setIsSubmitting(true);
     try {
       // Integrations must describe the same document the feedback diff does —
@@ -4366,11 +4371,11 @@ const App: React.FC = () => {
       const checkedSavedFileChanges = await validateSavedFileChangesBeforeSubmit();
       if (checkedSavedFileChanges === null) {
         setIsSubmitting(false);
-        return;
+        return false;
       }
       const editsSection = buildEditsSection();
       const savedChangesSection = buildSavedChangesSection(checkedSavedFileChanges);
-      if (allAnnotations.length > 0 || codeAnnotations.length > 0 || globalAttachments.length > 0 || hasDocAnnotations || editorAnnotations.length > 0 || editsSection || savedChangesSection) {
+      if (!options?.discardFeedback && (allAnnotations.length > 0 || codeAnnotations.length > 0 || globalAttachments.length > 0 || hasDocAnnotations || editorAnnotations.length > 0 || editsSection || savedChangesSection)) {
         body.feedback = getCurrentFeedbackPayload(checkedSavedFileChanges);
       }
 
@@ -4381,25 +4386,27 @@ const App: React.FC = () => {
       });
       if (await noteServerSessionMismatch(res)) {
         setIsSubmitting(false);
-        return;
+        return false;
       }
       if (res.status === 409) {
         handleStaleRevisionRefusal();
-        return;
+        return false;
       }
       setSubmitted('approved');
+      return true;
     } catch {
       setIsSubmitting(false);
+      return false;
     }
   };
 
-  const handleDeny = async () => {
+  const handleDeny = async (): Promise<boolean> => {
     setIsSubmitting(true);
     try {
       const checkedSavedFileChanges = await validateSavedFileChangesBeforeSubmit();
       if (checkedSavedFileChanges === null) {
         setIsSubmitting(false);
-        return;
+        return false;
       }
       const planSaveSettings = getPlanSaveSettings();
       const payload = getCurrentFeedbackPayload(checkedSavedFileChanges);
@@ -4420,15 +4427,17 @@ const App: React.FC = () => {
       });
       if (await noteServerSessionMismatch(res)) {
         setIsSubmitting(false);
-        return;
+        return false;
       }
       if (res.status === 409) {
         handleStaleRevisionRefusal();
-        return;
+        return false;
       }
       setSubmitted('denied');
+      return true;
     } catch {
       setIsSubmitting(false);
+      return false;
     }
   };
 
@@ -4661,7 +4670,7 @@ const App: React.FC = () => {
       if (document.querySelector('[data-plannotator-confirm-dialog="true"]')) return;
 
       // Don't intercept if any modal is open
-      if (showExport || showImport || showFeedbackPrompt || showClaudeCodeWarning ||
+      if (showExport || showImport ||
           showSourceFileEditWarning ||
           showExitWarning || showAgentWarning || showPermissionModeSetup || pendingPasteImage) return;
 
@@ -4695,41 +4704,16 @@ const App: React.FC = () => {
 
       e.preventDefault();
 
-      // Annotate mode: Mod+Enter always equals the visible header primary —
-      // one submitPrimaryDecision for keyboard, header, and compact (spec §4).
-      if (annotateMode) {
-        submitPrimaryDecisionRef.current();
-        return;
-      }
-
-      // No feedback → Approve, otherwise → Send Feedback
-      if (!hasFeedbackToSend) {
-        const approve = () => {
-          // Check if agent exists for OpenCode users
-          if (origin === 'opencode') {
-            const warning = getAgentWarning();
-            if (warning) {
-              setAgentWarningMessage(warning);
-              setShowAgentWarning(true);
-              return;
-            }
-          }
-          handleApprove();
-        };
-        if (maybeConfirmUnsavedSourceFileEdits('approve', approve)) return;
-        approve();
-      } else {
-        // Direct edits route through deny too: on Claude Code, deny is the only
-        // channel whose output carries feedback to the agent.
-        if (maybeConfirmUnsavedSourceFileEdits('send-feedback', () => handleDeny())) return;
-        handleDeny();
-      }
+      // Mod+Enter always equals the visible header primary, in annotate and
+      // plan review alike: one submitPrimaryDecision for keyboard, header and
+      // compact (spec §4; #1057 brought plan review onto it).
+      submitPrimaryDecisionRef.current();
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
-    showExport, showImport, showFeedbackPrompt, showClaudeCodeWarning, showSourceFileEditWarning, showExitWarning, showAgentWarning,
+    showExport, showImport, showSourceFileEditWarning, showExitWarning, showAgentWarning,
     showPermissionModeSetup, pendingPasteImage,
     submitted, isSubmitting, isExiting, goalSetupAction.isSubmitting, isApiMode, documentReadOnly, isEditingMarkdown, linkedDocHook.isActive, annotations.length, codeAnnotations.length, externalAnnotations.length, annotateMode,
     hasFeedbackToSend, goalSetupMode, goalSetupAction.canSubmit, isAgentTerminalReady,
@@ -5886,7 +5870,7 @@ const App: React.FC = () => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
-      if (showExport || showFeedbackPrompt || showClaudeCodeWarning ||
+      if (showExport ||
           showSourceFileEditWarning ||
           showExitWarning || showAgentWarning || showPermissionModeSetup || pendingPasteImage) return;
 
@@ -5922,7 +5906,7 @@ const App: React.FC = () => {
     window.addEventListener('keydown', handleSaveShortcut);
     return () => window.removeEventListener('keydown', handleSaveShortcut);
   }, [
-    showExport, showFeedbackPrompt, showClaudeCodeWarning, showSourceFileEditWarning, showExitWarning, showAgentWarning,
+    showExport, showSourceFileEditWarning, showExitWarning, showAgentWarning,
     showPermissionModeSetup, pendingPasteImage,
     submitted, isApiMode, documentReadOnly, isEditingMarkdown, handleSaveEditedSourceFile, displayedMarkdown, annotationsOutput,
   ]);
@@ -5935,7 +5919,7 @@ const App: React.FC = () => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
-      if (showExport || showFeedbackPrompt || showClaudeCodeWarning ||
+      if (showExport ||
           showSourceFileEditWarning ||
           showExitWarning || showAgentWarning || showPermissionModeSetup || pendingPasteImage) return;
 
@@ -5948,7 +5932,7 @@ const App: React.FC = () => {
     window.addEventListener('keydown', handlePrintShortcut);
     return () => window.removeEventListener('keydown', handlePrintShortcut);
   }, [
-    showExport, showFeedbackPrompt, showClaudeCodeWarning, showSourceFileEditWarning, showExitWarning, showAgentWarning,
+    showExport, showSourceFileEditWarning, showExitWarning, showAgentWarning,
     showPermissionModeSetup, pendingPasteImage, submitted,
   ]);
 
@@ -5996,41 +5980,52 @@ const App: React.FC = () => {
     close();
   }, [hasFeedbackToSend, maybeConfirmUnsavedSourceFileEdits]);
 
-  const handleHeaderFeedback = useCallback(() => {
-    const sendFeedback = () => {
-      const h = headerHandlersRef.current;
-      // Direct edits count as feedback — deny is the only Claude Code channel
-      // whose output carries feedback to the agent.
-      if (!hasFeedbackToSend) {
-        setShowFeedbackPrompt(true);
-      } else {
-        h.handleDeny();
-      }
-    };
-    if (maybeConfirmUnsavedSourceFileEdits('send-feedback', sendFeedback)) return;
-    sendFeedback();
-  }, [hasFeedbackToSend, maybeConfirmUnsavedSourceFileEdits]);
-
-  const handleHeaderApprove = useCallback(() => {
-    const approve = () => {
-      const h = headerHandlersRef.current;
-      if (origin === 'claude-code' && hasFeedbackToSend) {
-        setShowClaudeCodeWarning(true);
+  // --- Plan review's decision control (#1057) -----------------------------
+  // Every plan approval goes through requestPlanApprove, so the unsaved file
+  // edit warning and OpenCode's "Agent Not Found" check run on every approve
+  // path (the primary, Approve with notes, the discard confirm, a note). The
+  // Agent Not Found dialog's "Approve Anyway" runs the captured continuation,
+  // so a confirmed discard stays a bare approval there too. Both resolve true
+  // only once the decision is recorded.
+  const agentWarningContinuationRef = useRef<(() => void) | null>(null);
+  const requestPlanApprove = useCallback((options?: { discardFeedback?: boolean }): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      const approve = () => {
+        const h = headerHandlersRef.current;
+        if (origin === 'opencode') {
+          const warning = h.getAgentWarning();
+          if (warning) {
+            agentWarningContinuationRef.current = () => {
+              void headerHandlersRef.current.handleApprove(options);
+            };
+            setAgentWarningMessage(warning);
+            setShowAgentWarning(true);
+            resolve(false);
+            return;
+          }
+        }
+        void h.handleApprove(options).then(resolve);
+      };
+      if (maybeConfirmUnsavedSourceFileEdits('approve', approve)) {
+        resolve(false);
         return;
       }
-      if (origin === 'opencode') {
-        const warning = h.getAgentWarning();
-        if (warning) {
-          setAgentWarningMessage(warning);
-          setShowAgentWarning(true);
-          return;
-        }
+      approve();
+    }), [maybeConfirmUnsavedSourceFileEdits, origin]);
+
+  // Deny carries every kind of feedback (direct edits included): on Claude
+  // Code's classic hook it is the only channel whose output reaches the agent.
+  const requestPlanDeny = useCallback((): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      const send = () => {
+        void headerHandlersRef.current.handleDeny().then(resolve);
+      };
+      if (maybeConfirmUnsavedSourceFileEdits('send-feedback', send)) {
+        resolve(false);
+        return;
       }
-      h.handleApprove();
-    };
-    if (maybeConfirmUnsavedSourceFileEdits('approve', approve)) return;
-    approve();
-  }, [hasFeedbackToSend, maybeConfirmUnsavedSourceFileEdits, origin]);
+      send();
+    }), [maybeConfirmUnsavedSourceFileEdits]);
 
   // --- The unified annotate decision control (spec §3.1/§4) ----------------
   // One primary, one callback: the header's left segment, the global
@@ -6048,6 +6043,16 @@ const App: React.FC = () => {
   }) => {
     if (pendingDispatchInFlightRef.current) return;
     const { route, approvalFraming } = pending;
+    if (!annotateMode) {
+      // Plan review: the request helpers own the unsaved-edit and agent
+      // warnings. A note queued on 'approve' rides the approval's notes.
+      pendingDispatchInFlightRef.current = true;
+      const request = route === 'approve' ? requestPlanApprove() : requestPlanDeny();
+      void request
+        .then((ok) => { if (ok) setPendingDecisionSubmit(null); })
+        .finally(() => { pendingDispatchInFlightRef.current = false; });
+      return;
+    }
     const run = async () => {
       pendingDispatchInFlightRef.current = true;
       try {
@@ -6063,7 +6068,7 @@ const App: React.FC = () => {
     };
     if (maybeConfirmUnsavedSourceFileEdits(route === 'approve' ? 'approve' : 'send-feedback', run)) return;
     void run();
-  }, [maybeConfirmUnsavedSourceFileEdits]);
+  }, [annotateMode, maybeConfirmUnsavedSourceFileEdits, requestPlanApprove, requestPlanDeny]);
 
   const submitPrimaryDecision = useCallback(() => {
     if (isSubmitting || isExiting) return; // double-submit guard while in flight
@@ -6076,6 +6081,12 @@ const App: React.FC = () => {
       dispatchPendingDecision(pendingDecisionSubmit);
       return;
     }
+    if (!annotateMode) {
+      // Plan review: Approve with nothing to send, else Send Feedback / Send
+      // answers (the answers-only flag is decided inside handleDeny).
+      void (hasFeedbackToSend ? requestPlanDeny() : requestPlanApprove());
+      return;
+    }
     if (gate && !hasFeedbackToSend) {
       const approve = () => headerHandlersRef.current.handleAnnotateApprove();
       if (maybeConfirmUnsavedSourceFileEdits('approve', approve)) return;
@@ -6086,6 +6097,7 @@ const App: React.FC = () => {
     if (maybeConfirmUnsavedSourceFileEdits('send-feedback', sendFeedback)) return;
     sendFeedback();
   }, [
+    annotateMode,
     dispatchPendingDecision,
     gate,
     hasFeedbackToSend,
@@ -6093,6 +6105,8 @@ const App: React.FC = () => {
     isSubmitting,
     maybeConfirmUnsavedSourceFileEdits,
     pendingDecisionSubmit,
+    requestPlanApprove,
+    requestPlanDeny,
   ]);
   submitPrimaryDecisionRef.current = submitPrimaryDecision;
 
@@ -6228,18 +6242,109 @@ const App: React.FC = () => {
     dismissOnIframeFocus: isHtmlSurface,
   }), [annotateCloseTitle, annotateDecisionHandlers, annotateDecisionSpec, isHtmlSurface]);
 
+  // Plan review (#1057): the same control from the spec's plan arm. The
+  // Approve rows follow what this host receives (approvalNotesSupported on
+  // /api/plan), never the agent's name.
+  const runPlanDecisionAction = useCallback((id: DecisionActionId, note?: string) => {
+    const action = resolvePlanDecisionAction(id);
+    switch (action.kind) {
+      case 'primary':
+        submitPrimaryDecision();
+        return;
+      case 'note':
+        queueNoteDecision(note, action.route === 'approve' ? 'approve' : 'feedback', false);
+        return;
+      case 'approve':
+        // The control / compact confirm has already confirmed a discard. A
+        // confirm left open across an in-flight decision must not post twice.
+        if (submitted || isSubmitting || isExiting) return;
+        void requestPlanApprove(action.discardFeedback ? { discardFeedback: true } : undefined);
+    }
+  }, [isExiting, isSubmitting, queueNoteDecision, requestPlanApprove, submitPrimaryDecision, submitted]);
+
+  const storedAgentSwitch = useConfigValue('agentSwitch');
+  const planApproveTarget = origin === 'opencode' && availableAgents.length > 0
+    ? agentSwitchTargetLabel(storedAgentSwitch ?? getAgentSwitchDefaults('plan'), availableAgents) ?? undefined
+    : undefined;
+
+  const planDecisionSpec = useMemo(() => buildDecisionSpec({
+    app: 'plan',
+    gate: true,
+    count: feedbackAnnotationCount,
+    hasFeedback: hasFeedbackToSend,
+    approvalNotesSupported,
+    plan: {
+      answers: questionAnswerCount,
+      directEdits: hasDirectEdits,
+      answersOnly: answersOnlyFeedback,
+      agentName,
+      approveTarget: planApproveTarget,
+    },
+  }), [
+    agentName,
+    answersOnlyFeedback,
+    approvalNotesSupported,
+    feedbackAnnotationCount,
+    hasDirectEdits,
+    hasFeedbackToSend,
+    planApproveTarget,
+    questionAnswerCount,
+  ]);
+
+  const planDecisionHandlers = useMemo<Record<DecisionActionId, DecisionHandler>>(() => ({
+    'primary': () => runPlanDecisionAction('primary'),
+    'note-with-approval': (note) => runPlanDecisionAction('note-with-approval', note),
+    'request-changes': (note) => runPlanDecisionAction('request-changes', note),
+    'note-with-feedback': (note) => runPlanDecisionAction('note-with-feedback', note),
+    'approve-with-notes': () => runPlanDecisionAction('approve-with-notes'),
+    'discard-and-finish': () => runPlanDecisionAction('discard-and-finish'),
+  }), [runPlanDecisionAction]);
+
+  // Rows under the decisions: OpenCode's agent picker (it replaced
+  // ApproveDropdown's caret), or the permission mode Claude Code's Approve
+  // already sends, with a way to Settings where it is changed.
+  const permissionModeLabel = PERMISSION_MODE_OPTIONS.find((option) => option.value === permissionMode)?.label ?? permissionMode;
+  const planMenuFooter = useMemo<DecisionControlProps['menuFooter']>(() => {
+    if (origin === 'opencode' && availableAgents.length > 0) {
+      return <AgentSwitchMenuSection agents={availableAgents} />;
+    }
+    if (origin === 'claude-code') {
+      return ({ closeMenu }: { closeMenu: () => void }) => (
+        <PermissionModeMenuLine
+          agentName={agentName}
+          modeLabel={permissionModeLabel}
+          onChange={() => {
+            closeMenu();
+            setMobileSettingsOpen(true);
+          }}
+        />
+      );
+    }
+    return undefined;
+  }, [agentName, availableAgents, origin, permissionModeLabel]);
+
+  const planDecision = useMemo(() => ({
+    spec: planDecisionSpec,
+    handlers: planDecisionHandlers,
+    menuFooter: planMenuFooter,
+  }), [planDecisionHandlers, planDecisionSpec, planMenuFooter]);
+
+  // The decision surface the compact rows and dialogs follow.
+  const activeDecisionSpec = annotateMode ? annotateDecisionSpec : planDecisionSpec;
+  const runDecisionAction = annotateMode ? runAnnotateDecisionAction : runPlanDecisionAction;
+
   const annotateCompactPrimaryId = compactPrimaryIdForDecision(annotateDecisionSpec.primary);
 
   // L2: the compact dialogs render from the LIVE spec; if the item behind an
   // open dialog left the spec (annotation deleted, state flipped), the dialog
   // closes instead of acting on a stale capture.
   const compactComposerItem = compactDecisionComposer !== null
-    ? annotateDecisionSpec.items.find(
+    ? activeDecisionSpec.items.find(
         (item) => item.id === compactDecisionComposer && item.composer,
       ) ?? null
     : null;
   const compactConfirmItem = compactDecisionConfirm !== null
-    ? annotateDecisionSpec.items.find(
+    ? activeDecisionSpec.items.find(
         (item) => item.id === compactDecisionConfirm && item.confirm,
       ) ?? null
     : null;
@@ -6349,26 +6454,40 @@ const App: React.FC = () => {
                     disabled: compactActionBusy,
                   })),
                 ]
-              : [{
-                  id: 'feedback' as const,
-                  label: answersOnlyFeedback ? SEND_ANSWERS_LABEL : 'Send feedback',
-                  subtitle: !hasFeedbackToSend
-                    ? 'Add general feedback'
-                    : answersOnlyFeedback
+              : [
+                  // Plan review (#1057): the same spec as the header, the
+                  // primary row first, then every caret item as a row.
+                  {
+                    id: compactPrimaryIdForDecision(planDecisionSpec.primary),
+                    label: planDecisionSpec.primary.mobileLabel ?? planDecisionSpec.primary.label,
+                    subtitle: answersOnlyFeedback
                       ? `${questionAnswerCount} answer${questionAnswerCount === 1 ? '' : 's'}`
-                      : `${feedbackAnnotationCount} annotation${feedbackAnnotationCount === 1 ? '' : 's'}`,
-                  onSelect: handleHeaderFeedback,
-                  disabled: compactActionBusy,
-                }]),
-            ...(!annotateMode
-              ? [{
-                  id: 'approve' as const,
-                  label: 'Approve',
-                  subtitle: hasFeedbackToSend ? 'Feedback remains unsent' : undefined,
-                  onSelect: handleHeaderApprove,
-                  disabled: compactActionBusy,
-                }]
-              : []),
+                      : feedbackAnnotationCount > 0
+                        ? `${feedbackAnnotationCount} annotation${feedbackAnnotationCount === 1 ? '' : 's'}`
+                        : hasFeedbackToSend
+                          ? 'Edited document'
+                          : undefined,
+                    onSelect: submitPrimaryDecision,
+                    disabled: compactActionBusy,
+                  },
+                  ...planDecisionSpec.items.map((item) => ({
+                    id: compactRowIdForDecisionItem(item.id),
+                    label: item.label,
+                    subtitle: item.subtitle,
+                    onSelect: () => {
+                      if (item.composer) {
+                        setCompactDecisionComposer(item.id);
+                        return;
+                      }
+                      if (item.confirm) {
+                        setCompactDecisionConfirm(item.id);
+                        return;
+                      }
+                      runPlanDecisionAction(item.id);
+                    },
+                    disabled: compactActionBusy,
+                  })),
+                ]),
           ]
         : [];
   const compactModeActions: CompactPlanAction[] = !isCompactTouchLayout
@@ -6409,10 +6528,13 @@ const App: React.FC = () => {
               ? 'No feedback added. You can finish or keep reviewing.'
               : 'No feedback added. You can approve or keep reviewing.'
             : 'No feedback added. You can keep reviewing or close the session.';
+  const compactRowsFromDecisionSpec = isApiMode && (!linkedDocHook.isActive || annotateMode)
+    && !archive.archiveMode && !goalSetupMode && compactReviewActions.length > 0;
   const compactPrimaryReviewActionId: CompactPlanReviewAction['id'] | undefined =
-    annotateMode && compactReviewActions.length > 0
-      // The compact primary row IS the header primary (spec §3.1).
-      ? annotateCompactPrimaryId
+    compactRowsFromDecisionSpec
+      // The compact primary row IS the header primary (spec §3.1), in
+      // annotate and plan review alike.
+      ? compactPrimaryIdForDecision(activeDecisionSpec.primary)
       : compactReviewActions.some((action) => action.id === 'feedback') &&
         (hasFeedbackToSend || !compactCanApprove)
         ? 'feedback'
@@ -6949,12 +7071,9 @@ const App: React.FC = () => {
           linkedDocIsActive={linkedDocHook.isActive}
           callbackShareUrlReady={callbackShareUrlReady}
           canShareCurrentSession={canShareCurrentSession}
-          agentName={agentName}
-          availableAgents={availableAgents}
-          showAnnotationsWarning={hasFeedbackToSend}
           questionProgress={headerQuestionProgress}
-          feedbackLabel={answersOnlyFeedback ? SEND_ANSWERS_LABEL : undefined}
           annotateDecision={annotateMode ? annotateDecision : undefined}
+          planDecision={annotateMode ? undefined : planDecision}
           callbackConfig={callbackConfig}
           taterMode={taterMode}
           mobileSettingsOpen={mobileSettingsOpen}
@@ -6971,8 +7090,6 @@ const App: React.FC = () => {
           onAnnotateExit={handleHeaderAnnotateExit}
           onGoalSetupExit={handleGoalSetupExit}
           onGoalSetupSubmit={handleGoalSetupSubmit}
-          onFeedback={handleHeaderFeedback}
-          onApprove={handleHeaderApprove}
           onAnnotationPanelToggle={handleAnnotationPanelToggle}
           onAIChatToggle={handleAIChatToggle}
           onArchiveCopy={archive.copy}
@@ -6980,6 +7097,7 @@ const App: React.FC = () => {
           onTaterModeChange={handleTaterModeChange}
           onIdentityChange={handleIdentityChange}
           onUIPreferencesChange={setUiPrefs}
+          onPermissionModeChange={setPermissionMode}
           onOpenSettings={handleOpenSettings}
           onCloseSettings={handleCloseSettings}
           onOpenExport={handleOpenExport}
@@ -7645,19 +7763,6 @@ const App: React.FC = () => {
           shareBaseUrl={shareBaseUrl}
         />
 
-        {/* Feedback prompt dialog */}
-        <ConfirmDialog
-          isOpen={showFeedbackPrompt}
-          onClose={() => setShowFeedbackPrompt(false)}
-          title="Add Feedback First"
-          message={
-            canEditMarkdown
-              ? `To provide feedback, add annotations or direct edits. ${agentName} will use your feedback to revise the ${annotateMode ? 'document' : 'plan'}.`
-              : `To provide feedback, select text and add annotations. ${agentName} will use your annotations to revise the ${annotateMode ? 'document' : 'plan'}.`
-          }
-          variant="info"
-        />
-
         {/* Unsaved source-file edit warning dialog */}
         <ConfirmDialog
           isOpen={showSourceFileEditWarning}
@@ -7677,37 +7782,6 @@ const App: React.FC = () => {
                 ? 'Close Anyway'
                 : 'Send Anyway'
           }
-          cancelText="Cancel"
-          variant="warning"
-          showCancel
-        />
-
-        {/* Claude Code feedback warning dialog */}
-        <ConfirmDialog
-          isOpen={showClaudeCodeWarning}
-          onClose={() => setShowClaudeCodeWarning(false)}
-          onConfirm={() => {
-            setShowClaudeCodeWarning(false);
-            handleApprove();
-          }}
-          title="Feedback Won't Be Sent"
-          message={
-            hasOnlySavedFileChanges
-              ? <>{agentName} doesn't yet support feedback on approval. {savedFileAwarenessOnlyMessage}</>
-              : <>{agentName} doesn't yet support feedback on approval. Your {feedbackLoss} will be lost.{savedFileAwarenessMixedMessage}</>
-          }
-          subMessage={
-            <>
-              To send feedback, use <strong>{answersOnlyFeedback ? SEND_ANSWERS_LABEL : 'Send Feedback'}</strong> instead.
-              <br /><br />
-              Want this feature? Upvote these issues:
-              <br />
-              <a href="https://github.com/anthropics/claude-code/issues/16001" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">#16001</a>
-              {' · '}
-              <a href="https://github.com/anthropics/claude-code/issues/15755" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">#15755</a>
-            </>
-          }
-          confirmText="Approve Anyway"
           cancelText="Cancel"
           variant="warning"
           showCancel
@@ -7751,7 +7825,7 @@ const App: React.FC = () => {
             onSubmit={(note) => {
               const item = compactComposerItem;
               setCompactDecisionComposer(null);
-              runAnnotateDecisionAction(item.id, note);
+              runDecisionAction(item.id, note);
             }}
           />
         )}
@@ -7762,7 +7836,7 @@ const App: React.FC = () => {
             onConfirm={() => {
               const item = compactConfirmItem;
               setCompactDecisionConfirm(null);
-              runAnnotateDecisionAction(item.id);
+              runDecisionAction(item.id);
             }}
             title={compactConfirmItem.confirm.title}
             message={compactConfirmItem.confirm.message}
@@ -7776,10 +7850,15 @@ const App: React.FC = () => {
         {/* OpenCode agent not found warning dialog */}
         <ConfirmDialog
           isOpen={showAgentWarning}
-          onClose={() => setShowAgentWarning(false)}
-          onConfirm={() => {
+          onClose={() => {
+            agentWarningContinuationRef.current = null;
             setShowAgentWarning(false);
-            handleApprove();
+          }}
+          onConfirm={() => {
+            const approve = agentWarningContinuationRef.current ?? (() => { void handleApprove(); });
+            agentWarningContinuationRef.current = null;
+            setShowAgentWarning(false);
+            approve();
           }}
           title="Agent Not Found"
           message={agentWarningMessage}
