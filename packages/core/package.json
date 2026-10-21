@@ -16,6 +16,7 @@
     "./annotatable": "./annotatable.ts",
     "./annotation-threads": "./annotation-threads.ts",
     "./agent-jobs": "./agent-jobs.ts",
+    "./agent-switch": "./agent-switch.ts",
     "./agent-terminal": "./agent-terminal.ts",
     "./browser-paths": "./browser-paths.ts",
     "./code-file": "./code-file.ts",
