@@ -130,14 +130,15 @@ async function render(value: InboxThread, sent: { at: string; checked_at: string
 
 const line = (el: HTMLElement) => el.querySelector('[data-delivery]') as HTMLElement;
 
-test.skipIf(!hasDom)('Claude Code at work: "Queued · … is working", and Send now posts the send-now route for the reply', async () => {
+test.skipIf(!hasDom)('Claude Code at work: "Undelivered · … is working" (approval "inbox-busy-agent-reply"), and Send now posts the send-now route for the reply', async () => {
   connection = { busy: true, idle_since: null, send_now: true };
   let changed = 0;
   const el = await render(thread(), undefined, async () => {
     changed += 1;
   });
   expect(line(el).getAttribute('data-delivery')).toBe('queued');
-  expect(line(el).textContent).toContain('Queued · Claude Code is working; it gets this when its turn ends.');
+  // How long it waited (the reply was written long before the test runs) and what happens next.
+  expect(line(el).textContent).toMatch(/^Undelivered \d+ min · Claude Code is working · it gets this when its turn ends/);
   const button = el.querySelector('[data-send-now]') as HTMLButtonElement;
   expect(button.textContent).toBe('Send now');
   await act(async () => button.click());
@@ -187,7 +188,7 @@ test.skipIf(!hasDom)('a message sent without the wake mark from a session whose 
   connection = { busy: true, idle_since: null, send_now: true };
   const el = await render(thread({ wakes: false }));
   expect(line(el).getAttribute('data-delivery')).toBe('queued');
-  expect(line(el).textContent).toContain('Queued · Claude Code is working');
+  expect(line(el).textContent).toContain('Claude Code is working');
   expect(el.querySelector('[data-send-now]')).not.toBeNull();
 });
 
@@ -195,7 +196,7 @@ test.skipIf(!hasDom)("pressed, but the session cannot take it now (its own Ask q
   connection = { busy: true, idle_since: null, send_now: false };
   const el = await render(thread({ reply: { deliver_now_at: '2026-10-16T17:06:00.000Z' } }));
   expect(line(el).getAttribute('data-delivery')).toBe('queued');
-  expect(line(el).textContent).toContain('Queued · Claude Code is working');
+  expect(line(el).textContent).toContain('Claude Code is working');
   expect(el.querySelector('[data-send-now]')).toBeNull();
 });
 

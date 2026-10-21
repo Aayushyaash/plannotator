@@ -154,6 +154,9 @@ describe('a thread with two sessions: the row and the thread line agree on who a
       sendingNow: !!last.deliver_now_at,
       connection,
       askerEnded: askerEnded ? { name: inboxAgentName(asking!.author) } : null,
+      waitingSince: last.created_at,
+      nowBy: last.deliver_now_by ?? null,
+      nowAt: last.deliver_now_at ?? null,
     });
   }
 

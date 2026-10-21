@@ -36,7 +36,7 @@
 
 import { homedir } from "node:os";
 import { basename } from "node:path";
-import { INBOX_TAGS_MAX, type InboxHostSessions, type InboxOpenSession, type InboxProject, type InboxSessionOutdated, type InboxTag, type InboxToolHostId } from "@plannotator/core/inbox-types";
+import { INBOX_AUTO_SEND_AFTER_MS, INBOX_TAGS_MAX, type InboxHostSessions, type InboxOpenSession, type InboxProject, type InboxSessionOutdated, type InboxTag, type InboxToolHostId } from "@plannotator/core/inbox-types";
 import { checkServerSession, INBOX_SERVER_SESSION_MISMATCH_ERROR, serverSessionMismatchBody } from "@plannotator/core/server-session";
 import { INBOX_SEND_NOW_POLL_FIELD, INBOX_SESSION_LIVE_MS, INBOX_TAGS_POLL_FIELD } from "@plannotator/shared/inbox/connection";
 import { InboxError } from "@plannotator/shared/inbox/schema";
@@ -79,6 +79,13 @@ export interface InboxRecipientConnection {
   engine: string | null;
   /** The command that starts the same session again in its folder (`cd <folder> && claude --resume <id>`); null when unknown. Additive. */
   restart_command: string | null;
+  /**
+   * How long a reply waits on this busy session before it goes into the
+   * running turn by itself, where `send_now` (`INBOX_AUTO_SEND_AFTER_MS`;
+   * approval "inbox-busy-agent-reply"). Absent from an older Inbox, which
+   * never does. Additive.
+   */
+  auto_send_after_ms: number;
 }
 
 interface SeenSession {
@@ -154,9 +161,12 @@ export function createInboxLiveSessions(options: {
   displayFolder?: (path: string) => string;
   /** The command that restarts a session as itself, in its folder (shown); null for a host without one. */
   restartCommandOf?: (host: string, folder: string, session: string) => string | null;
+  /** How long a reply waits on a busy session before it goes in by itself. Default `INBOX_AUTO_SEND_AFTER_MS`. */
+  autoSendAfterMs?: number;
 }) {
   const { store, serverSession } = options;
   const now = options.now ?? Date.now;
+  const autoSendAfterMs = options.autoSendAfterMs ?? INBOX_AUTO_SEND_AFTER_MS;
   const startedAt = now();
   const sessions = new Map<string, SeenSession>();
   /**
@@ -501,7 +511,21 @@ export function createInboxLiveSessions(options: {
       outdated: outdatedOf(entry),
       engine: entry.engine,
       restart_command: restartCommandOf(session, entry),
+      auto_send_after_ms: autoSendAfterMs,
     };
+  };
+
+  /**
+   * The live sessions a reply may go into by itself now: a turn runs and the
+   * connection said it can take an item mid-turn (`send_now`). With `tags`:
+   * whether the connection understands a reply it was only tagged in.
+   */
+  const steerableSessions = (): { session: string; tags: boolean }[] => {
+    const out: { session: string; tags: boolean }[] = [];
+    for (const [session, entry] of sessions) {
+      if (isLive(entry) && entry.busy === true && entry.sendNow) out.push({ session, tags: entry.tags });
+    }
+    return out;
   };
 
   /** The fields a list row's delivery reads (`InboxStore.setDeliveryPresence`): `connectionOf` without its plugin checks. */
@@ -713,6 +737,8 @@ export function createInboxLiveSessions(options: {
     composeTarget,
     connectionOf,
     deliveryConnectionOf,
+    steerableSessions,
+    autoSendAfterMs,
     deliverySignature,
     hostSessions,
     restartCount,

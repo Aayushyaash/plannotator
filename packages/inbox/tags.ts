@@ -194,10 +194,22 @@ export function tagDeliveryLine(
   name: string,
   connection: RecipientConnection | null | undefined,
   time: (iso: string) => string,
+  /** The reply's `created_at`: with a busy session, how long it waited ("Undelivered 3 min"). */
+  sentAt?: string | null,
 ): DeliveryLine {
   if (!tag.wakes && !tag.delivery && tag.read_at) return { state: 'delivered', text: `${name} read this thread, ${time(tag.read_at)}` };
   if (!tag.wakes && !tag.delivery) return { state: 'saved', text: `Saved for ${name}. It sees it the next time it reads this thread.` };
-  return deliveryLine({ name, deliveredAt: tag.delivery?.at ?? null, time, wakes: true, sendingNow: !!tag.deliver_now_at, connection });
+  return deliveryLine({
+    name,
+    deliveredAt: tag.delivery?.at ?? null,
+    time,
+    wakes: true,
+    sendingNow: !!tag.deliver_now_at,
+    connection,
+    waitingSince: sentAt ?? null,
+    nowBy: tag.deliver_now_by ?? null,
+    nowAt: tag.deliver_now_at ?? null,
+  });
 }
 
 /** The tags of the person's message the window reads (a wire message may carry them). */

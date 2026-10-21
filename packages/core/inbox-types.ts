@@ -16,7 +16,7 @@
 
 import type { QuestionAnswer, QuestionKind } from "./question-block";
 import type { InboxAnnotationRecord, InboxAttachment, InboxAttachmentKind, InboxInlineImage } from "./inbox-attachments";
-import type { InboxRowDelivery } from "./inbox-delivery";
+import type { InboxDeliverNowBy, InboxRowDelivery } from "./inbox-delivery";
 import { INBOX_CARD_ACTION_ON, type InboxCard } from "./inbox-cards";
 
 // The attachment shapes and file rules (step 2) live in their own module and
@@ -309,6 +309,14 @@ export interface InboxMessage {
    */
   deliver_now_at?: string | null;
   /**
+   * Who asked for `deliver_now_at`: the person (Send now) or the Inbox after
+   * the item waited `INBOX_AUTO_SEND_AFTER_MS` on a busy session whose
+   * connection can take it mid-turn (approval "inbox-busy-agent-reply").
+   * Kept when a failed attempt clears `deliver_now_at`, so the Inbox never
+   * tries by itself twice. Absent on older records (a person's Send now).
+   */
+  deliver_now_by?: InboxDeliverNowBy | null;
+  /**
    * A guided review this message carries (submit_guide, PLAN step 5): the
    * snapshot is a content-addressed blob, `inbox/blobs/<sha256>`. Absent on
    * every other message and on records older than step 5.
@@ -440,8 +448,10 @@ export interface InboxTag {
   wakes: boolean;
   /** It reached the session (its connection delivered it, or its own wait_for_reply returned it). */
   delivery?: InboxDelivery | null;
-  /** The person pressed Send now for this session. */
+  /** The person pressed Send now for this session (or the Inbox did, after the wait: `deliver_now_by`). */
   deliver_now_at?: string | null;
+  /** Who asked for `deliver_now_at` (see `InboxMessage.deliver_now_by`). */
+  deliver_now_by?: InboxDeliverNowBy | null;
   /** A session that is not woken read the thread with read_thread after the tag (its own read only). */
   read_at?: string | null;
 }
@@ -563,6 +573,14 @@ export interface InboxAck {
    * else null. Never stored.
    */
   delivered_at?: string | null;
+  /**
+   * The window's thread only: its note's `created_at`, `deliver_now_at` and
+   * `deliver_now_by` (a 👍 that waited on a busy session goes into the
+   * running turn by itself after `INBOX_AUTO_SEND_AFTER_MS`). Never stored.
+   */
+  note_at?: string | null;
+  deliver_now_at?: string | null;
+  deliver_now_by?: InboxDeliverNowBy | null;
 }
 
 /**

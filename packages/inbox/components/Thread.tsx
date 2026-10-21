@@ -7,7 +7,7 @@ import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
 import { parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 import type { InboxListRow, InboxMessageWire, InboxProjectRepo, InboxQuestion, InboxSentRecipient, InboxThread, InboxUpload } from '@plannotator/core/inbox-types';
 import type { IndexedQuestion, QuestionAnswer, QuestionStatus } from '@plannotator/core/question-block';
-import { inboxAskingMessage, inboxDefaultSkip, isInboxNote, isInboxTextKind, readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachment, type InboxAttachmentState, type InboxInlineImage, type InboxQuestionState } from '@plannotator/core/inbox-types';
+import { inboxAskingMessage, inboxDefaultSkip, wholeMinutes, isInboxNote, isInboxTextKind, readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachment, type InboxAttachmentState, type InboxInlineImage, type InboxQuestionState } from '@plannotator/core/inbox-types';
 import type { LocalLinkResolver } from '@plannotator/ui/components/LocalLinkContext';
 import { NOT_ATTACHED_TITLE, attachmentDeepLink, attachmentDisplayPath, attachmentForLink, openAttachmentTitle, useRefRepo } from '../links';
 import { InboxApiError, inboxApi, type AttachmentsModel } from '../api';
@@ -29,8 +29,9 @@ import { useReplyDraft } from '../replyDraft';
 import { conflictText, DraftHead, DraftFootNote } from './DraftLabel';
 import { canToggleRead } from '../markRead';
 import { NewMessageButton, NewMessageComposer, NewMessagePopover, hostName, useLiveSessions, type NewMessageMode } from './NewMessage';
-import { deliveryLine, restartNote, type DeliveryLine, type RecipientConnection } from '../deliveryLine';
+import { autoAfterText, deliveryLine, restartNote, type DeliveryLine, type RecipientConnection } from '../deliveryLine';
 import { RestartLine } from './RestartNote';
+import { UndeliveredBand, UndeliveredText, useMinuteClock } from './Undelivered';
 import { SendToAnotherSession } from '../compose/SendToAnotherSession';
 import { ComposeFileTiles, attachedAnnouncement, useComposeFiles } from '../compose/ComposeFiles';
 import {
@@ -721,8 +722,12 @@ export function ackPillLine(
   wakes: boolean,
   time: (iso: string) => string = whenTime,
   connection?: RecipientConnection | null,
+  now: number = Date.now(),
 ): { state: AckPillState; text: string } {
-  if (ack.delivered_at) return { state: 'delivered', text: `Delivered to ${agent}, ${time(ack.delivered_at)}` };
+  if (ack.delivered_at) {
+    const auto = ack.deliver_now_by === 'auto' && ack.deliver_now_at && ack.note_at ? ` · ${autoAfterText(wholeMinutes(ack.note_at, ack.deliver_now_at))}` : '';
+    return { state: 'delivered', text: `Delivered to ${agent}, ${time(ack.delivered_at)}${auto}` };
+  }
   // The window ended after the person replied, or the agent wrote again: it was not sent.
   if (ack.not_sent === 'replied') return { state: 'not-sent', text: 'not sent: you replied' };
   if (ack.not_sent === 'wrote_again') return { state: 'not-sent', text: `not sent: ${agent} wrote again` };
@@ -730,7 +735,19 @@ export function ackPillLine(
   if (ack.settled_seq == null) return { state: 'pending', text: `${you}goes to ${agent} in a few seconds` };
   // A 👍 settled before it was sent through (no note) never reaches a wake: it waits for a read.
   if (wakes && ack.note_id) {
-    const line = deliveryLine({ name: agent, deliveredAt: null, time, wakes: true, sendingNow: false, connection });
+    const line = deliveryLine({
+      name: agent,
+      deliveredAt: null,
+      time,
+      wakes: true,
+      sendingNow: !!ack.deliver_now_at,
+      connection,
+      // It waits on a busy session: "Undelivered N min", and it goes in by itself after the wait.
+      waitingSince: ack.note_at ?? null,
+      nowBy: ack.deliver_now_by ?? null,
+      nowAt: ack.deliver_now_at ?? null,
+      now,
+    });
     return { state: line.state === 'sending' ? 'sending' : 'queued', text: `${you}${line.text}` };
   }
   return { state: 'saved', text: `${you}Saved for ${agent}. It sees it when it next reads this thread.` };
@@ -749,7 +766,9 @@ export function AckPill({
   /** How the agent's session is connected now (the sessions route's `asker.connection`); undefined while unknown. */
   connection?: RecipientConnection | null;
 }) {
-  const line = ackPillLine(ack, agent, wakes, whenTime, connection);
+  // The wait on a busy session is written in whole minutes: its own clock, while the 👍 waits.
+  const now = useMinuteClock(!ack.delivered_at && !!ack.note_id);
+  const line = ackPillLine(ack, agent, wakes, whenTime, connection, now);
   return (
     <p className="ib-ackpill" data-ack-pill={line.state}>
       <span className="ib-ackchip">
@@ -2257,7 +2276,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   const { connections: tagConnections, load: loadTagConnections } = useTagConnections(thread.thread_id, waitingTags, waitingTags.length > 0);
   const tagLines = lastTags.map((tag) => {
     const name = tagName(tag, ownerHost, replySession);
-    return { tag, name, line: tagDeliveryLine(tag, name, tagConnections[tag.session], whenTime) };
+    return { tag, name, line: tagDeliveryLine(tag, name, tagConnections[tag.session], whenTime, last.created_at) };
   });
   const delivered: DeliveryLine | null =
     last.author.kind !== 'person'
@@ -2271,6 +2290,9 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             sendingNow: !!last.deliver_now_at,
             connection: recipientConnection,
             undelivered: undelivered ? { host: hostName(lastTo.host) } : null,
+            waitingSince: last.created_at,
+            nowBy: last.deliver_now_by ?? null,
+            nowAt: last.deliver_now_at ?? null,
           })
         : deliveryLine({
             name: asker,
@@ -2281,11 +2303,20 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             sendingNow: !!last.deliver_now_at,
             connection: recipientConnection,
             askerEnded: askerEnded && asking ? { name: asking.name } : null,
+            waitingSince: last.created_at,
+            nowBy: last.deliver_now_by ?? null,
+            nowAt: last.deliver_now_at ?? null,
           });
   // No Send now because that session runs an older plugin than a restart loads (the "Steps" line,
   // owner approval "restart-warning"): only while the reply waits for a working session.
   const restartName = lastTo ? hostName(lastTo.host) : repliedTo?.author.kind === 'agent' && repliedTo.author.host ? hostName(repliedTo.author.host) : asker;
   const restart = delivered?.state === 'queued' && !last.deliver_now_at ? restartNote(recipientConnection) : null;
+  // The name the waiting band uses ("Claude Code", "Claude Code (another session)").
+  const ownerLineName = lastTo
+    ? last.to
+      ? toName(last, last.to)
+      : hostName(lastTo.host)
+    : asker;
   const [sendNowState, setSendNowState] = useState<{ id: string; busy: boolean; error: string | null } | null>(null);
   const sendNow = async () => {
     setSendNowState({ id: last.id, busy: true, error: null });
@@ -2931,7 +2962,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                   <ul className="ib-tg-dl" data-tag-lines="" tabIndex={-1}>
                     <li data-tag-line={replySession ?? ''} data-delivery={delivered.state} data-owner="">
                       <HostMark host={ownerHost} />
-                      <span className="ib-dl-text">{delivered.text}</span>
+                      {delivered.wait ? <UndeliveredText wait={delivered.wait} name={ownerLineName} /> : <span className="ib-dl-text">{delivered.text}</span>}
                       {delivered.sendNow && (
                         <button type="button" className="ib-sendnow" data-send-now="" disabled={sendNowState?.id === last.id && sendNowState.busy} onClick={() => void sendNow()}>
                           Send now
@@ -2941,7 +2972,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                     {tagLines.map(({ tag, name, line }) => (
                       <li key={tag.session} data-tag-line={tag.session} data-delivery={line.state}>
                         <HostMark host={tag.host} />
-                        <span className="ib-dl-text">{line.text}</span>
+                        {line.wait ? <UndeliveredText wait={line.wait} name={name} /> : <span className="ib-dl-text">{line.text}</span>}
                         {line.sendNow && (
                           <button
                             type="button"
@@ -2963,7 +2994,18 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                     {tagSendNow.error}
                   </p>
                 )}
-                {message === last && delivered && tagLines.length === 0 && (
+                {message === last && delivered?.wait && tagLines.length === 0 && (
+                  // Waiting on a busy agent (approval "inbox-busy-agent-reply"): the band, with its own minute clock.
+                  <UndeliveredBand
+                    wait={delivered.wait}
+                    name={ownerLineName}
+                    onSendNow={delivered.sendNow ? () => void sendNow() : null}
+                    sending={sendNowState?.id === last.id && sendNowState.busy}
+                    restart={restart}
+                    restartName={restartName}
+                  />
+                )}
+                {message === last && delivered && !delivered.wait && tagLines.length === 0 && (
                   // tabIndex -1: Send to another session puts focus here once it moved the message.
                   <div className="ib-delivered" data-delivery={delivered.state} tabIndex={-1}>
                     <span className="ib-dl-main">
