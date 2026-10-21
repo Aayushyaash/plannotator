@@ -27,8 +27,8 @@ interface DiffHunkPreviewProps {
  */
 function buildPierreCSS(
   mode: 'light' | 'dark',
-  fontFamily: string,
-  fontSize: string,
+  fontFamily: string | undefined,
+  fontSize: string | undefined,
   lineBgIntensity: DiffLineBgIntensity,
 ): string {
   try {

@@ -18,6 +18,8 @@
  * - A font installed mid-session is picked up on the next call (no event).
  */
 
+import { quoteFontFamily } from "./cssFontFamily";
+
 const SAMPLE = "mmmmmmmmmmlli0O1Il@#WQ";
 const SIZE = "72px";
 const GENERICS = ["monospace", "serif", "sans-serif"] as const;
@@ -41,17 +43,20 @@ function getContext(): CanvasRenderingContext2D | null {
  * is unavailable (no canvas) — callers should treat `null` as "unknown" and
  * skip any installed/missing hint.
  */
-export function isFontInstalled(family: string): boolean | null {
-  const name = family.trim().replace(/["']/g, "");
-  if (!name) return false;
+export function isFontInstalled(
+  family: string,
+  context: Pick<CanvasRenderingContext2D, "font" | "measureText"> | null = getContext(),
+): boolean | null {
+  const quoted = quoteFontFamily(family);
+  if (!quoted) return false;
 
-  const c = getContext();
+  const c = context;
   if (!c) return null;
 
   for (const generic of GENERICS) {
     c.font = `${SIZE} ${generic}`;
     const base = c.measureText(SAMPLE).width;
-    c.font = `${SIZE} "${name}", ${generic}`;
+    c.font = `${SIZE} ${quoted}, ${generic}`;
     if (c.measureText(SAMPLE).width !== base) return true;
   }
   return false;

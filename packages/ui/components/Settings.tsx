@@ -16,6 +16,7 @@ import {
 } from '../utils/agentToolSetting';
 import { loadDiffFont } from '../utils/diffFonts';
 import { isFontInstalled } from '../utils/fontDetect';
+import { MAX_FONT_FAMILY_LENGTH, monoFontStack, normalizeFontFamilyName } from '../utils/cssFontFamily';
 import { TaterSpritePullup } from './TaterSpritePullup';
 import { getIdentity, regenerateIdentity, setCustomIdentity, isIdentityEditable } from '../utils/identity';
 import { GitUser } from '../icons/GitUser';
@@ -567,9 +568,10 @@ function isBuiltInFont(value: string): boolean {
   return DIFF_FONT_OPTIONS.some((opt) => opt.value === value);
 }
 
-/** Inline style rendering UI chrome in the chosen font (sanitized — free text). */
-function fontPreviewStyle(family: string): React.CSSProperties {
-  return { fontFamily: `'${family.replace(/['"\\]/g, '')}', monospace` };
+/** Inline style rendering UI chrome in the chosen font (quoted and escaped: free text). */
+function fontPreviewStyle(family: string): React.CSSProperties | undefined {
+  const stack = monoFontStack(family);
+  return stack ? { fontFamily: stack } : undefined;
 }
 
 const ReviewDisplayTab: React.FC<{ isCompactTouchLayout?: boolean }> = ({ isCompactTouchLayout = false }) => {
@@ -604,7 +606,7 @@ const ReviewDisplayTab: React.FC<{ isCompactTouchLayout?: boolean }> = ({ isComp
   const customActive = customFontMode || (!!diffFontFamily && !isBuiltInFont(diffFontFamily));
   // Width-measurement check — deterministic per machine, no permissions.
   const customFontInstalled = useMemo(
-    () => (customFontDraft.trim() ? isFontInstalled(customFontDraft) : null),
+    () => (normalizeFontFamilyName(customFontDraft) ? isFontInstalled(customFontDraft) : null),
     [customFontDraft],
   );
 
@@ -617,7 +619,7 @@ const ReviewDisplayTab: React.FC<{ isCompactTouchLayout?: boolean }> = ({ isComp
   // the draft — but never clobber typing that hasn't been saved yet.
   useEffect(() => {
     if (pendingFontSave.current !== null) return;
-    if (diffFontFamily && !isBuiltInFont(diffFontFamily) && diffFontFamily !== customFontDraft.trim()) {
+    if (diffFontFamily && !isBuiltInFont(diffFontFamily) && diffFontFamily !== normalizeFontFamilyName(customFontDraft)) {
       setCustomFontDraft(diffFontFamily);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -642,7 +644,7 @@ const ReviewDisplayTab: React.FC<{ isCompactTouchLayout?: boolean }> = ({ isComp
     // Debounce the save — configStore.set writes the cookie and POSTs
     // /api/config; per-keystroke writes would spam both.
     clearTimeout(customFontSaveTimer.current);
-    pendingFontSave.current = value.trim();
+    pendingFontSave.current = normalizeFontFamilyName(value);
     customFontSaveTimer.current = setTimeout(() => {
       if (pendingFontSave.current !== null) {
         configStore.set('diffFontFamily', pendingFontSave.current);
@@ -738,13 +740,15 @@ const ReviewDisplayTab: React.FC<{ isCompactTouchLayout?: boolean }> = ({ isComp
               value={customFontDraft}
               onChange={(e) => handleCustomFontInput(e.target.value)}
               placeholder="Font name as installed, e.g. Iosevka"
+              aria-label="Custom code font name"
+              maxLength={MAX_FONT_FAMILY_LENGTH}
               autoFocus={!customFontDraft}
               spellCheck={false}
               className="w-full px-3 py-1.5 text-sm rounded-md bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-ring"
-              style={customFontDraft ? fontPreviewStyle(customFontDraft) : undefined}
+              style={fontPreviewStyle(customFontDraft)}
             />
-            <div className="text-[11px]">
-              {!customFontDraft.trim() ? (
+            <div className="text-[11px]" aria-live="polite">
+              {!normalizeFontFamilyName(customFontDraft) ? (
                 <span className="text-muted-foreground">Any font installed on this machine works — type its family name.</span>
               ) : customFontInstalled === true ? (
                 <span className="text-success">✓ Found on this machine</span>
