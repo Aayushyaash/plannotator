@@ -17,7 +17,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -73,7 +73,7 @@ const resumeLine = () => `cd ~${ids.restart.project.slice(dir!.length)} && claud
 const OLD = () => ({ version: '0.28.23', root: ids.restart.oldPath, loaded_at: Date.parse('2026-10-16T00:00:00Z') });
 const CURRENT = () => ({ version: '0.28.25', root: ids.restart.installPath, loaded_at: Date.now() });
 
-const TESTS = 7;
+const TESTS = 8;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -294,6 +294,41 @@ test.skipIf(!hasDom)('the sidebar: "Reload Claude Code N", a real button, opens 
   expect(copied).toEqual([resumeLine()]);
   // Settings' nav carries the warning dot on Agents.
   expect(!!document.querySelector('[data-settings-link="agents"] [data-agents-dot]')).toBe(true);
+}, 30_000);
+
+/** Claude Code's plugin registry the Inbox reads (the DOM server's scratch `<data>/claude`). */
+function installedPlugin(version: string) {
+  const folder = join(dir!, 'data', 'claude', 'plugins', 'cache', 'plannotator', 'plannotator', version);
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(
+    join(dir!, 'data', 'claude', 'plugins', 'installed_plugins.json'),
+    JSON.stringify({ version: 2, plugins: { 'plannotator@plannotator': [{ scope: 'user', installPath: folder, version, installedAt: '2026-10-04T22:07:24.658Z', lastUpdated: '2026-10-17T05:27:07.299Z' }] } }),
+  );
+}
+
+test.skipIf(!hasDom)('the installed plugin behind this Inbox (0.28.24 under Inbox 0.28.25): the update command leads with Copy, then /reload-plugins, in Settings and under the reply', async () => {
+  installedPlugin('0.28.24');
+  try {
+    await sessionPolls({ busy: true, plugin: OLD(), engine: '2.1.305' });
+    await renderApp('#settings/agents');
+    await until(() => !!document.querySelector('[data-agent-sessions="claude-code"] [data-reload-lead="update_plugin"]'), 'the update lead');
+    const lead = document.querySelector<HTMLElement>('[data-agent-sessions="claude-code"] [data-reload-lead="update_plugin"]')!;
+    const [update, reload] = [...lead.querySelectorAll<HTMLButtonElement>('[data-restart-copy]')];
+    await act(async () => update!.click());
+    await settle(100);
+    expect(copied[0]).toContain('claude plugin');
+    await act(async () => reload!.click());
+    await settle(100);
+    expect(copied[1]).toBe('/reload-plugins');
+    act(() => root?.unmount());
+    host?.remove();
+    await openThread();
+    await until(() => !!note()?.querySelector('[data-reload-lead="update_plugin"]'), 'the update lead under the reply');
+  } finally {
+    installedPlugin('0.28.25');
+    // The Inbox re-reads the registry at most every 2 s; let the next test see 0.28.25 again.
+    await settle(2_200);
+  }
 }, 30_000);
 
 test.skipIf(!hasDom)('the row clears itself once those sessions restart (read at the next list read)', async () => {
