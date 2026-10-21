@@ -231,7 +231,7 @@ test("wait_for_reply carries the reply once: each question as key, state and ans
   const questions = got.structuredContent.questions as Record<string, any>[];
   expect(questions).toHaveLength(2);
   for (const q of questions) {
-    expect(Object.keys(q).sort()).toEqual(["answer", "key", "sent_reply_id", "state"]);
+    expect(Object.keys(q).sort()).toEqual(["answer", "key", "message_id", "sent_reply_id", "state"]);
     expect(q).toMatchObject({ state: "sent", sent_reply_id: replyId, answer: { key: q.key, selected: expect.any(Array) } });
   }
   // The text the model reads: the reply, then a small JSON tail, whatever the thread's length.
