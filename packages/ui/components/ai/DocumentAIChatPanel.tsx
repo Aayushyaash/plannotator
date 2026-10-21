@@ -1,5 +1,5 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AIChatEntry, PendingPermission } from '../../hooks/useAIChat';
+import { hasPendingBusyChoice, type AIChatEntry, type PendingPermission } from '../../hooks/useAIChat';
 import { findSessionBridge, hasNonInterruptibleSession, type AIProviderOption } from '../../utils/aiProvider';
 import { formatRelativeTime, renderChatMarkdown } from '../../utils/aiChatFormat';
 import { OverlayScrollArea } from '../OverlayScrollArea';
@@ -116,6 +116,7 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
         <NewChatButton
           onNewChat={handleNewChat}
           busy={isStreaming || isCreatingSession}
+          pendingChoice={hasPendingBusyChoice(messages)}
           sessionBridge={!!findSessionBridge(aiProviders)}
         />
       )}

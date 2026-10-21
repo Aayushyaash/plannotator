@@ -112,6 +112,7 @@ jobs:
           packages/ui/hooks/useAIChat.sessionAsk.test.tsx
           packages/ui/hooks/useAIChat.newChat.test.tsx
           packages/ui/components/ai/NewChatButton.dom.test.tsx
+          packages/review-editor/hooks/useAIChat.newChat.test.tsx
           packages/ui/hooks/useAgentSettings.dom.test.tsx
           packages/ui/utils/codeHighlight.test.ts
           packages/ui/utils/htmlChrome.test.ts

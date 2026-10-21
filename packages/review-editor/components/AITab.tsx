@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback, memo } from 'react';
 import type { AIChatEntry, PendingPermission } from '../hooks/useAIChat';
+import { hasPendingBusyChoice } from '@plannotator/ui/hooks/useAIChat';
 import { renderChatMarkdown } from '../utils/renderChatMarkdown';
 import { formatLineRange } from '../utils/formatLineRange';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
@@ -215,6 +216,7 @@ export const AITab: React.FC<AITabProps> = ({
         <NewChatButton
           onNewChat={handleNewChat}
           busy={isStreaming || isCreatingSession}
+          pendingChoice={hasPendingBusyChoice(messages)}
           sessionBridge={!!findSessionBridge(aiProviders)}
         />
       )}

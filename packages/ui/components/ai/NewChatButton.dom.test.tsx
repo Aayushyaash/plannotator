@@ -29,6 +29,22 @@ function entry(text: string, isStreaming = false): AIChatEntry {
   };
 }
 
+/** A busy "Ask this session" answer still offering its choice. */
+function busyAnswer(text: string): AIChatEntry {
+  return {
+    question: { id: `q-${text}`, prompt: text, createdAt: 1 },
+    response: { questionId: `q-${text}`, text: '', isStreaming: false, createdAt: 1, error: 'The session is busy.', errorCode: 'agent_busy' },
+  };
+}
+
+/** Unavailable: still focusable, clicks ignored, and the reason is its description. */
+function expectBlocked(button: HTMLButtonElement, reason: RegExp) {
+  expect(button.disabled).toBe(false);
+  expect(button.getAttribute('aria-disabled')).toBe('true');
+  const description = document.getElementById(button.getAttribute('aria-describedby') ?? '');
+  expect(description?.textContent ?? '').toMatch(reason);
+}
+
 const SDK: AIProviderOption = { id: 'claude-agent-sdk', name: 'claude-agent-sdk', models: [] };
 const BRIDGE: AIProviderOption = { id: 'session-bridge', name: 'session-bridge', label: 'Ask this session · Pi', models: [] };
 
@@ -63,15 +79,29 @@ describe.if(hasDom)('Ask AI "New chat"', () => {
     let calls = 0;
     const idle = render({ messages: [entry('a')], onNewChat: () => { calls += 1; } });
     expect(idle).not.toBeNull();
-    expect(idle!.disabled).toBe(false);
+    expect(idle!.getAttribute('aria-disabled')).toBeNull();
     act(() => idle!.click());
     expect(calls).toBe(1);
     act(() => root?.unmount());
 
     const busy = render({ messages: [entry('a', true)], isStreaming: true, onNewChat: () => { calls += 1; } });
-    expect(busy!.disabled).toBe(true);
+    expectBlocked(busy!, /stop it/);
     act(() => busy!.click());
     expect(calls).toBe(1);
+  });
+
+  test('unavailable while a busy "Ask this session" answer still offers its choice', () => {
+    let calls = 0;
+    const button = render({
+      messages: [entry('a'), busyAnswer('b')],
+      aiProviders: [BRIDGE],
+      onSessionAskAction: () => {},
+      onNewChat: () => { calls += 1; },
+    });
+    expect(document.querySelector('[data-session-ask-actions="busy"]')).not.toBeNull();
+    expectBlocked(button!, /Ask when it finishes/);
+    act(() => button!.click());
+    expect(calls).toBe(0);
   });
 
   // Pinned on purpose (approved card for #1981): with "Ask this session" the

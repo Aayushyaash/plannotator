@@ -135,6 +135,29 @@ describe.if(hasDom)('useAIChat newChat', () => {
     expect(fake.aborts).toEqual([]);
   });
 
+  test('does nothing while a busy "Ask this session" answer still offers its choice', async () => {
+    const aborts: unknown[] = [];
+    setAITransport({
+      session: async () => new Response(JSON.stringify({ sessionId: 's-1' }), { status: 200 }),
+      query: async () => new Response(
+        `data: ${JSON.stringify({ type: 'error', error: 'The session is busy.', code: 'agent_busy' })}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      ),
+      abort: async (body) => { aborts.push(body); },
+      permission: () => {},
+    });
+    const chat = await mount();
+    await act(async () => { await chat.current!.ask({ prompt: 'when you are free' }); });
+    expect(chat.current!.messages[0].response.errorCode).toBe('agent_busy');
+    expect(chat.current!.isStreaming).toBe(false);
+
+    let started = true;
+    await act(async () => { started = chat.current!.newChat(); });
+    expect(started).toBe(false);
+    expect(chat.current!.messages).toHaveLength(1);
+    expect(aborts).toEqual([]);
+  });
+
   test('"Ask this session": the draft list is not sent again after a new chat, and a clear still is', async () => {
     const fake = controlledTransport();
     setAITransport(fake.transport);
