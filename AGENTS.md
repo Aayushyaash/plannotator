@@ -1747,6 +1747,18 @@ Opt-out: `PLANNOTATOR_REVIEW_PROGRESS=0` or `{ "reviewProgress": false }` (see t
 environment table); the server then captures no progress snapshot and the client
 falls back to draft-based viewed tracking.
 
+**Guided Review ticks mark files viewed (#1786).** Ticking a guide section
+"Reviewed" (live job or `saved:{id}` guide) marks its files viewed through the
+same path as the per-file Viewed checkbox (`handleGuideMarkFilesViewed` in
+`packages/review-editor/App.tsx`: durable progress, auto-view suppression lifted,
+`/api/pr-viewed` in PR mode). A file the guide splits across chapters is marked
+only once EVERY chapter showing it is ticked; refs not in the diff on screen are
+skipped; un-ticking unmarks nothing (`filesViewedByTickingSection`,
+`packages/review-editor/utils/guideReviewedViewed.ts`). Not gated on the
+auto-mark setting (it is an explicit gesture). Auto-mark on scroll still does
+not run inside the guide. The guide chain and the guides.show viewer are
+unchanged: the host wraps `onToggleReviewed` in `GuideScreen`.
+
 ### GitButler review invariants
 
 GitButler is a distinct VCS provider, ordered after JJ and before Git in both Bun and Pi. It is selected only while symbolic `HEAD` is `refs/heads/gitbutler/workspace` (or legacy `gitbutler/integration`) and the repository has GitButler's local target-ref configuration; a leftover database or an ordinary branch with the reserved name is not detection. An active workspace requires `but >= 0.21.0` on `PATH`, and a missing/incompatible CLI is an explicit error rather than a fallback to ordinary Git staging against the synthetic workspace commit. `--gitbutler` forces this provider; `--git` remains the escape hatch.
