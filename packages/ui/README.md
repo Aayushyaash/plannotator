@@ -297,7 +297,7 @@ in 0.42.0 (proven by diffing the mounted `outerHTML` against the base commit).
   in a plain-text body, so the first person you list owns every occurrence of
   it; and a restored draft has no chips (and reports no ids) until the author
   picks again. No source → no overlay element at all.
-- **Agents in the `@` picker** (unreleased, after 0.53.0; the Plannotator
+- **Agents in the `@` picker** (ui 0.53.1; the Plannotator
   Inbox's agent tags): `MentionSource.kinds?: ('user' | 'agent')[]` (absent →
   users only, as before) lets a host offer agents; `MentionSource.matchDetail?:
   boolean` (absent → true) keeps a query from matching the `detail` line;
@@ -435,7 +435,7 @@ See HANDOFF.md § "Decision toggle on any question, and an opener for the host's
 
 **Answers without comments (ui 0.53.0).** `Viewer` `answerOnly`: annotation authoring and the document actions (Global comment, Copy) are off as under `readOnly`, while question cards and checkboxes keep their handlers, for a host that shows a message to answer, not a document to annotate. See HANDOFF.md § "Viewer `answerOnly` (ui 0.53.0)".
 
-**Comments on an answer-only document (after ui 0.53.0).** `Viewer` `textComments`, with `answerOnly`: the text-selection toolbar (comment-only) and its composer come back, question cards stay out of selection, nothing else of authoring does. See HANDOFF.md § "Viewer `textComments` (after ui 0.53.0)".
+**Comments on an answer-only document (ui 0.53.1).** `Viewer` `textComments`, with `answerOnly`: the text-selection toolbar (comment-only) and its composer come back, question cards stay out of selection, nothing else of authoring does. See HANDOFF.md § "Viewer `textComments` (ui 0.53.1)".
 
 **Local links decided by the host (ui 0.53.0).** `Viewer` `resolveLocalLink`: the host decides what a link to a local path does (open it itself, or draw it as inert text), markdown and raw HTML alike. See HANDOFF.md § "Viewer `resolveLocalLink` (ui 0.53.0)".
 
