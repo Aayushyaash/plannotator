@@ -1955,7 +1955,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
   // No Send now because that session runs an older plugin than a restart loads (the "Steps" line,
   // owner approval "restart-warning"): only while the reply waits for a working session.
   const restartName = lastTo ? hostName(lastTo.host) : repliedTo?.author.kind === 'agent' && repliedTo.author.host ? hostName(repliedTo.author.host) : asker;
-  const restart = delivered?.state === 'queued' && !last.deliver_now_at ? restartNote(restartName, recipientConnection) : null;
+  const restart = delivered?.state === 'queued' && !last.deliver_now_at ? restartNote(recipientConnection) : null;
   const [sendNowState, setSendNowState] = useState<{ id: string; busy: boolean; error: string | null } | null>(null);
   const sendNow = async () => {
     setSendNowState({ id: last.id, busy: true, error: null });

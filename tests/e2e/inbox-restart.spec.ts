@@ -301,6 +301,7 @@ test('the sidebar: "Reload Claude Code 6" opens Settings → Agents: the lead, s
 
 test('a phone at 390 px: the line, its fold, and Settings → Agents; nothing overflows', async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, colorScheme: 'light' });
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   const page = await context.newPage();
   try {
     const threads = (await (await fetch(`${world.url}api/inbox/threads?archived=exclude`)).json()) as { sections: { threads: { thread_id: string; subject: string }[] }[] };
@@ -310,6 +311,13 @@ test('a phone at 390 px: the line, its fold, and Settings → Agents; nothing ov
     await expect(note).toBeVisible();
     await note.scrollIntoViewIfNeeded();
     await noOverflow(page);
+    // A tap at the lower edge of the lead's Copy copies (the fold's toggle below never takes it).
+    await page.evaluate(() => navigator.clipboard.writeText(''));
+    const copyBox = (await note.locator('[data-reload-lead] [data-restart-copy]').boundingBox())!;
+    await page.touchscreen.tap(copyBox.x + copyBox.width / 2, copyBox.y + copyBox.height - 1);
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('/reload-plugins');
+    await expect(note.locator('[data-restart-toggle]')).toHaveAttribute('aria-expanded', 'false');
+    await page.waitForTimeout(2_100);
     await shot(page, '4-reply-line-phone');
     await note.getByRole('button', { name: 'Still no Send now after reloading?' }).click();
     await expect(page.locator('[data-restart-steps]')).toBeVisible();

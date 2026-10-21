@@ -101,7 +101,7 @@ function OpenSessions({ id, sessions }: { id: InboxToolHostId; sessions: InboxHo
           </ul>
           <Fold question="Still listed after reloading?">
             <p className="ib-rl-manual" data-restart-fallback="">
-              Type <code>/exit</code> in that session, then run its restart command. <span className="ib-rw-warn">/exit stops a turn it is working on.</span>
+              Type <code>/exit</code> in any session still listed, then run its restart command. <span className="ib-rw-warn">/exit stops a turn it is working on.</span>
             </p>
             <ul className="ib-rw-sess" aria-label="Restart commands">
               {stale.map((s) => (

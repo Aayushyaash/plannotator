@@ -42,8 +42,6 @@ export interface RecipientConnection {
  * installed plugin is itself behind this Inbox (`update_plugin`).
  */
 export interface RestartNote {
-  /** The lead in plain words (the window draws it with Copy buttons). */
-  text: string;
   fix: InboxSessionOutdated['fix'];
   /** The command that brings the session back as itself; null when the Inbox does not know its folder. */
   command: string | null;
@@ -58,7 +56,7 @@ export interface RestartNote {
  * engine too old for Send now stays quiet (a restart would not bring it; the
  * owner chose to say nothing about that, 2026-10-19).
  */
-export function restartNote(name: string, connection: RecipientConnection | null | undefined): RestartNote | null {
+export function restartNote(connection: RecipientConnection | null | undefined): RestartNote | null {
   const outdated = connection?.outdated;
   if (!connection || !outdated || connection.busy !== true || connection.send_now) return null;
   if (inboxEngineTooOldForSendNow(connection.engine)) return null;
@@ -67,15 +65,10 @@ export function restartNote(name: string, connection: RecipientConnection | null
   if (!inboxLoadedPredatesSendNow(outdated.loaded)) return null;
   const command = connection.restart_command ?? null;
   if (outdated.fix === 'update_plugin') {
-    return {
-      fix: outdated.fix,
-      command,
-      updateCommand: outdated.update_command ?? null,
-      text: `Update the plugin, then type /reload-plugins in that ${name} to get Send now.`,
-    };
+    return { fix: outdated.fix, command, updateCommand: outdated.update_command ?? null };
   }
   if (outdated.fix !== 'restart') return null;
-  return { fix: outdated.fix, command, updateCommand: null, text: `Type /reload-plugins in that ${name} to get Send now.` };
+  return { fix: outdated.fix, command, updateCommand: null };
 }
 
 export type DeliveryLineState = InboxDeliveryState;

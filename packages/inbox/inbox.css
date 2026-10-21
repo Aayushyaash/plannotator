@@ -3587,6 +3587,7 @@ ol.ib-rl-two .ib-rw-cmd { font-weight: 400; margin-top: 6px; }
   .ib-rw-steps { margin-left: 0; }
   .ib-rw-sess, .ib-rl { grid-column: 1 / -1; }
   .pn-inbox .ib-rl-fold > .ib-rw-lnk { min-height: 44px; }
+  .pn-inbox .ib-rl-fold > .ib-rw-lnk::after { content: none; }
   .ib-rw-cmd { flex-wrap: wrap; }
 }
 /* The steps: /reload-plugins first; /exit and the resume command only as the fallback, quieter. */
