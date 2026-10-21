@@ -3924,6 +3924,7 @@ const ReviewApp: React.FC = () => {
     // focus claim at the source instead of threading `guideOpen` through every
     // dock panel. Guide-side DiffViewers arbitrate focus among themselves.
     focusedFilePath: guideOpen ? null : (files[activeFileIndex]?.path ?? null),
+    isDiffPanelActive: !guideOpen && isDiffPanelActive,
     diffStyle: effectiveDiffStyle,
     onDiffStyleChange: handleDiffStyleChange,
     isCompactTouchLayout,
@@ -4066,7 +4067,7 @@ const ReviewApp: React.FC = () => {
     codeNavIsLoading: codeNav.isLoading,
     codeNavActiveSymbol: codeNav.activeSymbol,
   }), [
-    files, diffData?.rawPatch, activeFileIndex, guideOpen, effectiveDiffStyle, handleDiffStyleChange, isCompactTouchLayout, diffOverflow, diffIndicators,
+    files, diffData?.rawPatch, activeFileIndex, guideOpen, isDiffPanelActive, effectiveDiffStyle, handleDiffStyleChange, isCompactTouchLayout, diffOverflow, diffIndicators,
     diffLineDiffType, diffShowLineNumbers, diffShowBackground,
     diffExpandUnchanged, diffFontFamily, diffFontSize, activeDiffBase, committedBase, feedbackDiffContext, prReviewScopeLabel, prDiffScope, agentCwd, canUseLiveWorkspaceActions, isStaticPatch, imagePreviewSupported, snapshotId, markdownPreview, handleAddMarkdownPreviewComment, handleAskAIForMarkdownPreview,
     diffAnnotations, externalAnnotations,
