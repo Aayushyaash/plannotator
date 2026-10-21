@@ -201,6 +201,7 @@ import {
 import { findCopilotPlanContent, findCopilotSessionByAncestorPids, findCopilotSessionForCwd, getRecentCopilotMessages } from "./copilot-session";
 import { resolveLatestVibePlan } from "./vibe-plan";
 import { resolveClaudePlan } from "./claude-plan";
+import { takeModPlanApproval } from "./mod-plan-approval";
 import {
   formatInteractiveNoArgClarification,
   formatSubcommandHelp,
@@ -2947,6 +2948,17 @@ if (args[0] === "sessions") {
       );
     }
 
+    process.exit(0);
+  }
+
+  // Claude Code with the mod: an ExitPlanMode the mod already approved, whose
+  // classic.PermissionRequest hook was skipped (an organization's plugin guard
+  // seated above it, #2007). Answer the approval; never open a second review.
+  const modApproval = takeModPlanApproval(event, { dataDir: getPlannotatorDataDir(), now: Date.now() });
+  if (modApproval) {
+    console.log(
+      JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision: modApproval } })
+    );
     process.exit(0);
   }
 

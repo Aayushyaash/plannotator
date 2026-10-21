@@ -56,6 +56,40 @@ export function planCallAction(
   return { kind: 'start' }
 }
 
+/**
+ * The approved call's record for the plugin's own PermissionRequest command
+ * hook (#2007). On Team/Enterprise accounts Claude Code seats its built-in
+ * guard (`cc-plugin-sec-default`) above the person's plugins, and it sends
+ * `classic.PermissionRequest` past this mod. The event then reaches the
+ * command hook (`plannotator`), which reads this record and allows the call
+ * instead of opening a second review. Written while the approved call is in
+ * flight, removed when it settles.
+ *
+ * A copy of the CLI's contract (`apps/hook/server/mod-plan-approval.ts`; a
+ * hooks module imports only its own files); `mod-plan-approval.test.ts` keeps
+ * them equal.
+ */
+export const PLAN_APPROVALS_DIR = 'plan-approvals'
+export const PLAN_APPROVAL_RECORD_VERSION = 1
+
+export interface PlanApprovalRecord {
+  v: typeof PLAN_APPROVAL_RECORD_VERSION
+  hash: string
+  plan: string
+  permissionMode?: string
+  at: number
+}
+
+export function planApprovalRecord(approval: PendingApproval, at: number): PlanApprovalRecord {
+  return {
+    v: PLAN_APPROVAL_RECORD_VERSION,
+    hash: approval.hash,
+    plan: approval.plan,
+    ...(approval.permissionMode ? { permissionMode: approval.permissionMode } : {}),
+    at,
+  }
+}
+
 /** The `classic.PermissionRequest` decision that lets the approved plan through. */
 export function approvedPermissionDecision(toolInput: unknown, approval: PendingApproval) {
   const input = toolInput && typeof toolInput === 'object' ? (toolInput as Record<string, unknown>) : {}

@@ -1049,6 +1049,9 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     return true;
   }, []);
 
+  // Replaced-question cards link `#123` refs into the project's repo, as message bodies do.
+  const threadRefRepo = useRefRepo(thread.project.repo ?? null);
+
   /** Scroll to a card or a message, focus it, and ring it briefly; a folded message opens first. */
   const jumpTo = useCallback((target: JumpTarget) => {
     if (unfold(target.messageId)) {
@@ -2743,7 +2746,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             const replacement = q ? replacementOf(thread.messages, q) : null;
             if (!q || !replacement) return undefined;
             const answer = pending.has(`${message.id}/${key}`) ? (pending.get(`${message.id}/${key}`) ?? null) : q.answer;
-            return <ReplacedQuestionCard question={q} number={number} total={questions.length} replacement={replacement} answer={answer} onJump={jumpTo} />;
+            return <ReplacedQuestionCard question={q} number={number} total={questions.length} replacement={replacement} answer={answer} onJump={jumpTo} refRepo={threadRefRepo} />;
           };
           const replacesLine = (key: string) => {
             const q = questions.find((x) => x.key === key);
