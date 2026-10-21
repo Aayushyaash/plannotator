@@ -103,6 +103,8 @@ export interface InboxTailscaleContext {
   /** A terminal closing a foreground Inbox (SIGHUP) while published: stop cleanly, then exit. */
   onHangup?: () => void;
   maxRequestBodySize?: number;
+  /** The tailnet listener just opened: the window starts compressing its page for it (#2032). */
+  onListen?: () => void;
 }
 
 /** The words for a route that exposes the window's own port, for Settings and stderr. */
@@ -215,6 +217,7 @@ export function createInboxTailscale(context: InboxTailscaleContext) {
       maxRequestBodySize: context.maxRequestBodySize,
       fetch: listenerFetch,
     } as Parameters<typeof Bun.serve>[0]);
+    context.onListen?.();
     return listener.port as number;
   };
 

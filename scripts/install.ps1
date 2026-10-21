@@ -144,6 +144,8 @@ if ($Version -eq "latest") {
     # and PowerShell 7 (HttpResponseMessage); the inner try guards a null
     # Response (e.g. DNS failure). See backnotprop/plannotator#1157.
     $apiUrl = "https://api.github.com/repos/$repo/releases/latest"
+    $release = $null
+    $apiError = $null
     try {
         $release = Invoke-RestMethod -Uri $apiUrl -Headers $ghHeaders
     } catch {
@@ -153,21 +155,41 @@ if ($Version -eq "latest") {
             try {
                 $release = Invoke-RestMethod -Uri $apiUrl
             } catch {
-                Write-Error "Failed to fetch latest version: $($_.Exception.Message)"
-                exit 1
+                $apiError = "Failed to fetch latest version: $($_.Exception.Message)"
             }
         } else {
-            Write-Error "Failed to fetch latest version: $($_.Exception.Message) (if this is HTTP 403, the GitHub API may be rate-limiting your IP; see https://github.com/backnotprop/plannotator/issues/1156)"
-            exit 1
+            $apiError = "Failed to fetch latest version: $($_.Exception.Message) (if this is HTTP 403, the GitHub API may be rate-limiting your IP; see https://github.com/backnotprop/plannotator/issues/1156)"
         }
     }
     # Drop the local token copies; GITHUB_TOKEN / GH_TOKEN themselves remain
     # in the environment exactly as the user set them.
     $ghToken = $null; $ghHeaders = $null; $apiUrl = $null
-    $latestTag = $release.tag_name
+    # Only a plain vX.Y.Z tag is accepted, from the API or the redirect below:
+    # it goes into download URLs, the attestation --source-ref and git clone
+    # --branch. -cmatch: case-sensitive; \z: the very end, with no trailing
+    # newline; [0-9], not \d, which also matches non-ASCII digits.
+    $releaseTagPattern = '^v[0-9]+\.[0-9]+\.[0-9]+\z'
+    $latestTag = if ($release) { [string]$release.tag_name } else { $null }
+    if ($latestTag -cnotmatch $releaseTagPattern) { $latestTag = $null }
+
+    # The API failed (anonymous rate limit of 60/hour per IP, a proxy that
+    # blocks api.github.com): read the tag from the redirect that
+    # github.com/<repo>/releases/latest answers with (.../releases/tag/vX.Y.Z),
+    # which is not rate-limited and needs no token or gh.
+    if (-not $latestTag) {
+        try {
+            $req = [System.Net.WebRequest]::Create("https://github.com/$repo/releases/latest")
+            $req.Method = "HEAD"
+            $resp = $req.GetResponse()
+            $candidate = $resp.ResponseUri.Segments[-1]
+            $resp.Close()
+            if ($candidate -cmatch $releaseTagPattern) { $latestTag = $candidate }
+        } catch { }
+    }
 
     if (-not $latestTag) {
-        Write-Error "Failed to fetch latest version"
+        if (-not $apiError) { $apiError = "Failed to fetch latest version" }
+        Write-Error "$apiError (check your connection, or pass -Version vX.Y.Z)"
     }
 } else {
     # Normalize: auto-prefix v if missing (matches install.cmd behaviour)
