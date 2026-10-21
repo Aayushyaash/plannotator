@@ -4,7 +4,7 @@
  * was skipped by an organization's guard plugin), without a second review.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -145,6 +145,32 @@ describe("takeModPlanApproval", () => {
     expect(modPlanApprovalsDir(dataDir, ".")).toBeNull();
     expect(modPlanApprovalsDir(dataDir, "")).toBeNull();
     expect(modPlanApprovalsDir(dataDir, "../x")).toBe(join(dataDir, "claude-code-mod", ".._x", MOD_PLAN_APPROVALS_DIR));
+  });
+
+  test("a record whose plan is not the one its hash names is ignored", async () => {
+    const dataDir = scratch();
+    const dir = modPlanApprovalsDir(dataDir, SESSION)!;
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Forged: the hash of the requested plan, the text of another.
+    const path = join(dir, "toolu_02.json");
+    writeFileSync(path, JSON.stringify({ v: 1, hash: modPlanHash(PLAN), plan: "# Never reviewed\n", at: Date.now() }));
+
+    expect(takeModPlanApproval(permissionRequest(), { dataDir, now: Date.now() })).toBeNull();
+    expect(existsSync(path)).toBe(true);
+  });
+
+  test("a symlinked plan-approvals folder is not followed", async () => {
+    const dataDir = scratch();
+    // A real folder holding a valid record elsewhere, linked in as the session's folder.
+    const elsewhere = join(scratch(), "elsewhere");
+    await writeModRecord(elsewhere);
+    const real = modPlanApprovalsDir(elsewhere, SESSION)!;
+    const linked = modPlanApprovalsDir(dataDir, SESSION)!;
+    mkdirSync(join(linked, ".."), { recursive: true });
+    symlinkSync(real, linked);
+
+    expect(takeModPlanApproval(permissionRequest(), { dataDir, now: Date.now() })).toBeNull();
+    expect(readdirSync(real)).toEqual(["toolu_02.json"]);
   });
 
   test("a malformed record is skipped, a good one beside it still answers", async () => {

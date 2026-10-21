@@ -72,6 +72,11 @@ export function modPlanApprovalsDir(dataDir: string, sessionId: unknown): string
   return join(dataDir, "claude-code-mod", segment, MOD_PLAN_APPROVALS_DIR);
 }
 
+/** Whether a file belongs to the user running this hook (always true where uids do not exist). */
+function ownedByMe(uid: number): boolean {
+  return typeof process.getuid !== "function" || uid === process.getuid();
+}
+
 function parseRecord(text: string): ModPlanApprovalRecord | null {
   try {
     const value = JSON.parse(text) as Record<string, unknown>;
@@ -108,6 +113,9 @@ export function takeModPlanApproval(
 
   let names: string[];
   try {
+    // A real folder of this user's: never a symlink to somewhere else, never another user's.
+    const folder = lstatSync(dir);
+    if (!folder.isDirectory() || !ownedByMe(folder.uid)) return null;
     names = readdirSync(dir).filter((name) => name.endsWith(".json")).sort().slice(0, MAX_RECORDS);
   } catch {
     return null;
@@ -127,9 +135,12 @@ export function takeModPlanApproval(
     const path = join(dir, name);
     try {
       const stat = lstatSync(path);
-      if (!stat.isFile() || stat.size > MAX_RECORD_BYTES) continue;
+      if (!stat.isFile() || stat.size > MAX_RECORD_BYTES || !ownedByMe(stat.uid)) continue;
       const record = parseRecord(readFileSync(path, "utf8"));
       if (!record) continue;
+      // The approved text must be the plan the hash names: a record whose plan
+      // was swapped would allow a plan nobody reviewed.
+      if (modPlanHash(record.plan) !== record.hash) continue;
       const age = options.now - record.at;
       if (age > MOD_PLAN_APPROVAL_MAX_AGE_MS || age < -60_000) continue;
       if (!wanted.has(record.hash)) continue;
