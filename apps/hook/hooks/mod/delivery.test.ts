@@ -99,6 +99,12 @@ describe('legacyResult (a CLI that predates the host result file)', () => {
     expect(deliveryFor(lgtm, CONTEXT).action).toBe('log')
   })
 
+  test('a gated review takes an older CLI\'s LGTM as the approval to deliver (#1907)', () => {
+    const lgtm = legacyResult('review', `${DEFAULT_REVIEW_APPROVED_PROMPT}\n`)
+    const delivery = deliveryFor(lgtm, { ...CONTEXT, deliverApproval: true })
+    expect(delivery).toEqual({ action: 'submit', text: `Plannotator: notes.md — Approved.\n\n${DEFAULT_REVIEW_APPROVED_PROMPT}` })
+  })
+
   test('a review approval with notes is delivered under its own outcome', () => {
     const printed = DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT.replace('{{feedback}}', 'rename foo')
     const delivery = deliveryFor(legacyResult('review', printed), CONTEXT)

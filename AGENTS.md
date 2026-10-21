@@ -631,6 +631,12 @@ unchanged for every caller. `noop` marks what never starts a turn: Done with
 nothing to send, review LGTM, Close, a truly empty review submit (no feedback
 text and no annotations), and a review posted straight to the PR platform
 (`platform: true`, logged plus a `$.prompt.suggest` to address the comments).
+A gated launch (`deliverApproval`: the tool's or a taken-over command's
+`gate: true`, annotate or review) still delivers a `noop` approval; a review
+LGTM record's `message` is the configured approved prompt for that (a CLI
+before #1907 wrote `""`, and the turn is then the heading alone). `plannotator
+review --gate` is accepted by the shared `parseReviewArgs` (`gate: true`) and
+changes nothing in the CLI, whose approval is printed anyway.
 **The platform post is marked explicitly, never inferred from zero
 annotations:** the review editor puts only code comments in `annotations`, while
 PR description comments, PR comment notes and VS Code editor comments ride only
@@ -820,7 +826,7 @@ what a `plannotator` command Claude already chose to run does). The engine names
 it through a loopback MCP server; the mod's `tool.call` hook answers every call
 itself (`{ result }` / `{ deny }`), so no other hook or permission prompt runs
 for it. Input: `{ action: "annotate" | "review" | "last", target?, gate?
-(annotate only), options?: { base? (review --base), markdown? (annotate
+(annotate and review), options?: { base? (review --base), markdown? (annotate
 --markdown) } }`, validated strictly (unknown keys, a target or base that would
 read as a flag, control characters, a field the action does not take; a `false`
 default is tolerated). The call becomes the words the slash command would carry
@@ -832,7 +838,15 @@ the decision arrives later as a plugin turn. The tool result returns at once
 call or a CLI startup error is an error result. A gated tool session
 (`gate: true`) is the one delivery difference: a bare Approve is submitted as a
 turn (`deliverApproval` on the launch record), because Claude was told to wait
-for the sign-off; the slash command's bare gated approval still only logs. Done
+for the sign-off; the slash command's bare gated approval still only logs. This
+holds for code review too (#1907, gate only, the owner's call: an ungated
+review's LGTM still only logs): `{ action: "review", gate: true }` delivers a
+bare Approve as `Plannotator: <subject> (pn-…) — Approved.` plus the configured
+approved prompt (the host record of a review LGTM is still `noop` but now
+carries that prompt as its `message`, as an annotate approval does). A review's
+gate is the HOST's alone: `plannotatorToolArgs` never passes it to the CLI (the
+review page always has Approve, and a CLI older than `review --gate` would
+refuse the flag), so it works against any CLI. Done
 and Close send nothing, as for the commands. A subagent may call the tool (its
 decision lands in the main session as a plugin turn), except `action: "last"`,
 which is refused there because it reads the main session's transcript. The contract (name, schema,
@@ -917,7 +931,7 @@ its own cwd or worktree, while the mod launches in the session's cwd, so its
 quote; quoting follows `splitShellWords`, nothing is expanded) whose program is
 exactly `plannotator` (the binary on PATH; a path such as `./plannotator` or
 `/tmp/dev/plannotator` is a dev build and runs for real), subcommand
-`annotate` (one target, or several that all read as file paths, `looksLikeFilePath`: a separator, a leading `~` `.` `@`, or a file extension; they become `target: [...]`, a review of several files; plus `--gate`, `--markdown`), `review` (at most one target, `--base <ref>`),
+`annotate` (one target, or several that all read as file paths, `looksLikeFilePath`: a separator, a leading `~` `.` `@`, or a file extension; they become `target: [...]`, a review of several files; plus `--gate`, `--markdown`), `review` (at most one target, `--base <ref>`, `--gate`),
 or `annotate-last` / `last` (no arguments); `--json` is accepted and dropped
 (the decision arrives as a message), and the result must pass
 `parsePlannotatorToolInput`. Everything else runs as written: other
@@ -1088,7 +1102,9 @@ annotate target is passed as ONE argument (`toolLaunchRequest` builds
 path); review words are quoted for `parseReviewArgs`' string form
 (`quoteReviewWord`). A gated tool session delivers its bare approval
 (`Plannotator: notes.md (pn-…) — Approved.`), like the mod; a slash command's
-bare gated approval still sends nothing. A list of files (two or more after the
+bare gated approval still sends nothing. A code review's bare Approve was
+always delivered here (and on Pi), so a review's `gate` changes nothing on
+OpenCode or Pi; it is accepted because the contract is shared. A list of files (two or more after the
 contract drops duplicates) opens ONE bundle review through the same launch:
 `handleCliCommand`'s `annotateBundle` passes each entry as its own CLI argument
 in the agent's order (never re-split, and a single tool target is never read as
@@ -1241,7 +1257,7 @@ runs for anyone who did not opt in.
 - **Decisions** (`packages/t3-code/decision.ts`) are worded exactly as the
   Claude Code mod words them (`decision.test.ts` compares against the mod's
   `deliveryFor`): `Changes requested · N comments`, LGTM / Done / Close only
-  logged (a gated annotate approval is sent), over 12 KB written to the
+  logged (a gated approval, annotate or review, is sent; `t3 review --gate`), over 12 KB written to the
   review's `feedback.md` and named in the message (T3 caps a message at
   120,000 characters). One deliberate difference: a review posted to the PR
   platform is sent as `Review posted` with its status line. `last` skips

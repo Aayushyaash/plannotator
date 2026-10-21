@@ -34,6 +34,8 @@ describe('plannotatorCommandToToolInput: taken over', () => {
     expect(take('plannotator review https://github.com/o/r/pull/7')).toEqual({ action: 'review', target: 'https://github.com/o/r/pull/7' })
     expect(take('plannotator review --base main ../wt')).toEqual({ action: 'review', target: '../wt', options: { base: 'main' } })
     expect(take('plannotator review ../wt --base origin/feature/x')).toEqual({ action: 'review', target: '../wt', options: { base: 'origin/feature/x' } })
+    // #1907: an agent waiting for the sign-off; the bare Approve reaches it.
+    expect(take('plannotator review --gate --json')).toEqual({ action: 'review', gate: true })
   })
 
   test('last and annotate-last', () => {
@@ -86,13 +88,13 @@ describe('plannotatorCommandToToolInput: passed through', () => {
       'plannotator review --diff-type staged',
       'plannotator review --local https://github.com/o/r/pull/7',
       'plannotator review --patch-file x.patch',
-      'plannotator review --gate',
       'plannotator review --markdown',
       'plannotator annotate a.md --base main',
       'plannotator last --gate',
       'plannotator annotate-last --stdin',
       'plannotator annotate a.md --gate --gate',
       'plannotator review --base main --base dev',
+      'plannotator review --gate --gate',
       'plannotator review --base',
       'plannotator review --base --json',
       'plannotator annotate a.md --',

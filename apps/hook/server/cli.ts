@@ -148,7 +148,7 @@ export function formatTopLevelHelp(): string {
     "  plannotator --help",
     "  plannotator --version, -v",
     "  plannotator [--browser <name>]",
-    "  plannotator review [--git | --gitbutler] [--base <ref>] [--diff-type <type>] [--patch-file <path | ->] [--tailscale] [DIRECTORY | PR_URL]",
+    "  plannotator review [--git | --gitbutler] [--base <ref>] [--diff-type <type>] [--patch-file <path | ->] [--tailscale] [--gate] [DIRECTORY | PR_URL]",
     "  plannotator annotate <file.md | file.txt | file.html | https://... | folder/>  [--markdown] [--no-jina] [--tailscale] [--gate] [--json] [--hook] [--require-approval] [--result-file <path>]",
     "  plannotator annotate-last [--stdin] [--tailscale] [--gate] [--json] [--hook]",
     "  plannotator copilot-last [--gate] [--json] [--hook]",
@@ -285,7 +285,7 @@ export const UPDATE_COMMAND_USAGE = [
 export const SUBCOMMAND_HELP: Record<string, string> = {
   review: [
     "Usage:",
-    "  plannotator review [--git | --gitbutler] [--base <ref>] [--diff-type <type>] [--local | --no-local] [--patch-file <path | ->] [--no-git-remote-check] [--tailscale] [--json] [DIRECTORY | PR_URL]",
+    "  plannotator review [--git | --gitbutler] [--base <ref>] [--diff-type <type>] [--local | --no-local] [--patch-file <path | ->] [--no-git-remote-check] [--tailscale] [--gate] [--json] [DIRECTORY | PR_URL]",
     "",
     "Review local VCS changes or a GitHub, GitLab or Bitbucket Cloud pull request in the browser.",
     "",
@@ -308,6 +308,9 @@ export const SUBCOMMAND_HELP: Record<string, string> = {
     "                SSH auth costs a hardware-key touch. Also PLANNOTATOR_GIT_REMOTE_CHECK=0",
     "                or { \"gitRemoteCheck\": false } in ~/.plannotator/config.json.",
     "  --tailscale   Publish the loopback session over your tailnet via tailscale serve (HTTPS)",
+    "  --gate        You wait for the sign-off: a bare Approve reaches you too. The approval",
+    "                is printed either way; an agent host that only logs a bare Approve",
+    "                (the Claude Code mod) delivers it as a message.",
     "  --json        Emit one decision/message JSON record instead of plaintext",
     "  PR_URL        GitHub PR, GitLab MR or Bitbucket Cloud PR URL to review",
     "  DIRECTORY     Review a repo, worktree, or multi-repo workspace at this path",

@@ -169,8 +169,9 @@ export function deliveryFor(record: HostResultRecord, context: DeliveryContext):
     }
   }
 
-  // A gated session Claude opened itself (the `plannotator` tool): Claude was
-  // told to wait for the sign-off, so a bare approval still starts a turn.
+  // A gated session Claude opened itself (the `plannotator` tool, annotate or
+  // review): Claude was told to wait for the sign-off, so a bare approval
+  // still starts a turn.
   const approvalAwaited = context.deliverApproval === true && record.decision === 'approved'
   if (record.noop && !approvalAwaited && !misreadAsPlatformPost(record)) {
     const what = record.decision === 'approved' ? 'approved with no notes' : 'closed with no annotations'
@@ -250,7 +251,7 @@ export function legacyResult(kind: SessionKind, printed: string): HostResultReco
     return { v: 1, surface, decision: 'annotated', message: '', noop: true }
   }
   if (surface === 'review' && text === LEGACY_REVIEW_APPROVED_TEXT) {
-    return { v: 1, surface, decision: 'approved', message: '', noop: true }
+    return { v: 1, surface, decision: 'approved', message: text, noop: true }
   }
   if (surface === 'review' && text.startsWith(LEGACY_REVIEW_APPROVED_WITH_NOTES_HEADING)) {
     return { v: 1, surface, decision: 'approved', message: text, noop: false, withNotes: true }
