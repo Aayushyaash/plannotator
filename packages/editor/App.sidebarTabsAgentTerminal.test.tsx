@@ -130,6 +130,13 @@ async function settle(): Promise<void> {
 
 const rail = () => document.querySelector<HTMLElement>('[data-sidebar-tabs="true"]');
 const agentTab = () => rail()?.querySelector<HTMLButtonElement>('button[aria-pressed]') ?? null;
+/** The z-index a Tailwind `z-N` / `z-[N]` class gives, or 0. */
+function zIndexOf(element: Element | null | undefined): number {
+  const match = element?.className.toString().match(/(?:^|\s)z-\[?(\d+)\]?(?:\s|$)/);
+  return match ? Number(match[1]) : 0;
+}
+/** The left-docked terminal's resize handle: the box around its hover track. */
+const terminalResizeHandle = () => document.querySelector('[data-resize-track="left"]')?.parentElement ?? null;
 const documentArea = () => document.querySelector<HTMLElement>('main[data-print-region="document"]');
 
 async function mount(serverConfig: Record<string, unknown> = {}): Promise<void> {
@@ -206,6 +213,12 @@ describe.if(hasDom)("sidebar tabs beside the Agent TUI", () => {
 
     expect(rail()).not.toBeNull();
     expect(rail()!.style.left).toContain("--agent-terminal-w");
+    // 2px off the terminal's edge, and above its resize handle, whose grab
+    // zone reaches 8px past the edge and would otherwise cover the buttons.
+    expect(rail()!.style.left).toContain("+ 2px");
+    const handle = terminalResizeHandle();
+    expect(handle).not.toBeNull();
+    expect(zIndexOf(rail())).toBeGreaterThan(zIndexOf(handle));
     expect(documentArea()?.className).toContain("lg:pl-[30px]");
 
     // The rail's own toggle closes the terminal again.

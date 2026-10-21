@@ -6577,8 +6577,13 @@ const App: React.FC = () => {
     !sidebar.isOpen &&
     !goalSetupMode &&
     !(isHtmlSurface && htmlToolsHidden);
+  // Beside a left-docked Agent TUI the rail sits 2px off the terminal's edge
+  // and above its resize handle, whose grab zone reaches 8px past the edge
+  // (ResizeHandle, side "left") and would otherwise cover the rail's buttons.
+  // The handle stays grabbable in the gap, on the terminal side and between
+  // the buttons.
   const collapsedSidebarTabsStyle = isLeftAgentTerminalVisible
-    ? { left: `var(--agent-terminal-w, ${agentTerminalResize.width}px)` }
+    ? { left: `calc(var(--agent-terminal-w, ${agentTerminalResize.width}px) + 2px)` }
     : undefined;
   // Only greet in a normal authoring context — not on a read-only shared session
   // (a viewer would also be able to flip the owner's gridEnabled), nor over the
@@ -7143,7 +7148,7 @@ const App: React.FC = () => {
               onToggleAgentTerminal={toggleAgentTerminal}
               hasMessageAnnotations={activeMessageAnnotationCounts.size > 0}
               hasFileAnnotations={hasFileAnnotations}
-              className="hidden lg:flex absolute left-0 top-0 z-20"
+              className={`hidden lg:flex absolute left-0 top-0 ${isLeftAgentTerminalVisible ? 'z-[56]' : 'z-20'}`}
               style={collapsedSidebarTabsStyle}
             />
           )}
