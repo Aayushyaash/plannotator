@@ -14,6 +14,7 @@ export {
   parseReviewAnalysisConfig,
   isAgentTerminalSide,
   agentToolSaveFailed,
+  agentSwitchConfigToSave,
   type PlannotatorConfig,
   type DiffOptions,
 } from "@plannotator/shared/config";
