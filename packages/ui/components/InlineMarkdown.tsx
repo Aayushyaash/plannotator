@@ -1,15 +1,20 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { isCodeFilePath, isCodeFilePathStrict, CODE_PATH_BARE_REGEX, parseCodePath } from "@plannotator/core/code-file";
+import { forgeRefLinks } from "@plannotator/core/forge-refs";
 import { ensureHighlight, highlightToHtml } from "../utils/codeHighlight";
 import { useFenceTheme } from "../hooks/useFenceTheme";
 import { transformPlainText } from "../utils/inlineTransforms";
 import { hasLinkedDocExtension } from "../utils/markdownExtensions";
 import { getImageSrc } from "./ImageThumbnail";
+import { UNAVAILABLE_IMAGE_CLASS, useImageResolver } from "./ImageResolverContext";
 import { useCodePathValidation, type CodePathValidationContextValue } from "./CodePathValidationContext";
+import { isLocalLinkTarget, isNewTabClick, useLocalLinkResolver } from "./LocalLinkContext";
 import type { ValidationEntry } from "../hooks/useValidatedCodePaths";
 import { CodeFilePicker } from "./CodeFilePicker";
-import { normalizeMathTex, renderMathToHtml } from "./blocks/MathBlock";
+import { normalizeMathTex, renderMathToHtml } from "../utils/math";
+import { useMathRenderer } from "../hooks/useMathRenderer";
+import { HostTitle } from "./HostTitle";
 
 export interface DocPreviewResult {
   contents?: string;
@@ -41,6 +46,9 @@ export const setDocPreviewFetcher = (fetcher: DocPreviewFetcher): void => {
 export const resetDocPreviewFetcher = (): void => {
   docPreviewFetcher = defaultDocPreviewFetcher;
 };
+
+/** Read the active fetcher at call time (so a late override is honored). */
+export const getDocPreviewFetcher = (): DocPreviewFetcher => docPreviewFetcher;
 
 /**
  * Decide how a candidate code-file path should render based on validation state:
@@ -309,7 +317,23 @@ const CodeFileIcon = () => (
 
 const InlineMath: React.FC<{ tex: string }> = ({ tex }) => {
   const normalizedTex = normalizeMathTex(tex);
-  const html = useMemo(() => renderMathToHtml(normalizedTex, false), [normalizedTex]);
+  const renderer = useMathRenderer();
+  const html = useMemo(() => renderMathToHtml(normalizedTex, false, renderer), [normalizedTex, renderer]);
+
+  // Same wrapper in both branches (see MathBlock): the placeholder carries the
+  // attributes annotation restore keys on, with the TeX as a text child.
+  if (html === null) {
+    return (
+      <span
+        className="math-inline math-annotatable text-foreground"
+        data-math-tex={normalizedTex}
+        data-math-display="false"
+        aria-label={normalizedTex}
+      >
+        {normalizedTex}
+      </span>
+    );
+  }
 
   return (
     <span
@@ -450,6 +474,35 @@ function emitPlainTextWithBareUrls(
   }
 }
 
+/** An image a host resolver chose; a load failure shows the placeholder. */
+const HostResolvedImage: React.FC<{
+  src: string;
+  alt: string;
+  onImageClick?: (src: string, alt: string) => void;
+}> = ({ src, alt, onImageClick }) => {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  if (failedSrc === src) {
+    return (
+      <span className={UNAVAILABLE_IMAGE_CLASS} title="Image could not be loaded" data-image-unavailable="">
+        {alt || 'Image'}
+      </span>
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt={alt}
+      className="max-w-full rounded my-2 cursor-zoom-in"
+      loading="lazy"
+      onError={() => setFailedSrc(src)}
+      onClick={(e) => {
+        e.stopPropagation();
+        onImageClick?.(src, alt);
+      }}
+    />
+  );
+};
+
 /**
  * Scanner that walks a text string and emits React nodes for inline markdown:
  * emphasis (**bold**, *italic*, _italic_, ***both***), `code`, ~~strikethrough~~,
@@ -481,9 +534,15 @@ export const InlineMarkdown: React.FC<{
   onNavigateAnchor?: (hash: string) => void;
   imageBaseDir?: string;
   onImageClick?: (src: string, alt: string) => void;
+  /** Repo path (`owner/repo`, `group/sub/project`) bare `#123` / `@user` refs link into. */
   githubRepo?: string;
-}> = ({ text, onOpenLinkedDoc, resolveLinkedDoc, onOpenCodeFile, onNavigateAnchor, imageBaseDir, onImageClick, githubRepo }) => {
+  /** Host of that repo's git remote; picks the forge refs link to. Absent means github.com. */
+  repoHost?: string;
+}> = ({ text, onOpenLinkedDoc, resolveLinkedDoc, onOpenCodeFile, onNavigateAnchor, imageBaseDir, onImageClick, githubRepo, repoHost }) => {
   const validation = useCodePathValidation();
+  const resolveLocalLink = useLocalLinkResolver();
+  const resolveImage = useImageResolver();
+  const refLinks = forgeRefLinks({ display: githubRepo, host: repoHost });
   const parts: React.ReactNode[] = [];
   let remaining = text;
   let key = 0;
@@ -652,6 +711,7 @@ export const InlineMarkdown: React.FC<{
             onOpenCodeFile={onOpenCodeFile}
             onNavigateAnchor={onNavigateAnchor}
             githubRepo={githubRepo}
+            repoHost={repoHost}
           />
         </del>,
       );
@@ -675,6 +735,7 @@ export const InlineMarkdown: React.FC<{
               onOpenCodeFile={onOpenCodeFile}
               onNavigateAnchor={onNavigateAnchor}
               githubRepo={githubRepo}
+              repoHost={repoHost}
             />
           </em>
         </strong>,
@@ -698,6 +759,7 @@ export const InlineMarkdown: React.FC<{
             onOpenCodeFile={onOpenCodeFile}
             onNavigateAnchor={onNavigateAnchor}
             githubRepo={githubRepo}
+            repoHost={repoHost}
           />
         </strong>,
       );
@@ -720,6 +782,7 @@ export const InlineMarkdown: React.FC<{
             onOpenCodeFile={onOpenCodeFile}
             onNavigateAnchor={onNavigateAnchor}
             githubRepo={githubRepo}
+            repoHost={repoHost}
           />
         </em>,
       );
@@ -743,6 +806,7 @@ export const InlineMarkdown: React.FC<{
             onOpenCodeFile={onOpenCodeFile}
             onNavigateAnchor={onNavigateAnchor}
             githubRepo={githubRepo}
+            repoHost={repoHost}
           />
         </em>,
       );
@@ -814,9 +878,7 @@ export const InlineMarkdown: React.FC<{
       match = remaining.match(/^#(\d+)(?!\w)/);
       if (match) {
         const num = match[1];
-        const href = githubRepo && githubRepo.includes('/')
-          ? `https://github.com/${githubRepo}/issues/${num}`
-          : null;
+        const href = refLinks?.issue(num) ?? null;
         const label = `#${num}`;
         parts.push(
           href ? (
@@ -844,9 +906,7 @@ export const InlineMarkdown: React.FC<{
       match = remaining.match(/^@([a-zA-Z][a-zA-Z0-9_-]{0,38})(?!\w)/);
       if (match) {
         const handle = match[1];
-        const href = githubRepo && githubRepo.includes('/')
-          ? `https://github.com/${handle}`
-          : null;
+        const href = refLinks?.user(handle) ?? null;
         const label = `@${handle}`;
         parts.push(
           href ? (
@@ -940,21 +1000,47 @@ export const InlineMarkdown: React.FC<{
     if (match) {
       const alt = match[1];
       const src = match[2];
-      const imgSrc = /^(https?:\/\/|data:|blob:)/i.test(src)
-        ? src
-        : getImageSrc(src, imageBaseDir);
+      // A host's resolver (RenderedMarkdown `resolveImage`) decides first;
+      // null from it, or no resolver, keeps the default resolution.
+      const resolvedImage = resolveImage ? resolveImage(src) : null;
+      if (resolvedImage?.kind === 'unavailable') {
+        parts.push(
+          <span
+            key={key++}
+            className={UNAVAILABLE_IMAGE_CLASS}
+            title={resolvedImage.title}
+            data-image-unavailable=""
+          >
+            {alt || 'Image'}
+          </span>,
+        );
+        remaining = remaining.slice(match[0].length);
+        previousChar = match[0][match[0].length - 1] || previousChar;
+        continue;
+      }
+      const imgSrc = resolvedImage?.kind === 'src'
+        ? resolvedImage.src
+        : /^(https?:\/\/|data:|blob:)/i.test(src)
+          ? src
+          : getImageSrc(src, imageBaseDir);
       parts.push(
-        <img
-          key={key++}
-          src={imgSrc}
-          alt={alt}
-          className="max-w-full rounded my-2 cursor-zoom-in"
-          loading="lazy"
-          onClick={(e) => {
-            e.stopPropagation();
-            onImageClick?.(imgSrc, alt);
-          }}
-        />,
+        resolveImage ? (
+          // With a host resolver, an image that fails to load becomes the
+          // same placeholder instead of a broken-image icon.
+          <HostResolvedImage key={key++} src={imgSrc} alt={alt} onImageClick={onImageClick} />
+        ) : (
+          <img
+            key={key++}
+            src={imgSrc}
+            alt={alt}
+            className="max-w-full rounded my-2 cursor-zoom-in"
+            loading="lazy"
+            onClick={(e) => {
+              e.stopPropagation();
+              onImageClick?.(imgSrc, alt);
+            }}
+          />
+        ),
       );
       remaining = remaining.slice(match[0].length);
       previousChar = match[0][match[0].length - 1] || previousChar;
@@ -1017,8 +1103,56 @@ export const InlineMarkdown: React.FC<{
       const linkedDocPath = isLocalDoc ? linkUrl.replace(/#.*$/, '') : linkUrl;
       const codeFilePath = isCodeFile ? linkUrl.replace(/#.*$/, '') : linkUrl;
       const isInPageAnchor = safeLinkUrl.startsWith('#');
+      // A host's resolver (Viewer `resolveLocalLink`) decides local paths
+      // first; null from it, or no resolver, keeps the branches below.
+      const localLink = resolveLocalLink && isLocalLinkTarget(linkUrl) ? resolveLocalLink(linkUrl) : null;
 
-      if (isInPageAnchor) {
+      if (localLink?.kind === 'open') {
+        const openLink = localLink.open;
+        const hostHref = localLink.href;
+        parts.push(
+          <HostTitle key={key++} title={localLink.title}>
+          <a
+            href={hostHref ?? safeLinkUrl}
+            onClick={(e) => {
+              // With the host's own address, a new-tab click goes there.
+              if (hostHref && isNewTabClick(e)) return;
+              e.preventDefault();
+              e.stopPropagation();
+              openLink();
+            }}
+            // Without it, a middle click would open the path on the host's own origin.
+            onAuxClick={hostHref ? undefined : (e) => e.preventDefault()}
+            className="text-primary underline underline-offset-2 hover:text-primary/80 inline-flex items-center gap-1 cursor-pointer"
+            data-local-link="open"
+          >
+            {linkText}
+            <svg
+              className="w-3 h-3 opacity-50 flex-shrink-0"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+              aria-hidden="true"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"
+              />
+            </svg>
+          </a>
+          </HostTitle>,
+        );
+      } else if (localLink?.kind === 'unavailable') {
+        parts.push(
+          <HostTitle key={key++} title={localLink.title}>
+            <span className="text-muted-foreground underline decoration-dotted underline-offset-2" data-local-link="unavailable">
+              {linkText}
+            </span>
+          </HostTitle>,
+        );
+      } else if (isInPageAnchor) {
         parts.push(
           <a
             key={key++}
@@ -1120,6 +1254,7 @@ export const InlineMarkdown: React.FC<{
             onOpenCodeFile={onOpenCodeFile}
             onNavigateAnchor={onNavigateAnchor}
             githubRepo={githubRepo}
+            repoHost={repoHost}
             imageBaseDir={imageBaseDir}
             onImageClick={onImageClick}
           />,

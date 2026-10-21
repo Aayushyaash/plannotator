@@ -6,7 +6,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSlug, getPlanDir, savePlan, saveToHistory, getPlanVersion, getVersionCount, listVersions } from "./storage";
 
@@ -61,9 +61,11 @@ describe("getPlanDir", () => {
   });
 
   test("expands tilde in custom path", () => {
-    const result = getPlanDir("~/.plannotator/test-plans");
+    // getPlanDir mkdirs its result, and os.homedir() ignores a HOME override, so
+    // expand bare "~": the real home already exists and nothing is created in it.
+    const result = getPlanDir("~");
     expect(result).not.toContain("~");
-    expect(result).toMatch(/\.plannotator\/test-plans$/);
+    expect(result).toBe(homedir());
   });
 
   test("uses default when no custom path", () => {
@@ -172,5 +174,41 @@ describe("listVersions", () => {
     expect(versions[0].version).toBe(1);
     expect(versions[1].version).toBe(2);
     expect(versions[0].timestamp).toBeTruthy();
+  });
+});
+
+describe("PLANNOTATOR_DATA_DIR", () => {
+  test("isolates plan and history data when the data directory changes after import", () => {
+    const savedDataDir = process.env.PLANNOTATOR_DATA_DIR;
+    const firstDir = makeTempDir();
+    const secondDir = makeTempDir();
+    const project = "data-dir-project";
+    const slug = "data-dir-plan";
+
+    try {
+      process.env.PLANNOTATOR_DATA_DIR = firstDir;
+      savePlan(slug, "# First plan");
+      saveToHistory(project, slug, "# First version");
+      expect(readFileSync(join(firstDir, "plans", `${slug}.md`), "utf-8")).toBe("# First plan");
+      expect(getPlanVersion(project, slug, 1)).toBe("# First version");
+      expect(getVersionCount(project, slug)).toBe(1);
+
+      process.env.PLANNOTATOR_DATA_DIR = secondDir;
+      expect(getPlanVersion(project, slug, 1)).toBeNull();
+      expect(getVersionCount(project, slug)).toBe(0);
+      savePlan(slug, "# Second plan");
+      saveToHistory(project, slug, "# Second version");
+      expect(readFileSync(join(secondDir, "plans", `${slug}.md`), "utf-8")).toBe("# Second plan");
+      expect(getPlanVersion(project, slug, 1)).toBe("# Second version");
+      expect(getVersionCount(project, slug)).toBe(1);
+
+      process.env.PLANNOTATOR_DATA_DIR = firstDir;
+      expect(readFileSync(join(firstDir, "plans", `${slug}.md`), "utf-8")).toBe("# First plan");
+      expect(getPlanVersion(project, slug, 1)).toBe("# First version");
+      expect(getVersionCount(project, slug)).toBe(1);
+    } finally {
+      if (savedDataDir === undefined) delete process.env.PLANNOTATOR_DATA_DIR;
+      else process.env.PLANNOTATOR_DATA_DIR = savedDataDir;
+    }
   });
 });

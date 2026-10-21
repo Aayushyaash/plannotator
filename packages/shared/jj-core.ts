@@ -2,12 +2,19 @@ import { basename } from "node:path";
 import {
   type DiffResult,
   type DiffType,
+  type DiffSide,
+  type FileBytesRead,
+  type GitBytesCommandResult,
   type GitCommandResult,
   type GitContext,
   type GitDiffOptions,
   type JjEvoLogEntry,
+  type JjLineBaseResolution,
+  type JjRevisionInfo,
   JJ_TRUNK_REVSET,
+  jjCommitRevset,
   jjLineBaseRevset,
+  parseJjCommitDiffType,
   parseRemoteBookmark,
   validateFilePath,
 } from "./review-core";
@@ -18,26 +25,37 @@ export {
   jjLineBaseRevset,
   parseRemoteBookmark,
   type JjEvoLogEntry,
+  type JjLineBaseResolution,
+  type JjRevisionInfo,
 } from "./review-core";
+
+/**
+ * Global options every runtime prepends to a `jj` command, so output Plannotator
+ * parses never carries ANSI color or goes to a pager, whatever the user's
+ * `ui.color` / `ui.paginate` say (#1661). `ui.color = "always"` colors
+ * `jj diff --git` even through a pipe; `--color=never` overrides it.
+ */
+export const JJ_COLOR_FREE_ARGS: readonly string[] = Object.freeze(["--color=never", "--no-pager"]);
 
 export interface ReviewJjRuntime {
   runJj: (
     args: string[],
     options?: { cwd?: string; timeoutMs?: number; maxOutputBytes?: number },
   ) => Promise<GitCommandResult>;
+  /** `runJj` with undecoded stdout (image previews). Optional: absent means unavailable. */
+  runJjBytes?: (
+    args: string[],
+    options?: { cwd?: string; timeoutMs?: number; maxOutputBytes?: number },
+  ) => Promise<GitBytesCommandResult>;
 }
 
 // `reachable(@, mutable())` is JJ's definition of the stack being worked on.
-// Its root parents are where that line diverged from immutable history.
-//
-// `latest(..., 1)` is what keeps the query single-record. A criss-cross history
-// can leave several fork points, and the parser below reads one record only, so
-// the tie-break belongs in the revset where it is deliberate and testable
-// rather than in a silent "first row wins" slice. It also matters for
-// correctness: bookmark preference (remote before local) is only meaningful
-// within one commit, so a multi-row answer could otherwise pick a remote
-// bookmark from one commit over a local bookmark on a nearer one.
-const JJ_LINE_BASE_REVSET = "latest(fork_point(roots(reachable(@, mutable()))-), 1)";
+// Its root parents are where that line diverged from immutable history. A
+// criss-cross history can have several equally valid fork points; requiring
+// exactly one prevents timestamp order from silently choosing review content.
+const JJ_LINE_BASE_CANDIDATES_REVSET = "fork_point(roots(reachable(@, mutable()))-)";
+const JJ_LINE_BASE_REVSET = `exactly(${JJ_LINE_BASE_CANDIDATES_REVSET}, 1)`;
+const JJ_LINE_BASE_TEMPLATE = 'json(bookmarks) ++ "\\t" ++ commit_id ++ "\\t" ++ json(description.first_line()) ++ "\\n"';
 
 // `jj git push --change` mints bookmarks under `git.push-bookmark-prefix`
 // (default `push-`). They name one change, not a line of work, so they are
@@ -66,8 +84,28 @@ export async function getJjContext(
 ): Promise<GitContext> {
   const root = await detectJjWorkspace(runtime, cwd);
   const targets = await listJjCompareTargets(runtime, root ?? cwd);
-  const defaultTarget = await selectDefaultJjCompareTarget(runtime, root ?? cwd);
+  const jjLineBase = await resolveJjLineBase(runtime, root ?? cwd);
+  const defaultTarget = jjLineBase.kind === "resolved"
+    ? jjLineBase.revision.commitId
+    : JJ_TRUNK_REVSET;
   const contextCwd = root ?? cwd;
+  const diffAvailability = jjLineBase.kind === "resolved"
+    ? undefined
+    : {
+        "jj-line": {
+          fallbackDiffType: "jj-current",
+          message: jjLineBase.kind === "ambiguous"
+            ? "Jujutsu found multiple possible line-of-work bases. Showing Current change instead."
+            : `${jjLineBase.reason} Showing Current change instead.`,
+          ...(jjLineBase.kind === "ambiguous" && {
+            candidates: jjLineBase.candidates.map((candidate) => ({
+              revision: candidate.commitId,
+              labels: candidate.bookmarks,
+              subject: candidate.subject,
+            })),
+          }),
+        },
+      };
 
   const evologs = await getJjEvoLogEntries(runtime, root ?? cwd);
 
@@ -97,8 +135,10 @@ export async function getJjContext(
       },
     },
     repository: contextCwd ? { displayFallback: basename(contextCwd) } : undefined,
+    diffAvailability,
     cwd: contextCwd,
     vcsType: "jj",
+    jjLineBase,
     jjEvologs: evologs.length >= 2 ? evologs : undefined,
   };
 }
@@ -107,7 +147,8 @@ export function isJjSnapshotDiffType(diffType: string): boolean {
   return diffType === "jj-current"
     || diffType === "jj-last"
     || diffType === "jj-line"
-    || diffType === "jj-evolog";
+    || diffType === "jj-evolog"
+    || parseJjCommitDiffType(diffType) !== null;
 }
 
 /**
@@ -150,8 +191,12 @@ export function getJjSnapshotRevsets(
       return compareTarget.length > 0
         ? { from: { revset: compareTarget, firstParentSteps: 0 }, to: { revset: "@", firstParentSteps: 0 } }
         : null;
-    default:
-      return null;
+    default: {
+      const commit = parseJjCommitDiffType(diffType);
+      if (!commit) return null;
+      const revset = jjCommitRevset(commit.commitId);
+      return { from: { revset, firstParentSteps: 1 }, to: { revset, firstParentSteps: 0 } };
+    }
   }
 }
 
@@ -170,6 +215,54 @@ export async function resolveJjSnapshotEndpoint(
     revision = parent;
   }
   return revision;
+}
+
+/**
+ * Whether a jj-commit id is still the CURRENT version of its change:
+ * `visible`, `hidden` (rewritten or abandoned; the id still resolves), or
+ * `gone` (no longer resolves at all).
+ */
+async function getJjCommitVisibility(
+  runtime: ReviewJjRuntime,
+  commitId: string,
+  cwd?: string,
+): Promise<"visible" | "hidden" | "gone"> {
+  const result = await runtime.runJj(
+    ["log", "--no-graph", "-r", `${jjCommitRevset(commitId)} & ::visible_heads()`, "-T", 'commit_id ++ "\n"'],
+    { cwd },
+  );
+  if (result.exitCode !== 0) return "gone";
+  return result.stdout.trim() ? "visible" : "hidden";
+}
+
+/**
+ * Point a `jj-commit:<id>` whose revision was rewritten at the change's
+ * current version. jj rewrites a mutable revision on every edit — the
+ * working copy on every save — so a reviewer who opened `@` from the Commits
+ * rail would otherwise keep reading the frozen pre-edit snapshot. Visible,
+ * abandoned, and divergent revisions (no single successor) are returned
+ * unchanged; any other diff type passes through.
+ */
+export async function canonicalizeJjCommitDiffType(
+  runtime: ReviewJjRuntime,
+  diffType: string,
+  cwd?: string,
+): Promise<string> {
+  const commit = parseJjCommitDiffType(diffType);
+  if (!commit) return diffType;
+  if (await getJjCommitVisibility(runtime, commit.commitId, cwd) !== "hidden") return diffType;
+  const change = await runtime.runJj(
+    ["log", "--no-graph", "-r", jjCommitRevset(commit.commitId), "-T", "change_id"],
+    { cwd },
+  );
+  const changeId = change.exitCode === 0 ? change.stdout.trim() : "";
+  if (!/^[k-z]+$/.test(changeId)) return diffType;
+  const current = await runtime.runJj(
+    ["log", "--no-graph", "-r", `change_id(${changeId})`, "-T", 'commit_id ++ "\n"'],
+    { cwd },
+  );
+  const ids = current.exitCode === 0 ? current.stdout.split("\n").map((id) => id.trim()).filter(Boolean) : [];
+  return ids.length === 1 && /^[0-9a-f]+$/.test(ids[0]) ? `jj-commit:${ids[0]}` : diffType;
 }
 
 /**
@@ -204,6 +297,9 @@ export async function runJjDiff(
   cwd?: string,
   options?: GitDiffOptions,
 ): Promise<DiffResult> {
+  const commit = parseJjCommitDiffType(diffType);
+  if (commit) return runJjCommitDiff(runtime, commit.commitId, cwd, options);
+
   let compareTarget = defaultBranch.length > 0 ? defaultBranch : JJ_TRUNK_REVSET;
 
   // For evolog diffs, when no explicit base is provided, default to the
@@ -226,6 +322,54 @@ export async function runJjDiff(
 
   const patch = options?.hideWhitespace ? dropHunklessGitDiffChunks(result.stdout) : result.stdout;
   return { patch, label: args.label };
+}
+
+/**
+ * `jj-commit:<commit id>` — one revision against its FIRST parent, the same
+ * shape as git's `commit:<sha>`. Not `jj diff -r`: on a merge that renders the
+ * revision against the auto-merge of all its parents, a different changeset
+ * from the first-parent one the Commits rail walks. A revision whose only
+ * parent is the virtual root diffs against root's empty tree.
+ */
+async function runJjCommitDiff(
+  runtime: ReviewJjRuntime,
+  commitId: string,
+  cwd?: string,
+  options?: GitDiffOptions,
+): Promise<DiffResult> {
+  const revset = jjCommitRevset(commitId);
+  const header = await runtime.runJj([
+    "log",
+    "--no-graph",
+    "-r",
+    revset,
+    "-T",
+    'change_id.short(8) ++ "\t" ++ json(description.first_line()) ++ "\t" ++ parents.map(|p| p.commit_id()).join(",") ++ "\n"',
+  ], { cwd });
+  const fields = header.exitCode === 0 ? header.stdout.trim().split("\t") : null;
+  if (!fields || fields.length < 3) {
+    return {
+      patch: "",
+      label: `Commit ${commitId.slice(0, 12)}`,
+      error: firstErrorLine(header.stderr) ?? "Jujutsu could not resolve this revision.",
+    };
+  }
+  const [changeId, subjectField, parentIds] = fields;
+  const subject = parseSerializedJjString(subjectField) ?? "";
+  const label = subject ? `Commit ${changeId} — ${subject}` : `Commit ${changeId}`;
+  const parent = parentIds.split(",").map((id) => id.trim()).find(Boolean);
+  const from = parent && !JJ_ROOT_COMMIT_ID.test(parent) ? jjCommitRevset(parent) : "root()";
+
+  const whitespaceArgs = options?.hideWhitespace ? ["-w"] : [];
+  const result = await runtime.runJj(
+    ["diff", "--git", ...whitespaceArgs, "--from", from, "--to", revset],
+    { cwd },
+  );
+  if (result.exitCode !== 0) {
+    return { patch: "", label, error: firstErrorLine(result.stderr) };
+  }
+  const patch = options?.hideWhitespace ? dropHunklessGitDiffChunks(result.stdout) : result.stdout;
+  return { patch, label };
 }
 
 // --- Diff staleness fingerprint ---------------------------------------------
@@ -276,8 +420,18 @@ export async function getJjDiffFingerprint(
           ? `jj:${diffType}:auto:${evologs[1].commitId}:${current}`
           : null;
       }
-      default:
-        return null;
+      default: {
+        // jj-commit: the id's content never changes, but jj REWRITES a
+        // mutable revision on every edit (the working copy on every snapshot,
+        // which this very query triggers) and the old id keeps resolving as a
+        // hidden commit. So the fingerprint tracks visibility: a rewritten
+        // revision reads stale, and Refresh lands on its successor
+        // (canonicalizeJjCommitDiffType).
+        const commit = parseJjCommitDiffType(diffType);
+        if (!commit) return null;
+        const state = await getJjCommitVisibility(runtime, commit.commitId, cwd);
+        return `jj:jj-commit:${commit.commitId}:${state}`;
+      }
     }
   } catch {
     return null;
@@ -302,6 +456,71 @@ function hasReviewableGitDiffChunk(chunk: string): boolean {
   return /^(new file mode|deleted file mode|old mode|new mode|rename from|rename to|copy from|copy to|GIT binary patch|Binary files |similarity index|dissimilarity index)/m.test(chunk);
 }
 
+interface JjSideRevs {
+  cwd?: string;
+  old: { rev: string; path: string } | null;
+  new: { rev: string; path: string } | null;
+}
+
+/**
+ * Which revision each side of a changed file is, per jj diff type: one table
+ * behind both the text reader (hunk expansion) and the byte reader (image
+ * previews). Null for an unknown diff type.
+ */
+async function resolveJjSideRevs(
+  runtime: ReviewJjRuntime,
+  diffType: DiffType,
+  defaultBranch: string,
+  filePath: string,
+  oldPath?: string,
+  cwd?: string,
+): Promise<JjSideRevs | null> {
+  validateFilePath(filePath);
+  if (oldPath) validateFilePath(oldPath);
+
+  const oldFilePath = oldPath === undefined || oldPath.length === 0 ? filePath : oldPath;
+  const root = await detectJjWorkspace(runtime, cwd);
+  const fileCwd = root ?? cwd;
+  const side = (rev: string, path: string) => ({ rev, path });
+
+  switch (diffType) {
+    case "jj-current":
+      return { cwd: fileCwd, old: side("@-", oldFilePath), new: side("@", filePath) };
+    case "jj-last": {
+      const parentRev = await resolveJjParent(runtime, "@-", fileCwd);
+      return {
+        cwd: fileCwd,
+        old: parentRev ? side(parentRev, oldFilePath) : null,
+        new: side("@-", filePath),
+      };
+    }
+    case "jj-line": {
+      const compareTarget = defaultBranch.length > 0 ? defaultBranch : JJ_TRUNK_REVSET;
+      return { cwd: fileCwd, old: side(jjLineBaseRevset(compareTarget), oldFilePath), new: side("@", filePath) };
+    }
+    case "jj-evolog": {
+      // defaultBranch carries the evolog commit ID of the historical state.
+      const evologRev = defaultBranch.length > 0 ? defaultBranch : "@-";
+      return { cwd: fileCwd, old: side(evologRev, oldFilePath), new: side("@", filePath) };
+    }
+    case "jj-all":
+      return { cwd: fileCwd, old: null, new: side("@", filePath) };
+    default: {
+      const commit = parseJjCommitDiffType(diffType);
+      if (!commit) return null;
+      const revset = jjCommitRevset(commit.commitId);
+      // First parent, matching runJjCommitDiff. The virtual root's empty tree
+      // (a revision with no real parent) reads as an absent old side.
+      const parent = await resolveJjFirstParentCommitId(runtime, revset, fileCwd).catch(() => null);
+      return {
+        cwd: fileCwd,
+        old: parent && !JJ_ROOT_COMMIT_ID.test(parent) ? side(jjCommitRevset(parent), oldFilePath) : null,
+        new: side(revset, filePath),
+      };
+    }
+  }
+}
+
 export async function getJjFileContentsForDiff(
   runtime: ReviewJjRuntime,
   diffType: DiffType,
@@ -310,49 +529,57 @@ export async function getJjFileContentsForDiff(
   oldPath?: string,
   cwd?: string,
 ): Promise<{ oldContent: string | null; newContent: string | null }> {
-  validateFilePath(filePath);
-  if (oldPath) validateFilePath(oldPath);
+  const revs = await resolveJjSideRevs(runtime, diffType, defaultBranch, filePath, oldPath, cwd);
+  if (!revs) return { oldContent: null, newContent: null };
+  return {
+    oldContent: revs.old ? await jjFileContent(runtime, revs.old.rev, revs.old.path, revs.cwd) : null,
+    newContent: revs.new ? await jjFileContent(runtime, revs.new.rev, revs.new.path, revs.cwd) : null,
+  };
+}
 
-  const oldFilePath = oldPath === undefined || oldPath.length === 0 ? filePath : oldPath;
-  const root = await detectJjWorkspace(runtime, cwd);
-  const fileCwd = root ?? cwd;
+/**
+ * A jj fileset naming exactly one repository-relative path. A bare path after
+ * `--` is a fileset EXPRESSION, so a file named `a|b.png` would show `a` and
+ * `b.png` (and `~`, `&`, `(`, globs and pattern prefixes likewise): a path
+ * that came out of a diff, or out of a Markdown file the review shows, must
+ * never be read as one. `root-file:"…"` is the literal path from the
+ * workspace root, with `\` and `"` escaped and control characters written as
+ * `\xHH` (jj's string-literal escapes).
+ */
+export function jjRootFileFileset(path: string): string {
+  const escaped = path.replace(/[\\"\u0000-\u001f\u007f]/g, (ch) => {
+    if (ch === "\\" || ch === '"') return `\\${ch}`;
+    return `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`;
+  });
+  return `root-file:"${escaped}"`;
+}
 
-  switch (diffType) {
-    case "jj-current":
-      return {
-        oldContent: await jjFileContent(runtime, "@-", oldFilePath, fileCwd),
-        newContent: await jjFileContent(runtime, "@", filePath, fileCwd),
-      };
-    case "jj-last": {
-      const parentRev = await resolveJjParent(runtime, "@-", fileCwd);
-      return {
-        oldContent: parentRev ? await jjFileContent(runtime, parentRev, oldFilePath, fileCwd) : null,
-        newContent: await jjFileContent(runtime, "@-", filePath, fileCwd),
-      };
-    }
-    case "jj-line": {
-      const compareTarget = defaultBranch.length > 0 ? defaultBranch : JJ_TRUNK_REVSET;
-      return {
-        oldContent: await jjFileContent(runtime, jjLineBaseRevset(compareTarget), oldFilePath, fileCwd),
-        newContent: await jjFileContent(runtime, "@", filePath, fileCwd),
-      };
-    }
-    case "jj-evolog": {
-      // defaultBranch carries the evolog commit ID of the historical state.
-      const evologRev = defaultBranch.length > 0 ? defaultBranch : "@-";
-      return {
-        oldContent: await jjFileContent(runtime, evologRev, oldFilePath, fileCwd),
-        newContent: await jjFileContent(runtime, "@", filePath, fileCwd),
-      };
-    }
-    case "jj-all":
-      return {
-        oldContent: null,
-        newContent: await jjFileContent(runtime, "@", filePath, fileCwd),
-      };
-    default:
-      return { oldContent: null, newContent: null };
-  }
+/** One side of a jj diff as raw bytes for the image preview, capped at `maxBytes`. */
+export async function getJjFileBytesForDiff(
+  runtime: ReviewJjRuntime,
+  diffType: DiffType,
+  defaultBranch: string,
+  filePath: string,
+  oldPath: string | undefined,
+  side: DiffSide,
+  maxBytes: number,
+  cwd?: string,
+): Promise<FileBytesRead> {
+  if (!runtime.runJjBytes) return { kind: "unavailable" };
+  const revs = await resolveJjSideRevs(runtime, diffType, defaultBranch, filePath, oldPath, cwd);
+  if (!revs) return { kind: "unavailable" };
+  const source = side === "old" ? revs.old : revs.new;
+  if (!source) return { kind: "missing" };
+  // jj has no cheap size probe, so the byte cap is the gate: one byte over
+  // the limit truncates the read and reports it as too large.
+  const result = await runtime.runJjBytes(
+    ["file", "show", "-r", source.rev, "--", jjRootFileFileset(source.path)],
+    { cwd: revs.cwd, maxOutputBytes: maxBytes },
+  );
+  if (result.truncated) return { kind: "too-large", size: maxBytes + 1 };
+  // `jj file show` exits 0 with no output when the fileset matches nothing.
+  if (result.exitCode !== 0 || result.stdout.byteLength === 0) return { kind: "missing" };
+  return { kind: "ok", bytes: result.stdout };
 }
 
 export function getJjDiffArgs(
@@ -370,7 +597,9 @@ export function getJjDiffArgs(
     case "jj-line":
       return {
         args: ["diff", "--git", ...whitespaceArgs, "--from", jjLineBaseRevset(compareTarget), "--to", "@"],
-        label: `Line of work vs ${compareTarget}`,
+        // A frozen full commit id would render as 40+ hex chars in the
+        // header label; show the short form like jj itself does.
+        label: `Line of work vs ${/^[0-9a-f]{40,64}$/.test(compareTarget) ? compareTarget.slice(0, 12) : compareTarget}`,
       };
     case "jj-evolog":
       // compareTarget is the short commit ID of an older evolog entry.
@@ -386,38 +615,73 @@ export function getJjDiffArgs(
   }
 }
 
+export async function resolveJjLineBase(
+  runtime: ReviewJjRuntime,
+  cwd?: string,
+): Promise<JjLineBaseResolution> {
+  const result = await queryJjLineBases(runtime, JJ_LINE_BASE_REVSET, cwd);
+  if (result.exitCode === 0) {
+    const [revision] = parseJjLineBaseRecords(result.stdout);
+    if (!revision || JJ_ROOT_COMMIT_ID.test(revision.commitId)) {
+      return { kind: "unavailable", reason: "The line of work starts at the repository root." };
+    }
+    return { kind: "resolved", revision };
+  }
+
+  // `exactly(..., 1)` deliberately rejects both an empty set and a set with
+  // several fork points. Query the candidates only after that rejection so
+  // the normal path remains one repository lookup.
+  const candidatesResult = await queryJjLineBases(runtime, JJ_LINE_BASE_CANDIDATES_REVSET, cwd);
+  if (candidatesResult.exitCode !== 0) {
+    return {
+      kind: "unavailable",
+      reason: firstErrorLine(result.stderr) ?? "Jujutsu could not resolve a line-of-work base.",
+    };
+  }
+
+  const candidates = parseJjLineBaseRecords(candidatesResult.stdout)
+    .filter((revision) => !JJ_ROOT_COMMIT_ID.test(revision.commitId));
+  if (candidates.length > 1) return { kind: "ambiguous", candidates };
+  if (candidates.length === 1) return { kind: "resolved", revision: candidates[0] };
+  return { kind: "unavailable", reason: "Jujutsu could not find a line-of-work base." };
+}
+
 export async function selectDefaultJjCompareTarget(
   runtime: ReviewJjRuntime,
   cwd?: string,
 ): Promise<string> {
-  const result = await runtime.runJj([
+  const resolution = await resolveJjLineBase(runtime, cwd);
+  return resolution.kind === "resolved" ? resolution.revision.commitId : JJ_TRUNK_REVSET;
+}
+
+function queryJjLineBases(runtime: ReviewJjRuntime, revset: string, cwd?: string) {
+  return runtime.runJj([
     "log",
     "--no-graph",
     "-r",
-    JJ_LINE_BASE_REVSET,
+    revset,
     "-T",
-    'json(bookmarks) ++ "\\t" ++ commit_id ++ "\\n"',
+    JJ_LINE_BASE_TEMPLATE,
   ], { cwd });
-  // Every unresolvable case falls back to `trunk()`, which is what this
-  // returned before the line-of-work base was inferred at all. The only live
-  // caller is `getJjContext`, which runs on the review startup path with no
-  // handler above it, so throwing here does not report a problem: it aborts
-  // `plannotator review` with a stack trace before the server is built. That
-  // also covers a `jj` too old for `fork_point`/`reachable`, where the revset
-  // itself fails and the previous default is still perfectly serviceable.
-  if (result.exitCode !== 0) return JJ_TRUNK_REVSET;
+}
 
-  const [record] = splitJjTemplateRecords(result.stdout);
-  if (!record) return JJ_TRUNK_REVSET;
-
-  const fields = splitJjTemplateFields(record);
-  const bookmark = parseJjResolvedBookmarks(fields?.[0] ?? record)
-    .find((name) => !isGeneratedPushBookmark(name));
-  if (bookmark) return bookmark;
-
-  const commitId = fields?.[1]?.trim();
-  if (commitId && !JJ_ROOT_COMMIT_ID.test(commitId)) return commitId;
-  return JJ_TRUNK_REVSET;
+function parseJjLineBaseRecords(stdout: string): JjRevisionInfo[] {
+  const revisions: JjRevisionInfo[] = [];
+  for (const record of splitJjTemplateRecords(stdout)) {
+    if (!record) continue;
+    const fields = splitJjTemplateFields(record, 3);
+    if (!fields) continue;
+    const commitId = fields[1]?.trim();
+    if (!commitId) continue;
+    const bookmarks = parseJjResolvedBookmarks(fields[0])
+      .filter((name) => !isGeneratedPushBookmark(name));
+    revisions.push({
+      commitId,
+      bookmarks,
+      subject: parseSerializedJjString(fields[2]) ?? "",
+    });
+  }
+  return revisions;
 }
 
 function isGeneratedPushBookmark(target: string): boolean {
@@ -544,14 +808,9 @@ function splitJjTemplateRecords(stdout: string): string[] {
   return stdout.split(/\n|\\n/g);
 }
 
-function splitJjTemplateFields(line: string): [string, string] | null {
-  const literalTab = line.indexOf("\t");
-  if (literalTab !== -1) return [line.slice(0, literalTab), line.slice(literalTab + 1)];
-
-  const escapedTab = line.indexOf("\\t");
-  if (escapedTab !== -1) return [line.slice(0, escapedTab), line.slice(escapedTab + 2)];
-
-  return null;
+function splitJjTemplateFields(line: string, expected = 2): string[] | null {
+  const fields = line.includes("\t") ? line.split("\t") : line.split("\\t");
+  return fields.length >= expected ? fields : null;
 }
 
 function parseSerializedJjString(value: string): string | null {
@@ -610,7 +869,7 @@ async function jjFileContent(
   filePath: string,
   cwd?: string,
 ): Promise<string | null> {
-  const result = await runtime.runJj(["file", "show", "-r", rev, "--", filePath], { cwd });
+  const result = await runtime.runJj(["file", "show", "-r", rev, "--", jjRootFileFileset(filePath)], { cwd });
   return result.exitCode === 0 ? result.stdout : null;
 }
 

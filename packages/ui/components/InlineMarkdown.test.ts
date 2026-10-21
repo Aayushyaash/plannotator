@@ -1,7 +1,9 @@
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import katex from 'katex';
 import { InlineMarkdown, trimUrlTail } from './InlineMarkdown';
+import { getMathRenderer, getMathRendererSource, resetMathRenderer, setMathRenderer } from '../utils/math';
 
 function renderInline(text: string): string {
   return renderToStaticMarkup(createElement(InlineMarkdown, { text }));
@@ -101,6 +103,27 @@ describe('InlineMarkdown angle autolinks', () => {
 });
 
 describe('InlineMarkdown math', () => {
+  // KaTeX reaches InlineMath through the renderer slot now (utils/math.ts);
+  // Plannotator's apps fill it by importing utils/math-eager. Register it
+  // here explicitly so these assertions do not depend on which test file ran
+  // first in bun's shared process, and restore whatever was there after.
+  const saved = getMathRenderer();
+  const savedSource = getMathRendererSource();
+  beforeEach(() => setMathRenderer(katex));
+  afterEach(() => {
+    resetMathRenderer();
+    if (saved) setMathRenderer(saved, savedSource ?? 'host');
+  });
+
+  test('renders the TeX as text in the same wrapper while no renderer is registered', () => {
+    resetMathRenderer();
+    const html = renderToStaticMarkup(createElement(InlineMarkdown, { text: 'Area is $A=\\pi r^2$.' }));
+    expect(html).not.toContain('katex');
+    expect(html).toContain('math-inline');
+    expect(html).toContain('data-math-tex="A=\\pi r^2"');
+    expect(html).toContain('>A=\\pi r^2</span>');
+  });
+
   test('renders inline math with KaTeX markup', () => {
     const html = renderToStaticMarkup(createElement(InlineMarkdown, { text: 'Area is $A=\\pi r^2$.' }));
     expect(html).toContain('katex');
@@ -174,5 +197,26 @@ describe('InlineMarkdown math', () => {
     const html = renderToStaticMarkup(createElement(InlineMarkdown, { text: 'Coefficient $2x + 1$ grows.' }));
     expect(html).toContain('katex');
     expect(html).toContain('data-math-tex="2x + 1"');
+  });
+});
+
+describe('issue and mention refs (#1596)', () => {
+  const render = (repoHost?: string) =>
+    renderToStaticMarkup(
+      createElement(InlineMarkdown, { text: 'Fixes #123, thanks @alice', githubRepo: 'group/sub/project', repoHost }),
+    );
+
+  test('GitLab host links to its own issues and users', () => {
+    const html = render('gitlab.com');
+    expect(html).toContain('href="https://gitlab.com/group/sub/project/-/issues/123"');
+    expect(html).toContain('href="https://gitlab.com/alice"');
+    expect(html).not.toContain('github.com');
+  });
+
+  test('unrecognized host renders the refs as unlinked spans', () => {
+    const html = render('git.internal.example');
+    expect(html).not.toContain('<a');
+    expect(html).toContain('#123</span>');
+    expect(html).toContain('@alice</span>');
   });
 });

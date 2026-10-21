@@ -1,10 +1,12 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdir, writeFile, readFile, unlink } from "node:fs/promises";
 import { getPlannotatorDataDir } from "@plannotator/shared/data-dir";
 import type { DiffType } from "../vcs";
-import type { PRMetadata } from "../pr";
+import { getPRPlatformCapabilities, type PRMetadata } from "../pr";
 import { buildWorkspacePromptContextLines, getLocalDiffInstruction, type WorkspaceReviewPromptContext } from "../agent-review-message";
+import { claudeJobIsolationArgs, claudeJobToolArgs, findClaudeStructuredOutput, type ClaudeJobCommandOptions } from "../claude-review";
+import { loadConfig, resolveClaudeSandbox } from "../config";
 import type {
   CodeTourOutput,
   TourDiffAnchor,
@@ -330,6 +332,19 @@ export function buildTourUserMessage(
         "Walk the reviewer through this changeset as a guided tour.",
       ].join("\n");
     }
+    if (!getPRPlatformCapabilities(prMetadata).agentCliAccess) {
+      // No CLI the job may run can read this platform's PR (Bitbucket), so
+      // the URL alone is not enough: carry the diff inline.
+      return [
+        prMetadata.url,
+        "",
+        "Walk the reviewer through this PR as a guided tour. The PR diff is below.",
+        "",
+        "```diff",
+        patch,
+        "```",
+      ].join("\n");
+    }
     return [prMetadata.url, "", "Walk the reviewer through this PR as a guided tour."].join("\n");
   }
 
@@ -367,34 +382,12 @@ export interface TourClaudeCommandResult {
   stdinPrompt: string;
 }
 
-export function buildTourClaudeCommand(prompt: string, model: string = "sonnet", effort?: string): TourClaudeCommandResult {
-  const allowedTools = [
-    "Agent", "Read", "Glob", "Grep",
-    "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
-    "Bash(git show:*)", "Bash(git blame:*)", "Bash(git branch:*)",
-    "Bash(git grep:*)", "Bash(git ls-remote:*)", "Bash(git ls-tree:*)",
-    "Bash(git merge-base:*)", "Bash(git remote:*)", "Bash(git rev-parse:*)",
-    "Bash(git show-ref:*)", "Bash(git -C:*)",
-    "Bash(jj status:*)", "Bash(jj diff:*)", "Bash(jj log:*)",
-    "Bash(jj show:*)", "Bash(jj file show:*)", "Bash(jj cat:*)",
-    "Bash(jj bookmark list:*)",
-    "Bash(gh pr view:*)", "Bash(gh pr diff:*)", "Bash(gh pr list:*)",
-    "Bash(gh api repos/*/*/pulls/*)", "Bash(gh api repos/*/*/pulls/*/files*)",
-    // The tour prompt follows linked issues (`Fixes #123`, `Closes owner/repo#456`),
-    // so the allowlist has to permit the issue-read commands.
-    "Bash(gh issue view:*)", "Bash(gh api repos/*/*/issues/*)",
-    "Bash(glab mr view:*)", "Bash(glab mr diff:*)",
-    "Bash(glab issue view:*)",
-    "Bash(wc:*)",
-  ].join(",");
-
-  const disallowedTools = [
-    "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
-    "Bash(python:*)", "Bash(python3:*)", "Bash(node:*)", "Bash(npx:*)",
-    "Bash(bun:*)", "Bash(bunx:*)", "Bash(sh:*)", "Bash(bash:*)", "Bash(zsh:*)",
-    "Bash(curl:*)", "Bash(wget:*)",
-  ].join(",");
-
+export function buildTourClaudeCommand(
+  prompt: string,
+  model: string = "sonnet",
+  effort?: string,
+  opts?: ClaudeJobCommandOptions,
+): TourClaudeCommandResult {
   return {
     command: [
       "claude", "-p",
@@ -405,25 +398,33 @@ export function buildTourClaudeCommand(prompt: string, model: string = "sonnet",
       "--no-session-persistence",
       "--model", model,
       ...(effort ? ["--effort", effort] : []),
-      "--tools", "Agent,Bash,Read,Glob,Grep",
-      "--allowedTools", allowedTools,
-      "--disallowedTools", disallowedTools,
+      ...claudeJobToolArgs(),
+      ...claudeJobIsolationArgs(opts),
     ],
     stdinPrompt: prompt,
   };
 }
 
-const TOUR_SCHEMA_DIR = getPlannotatorDataDir();
-const TOUR_SCHEMA_FILE = join(TOUR_SCHEMA_DIR, "tour-schema.json");
-let tourSchemaMaterialized = false;
+/** Materialized schema path under the current data directory. */
+function tourSchemaPath(): string {
+  return join(getPlannotatorDataDir(), "tour-schema.json");
+}
+
+/** Schema paths this process has already refreshed with its own schema. */
+const materializedTourSchemaPaths = new Set<string>();
 
 async function ensureTourSchemaFile(): Promise<string> {
-  if (!tourSchemaMaterialized) {
-    await mkdir(TOUR_SCHEMA_DIR, { recursive: true });
-    await writeFile(TOUR_SCHEMA_FILE, TOUR_SCHEMA_JSON);
-    tourSchemaMaterialized = true;
+  const schemaPath = tourSchemaPath();
+  // Guarded per resolved path, not per process and not by file existence: a
+  // PLANNOTATOR_DATA_DIR change after import materializes the schema in the
+  // new location, and a stale file left by an older binary is overwritten
+  // once per process so the agent always gets the current schema.
+  if (!materializedTourSchemaPaths.has(schemaPath)) {
+    await mkdir(dirname(schemaPath), { recursive: true });
+    await writeFile(schemaPath, TOUR_SCHEMA_JSON);
+    materializedTourSchemaPaths.add(schemaPath);
   }
-  return TOUR_SCHEMA_FILE;
+  return schemaPath;
 }
 
 export function generateTourOutputPath(): string {
@@ -459,29 +460,12 @@ export async function buildTourCodexCommand(options: {
 }
 
 export function parseTourStreamOutput(stdout: string): CodeTourOutput | null {
-  if (!stdout.trim()) return null;
-
-  const lines = stdout.trim().split('\n');
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-
-    try {
-      const event = JSON.parse(line);
-      if (event.type === 'result') {
-        if (event.is_error) return null;
-        const output = event.structured_output;
-        // A tour with no stops isn't a tour — treat as invalid so the UI
-        // error state fires instead of rendering an empty walkthrough.
-        if (!output || !Array.isArray(output.stops) || output.stops.length === 0) return null;
-        return output as CodeTourOutput;
-      }
-    } catch {
-      // Not valid JSON — skip
-    }
-  }
-
-  return null;
+  // A tour with no stops isn't a tour — treat as invalid so the UI error state
+  // fires instead of rendering an empty walkthrough.
+  return findClaudeStructuredOutput(stdout, (output) => {
+    const stops = output && typeof output === 'object' ? (output as { stops?: unknown }).stops : undefined;
+    return Array.isArray(stops) && stops.length > 0 ? (output as CodeTourOutput) : null;
+  });
 }
 
 export async function parseTourFileOutput(outputPath: string): Promise<CodeTourOutput | null> {
@@ -575,7 +559,7 @@ export function createTourSession(): TourSession {
         return { command, outputPath, prompt, label: "Code Tour", engine: "codex", model, reasoningEffort, fastMode: fastMode || undefined };
       }
 
-      const { command, stdinPrompt } = buildTourClaudeCommand(prompt, model, effort);
+      const { command, stdinPrompt } = buildTourClaudeCommand(prompt, model, effort, { sandbox: resolveClaudeSandbox(loadConfig()) });
       return { command, stdinPrompt, prompt, cwd, label: "Code Tour", captureStdout: true, engine: "claude", model, effort };
     },
 

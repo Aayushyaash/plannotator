@@ -16,6 +16,8 @@ import {
   serializeSSEEvent,
   HEARTBEAT_COMMENT,
   HEARTBEAT_INTERVAL_MS,
+  validateReplyTarget,
+  validateAnnotationPatch,
   type AnnotationStore,
   type StorableAnnotation,
   type ExternalAnnotationEvent,
@@ -35,6 +37,8 @@ export interface ExternalAnnotationHandler {
   ) => Promise<Response | null>;
   /** Push annotations directly into the store (bypasses HTTP, reuses same validation). */
   addAnnotations: (body: unknown) => { ids: string[] } | { error: string };
+  /** Send an event that is not a store mutation (session-closed) to every open stream. */
+  broadcast: (event: ExternalAnnotationEvent<StorableAnnotation>) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -56,8 +60,7 @@ export function createExternalAnnotationHandler(
   const encoder = new TextEncoder();
   const transform = mode === "plan" ? transformPlanInput : transformReviewInput;
 
-  // Wire store mutations → SSE broadcast
-  store.onMutation((event: ExternalAnnotationEvent<StorableAnnotation>) => {
+  const broadcast = (event: ExternalAnnotationEvent<StorableAnnotation>) => {
     const data = encoder.encode(serializeSSEEvent(event));
     for (const controller of subscribers) {
       try {
@@ -67,9 +70,14 @@ export function createExternalAnnotationHandler(
         subscribers.delete(controller);
       }
     }
-  });
+  };
+
+  // Wire store mutations → SSE broadcast
+  store.onMutation(broadcast);
 
   return {
+    broadcast,
+
     addAnnotations(body: unknown): { ids: string[] } | { error: string } {
       const parsed = transform(body);
       if ("error" in parsed) return { error: parsed.error };
@@ -169,16 +177,33 @@ export function createExternalAnnotationHandler(
         if (!id) {
           return Response.json({ error: "Missing ?id parameter" }, { status: 400 });
         }
+        let body: unknown;
         try {
-          const body = await req.json();
-          const updated = store.update(id, body as Partial<StorableAnnotation>);
-          if (!updated) {
-            return Response.json({ error: "Not found" }, { status: 404 });
-          }
-          return Response.json({ annotation: updated });
+          body = await req.json();
         } catch {
           return Response.json({ error: "Invalid JSON" }, { status: 400 });
         }
+        // Field-level validation with the same validators POST applies:
+        // unknown keys are dropped and a malformed structured value is a 400,
+        // never a stored one that the renderer then reads a property off
+        // (`{"diagramAnchor": null}` used to blank the page).
+        const patch = validateAnnotationPatch(mode, body);
+        if ("error" in patch) {
+          return Response.json({ error: patch.error }, { status: 400 });
+        }
+        // A reply must point at an existing, different annotation and must
+        // not close a cycle: the export and the panel treat cycle members as
+        // roots, but the invalid state should not be creatable in the first
+        // place. (POST never carries inReplyTo, so PATCH is the only ingest.)
+        if ("inReplyTo" in patch.fields) {
+          const problem = validateReplyTarget(store.getAll(), id, patch.fields.inReplyTo);
+          if (problem) return Response.json({ error: problem }, { status: 400 });
+        }
+        const updated = store.update(id, patch.fields as Partial<StorableAnnotation>);
+        if (!updated) {
+          return Response.json({ error: "Not found" }, { status: 404 });
+        }
+        return Response.json({ annotation: updated });
       }
 
       // --- DELETE (by id, by source, or clear all) ---

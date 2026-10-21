@@ -1,14 +1,16 @@
-import React, { useState, useEffect, useRef, useCallback, useId } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, useId } from 'react';
 import { createPortal } from 'react-dom';
 import type { ImageAttachment } from '../types';
 import { AttachmentsButton } from './AttachmentsButton';
-import { submitHint } from '../utils/platform';
 import { useDraggable } from '../hooks/useDraggable';
 import { SparklesIcon } from './SparklesIcon';
 import { hasUnsavedCommentContent } from '../utils/commentContent';
 import { useSkillReferenceAutocomplete } from '../hooks/useSkillReferenceAutocomplete';
 import { HumanOnlySkillNotice, SkillReferenceMenu } from './SkillReferenceMenu';
-import type { SkillReferenceToken } from '../utils/skillReferences';
+import { ComposerTokenTextarea, type ComposerMentionChips } from './ComposerTokenTextarea';
+import { useMentionAutocomplete } from '../hooks/useMentionAutocomplete';
+import { MentionAutocompleteMenu, mentionActiveOptionId } from './MentionAutocomplete';
+import type { MentionSource } from '../utils/mentions';
 import {
   hasPrimaryCoarsePointer,
   shouldUseExpandedComposer,
@@ -16,11 +18,20 @@ import {
   type VisibleViewportBounds,
 } from '../hooks/useViewportEnvironment';
 
+export type { ComposerMentionChips } from './ComposerTokenTextarea';
+
 export interface CommentAskAIContext {
   kind: 'general' | 'selection';
   label?: string;
   text?: string;
   sourcePath?: string;
+  /** Agent-facing identity of the selected element(s), for a pinpoint on a
+   *  raw-HTML or live-app surface. Rides with the question; not displayed. */
+  detail?: string;
+  /** 1-based source lines of a markdown text selection (see
+   *  `AIQuestion.scope.lineStart`). Rides with the question; not displayed. */
+  lineStart?: number;
+  lineEnd?: number;
 }
 
 export type CommentAskAIHandler = (
@@ -51,14 +62,22 @@ interface CommentPopoverProps {
   isGlobal: boolean;
   /** Pre-filled text (for type-to-comment) */
   initialText?: string;
-  /** Called on submit with comment text and optional images */
-  onSubmit: (text: string, images?: ImageAttachment[]) => void;
   /**
-   * One-click "Looks good" action (comment-only HTML/live surfaces, where
-   * pinpoint clicks open this composer directly and never see the selection
-   * toolbar's 👍). Renders a thumbs-up button in the footer; disabled once
-   * the user has typed or attached anything, so a click can never discard a
-   * draft. The parent owns annotation creation and closing.
+   * Called on submit with comment text and optional images. The third
+   * argument carries the mention ids the body still tags, and is passed ONLY
+   * when a `mentionSource` is supplied — without one the call is the two
+   * arguments it has always been.
+   */
+  onSubmit: (text: string, images?: ImageAttachment[], mentions?: readonly string[]) => void;
+  /**
+   * One-click 👍 "Looks good" (comment-only HTML / live-app surfaces, where a
+   * pinpoint click opens this composer directly and never shows the selection
+   * toolbar's 👍). Renders an emoji-only button beside Save, named "Looks
+   * good" for assistive tech and in its tooltip; disabled once anything is
+   * typed or attached so a click can never discard a draft. It takes no
+   * keyboard shortcut: Enter / Mod+Enter still Save. Like Save, a click
+   * clears the `draftKey` draft and returns focus to the opener. The parent
+   * owns annotation creation and closing. Absent renders nothing.
    */
   onQuickLookGood?: () => void;
   /** Optional live draft observer for submit paths outside the popover. */
@@ -77,6 +96,13 @@ interface CommentPopoverProps {
   askAIDisabled?: boolean;
   /** Opt-in: `/` and `$` skill-reference autocomplete (document UI surfaces). Off by default. */
   skillReferences?: boolean;
+  /**
+   * Opt-in host capability: an `@` mention source for this composer. Supplies
+   * the people, an optional honest-empty notice, and optional callbacks for
+   * the surviving mention ids and for a picked person the host blocks.
+   * Absent → no listener, no picker, no extra DOM: byte-identical composer.
+   */
+  mentionSource?: MentionSource;
   /** Opt-in (HTML multi-select): selected targets rendered as horizontally
    *  scrollable chips above the textarea. Absent → byte-identical composer. */
   targetChips?: CommentTargetChip[];
@@ -166,6 +192,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   askAIContext,
   askAIDisabled = false,
   skillReferences = false,
+  mentionSource,
   targetChips,
   onRemoveTargetChip,
   onHoverTargetChip,
@@ -451,14 +478,37 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     </div>
   ) : null;
 
+  const mentionAc = useMentionAutocomplete({
+    text,
+    setText,
+    textareaRef,
+    source: mentionSource,
+  });
+
+  // The mention half of the composer's highlight layer: present for the whole
+  // life of a mention composer (so the first pick never swaps the textarea
+  // element), null without a source (so the overlay does not exist at all).
+  const mentionChipPeople = mentionAc.mentions;
+  const mentionTokenClassName = mentionSource?.tokenClassName;
+  const mentionChips: ComposerMentionChips | null = useMemo(
+    () =>
+      mentionSource
+        ? { people: mentionChipPeople, tokenClassName: mentionTokenClassName }
+        : null,
+    [mentionSource, mentionChipPeople, mentionTokenClassName],
+  );
+
   const handleSubmit = useCallback(() => {
     const canSubmitEmpty = allowEmptySubmit && initialText.trim().length > 0;
     if (hasUnsavedContent || canSubmitEmpty) {
       if (draftKey) draftStore.delete(draftKey);
-      onSubmit(text, allowImages && images.length > 0 ? images : undefined);
+      const submitImages = allowImages && images.length > 0 ? images : undefined;
+      // Without a mentionSource this is the two-argument call it always was.
+      if (mentionSource) onSubmit(text, submitImages, mentionAc.mentionIds);
+      else onSubmit(text, submitImages);
       restoreOpeningFocus();
     }
-  }, [text, images, onSubmit, draftKey, allowImages, allowEmptySubmit, initialText, hasUnsavedContent, restoreOpeningFocus]);
+  }, [text, images, onSubmit, draftKey, allowImages, allowEmptySubmit, initialText, hasUnsavedContent, restoreOpeningFocus, mentionSource, mentionAc.mentionIds]);
 
   const handleAskAI = useCallback(async () => {
     const question = text.trim();
@@ -492,14 +542,28 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     textareaRef,
     enabled: skillReferences,
   });
+  const readComposerCaret = useCallback(() => {
+    skillAc.onSelect();
+    mentionAc.onSelect();
+  }, [mentionAc, skillAc]);
   const skillListboxId = `skill-reference-listbox-${useId().replace(/:/g, '')}`;
+  const mentionListboxId = `${skillListboxId}-mentions`;
   const activeSkillOptionId =
     skillAc.menu?.activeIndex === null || skillAc.menu?.activeIndex === undefined
       ? undefined
       : `${skillListboxId}-option-${skillAc.menu.activeIndex}`;
+  // At most one of the two menus can be open (their triggers are disjoint), so
+  // the textarea's ARIA relationship points at whichever one is. All three are
+  // `undefined`/false with no menu open, which is every render Plannotator
+  // makes without a `mentionSource`.
+  const activeMentionOptionId = mentionActiveOptionId(mentionListboxId, mentionAc.menu);
+  const composerListboxId = mentionAc.menu !== null ? mentionListboxId : skillListboxId;
+  const composerListboxOpen = skillAc.menu !== null || mentionAc.menu !== null;
+  const activeComposerOptionId = activeSkillOptionId ?? activeMentionOptionId;
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (skillAc.onKeyDown(e)) return;
+    if (mentionAc.onKeyDown(e)) return;
     if (e.key === 'Escape') {
       e.stopPropagation();
       if (mode === 'dialog') {
@@ -529,19 +593,35 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     hasUnsavedContent ||
     (allowEmptySubmit && initialText.trim().length > 0);
   const canAskAI = !!onAskAI && !askAIDisabled && text.trim().length > 0;
+  const showsSkillMenu = skillAc.menu !== null;
 
-  // Shared by both footers. Disabled once anything is typed or attached so a
-  // click can never discard a draft; with content present, Save is the path.
+  // Shared by both footers, sits beside Save. Emoji-only like the selection
+  // toolbar's 👍 (same hover tint). Disabled once anything is typed or
+  // attached so a click can never discard a draft; with content, Save is the
+  // path. A plain click handler only: Enter / Mod+Enter stay on Save.
+  // The grey-out is an inline filter, not a Tailwind filter utility: this
+  // file is scanned into the pinned guides.show viewer CSS, and every class
+  // below already exists there, so the 👍 adds nothing to that bundle.
+  const handleQuickLookGood = () => {
+    if (!onQuickLookGood || hasUnsavedContent) return;
+    if (draftKey) draftStore.delete(draftKey);
+    onQuickLookGood();
+    restoreOpeningFocus();
+  };
   const quickLookGoodButton = onQuickLookGood ? (
     <button
       type="button"
-      onClick={onQuickLookGood}
+      onClick={handleQuickLookGood}
       disabled={hasUnsavedContent}
-      className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium rounded-md text-muted-foreground hover:text-foreground hover:bg-green-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-      title={hasUnsavedContent ? 'Clear the comment to use Looks good' : 'Add "Looks good" without typing'}
+      aria-label="Looks good"
+      title={hasUnsavedContent ? 'Looks good (clear the comment to use it)' : 'Looks good'}
+      data-quick-look-good="true"
+      data-pn-touch-target="true"
+      data-pn-touch-target-icon="true"
+      style={hasUnsavedContent ? { filter: 'grayscale(1)' } : undefined}
+      className="inline-flex h-7 w-7 items-center justify-center rounded-md text-sm leading-none hover:bg-green-500/10 outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent transition-colors"
     >
       <span aria-hidden="true">👍</span>
-      Looks good
     </button>
   ) : null;
 
@@ -570,7 +650,9 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
           aria-modal="true"
           aria-label={isGlobal ? 'Global comment' : 'Comment'}
           tabIndex={-1}
-          className="relative w-full max-w-xl max-h-full min-h-0 bg-popover border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden"
+          className={`relative w-full max-w-xl max-h-full min-h-0 bg-popover border border-border rounded-xl shadow-2xl flex flex-col ${
+            showsSkillMenu ? 'overflow-visible' : 'overflow-hidden'
+          }`}
           style={{
             animation: 'comment-dialog-in 0.15s ease-out',
           }}
@@ -617,7 +699,9 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
           {chipsRow}
 
           {/* Textarea */}
-          <div className="relative px-4 py-3 min-h-0 flex-1 overflow-y-auto">
+          <div className={`relative px-4 py-3 min-h-0 flex-1 ${
+            showsSkillMenu ? 'overflow-visible' : 'overflow-y-auto'
+          }`}>
             {skillAc.menu && (
               <SkillReferenceMenu
                 id={skillListboxId}
@@ -626,21 +710,28 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
                 onSelect={skillAc.select}
               />
             )}
-            <ComposerTextarea
+            <ComposerTokenTextarea
               textareaRef={focusOnMountRef}
               value={text}
-              onChange={(e) => { setText(e.target.value); skillAc.onSelect(); }}
+              onChange={(e) => { setText(e.target.value); readComposerCaret(); }}
               onKeyDown={handleKeyDown}
-              onSelectCaret={skillAc.onSelect}
+              onSelectCaret={readComposerCaret}
               placeholder={isGlobal ? 'Add a global comment...' : 'Add a comment...'}
               sizeClassName="min-h-32 max-h-full"
               skillReferences={skillReferences}
               tokens={skillAc.referenceTokens}
-              listboxId={skillListboxId}
-              listboxOpen={skillAc.menu !== null}
-              activeOptionId={activeSkillOptionId}
+              mentionChips={mentionChips}
+              listboxId={composerListboxId}
+              listboxOpen={composerListboxOpen}
+              activeOptionId={activeComposerOptionId}
             />
             <HumanOnlySkillNotice skills={skillAc.humanOnlyReferences} />
+            {mentionSource?.renderNotice?.(mentionChipPeople)}
+            <MentionAutocompleteMenu
+              id={mentionListboxId}
+              menu={mentionAc.menu}
+              onSelect={mentionAc.select}
+            />
           </div>
 
           {/* Footer — DOM order sets tab order (Save first); row-reverse keeps the visual layout unchanged */}
@@ -653,9 +744,6 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
               >
                 {isGlobal ? 'Add' : 'Save'}
               </button>
-              {!coarsePointer && (
-                <span className="text-[10px] text-muted-foreground">{submitHint}</span>
-              )}
               {quickLookGoodButton}
               {onAskAI && (
                 <button
@@ -713,14 +801,14 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
             left: dragPosition.left,
             width: position.width,
             maxHeight: visibleBounds.height,
-            overflowY: 'auto',
+            overflowY: showsSkillMenu ? 'visible' : 'auto',
           }
         : {
             top: position.top,
             left: position.left,
             width: position.width,
             maxHeight: position.maxHeight,
-            overflowY: 'auto',
+            overflowY: showsSkillMenu ? 'visible' : 'auto',
             ...(position.flipAbove ? { transform: 'translateY(-100%)' } : {}),
             animation: position.flipAbove
               ? 'comment-popover-in-above 0.15s ease-out'
@@ -776,21 +864,28 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
             onSelect={skillAc.select}
           />
         )}
-        <ComposerTextarea
+        <ComposerTokenTextarea
           textareaRef={focusOnMountRef}
           value={text}
-          onChange={(e) => { setText(e.target.value); skillAc.onSelect(); }}
+          onChange={(e) => { setText(e.target.value); readComposerCaret(); }}
           onKeyDown={handleKeyDown}
-          onSelectCaret={skillAc.onSelect}
+          onSelectCaret={readComposerCaret}
           placeholder={isGlobal ? 'Add a global comment...' : 'Add a comment...'}
           sizeClassName="max-h-64 min-h-[4.5rem]"
           skillReferences={skillReferences}
           tokens={skillAc.referenceTokens}
-          listboxId={skillListboxId}
-          listboxOpen={skillAc.menu !== null}
-          activeOptionId={activeSkillOptionId}
+          mentionChips={mentionChips}
+          listboxId={composerListboxId}
+          listboxOpen={composerListboxOpen}
+          activeOptionId={activeComposerOptionId}
         />
         <HumanOnlySkillNotice skills={skillAc.humanOnlyReferences} />
+        {mentionSource?.renderNotice?.(mentionChipPeople)}
+        <MentionAutocompleteMenu
+          id={mentionListboxId}
+          menu={mentionAc.menu}
+          onSelect={mentionAc.select}
+        />
       </div>
 
       {/* Footer — same DOM-order/row-reverse pattern as the dialog footer above */}
@@ -803,9 +898,6 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
           >
             {isGlobal ? 'Add' : 'Save'}
           </button>
-          {!coarsePointer && (
-            <span className="text-[10px] text-muted-foreground">{submitHint}</span>
-          )}
           {quickLookGoodButton}
           {onAskAI && (
             <button
@@ -836,166 +928,6 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   );
 };
 
-// ---------------------------------------------------------------------------
-// Composer textarea with skill-reference token highlighting
-// ---------------------------------------------------------------------------
-
-/** Classes shared by the textarea and its highlight mirror — font, size,
- * and box metrics MUST stay identical or the overlay drifts out of alignment. */
-const COMPOSER_TEXT_CLASSES = 'w-full bg-transparent text-sm px-1 py-0.5';
-
-interface ComposerTextareaProps {
-  value: string;
-  onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
-  onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
-  /** Caret observer (skill autocomplete). */
-  onSelectCaret: () => void;
-  placeholder: string;
-  /** Mode-specific min/max height classes. */
-  sizeClassName: string;
-  textareaRef: (el: HTMLTextAreaElement | null) => void;
-  /** Positioned skill-reference occurrences to highlight. */
-  tokens: SkillReferenceToken[];
-  /** Off → render the plain pre-feature textarea, byte-for-byte. */
-  skillReferences: boolean;
-  /** ARIA relationship to the skill-reference listbox. */
-  listboxId: string;
-  listboxOpen: boolean;
-  activeOptionId?: string;
-}
-
-/**
- * The composer's textarea. With `skillReferences` off this is exactly the
- * pre-feature `<textarea>`; with it on, inserted skill-reference tokens are
- * highlighted via a mirrored, aria-hidden overlay rendered BEHIND a
- * transparent-text textarea (a textarea cannot style substrings). The overlay
- * shares the exact font/padding/wrapping metrics and mirrors scroll position,
- * and token spans change ONLY color/background (never font or weight), so the
- * glyphs the browser lays out in the textarea and the glyphs the overlay
- * paints coincide. During IME composition the overlay hides and the textarea
- * text becomes visible again (`.pn-ref-composing`), keeping native
- * composition rendering (underlines, candidate highlights) intact.
- */
-const ComposerTextarea: React.FC<ComposerTextareaProps> = ({
-  value,
-  onChange,
-  onKeyDown,
-  onSelectCaret,
-  placeholder,
-  sizeClassName,
-  textareaRef,
-  tokens,
-  skillReferences,
-  listboxId,
-  listboxOpen,
-  activeOptionId,
-}) => {
-  const overlayRef = useRef<HTMLDivElement>(null);
-  const [composing, setComposing] = useState(false);
-
-  const syncScroll = useCallback((el: HTMLTextAreaElement) => {
-    const overlay = overlayRef.current;
-    if (!overlay) return;
-    overlay.scrollTop = el.scrollTop;
-    overlay.scrollLeft = el.scrollLeft;
-  }, []);
-
-  const innerRef = useRef<HTMLTextAreaElement | null>(null);
-  const attachRef = useCallback(
-    (el: HTMLTextAreaElement | null) => {
-      innerRef.current = el;
-      textareaRef(el);
-    },
-    [textareaRef],
-  );
-
-  // Keep the mirror aligned when the value changes without a scroll event
-  // (e.g. programmatic insertion moving the caret into a scrolled region).
-  useEffect(() => {
-    if (innerRef.current) syncScroll(innerRef.current);
-  }, [value, syncScroll]);
-
-  if (!skillReferences) {
-    return (
-      <textarea
-        data-pn-mobile-editable="true"
-        ref={attachRef}
-        value={value}
-        onChange={onChange}
-        onKeyDown={onKeyDown}
-        onSelect={onSelectCaret}
-        placeholder={placeholder}
-        className={`${COMPOSER_TEXT_CLASSES} placeholder:text-muted-foreground resize-none focus:outline-none ${sizeClassName}`}
-        style={{ fieldSizing: 'content' } as React.CSSProperties}
-      />
-    );
-  }
-
-  const segments: React.ReactNode[] = [];
-  let pos = 0;
-  tokens.forEach((token, i) => {
-    if (token.start < pos || token.end > value.length) return; // stale tokens for a different value
-    if (token.start > pos) segments.push(value.slice(pos, token.start));
-    // Human-only tokens carry a quiet dotted underline as their inline marker
-    // (text-decoration never affects glyph layout, so overlay alignment is
-    // safe). The accessible explanation lives in HumanOnlySkillNotice below
-    // the textarea — this overlay is aria-hidden.
-    segments.push(
-      <span
-        key={`${token.start}-${i}`}
-        data-skill-ref-token={token.entry.name}
-        data-skill-ref-human-only={token.entry.humanOnly ? 'true' : undefined}
-        className={`text-primary bg-primary/10 rounded-[3px] ${
-          token.entry.humanOnly
-            ? 'underline decoration-dotted decoration-primary/60 underline-offset-2'
-            : ''
-        }`}
-      >
-        {value.slice(token.start, token.end)}
-      </span>,
-    );
-    pos = token.end;
-  });
-  segments.push(value.slice(pos));
-
-  return (
-    <div className="relative">
-      <div
-        ref={overlayRef}
-        aria-hidden="true"
-        data-skill-ref-overlay="true"
-        data-pn-mobile-editable-mirror="true"
-        className={`${COMPOSER_TEXT_CLASSES} ${sizeClassName} pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words`}
-        style={composing ? { visibility: 'hidden' } : undefined}
-      >
-        {segments}
-        {'\n'}
-      </div>
-      <textarea
-        data-pn-mobile-editable="true"
-        aria-label={placeholder}
-        aria-autocomplete="list"
-        aria-haspopup="listbox"
-        aria-controls={listboxOpen ? listboxId : undefined}
-        aria-owns={listboxOpen ? listboxId : undefined}
-        aria-activedescendant={activeOptionId}
-        ref={attachRef}
-        value={value}
-        onChange={onChange}
-        onKeyDown={onKeyDown}
-        onSelect={onSelectCaret}
-        onScroll={(e) => syncScroll(e.currentTarget)}
-        onCompositionStart={() => setComposing(true)}
-        onCompositionEnd={() => setComposing(false)}
-        placeholder={placeholder}
-        className={`${COMPOSER_TEXT_CLASSES} placeholder:text-muted-foreground resize-none focus:outline-none relative pn-ref-input ${
-          composing ? 'pn-ref-composing' : ''
-        } ${sizeClassName}`}
-        style={{ fieldSizing: 'content' } as React.CSSProperties}
-      />
-    </div>
-  );
-};
 
 // Icons
 

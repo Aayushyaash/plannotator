@@ -14,6 +14,8 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Annotation } from '../../types';
 import { AnnotationType } from '../../types';
+import { BRIDGE_PROTOCOL_VERSION } from './bridge-script';
+import { THUMBS_UP_LABEL } from '../../utils/quickLabels';
 
 const hasDom = typeof document !== 'undefined';
 const hookModule = hasDom ? await import('./useHtmlAnnotation') : null;
@@ -310,6 +312,65 @@ describe.if(hasDom)('pinpoint click-to-pin flow', () => {
     expect(added[0]?.text).toBe('Looks good');
   });
 
+  function composerThumbsUp(): HTMLButtonElement | null {
+    return document.querySelector<HTMLButtonElement>(
+      '[data-comment-popover] button[aria-label="Looks good"]',
+    );
+  }
+
+  test('the pinpoint composer thumbs-up labels the pinned element in one click', async () => {
+    // A pinpoint click opens the composer, never the toolbar, so without
+    // this button an element cannot get a one-click thumbs-up at all. It
+    // must mint the same labeled comment the toolbar 👍 does, on the pinned
+    // element, carrying the anchor and element context a typed comment would.
+    const added: Annotation[] = [];
+    const { postSelection } = await mountViewer({ mode: 'selection', onAdd: (ann) => added.push(ann) });
+    await postSelection({
+      ...selectionMessage,
+      pinpoint: true,
+      context: { tag: 'p', path: 'body > p' },
+    });
+    const thumbs = composerThumbsUp();
+    if (!thumbs) throw new Error('composer thumbs-up missing');
+    // Emoji only: the "Looks good" name lives in aria-label / tooltip.
+    expect(thumbs.textContent).toBe('👍');
+    await act(async () => thumbs.click());
+    expect(added).toHaveLength(1);
+    expect(added[0]!.type).toBe(AnnotationType.COMMENT);
+    expect(added[0]!.isQuickLabel).toBe(true);
+    expect(added[0]!.text).toBe(THUMBS_UP_LABEL.text);
+    expect(added[0]!.quickLabelTip).toBe(THUMBS_UP_LABEL.tip);
+    expect(added[0]!.originalText).toBe('Pinpoint target');
+    expect(added[0]!.htmlAnchor).toEqual(selectionMessage.anchor);
+    expect(added[0]!.elementContext).toMatchObject({ tag: 'p', path: 'body > p' });
+    expect(document.querySelector('[data-comment-popover]')).toBeNull();
+  });
+
+  test('Mod+Enter still saves the typed comment; the thumbs-up takes no key and disables once typed', async () => {
+    const added: Annotation[] = [];
+    const { postSelection } = await mountViewer({ mode: 'selection', onAdd: (ann) => added.push(ann) });
+    await postSelection({ ...selectionMessage, pinpoint: true });
+    const textarea = document.querySelector<HTMLTextAreaElement>('[data-comment-popover] textarea');
+    if (!textarea) throw new Error('composer textarea missing');
+    const pressModEnter = async () => {
+      await act(async () => {
+        textarea.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Enter', metaKey: true, ctrlKey: true, bubbles: true, cancelable: true,
+        }));
+      });
+    };
+    // Empty composer: Mod+Enter is not routed to the thumbs-up.
+    await pressModEnter();
+    expect(added).toHaveLength(0);
+
+    await typeComment('the spacing is off here');
+    expect(composerThumbsUp()?.disabled).toBe(true);
+    await pressModEnter();
+    expect(added).toHaveLength(1);
+    expect(added[0]!.text).toBe('the spacing is off here');
+    expect(added[0]!.isQuickLabel).toBeUndefined();
+  });
+
   test('redline mode is CLAMPED on HTML surfaces: a pinpoint selection opens the composer instead of auto-deleting', async () => {
     const added: Annotation[] = [];
     const { postSelection } = await mountViewer({
@@ -431,7 +492,7 @@ describe.if(hasDom)('ordered saved-annotation sync (placed-marker numbering)', (
       await act(async () => {
         window.dispatchEvent(new MessageEvent('message', {
           source: iframe.contentWindow,
-          data: { type: 'plannotator-bridge-ready' },
+          data: { type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION },
         }));
       });
     };
@@ -673,6 +734,7 @@ describe.if(hasDom)('multi-target composer flow (chips, promotion, submit)', () 
   async function mountViewer(
     onAdd: (ann: Annotation) => void,
     mode: 'selection' | 'quickLabel' = 'selection',
+    extraProps: { maxAdditionalTargets?: number } = {},
   ) {
     if (!htmlViewerModule) throw new Error('DOM test environment is not registered');
     const HtmlViewer = htmlViewerModule.HtmlViewer;
@@ -683,6 +745,7 @@ describe.if(hasDom)('multi-target composer flow (chips, promotion, submit)', () 
     await act(async () => {
       root.render(
         <HtmlViewer
+          {...extraProps}
           rawHtml="<html><body><p>Pinpoint target</p></body></html>"
           annotations={[]}
           onAddAnnotation={onAdd}
@@ -880,6 +943,53 @@ describe.if(hasDom)('multi-target composer flow (chips, promotion, submit)', () 
     expect(added[0]!.htmlAdditionalTargets!.length).toBe(16);
   });
 
+  test('maxAdditionalTargets lowers the cap end to end: chips, the saved array, and the bridge arm', async () => {
+    // A host with a product cap of 3 must see the cap in the draft (chips
+    // stop growing), in the saved annotation, and in what the bridge is
+    // armed with, so the in-page toggle stops at the same number.
+    const added: Annotation[] = [];
+    const { post, postedToIframe } = await mountViewer((ann) => added.push(ann), 'selection', { maxAdditionalTargets: 3 });
+    await post(primarySelection());
+    expect(postedToIframe).toContainEqual({
+      type: 'plannotator-bridge-arm-multi-select',
+      key: 'ht-1',
+      max: 3,
+    });
+    for (let i = 0; i < 8; i++) {
+      await post(addedTarget(`host-cap-${i}`, `Target ${i}`));
+    }
+    expect(chips().length).toBe(4); // primary + 3
+
+    await typeComment('Host capped');
+    await save();
+    expect(added[0]!.htmlAdditionalTargets!.length).toBe(3);
+
+    // The composer's one-click 👍 submits the shift-click targets too, under
+    // the same cap.
+    await post(primarySelection({ targetKey: 'ht-2' }));
+    for (let i = 0; i < 8; i++) {
+      await post(addedTarget(`host-cap-b-${i}`, `Target ${i}`));
+    }
+    const thumbs = document.querySelector<HTMLButtonElement>(
+      '[data-comment-popover] button[aria-label="Looks good"]',
+    );
+    if (!thumbs) throw new Error('composer thumbs-up missing');
+    await act(async () => { thumbs.click(); });
+    expect(added[1]!.isQuickLabel).toBe(true);
+    expect(added[1]!.htmlAdditionalTargets!.map((t) => t.text)).toEqual([
+      'Target 0', 'Target 1', 'Target 2',
+    ]);
+  });
+
+  test('without maxAdditionalTargets the arm message and the 16 cap are unchanged', async () => {
+    const added: Annotation[] = [];
+    const { post, postedToIframe } = await mountViewer((ann) => added.push(ann));
+    await post(primarySelection());
+    const arm = postedToIframe.find((m) => m.type === 'plannotator-bridge-arm-multi-select');
+    expect(arm).toEqual({ type: 'plannotator-bridge-arm-multi-select', key: 'ht-1' });
+    expect('max' in arm!).toBe(false);
+  });
+
   test('adds are ignored when no pinpoint draft is open (drag selections stay single-target)', async () => {
     const { post, postedToIframe } = await mountViewer(() => {});
     // Drag selection (no pinpoint flag): opens the toolbar, arms nothing.
@@ -1021,9 +1131,63 @@ describe.if(hasDom)('readOnly view-only contract', () => {
     } as Annotation;
   }
 
+  test('scroll-to carries the host scrollBehavior only when one is passed', async () => {
+    // Reduced motion cannot be observed inside the sandbox, so the host
+    // passes it. Absent, the message must be exactly today's shape so the
+    // bridge keeps scrolling smoothly for hosts that never set it.
+    if (!htmlViewerModule) throw new Error('DOM test environment is not registered');
+    const HtmlViewer = htmlViewerModule.HtmlViewer;
+    const mountWith = async (scrollBehavior?: 'smooth' | 'auto') => {
+      const host = document.createElement('div');
+      document.body.appendChild(host);
+      const root = createRoot(host);
+      mountedRoots.push(root);
+      await act(async () => {
+        root.render(
+          <HtmlViewer
+            rawHtml="<html><body><p>Read-only target</p></body></html>"
+            annotations={[committed('sel-1')]}
+            onAddAnnotation={() => {}}
+            onSelectAnnotation={() => {}}
+            selectedAnnotationId={null}
+            mode="selection"
+            inputMethod="pinpoint"
+            scrollBehavior={scrollBehavior}
+          />,
+        );
+      });
+      const iframe = host.querySelector<HTMLIFrameElement>('iframe');
+      if (!iframe?.contentWindow) throw new Error('HTML iframe missing');
+      const posted: Array<Record<string, unknown>> = [];
+      const realPost = iframe.contentWindow.postMessage.bind(iframe.contentWindow);
+      (iframe.contentWindow as unknown as { postMessage: (data: unknown) => void }).postMessage =
+        ((data: unknown, ...rest: unknown[]) => {
+          if (data && typeof data === 'object') posted.push(data as Record<string, unknown>);
+          return (realPost as (...args: unknown[]) => unknown)(data, ...rest);
+        }) as typeof iframe.contentWindow.postMessage;
+      await act(async () => {
+        root.render(
+          <HtmlViewer
+            rawHtml="<html><body><p>Read-only target</p></body></html>"
+            annotations={[committed('sel-1')]}
+            onAddAnnotation={() => {}}
+            onSelectAnnotation={() => {}}
+            selectedAnnotationId="sel-1"
+            mode="selection"
+            inputMethod="pinpoint"
+            scrollBehavior={scrollBehavior}
+          />,
+        );
+      });
+      return posted.filter((m) => m.type === 'plannotator-bridge-scroll-to');
+    };
+    expect(await mountWith(undefined)).toEqual([{ type: 'plannotator-bridge-scroll-to', id: 'sel-1' }]);
+    expect(await mountWith('auto')).toEqual([{ type: 'plannotator-bridge-scroll-to', id: 'sel-1', behavior: 'auto' }]);
+  });
+
   test('readOnly still restores markers and syncs export-matching numbers on ready', async () => {
     const { post, postedToIframe } = await mountReadOnly([committed('ro-1'), committed('ro-2')]);
-    await post({ type: 'plannotator-bridge-ready' });
+    await post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION });
 
     const restores = postedToIframe.filter((m) => m.type === 'plannotator-bridge-find-and-mark');
     expect(restores.map((m) => m.id)).toEqual(['ro-1', 'ro-2']);
@@ -1041,14 +1205,14 @@ describe.if(hasDom)('readOnly view-only contract', () => {
   test('readOnly marker clicks still navigate via onSelectAnnotation', async () => {
     const selected: Array<string | null> = [];
     const { post } = await mountReadOnly([committed('ro-1')], (id) => selected.push(id));
-    await post({ type: 'plannotator-bridge-ready' });
+    await post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION });
     await post({ type: 'plannotator-bridge-mark-click', id: 'ro-1' });
     expect(selected).toEqual(['ro-1']);
   });
 
   test('readOnly ignores selection messages: no toolbar, no composer', async () => {
     const { post } = await mountReadOnly([committed('ro-1')]);
-    await post({ type: 'plannotator-bridge-ready' });
+    await post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION });
     await post({
       type: 'plannotator-bridge-selection',
       text: 'Read-only target',
@@ -1120,6 +1284,201 @@ describe.if(hasDom)('unanchored report (trust boundary + delivery)', () => {
     });
     expect(received).toEqual([['lost-1']]);
   });
+
+  function pageRow(id: string, overrides: Partial<Annotation> = {}): Annotation {
+    return {
+      id,
+      blockId: '',
+      startOffset: 0,
+      endOffset: 0,
+      type: AnnotationType.COMMENT,
+      text: 'noted',
+      originalText: 'Page',
+      createdA: 1,
+      ...overrides,
+    };
+  }
+
+  async function mountUnion(initial: Annotation[], received: string[][]) {
+    if (!htmlViewerModule) throw new Error('DOM test environment is not registered');
+    const HtmlViewer = htmlViewerModule.HtmlViewer;
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    mountedRoots.push(root);
+    const added: Annotation[] = [];
+    const render = async (annotations: Annotation[], rawHtml = '<html><body><p>Page</p></body></html>') => {
+      await act(async () => {
+        root.render(
+          <HtmlViewer
+            rawHtml={rawHtml}
+            annotations={annotations}
+            onAddAnnotation={(ann) => added.push(ann)}
+            onSelectAnnotation={() => {}}
+            selectedAnnotationId={null}
+            mode="comment"
+            inputMethod="pinpoint"
+            onUnanchoredChange={(ids) => received.push(ids)}
+          />,
+        );
+      });
+    };
+    await render(initial);
+    const iframe = host.querySelector<HTMLIFrameElement>('iframe');
+    if (!iframe?.contentWindow) throw new Error('HTML iframe missing');
+    const postedToIframe: Array<Record<string, unknown>> = [];
+    const realPost = iframe.contentWindow.postMessage.bind(iframe.contentWindow);
+    (iframe.contentWindow as unknown as { postMessage: (data: unknown) => void }).postMessage =
+      ((data: unknown, ...rest: unknown[]) => {
+        if (data && typeof data === 'object') postedToIframe.push(data as Record<string, unknown>);
+        return (realPost as (...args: unknown[]) => unknown)(data, ...rest);
+      }) as typeof iframe.contentWindow.postMessage;
+    const post = async (data: Record<string, unknown>) => {
+      await act(async () => {
+        window.dispatchEvent(new MessageEvent('message', { source: iframe.contentWindow, data }));
+      });
+    };
+    const ready = () => post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION });
+    return { render, post, ready, added, postedToIframe };
+  }
+
+  test('on ready the viewer asks the bridge for one complete report AFTER its restore batch', async () => {
+    // The bridge only posts when its set changes from empty, so a fresh
+    // document where everything restores would stay silent. The parent asks
+    // for the post-restore set explicitly, after the find-and-marks, so the
+    // answering pass sees every restore.
+    const received: string[][] = [];
+    const { ready, postedToIframe } = await mountUnion([pageRow('a-1'), pageRow('a-2')], received);
+    await ready();
+    const types = postedToIframe.map((m) => m.type);
+    const restores = types.filter((t) => t === 'plannotator-bridge-find-and-mark');
+    expect(restores.length).toBe(2);
+    expect(types.lastIndexOf('plannotator-bridge-find-and-mark')).toBeLessThan(
+      types.indexOf('plannotator-bridge-report-unanchored'),
+    );
+    // Nothing is delivered until the bridge answers.
+    expect(received).toEqual([]);
+  });
+
+  test('textless page rows join the FIRST bridge report; document-level comments do not; nothing is delivered before it', async () => {
+    // A page row with no quoted text and no element anchor is never posted
+    // to the bridge (nothing to find it by), so the bridge can never name
+    // it; the viewer completes the bridge's report with it. Delivery waits
+    // for the bridge's post-restore answer: a host acknowledging "the first
+    // report after a reload" must get the restore set, not a set computed
+    // at mount. A GLOBAL_COMMENT has no page location and is never flagged.
+    const received: string[][] = [];
+    const { post, ready } = await mountUnion([
+      pageRow('anchored-1'),
+      pageRow('textless-1', { originalText: '' }),
+      pageRow('global-1', { originalText: '', type: AnnotationType.GLOBAL_COMMENT }),
+    ], received);
+    await ready();
+    expect(received).toEqual([]);
+    await post({ type: MSG, ids: [] });
+    expect(received).toEqual([['textless-1']]);
+
+    // Later bridge reports union with it, pass-through timing kept.
+    await post({ type: MSG, ids: ['anchored-1'] });
+    expect(received.at(-1)).toEqual(['anchored-1', 'textless-1']);
+    await post({ type: MSG, ids: [] });
+    expect(received.at(-1)).toEqual(['textless-1']);
+  });
+
+  test('one textless row plus one real orphan: the first delivered report carries the orphan', async () => {
+    // The refresh acknowledgement consumes the first report per reload, so
+    // that report must be the post-restore one, with the orphan in it.
+    const received: string[][] = [];
+    const { post, ready } = await mountUnion([
+      pageRow('textless-1', { originalText: '' }),
+      pageRow('orphan-1'),
+    ], received);
+    await ready();
+    await post({ type: MSG, ids: ['orphan-1'] });
+    expect(received).toEqual([['orphan-1', 'textless-1']]);
+  });
+
+  test('re-anchoring: a document whose restore succeeds reports the empty set once, clearing a prior orphan', async () => {
+    // Delete, refresh: the bridge names the orphan. Restore, refresh: a new
+    // document restores everything; the forced report is the empty set, and
+    // the host clears its chip from it.
+    const received: string[][] = [];
+    const { post, ready } = await mountUnion([pageRow('a-1')], received);
+    await ready();
+    await post({ type: MSG, ids: ['a-1'] });
+    expect(received).toEqual([['a-1']]);
+    // A new document (srcdoc reload): the bridge starts empty and answers
+    // the parent's request with its complete, empty set.
+    await ready();
+    await post({ type: MSG, ids: [] });
+    expect(received).toEqual([['a-1'], []]);
+  });
+
+  test('an in-place rawHtml swap drops old-document reports until the new ready, then delivers afresh', async () => {
+    // One instance, new srcdoc: the old document can still emit through the
+    // same contentWindow before the new one is ready. Those reports belong
+    // to a document that no longer exists and must not reach the host; the
+    // new document's first answer is delivered even when it equals the last
+    // set the old document delivered.
+    const received: string[][] = [];
+    const { render, post, ready } = await mountUnion([pageRow('a-1')], received);
+    await ready();
+    await post({ type: MSG, ids: ['a-1'] });
+    expect(received).toEqual([['a-1']]);
+
+    await render([pageRow('a-1')], '<html><body><p>Page v2</p></body></html>');
+    // Stale emission from the old document, before the new ready.
+    await post({ type: MSG, ids: [] });
+    expect(received).toEqual([['a-1']]);
+    // A prop-side change before the new ready delivers nothing either.
+    await render([pageRow('a-1'), pageRow('textless-1', { originalText: '' })], '<html><body><p>Page v2</p></body></html>');
+    expect(received).toEqual([['a-1']]);
+
+    await ready();
+    await post({ type: MSG, ids: ['a-1'] });
+    expect(received).toEqual([['a-1'], ['a-1', 'textless-1']]);
+  });
+
+  test('a locally minted id the host swapped out of annotations never reaches the report', async () => {
+    // The create swap: the composer mints a local id (create-mark), the host
+    // persists the comment under its own id and lists only that one. If the
+    // kept local mark later dies, the bridge names the local id, which the
+    // host holds no card for. The union drops it; the host id passes.
+    const received: string[][] = [];
+    const { render, post, added } = await mountUnion([], received);
+    await post({
+      type: 'plannotator-bridge-selection',
+      text: 'Page',
+      rect: { top: 10, left: 10, width: 120, height: 24 },
+      pinpoint: true,
+      targetKey: 'ht-1',
+      anchor: { selector: 'p', tagName: 'p', text: 'Page' },
+    });
+    const textarea = document.querySelector<HTMLTextAreaElement>('[data-comment-popover] textarea');
+    if (!textarea) throw new Error('composer textarea missing');
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(textarea), 'value')?.set;
+    await act(async () => {
+      if (setter) setter.call(textarea, 'swap me');
+      else textarea.value = 'swap me';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const save = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-comment-popover] button'))
+      .find((b) => b.textContent === 'Save');
+    if (!save) throw new Error('Save button missing');
+    await act(async () => { save.click(); });
+    const localId = added[0]?.id;
+    if (!localId) throw new Error('no created annotation');
+
+    // Host swapped: its list carries the server row only.
+    await render([pageRow('srv-1')]);
+    await post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION });
+    await post({ type: MSG, ids: [localId, 'srv-1'] });
+    expect(received.at(-1)).toEqual(['srv-1']);
+
+    // A minted id the host DOES keep in its list is a real row and passes.
+    await render([pageRow('srv-1'), pageRow(localId)]);
+    expect(received.at(-1)).toEqual([localId, 'srv-1'].sort());
+  });
 });
 
 describe.if(hasDom)('Interact/Annotate mode on static (srcdoc) surfaces', () => {
@@ -1127,6 +1486,8 @@ describe.if(hasDom)('Interact/Annotate mode on static (srcdoc) surfaces', () => 
     annotateModeActive?: boolean;
     onAnnotateModeExit?: () => void;
     onAnnotateModeToggle?: () => void;
+    onStep?: (dir: 1 | -1) => void;
+    onPageEscape?: () => void;
   } = {}) {
     if (!htmlViewerModule) throw new Error('DOM test environment is not registered');
     const HtmlViewer = htmlViewerModule.HtmlViewer;
@@ -1147,6 +1508,8 @@ describe.if(hasDom)('Interact/Annotate mode on static (srcdoc) surfaces', () => 
           annotateModeActive={options.annotateModeActive}
           onAnnotateModeExit={options.onAnnotateModeExit}
           onAnnotateModeToggle={options.onAnnotateModeToggle}
+          onStep={options.onStep}
+          onPageEscape={options.onPageEscape}
         />,
       );
     });
@@ -1172,7 +1535,7 @@ describe.if(hasDom)('Interact/Annotate mode on static (srcdoc) surfaces', () => 
 
   test('static surfaces default to Annotate armed: set-annotate-mode active:true rides every ready', async () => {
     const { post, postedToIframe } = await mountModeViewer();
-    await post({ type: 'plannotator-bridge-ready' });
+    await post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION });
     const modePosts = postedToIframe.filter((m) => m.type === 'plannotator-bridge-set-annotate-mode');
     expect(modePosts.length).toBe(1);
     expect(modePosts[0]!.active).toBe(true);
@@ -1180,7 +1543,7 @@ describe.if(hasDom)('Interact/Annotate mode on static (srcdoc) surfaces', () => 
 
   test('a host-driven Interact state is pushed instead of the default', async () => {
     const { post, postedToIframe } = await mountModeViewer({ annotateModeActive: false });
-    await post({ type: 'plannotator-bridge-ready' });
+    await post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION });
     const modePosts = postedToIframe.filter((m) => m.type === 'plannotator-bridge-set-annotate-mode');
     expect(modePosts.length).toBe(1);
     expect(modePosts[0]!.active).toBe(false);
@@ -1226,5 +1589,144 @@ describe.if(hasDom)('Interact/Annotate mode on static (srcdoc) surfaces', () => 
     });
     await post({ type: 'plannotator-bridge-annotate-toggle' });
     expect(toggles).toBe(1);
+  });
+
+  test('a bridge step message (a plain ] or [ in the page) reaches the host only while armed, with the frame focused, at most once per 150 ms', async () => {
+    // The Inbox steps through a thread's attachments on it. The page can post
+    // the message itself, so a page posting in a loop without the person's
+    // focus must not move anything, and a loop with focus is throttled.
+    const armed: number[] = [];
+    const { post } = await mountModeViewer({ annotateModeActive: true, onStep: (dir) => armed.push(dir) });
+    const iframe = document.querySelector<HTMLIFrameElement>('iframe')!;
+    // Not focused: a page posting every 50 ms moves nothing.
+    for (let i = 0; i < 5; i++) {
+      await post({ type: 'plannotator-bridge-step', dir: 1 });
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    }
+    expect(armed).toEqual([]);
+    // Focused: one step, then nothing until 150 ms have passed; only 1 or -1.
+    await act(async () => { iframe.focus(); });
+    expect(document.activeElement).toBe(iframe);
+    await post({ type: 'plannotator-bridge-step', dir: 2 });
+    await post({ type: 'plannotator-bridge-step', dir: '1' });
+    await post({ type: 'plannotator-bridge-step', dir: 1 });
+    await post({ type: 'plannotator-bridge-step', dir: 1 });
+    await post({ type: 'plannotator-bridge-step', dir: -1 });
+    expect(armed).toEqual([1]);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, htmlViewerModule!.STEP_MESSAGE_MIN_INTERVAL_MS + 20)); });
+    await post({ type: 'plannotator-bridge-step', dir: -1 });
+    expect(armed).toEqual([1, -1]);
+
+    // In Interact the page owns its keys: nothing reaches the host.
+    const interact: number[] = [];
+    const second = await mountModeViewer({ annotateModeActive: false, onStep: (dir) => interact.push(dir) });
+    const frames = document.querySelectorAll<HTMLIFrameElement>('iframe');
+    await act(async () => { frames[frames.length - 1]!.focus(); });
+    await second.post({ type: 'plannotator-bridge-step', dir: 1 });
+    expect(interact).toEqual([]);
+  });
+
+  test('a bridge page-escape (an Escape the page did not use, in Interact) reaches the host only in Interact, with the frame focused, at most once per 150 ms', async () => {
+    // The Inbox leaves full screen on it. The page can post it itself, so it
+    // is honored only for a key the person pressed in the frame, never in
+    // Annotate (whose Escape is annotate-exit), and a loop is throttled.
+    const seen: string[] = [];
+    const { post } = await mountModeViewer({ annotateModeActive: false, onPageEscape: () => seen.push('escape') });
+    const iframe = document.querySelector<HTMLIFrameElement>('iframe')!;
+    await post({ type: 'plannotator-bridge-page-escape' });
+    expect(seen).toEqual([]);
+    await act(async () => { iframe.focus(); });
+    await post({ type: 'plannotator-bridge-page-escape' });
+    await post({ type: 'plannotator-bridge-page-escape' });
+    expect(seen).toEqual(['escape']);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, htmlViewerModule!.STEP_MESSAGE_MIN_INTERVAL_MS + 20)); });
+    await post({ type: 'plannotator-bridge-page-escape' });
+    expect(seen).toEqual(['escape', 'escape']);
+
+    const armed: string[] = [];
+    const second = await mountModeViewer({ annotateModeActive: true, onPageEscape: () => armed.push('escape') });
+    const frames = document.querySelectorAll<HTMLIFrameElement>('iframe');
+    await act(async () => { frames[frames.length - 1]!.focus(); });
+    await second.post({ type: 'plannotator-bridge-page-escape' });
+    expect(armed).toEqual([]);
+  });
+});
+
+describe.if(hasDom)('parseHtmlElementContext (validated DTO)', () => {
+  // Failures to catch: a hostile page's newlines becoming markdown structure
+  // in agent-read feedback, a non-allowlisted attribute (a form value, an
+  // inline handler) surviving the boundary, unknown keys reaching React
+  // state, an oversized context landing in drafts, and a malformed context
+  // taking the whole selection message down with it.
+  const parse = () => hookModule!.parseHtmlElementContext;
+
+  test('accepts a well-formed context and lowercases the tag', () => {
+    expect(parse()({
+      tag: 'NAV', id: 'site-nav', classes: ['site-nav'], path: 'body > nav#site-nav',
+      role: 'navigation', name: 'Primary', attrs: [['aria-label', 'Primary']],
+      text: 'Home About', outline: '<nav id="site-nav">\n  <ul>…</ul>\n</nav>',
+      children: 2, rect: { x: 0, y: 0, w: 1280, h: 64, vw: 1280, vh: 800 },
+      landmark: 'header.site-header', heading: 'h1 "Acme"', component: 'data-component=AppNav',
+      page: { url: '/dashboard?tab=2', title: 'Acme — Dashboard' },
+    })).toEqual({
+      tag: 'nav', id: 'site-nav', classes: ['site-nav'], path: 'body > nav#site-nav',
+      role: 'navigation', name: 'Primary', attrs: [['aria-label', 'Primary']],
+      text: 'Home About', outline: '<nav id="site-nav">\n  <ul>…</ul>\n</nav>',
+      children: 2, rect: { x: 0, y: 0, w: 1280, h: 64, vw: 1280, vh: 800 },
+      landmark: 'header.site-header', heading: 'h1 "Acme"', component: 'data-component=AppNav',
+      page: { url: '/dashboard?tab=2', title: 'Acme — Dashboard' },
+    });
+  });
+
+  test('collapses newlines in every scalar, defuses fence-closing backticks in the outline', () => {
+    const context = parse()({
+      tag: 'div', name: 'Save\n## INJECTED', path: 'body >\n\n# HEADING', role: 'x\ny',
+      attrs: [['aria-label', 'a\nb']], text: 'line\n\nline',
+      outline: '<div>\n```\n# escaped fence\n</div>',
+    })!;
+    expect(context.name).toBe('Save ## INJECTED');
+    expect(context.path).toBe('body > # HEADING');
+    expect(context.role).toBe('x y');
+    expect(context.attrs).toEqual([['aria-label', 'a b']]);
+    expect(context.text).toBe('line line');
+    expect(context.outline).not.toContain('```');
+    expect(context.outline).toContain("'''");
+  });
+
+  test('drops non-allowlisted attributes and unknown keys, keeps the rest', () => {
+    const context = parse()({
+      tag: 'input', attrs: [['value', 'hunter2'], ['onfocus', 'steal()'], ['style', 'x'], ['placeholder', 'Password'], ['data-secret', 's']],
+      innerHTML: '<b>never</b>', fiber: { props: {} },
+    })!;
+    expect(context.attrs).toEqual([['placeholder', 'Password']]);
+    expect('innerHTML' in context).toBe(false);
+    expect('fiber' in context).toBe(false);
+  });
+
+  test('caps every field and sheds the expendable ones under the byte budget', () => {
+    const huge = 'x'.repeat(5000);
+    const context = parse()({ tag: 'div', text: huge, outline: huge, path: huge, classes: Array(30).fill('c'), attrs: Array(30).fill(['title', 't']) })!;
+    expect(context.text!.length).toBeLessThanOrEqual(300);
+    expect(context.classes!.length).toBeLessThanOrEqual(9);
+    expect(context.attrs!.length).toBeLessThanOrEqual(10);
+    expect(new TextEncoder().encode(JSON.stringify(context)).length).toBeLessThanOrEqual(hookModule!.MAX_ELEMENT_CONTEXT_BYTES);
+  });
+
+  test('a tag-less or non-object context is dropped, never fatal to the selection message', () => {
+    expect(parse()(null)).toBeUndefined();
+    expect(parse()('nav')).toBeUndefined();
+    expect(parse()({ id: 'x' })).toBeUndefined();
+    const message = hookModule!.parseBridgeMessage({
+      type: 'plannotator-bridge-selection', text: '[element: Navigation]',
+      rect: { top: 0, left: 0, width: 10, height: 10 }, pinpoint: true, context: 42,
+    }) as { text: string; context?: unknown };
+    expect(message.text).toBe('[element: Navigation]');
+    expect(message.context).toBeUndefined();
+  });
+
+  test('a rect with a non-finite member is dropped whole; children is floored and clamped', () => {
+    const context = parse()({ tag: 'div', rect: { x: 1, y: 2, w: NaN, h: 4, vw: 5, vh: 6 }, children: 3.7 })!;
+    expect(context.rect).toBeUndefined();
+    expect(context.children).toBe(3);
   });
 });

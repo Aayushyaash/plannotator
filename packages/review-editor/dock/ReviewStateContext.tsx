@@ -1,5 +1,6 @@
 import React, { createContext, useContext } from 'react';
-import type { CallFlowAnnotationTarget, CodeAnnotation, CodeAnnotationType, SelectedLineRange, TokenAnnotationMeta, ConventionalLabel, ConventionalDecoration, Annotation, CommentAnnotation, ArtifactAnnotationMeta } from '@plannotator/ui/types';
+import type { CallFlowAnnotationTarget, CodeAnnotation, CodeAnnotationType, SelectedLineRange, TokenAnnotationMeta, ConventionalLabel, ConventionalDecoration, Annotation, CommentAnnotation, ArtifactAnnotationMeta, ImageAttachment, MarkdownPreviewAnchor } from '@plannotator/ui/types';
+import type { MarkdownPreviewController } from '../hooks/useMarkdownPreview';
 import type { CommentAskAIHandler } from '@plannotator/ui/components/CommentPopover';
 import type { AgentJobInfo } from '@plannotator/ui/types';
 import type { DiffFile, AnnotationScrollTarget } from '../types';
@@ -65,6 +66,30 @@ export interface ReviewState {
   agentCwd?: string | null;
   /** Whether live-working-tree actions match the snapshot currently shown. */
   canUseLiveWorkspaceActions?: boolean;
+  /** False when hunk-context expansion has no source to expand from — a static
+   *  patch review has no working tree, so `/api/file-content` answers 400 and
+   *  the diff views must not ask. Absent means available (every VCS session). */
+  contextExpansionAvailable?: boolean;
+  /** True when the server advertised `imagePreviewSupported`: changed images
+   *  render as Before/After previews through `/api/review-image`. Absent or
+   *  false keeps the plain binary notice and issues no image requests. */
+  imagePreviewAvailable?: boolean;
+  /** The snapshot the server is serving (every mode, PR included); image
+   *  preview requests are bound to it. */
+  snapshotId?: string;
+  /** Markdown file views (Source / Changes / Read, one menu per Markdown
+   *  file). Absent when the server did not advertise
+   *  `markdownPreviewSupported` or has no full contents (static patch): no
+   *  preview UI renders anywhere. */
+  markdownPreview?: MarkdownPreviewController;
+  /** Commit a comment made by selecting text in a previewed Markdown file
+   *  (file-scoped, carries the quote). */
+  onAddMarkdownPreviewComment?: (
+    filePath: string,
+    comment: { id: string; text: string; anchor: MarkdownPreviewAnchor; images?: ImageAttachment[] },
+  ) => void;
+  /** Ask AI about a selection in a previewed Markdown file; absent without AI. */
+  onAskAIForMarkdownPreview?: CommentAskAIHandler;
 
   // Annotations
   allAnnotations: CodeAnnotation[];
@@ -215,10 +240,12 @@ export interface ReviewState {
 
   // Diff navigation
   openDiffFile: (filePath: string) => void;
-  onAllFilesVisibleFileChange: (filePath: string | null) => void;
+  onAllFilesVisibleFileChange: (filePath: string | null, info?: { collapsed: boolean }) => void;
+  /** Auto-mark-viewed: the reader moved on from this file (see useAutoViewed). */
+  onAllFilesFileScrolledPast: (filePath: string) => void;
   isAllFilesActive: boolean;
   // Which left panel drives the all-files item order ('list' = sections order).
-  allFilesOrder: 'tree' | 'list';
+  allFilesOrder: import('../components/AllFilesCodeView').AllFilesOrder;
   // All-files collapse-all toggle — the AllFilesCodeView registers its handler
   // here; the dock header's button (ReviewDockRightActions) invokes it.
   allFilesAllCollapsed: boolean;
@@ -252,6 +279,12 @@ export interface ReviewState {
 
   // Code navigation
   onCodeNavRequest?: (request: import('@plannotator/shared/code-nav').CodeNavRequest) => void;
+  /** Token hover cards. Undefined whenever the gate or the setting is off. */
+  onTokenHoverEnter?: (
+    props: import('@pierre/diffs').DiffTokenEventBaseProps,
+    filePath: string,
+  ) => void;
+  onTokenHoverLeave?: () => void;
   codeNavResult: import('@plannotator/shared/code-nav').CodeNavResponse | null;
   codeNavIsLoading: boolean;
   codeNavActiveSymbol: string | null;

@@ -6,6 +6,7 @@ import {
   createGitProvider,
   createJjProvider,
   createVcsApi,
+  resolveAvailableDiffType,
   resolveInitialDiffType,
 } from "@plannotator/shared/vcs-core";
 import {
@@ -56,6 +57,7 @@ export const {
   prepareLocalReviewDiff,
   runVcsDiff,
   getVcsFileContentsForDiff,
+  getVcsFileBytesForDiff,
   getVcsDiffFingerprint,
   canStageFiles,
   stageFile,
@@ -65,7 +67,7 @@ export const {
   materializeVcsSnapshot,
 } = api;
 
-export { resolveInitialDiffType, gitRuntime };
+export { resolveAvailableDiffType, resolveInitialDiffType, gitRuntime };
 
 export type {
   DiffOption,
@@ -79,9 +81,11 @@ export type {
 
 export {
   JJ_TRUNK_REVSET,
+  jjCommitRevset,
   jjCompareTargetRevset,
   jjLineBaseRevset,
   parseCommitDiffType,
+  parseJjCommitDiffType,
   parseRemoteBookmark,
   parseWorktreeDiffType,
   validateFilePath,

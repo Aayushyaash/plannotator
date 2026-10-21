@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useRef, type RefObject } from "react";
-import { AnnotationType, type Annotation, type EditorMode, type HtmlAnnotationTarget, type HtmlElementAnchor, type ImageAttachment } from "../../types";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, type RefObject } from "react";
+import { AnnotationType, type Annotation, type EditorMode, type HostDraft, type HtmlAnnotationTarget, type HtmlElementAnchor, type HtmlElementContext, type ImageAttachment } from "../../types";
 import { THUMBS_UP_LABEL, type QuickLabel } from "../../utils/quickLabels";
 import { getIdentity } from "../../utils/identity";
 import type {
@@ -8,8 +8,50 @@ import type {
   QuickLabelPickerState,
   UseAnnotationHighlighterReturn,
 } from "../../hooks/useAnnotationHighlighter";
+import { BRIDGE_PROTOCOL_VERSION } from "./bridge-script";
+import {
+  parseHtmlElementContext,
+  MAX_ELEMENT_CONTEXT_BYTES,
+  MAX_PAGE_URL_LENGTH,
+} from "@plannotator/core/html-anchor";
 
 const PREFIX = "plannotator-bridge-";
+
+/** Outcome of comparing a bridge `ready` message's stamp with this parent. */
+export interface BridgeProtocolVerdict {
+  ok: boolean;
+  /** The version this parent bundle speaks (`BRIDGE_PROTOCOL_VERSION`). */
+  expected: number;
+  /** The version the bridge reported; `undefined` when the ready carried none
+   *  (a bridge asset built before the stamp existed, or a forged message). */
+  reported: number | undefined;
+}
+
+/**
+ * Compare a `ready` message against the parent's protocol version. A missing
+ * stamp counts as a mismatch: the only way it can be absent is a bridge asset
+ * older than the parent (or a page forging the message), which is exactly
+ * the drift this check exists to name.
+ */
+export function checkBridgeProtocolVersion(data: unknown): BridgeProtocolVerdict {
+  const raw = isRecord(data) ? data.protocolVersion : undefined;
+  const reported = typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
+  return {
+    ok: reported === BRIDGE_PROTOCOL_VERSION,
+    expected: BRIDGE_PROTOCOL_VERSION,
+    reported,
+  };
+}
+
+/** The one console warning a mismatch produces; names both versions. */
+export function formatBridgeProtocolWarning(
+  verdict: BridgeProtocolVerdict,
+  bridgeScriptUrl?: string,
+): string {
+  const reported = verdict.reported === undefined ? "none" : String(verdict.reported);
+  const source = bridgeScriptUrl ? `the bridge script at ${bridgeScriptUrl}` : "the bridge script";
+  return `[plannotator] HTML bridge protocol version mismatch: this viewer expects ${verdict.expected}, ${source} reported ${reported}. Serve the bridge-script asset from the same @plannotator/ui version as the viewer.`;
+}
 
 // Collision-proof annotation ids. `Date.now()` alone repeats within a millisecond,
 // so two quick annotations could share a data-bind-id and clobber each other.
@@ -17,6 +59,13 @@ let htmlAnnSeq = 0;
 function nextHtmlAnnId(): string {
   return `html-ann-${Date.now().toString(36)}-${(htmlAnnSeq++).toString(36)}`;
 }
+
+// Ids minted for locally created annotations (create-mark) live per hook
+// instance (mintedIdsRef below), not per module: the unanchored union only
+// consults them against the bridge of the instance that minted them (a
+// remounted viewer restores from the host's list and never reports an id it
+// was not asked for), and a module-wide set leaked every id ever minted into
+// unrelated later instances of a long-lived host page.
 
 function htmlCommentDraftKey(
   text: string,
@@ -39,6 +88,8 @@ interface BridgeSelectionMessage {
   targetKey?: string;
   /** Semantic label from the pinpoint hover cascade (chips + export). */
   targetLabel?: string;
+  /** Agent-facing element description (pinpoint clicks) — validated, size-capped. */
+  context?: HtmlElementContext;
 }
 
 /** One draft target in an in-flight multi-select comment. Index 0 is primary. */
@@ -47,6 +98,7 @@ export interface HtmlDraftTarget {
   label?: string;
   text: string;
   anchor: HtmlElementAnchor | null;
+  context?: HtmlElementContext;
 }
 
 interface BridgeMultiTargetAddedMessage {
@@ -55,6 +107,7 @@ interface BridgeMultiTargetAddedMessage {
   label?: string;
   text: string;
   anchor?: HtmlElementAnchor;
+  context?: HtmlElementContext;
 }
 
 interface BridgeRect {
@@ -75,7 +128,8 @@ type BridgeMessage =
   | { type: `${typeof PREFIX}mark-click`; id: string }
   | { type: `${typeof PREFIX}unanchored`; ids: string[] }
   | { type: `${typeof PREFIX}resize`; height: number }
-  | { type: `${typeof PREFIX}page-change`; pageUrl: string };
+  | { type: `${typeof PREFIX}page-change`; pageUrl: string }
+  | { type: `${typeof PREFIX}link-click`; href: string };
 
 /** Live proxied-app session credentials: the proxy origin messages must come
  * from, and the per-session token every message must echo. */
@@ -84,8 +138,10 @@ export interface HtmlLiveSession {
   token: string;
 }
 
-/** Cap for live-mode page identity strings (mirrors the bridge's slice). */
-export const MAX_PAGE_URL_LENGTH = 2048;
+/** Cap for a link href relayed out of the framed document. */
+const MAX_LINK_HREF_LENGTH = 2048;
+/** Control characters never appear in a real href; they are how structure gets smuggled. */
+const LINK_CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
 /** True when a live-session message event fails the origin or token check.
  * Exported for protocol tests. */
@@ -129,6 +185,30 @@ export interface UseHtmlAnnotationOptions {
    *  empty on recovery. Delivered in readOnly mode too: view-only surfaces
    *  are exactly where silently missing markers would go unnoticed. */
   onUnanchoredChange?: (ids: string[]) => void;
+  /** Product cap on additional (shift-click) targets per comment, 0..16.
+   *  Applied at the trust boundary, on submit, on restore, and carried to
+   *  the bridge on arm-multi-select so the in-page toggle stops at the
+   *  same number. Absent: the package's 16, and the arm message is unchanged. */
+  maxAdditionalTargets?: number;
+  /** A link the framed document swallowed rather than navigating to. The raw
+   *  href, already bounded and screened; the host resolves it (see
+   *  `resolveHtmlLinkIntent`). Delivered in readOnly mode too — navigating is
+   *  a read action — and never fired in live sessions, which navigate the
+   *  proxied app for real. */
+  onLinkClick?: (href: string) => void;
+  /** scrollIntoView behavior for scroll-to (selecting an annotation).
+   *  Absent: smooth, as before; pass 'auto' to honor reduced motion. */
+  scrollBehavior?: 'smooth' | 'auto';
+  /** The composer handed to the host (see `HostDraft` and HtmlViewer's
+   *  `onHostDraft`): a selection or a pin reports a draft instead of opening
+   *  the toolbar or the composer. Absent: unchanged. */
+  onHostDraft?: (draft: HostDraft | null) => void;
+}
+
+/** Clamp a host cap into the package's bound; anything unusable is the default. */
+export function resolveMaxAdditionalTargets(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return MAX_ADDITIONAL_TARGETS;
+  return Math.max(0, Math.min(MAX_ADDITIONAL_TARGETS, Math.floor(value)));
 }
 
 function postToIframe(
@@ -252,6 +332,15 @@ function parseTargetLabel(value: unknown): string | undefined {
     : collapsed;
 }
 
+// Re-exported so `components/html-viewer` stays the one import site a host
+// needs for the parent trust boundary; the definitions live in
+// `@plannotator/core/html-anchor`, never mirrored here.
+export {
+  parseHtmlElementContext,
+  MAX_ELEMENT_CONTEXT_BYTES,
+  MAX_PAGE_URL_LENGTH,
+};
+
 function parseBridgeRect(value: unknown): BridgeRect | null {
   if (!isRecord(value)) return null;
   const { top, left, width, height } = value;
@@ -280,6 +369,7 @@ export function parseBridgeMessage(value: unknown): BridgeMessage | null {
         pinpoint: value.pinpoint === true,
         targetKey: parseTargetKey(value.targetKey) ?? undefined,
         targetLabel: parseTargetLabel(value.targetLabel),
+        context: parseHtmlElementContext(value.context),
       };
     }
     case `${PREFIX}multi-target-added`: {
@@ -291,6 +381,7 @@ export function parseBridgeMessage(value: unknown): BridgeMessage | null {
         label: parseTargetLabel(value.label),
         text: capSelectionText(value.text),
         anchor: parseHtmlElementAnchor(value.anchor) ?? undefined,
+        context: parseHtmlElementContext(value.context),
       };
     }
     case `${PREFIX}multi-target-removed`: {
@@ -335,6 +426,16 @@ export function parseBridgeMessage(value: unknown): BridgeMessage | null {
       return typeof value.height === "number" && Number.isFinite(value.height)
         ? { type: value.type, height: value.height }
         : null;
+    case `${PREFIX}link-click`: {
+      // The raw href of a link the framed document just swallowed. It is
+      // page-controlled text, so it is bounded and screened here — the trust
+      // boundary — before the host resolves it into a path or a URL.
+      if (typeof value.href !== "string") return null;
+      const href = value.href.trim();
+      if (!href || href.length > MAX_LINK_HREF_LENGTH) return null;
+      if (LINK_CONTROL_CHARS.test(href)) return null;
+      return { type: value.type, href };
+    }
     case `${PREFIX}page-change`:
       // Live-mode SPA navigation report. Bounded like every bridge string.
       return typeof value.pageUrl === "string"
@@ -363,8 +464,12 @@ export function useHtmlAnnotation({
   onResize,
   live,
   onPageChange,
+  onLinkClick,
   onBridgePointer,
   onUnanchoredChange,
+  maxAdditionalTargets,
+  scrollBehavior,
+  onHostDraft,
 }: UseHtmlAnnotationOptions): Omit<
   UseAnnotationHighlighterReturn,
   "highlighterRef" | "highlightRange" | "highlightMathElement"
@@ -377,9 +482,13 @@ export function useHtmlAnnotation({
   flashDraftTarget: (key: string) => void;
   /** Bumped after every target add/remove so the composer can refocus its textarea. */
   composerFocusToken: number;
-  /** Composer one-click "Looks good": submits the hardcoded positive label
-   *  with the same anchor and multi-select targets a typed comment would carry. */
+  /** Composer one-click 👍: submits the hardcoded positive label with the
+   *  same anchor and multi-select targets a typed comment would carry. */
   handleCommentLooksGood: () => void;
+  /** Ids this module minted for locally created annotations (create-mark),
+   *  for the unanchored union: a minted id the host never listed is a
+   *  swapped-out local mark, not a host row. Read-only, stable identity. */
+  createdAnnotationIds: ReadonlySet<string>;
 } {
   const [toolbarState, setToolbarState] = useState<ToolbarState | null>(null);
   const [commentPopover, setCommentPopover] = useState<CommentPopoverState | null>(null);
@@ -391,6 +500,7 @@ export function useHtmlAnnotation({
   // Element anchor for the pending pinpoint selection — committed onto the
   // annotation so restoration can resolve the exact element again.
   const pendingAnchorRef = useRef<HtmlElementAnchor | null>(null);
+  const pendingContextRef = useRef<HtmlElementContext | null>(null);
   const draftTargetsRef = useRef<HtmlDraftTarget[]>(draftTargets);
   draftTargetsRef.current = draftTargets;
   const onBridgePointerRef = useRef(onBridgePointer);
@@ -399,6 +509,15 @@ export function useHtmlAnnotation({
   enabledRef.current = enabled;
   const modeRef = useRef(mode);
   modeRef.current = mode;
+  // Ids this instance minted (see the module comment above nextHtmlAnnId);
+  // released on unmount so nothing outlives the viewer that created it.
+  const mintedIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const minted = mintedIdsRef.current;
+    return () => {
+      minted.clear();
+    };
+  }, []);
   // Mirror toolbar visibility into a ref so the (stable) message handler can gate
   // type-to-comment on "the markup toolbar is showing", like AnnotationToolbar does.
   const toolbarStateRef = useRef(toolbarState);
@@ -420,6 +539,18 @@ export function useHtmlAnnotation({
   liveRef.current = live ?? null;
   const onPageChangeRef = useRef(onPageChange);
   onPageChangeRef.current = onPageChange;
+  const onLinkClickRef = useRef(onLinkClick);
+  onLinkClickRef.current = onLinkClick;
+  const onHostDraftRef = useRef(onHostDraft);
+  onHostDraftRef.current = onHostDraft;
+  // The id of the draft the host holds, so a stale cancel cannot drop a newer one.
+  const hostDraftIdRef = useRef<string | null>(null);
+  // The effective cap and whether the host set one: only an explicit cap
+  // rides on arm-multi-select, so an unconfigured viewer posts today's message.
+  const maxTargetsRef = useRef(resolveMaxAdditionalTargets(maxAdditionalTargets));
+  maxTargetsRef.current = resolveMaxAdditionalTargets(maxAdditionalTargets);
+  const hostCapRef = useRef(maxAdditionalTargets !== undefined);
+  hostCapRef.current = maxAdditionalTargets !== undefined;
 
   const anchorRef = useRef<HTMLDivElement | null>(null);
 
@@ -455,6 +586,7 @@ export function useHtmlAnnotation({
         setCommentPopover(null);
         pendingTextRef.current = "";
         pendingAnchorRef.current = null;
+        pendingContextRef.current = null;
         return;
       }
       if (index === 0) {
@@ -463,6 +595,7 @@ export function useHtmlAnnotation({
         const next = remaining[0]!;
         pendingTextRef.current = next.text;
         pendingAnchorRef.current = next.anchor;
+        pendingContextRef.current = next.context ?? null;
         setCommentPopover((prev) =>
           prev ? { ...prev, contextText: next.text, selectedText: next.text } : prev,
         );
@@ -504,7 +637,9 @@ export function useHtmlAnnotation({
     [iframeRef, getOrCreateAnchor],
   );
 
-  useEffect(() => {
+  // A layout effect, like HtmlViewer's own listener: listening from the
+  // commit that inserts the iframe, before its document can post anything.
+  useLayoutEffect(() => {
     function handler(e: MessageEvent<unknown>) {
       if (e.source !== iframeRef.current?.contentWindow) return;
       // Live sessions verify origin + session token BEFORE parsing. The
@@ -524,6 +659,8 @@ export function useHtmlAnnotation({
         && type !== `${PREFIX}resize`
         // Page identity is navigation state, not an annotation mutation.
         && type !== `${PREFIX}page-change`
+        // Following a link is a read action; a read-only document still navigates.
+        && type !== `${PREFIX}link-click`
       ) {
         return;
       }
@@ -531,7 +668,41 @@ export function useHtmlAnnotation({
       if (type === `${PREFIX}selection`) {
         pendingTextRef.current = message.text;
         pendingAnchorRef.current = message.anchor ?? null;
+        pendingContextRef.current = message.context ?? null;
         setDraftTargets([]); // a new selection always starts a fresh draft
+        const reportDraft = onHostDraftRef.current;
+        if (reportDraft) {
+          // The host composes: HTML is comment-only, so every selection or
+          // pin is a comment draft, and nothing of ours opens.
+          const id = nextHtmlAnnId();
+          hostDraftIdRef.current = id;
+          reportDraft({
+            annotation: {
+              id,
+              blockId: "",
+              startOffset: 0,
+              endOffset: 0,
+              type: AnnotationType.COMMENT,
+              text: "",
+              originalText: message.text,
+              author: getIdentity(),
+              createdA: Date.now(),
+              htmlAnchor: message.anchor,
+              elementContext: message.context,
+            },
+            intent: message.pinpoint ? "compose" : "selection",
+            label: message.targetLabel,
+            cancel: () => {
+              if (hostDraftIdRef.current !== id) return;
+              hostDraftIdRef.current = null;
+              post({ type: `${PREFIX}cancel-selection` });
+              pendingTextRef.current = "";
+              pendingAnchorRef.current = null;
+              pendingContextRef.current = null;
+            },
+          });
+          return;
+        }
         const anchor = positionAnchor(message.rect);
         if (!anchor) return;
 
@@ -575,11 +746,13 @@ export function useHtmlAnnotation({
                 label: message.targetLabel,
                 text: message.text,
                 anchor: message.anchor ?? null,
+                context: message.context,
               },
             ]);
             post({
               type: `${PREFIX}arm-multi-select`,
               key: message.targetKey,
+              ...(hostCapRef.current ? { max: maxTargetsRef.current } : {}),
             });
           }
         } else {
@@ -599,7 +772,7 @@ export function useHtmlAnnotation({
         if (
           commentPopoverRef.current
           && targets.length > 0
-          && targets.length < 1 + MAX_ADDITIONAL_TARGETS
+          && targets.length < 1 + maxTargetsRef.current
           && !targets.some((t) => t.key === message.key)
         ) {
           setDraftTargets([
@@ -609,6 +782,7 @@ export function useHtmlAnnotation({
               label: message.label,
               text: message.text,
               anchor: message.anchor ?? null,
+              context: message.context,
             },
           ]);
           setComposerFocusToken((t) => t + 1);
@@ -624,6 +798,10 @@ export function useHtmlAnnotation({
       }
 
       if (type === `${PREFIX}selection-clear`) {
+        if (onHostDraftRef.current && hostDraftIdRef.current) {
+          hostDraftIdRef.current = null;
+          onHostDraftRef.current(null);
+        }
         setToolbarState(null);
         // Keep the captured text alive while a comment/quick-label is open: the user
         // is composing, and the selection collapsing or scrolling out of view must
@@ -631,6 +809,7 @@ export function useHtmlAnnotation({
         if (!commentPopoverRef.current && !quickLabelPickerRef.current) {
           pendingTextRef.current = "";
           pendingAnchorRef.current = null;
+          pendingContextRef.current = null;
         }
       }
 
@@ -685,6 +864,10 @@ export function useHtmlAnnotation({
       if (type === `${PREFIX}page-change`) {
         onPageChangeRef.current?.(message.pageUrl);
       }
+
+      if (type === `${PREFIX}link-click`) {
+        onLinkClickRef.current?.(message.href);
+      }
     }
 
     window.addEventListener("message", handler);
@@ -715,6 +898,9 @@ export function useHtmlAnnotation({
       post({
         type: `${PREFIX}scroll-to`,
         id: selectedAnnotationId,
+        // Only an explicit host preference rides along; the default message
+        // is unchanged and the bridge scrolls smoothly as before.
+        ...(scrollBehavior ? { behavior: scrollBehavior } : {}),
       });
     } else {
       post({
@@ -722,7 +908,7 @@ export function useHtmlAnnotation({
         id: null,
       });
     }
-  }, [selectedAnnotationId, post]);
+  }, [selectedAnnotationId, post, scrollBehavior]);
 
   const handleAnnotate = useCallback(
     (type: AnnotationType) => {
@@ -731,6 +917,7 @@ export function useHtmlAnnotation({
       if (!text || type !== AnnotationType.DELETION) return;
 
       const id = nextHtmlAnnId();
+      mintedIdsRef.current.add(id);
       post({ type: `${PREFIX}create-mark`, id, annotationType: "deletion" });
       onAddRef.current?.({
         id,
@@ -742,11 +929,13 @@ export function useHtmlAnnotation({
         author: getIdentity(),
         createdA: Date.now(),
         htmlAnchor: pendingAnchorRef.current ?? undefined,
+        elementContext: pendingContextRef.current ?? undefined,
       });
 
       setToolbarState(null);
       pendingTextRef.current = "";
       pendingAnchorRef.current = null;
+      pendingContextRef.current = null;
     },
     [post],
   );
@@ -769,8 +958,14 @@ export function useHtmlAnnotation({
     [getOrCreateAnchor],
   );
 
-  const handleCommentSubmit = useCallback(
-    (comment: string, images?: ImageAttachment[]) => {
+  // One commit path for everything the pinpoint composer submits (a typed
+  // comment or the one-click 👍), so both carry the same anchor, element
+  // context and multi-select targets.
+  const commitComposerDraft = useCallback(
+    (
+      body: Pick<Annotation, "text"> &
+        Partial<Pick<Annotation, "images" | "mentions" | "isQuickLabel" | "quickLabelTip">>,
+    ) => {
       if (!enabledRef.current) return;
       // Prefer the text captured when the popover opened — it can't be clobbered by
       // a later selection change or clear while the user is composing the comment.
@@ -781,14 +976,16 @@ export function useHtmlAnnotation({
       const targets = draftTargetsRef.current;
       const additionalTargets: HtmlAnnotationTarget[] | undefined =
         targets.length > 1
-          ? targets.slice(1, 1 + MAX_ADDITIONAL_TARGETS).map((t) => ({
+          ? targets.slice(1, 1 + maxTargetsRef.current).map((t) => ({
               label: t.label,
               text: t.text,
               anchor: t.anchor ?? undefined,
+              ...(t.context ? { context: t.context } : {}),
             }))
           : undefined;
 
       const id = nextHtmlAnnId();
+      mintedIdsRef.current.add(id);
       post({ type: `${PREFIX}create-mark`, id, annotationType: "comment" });
       onAddRef.current?.({
         id,
@@ -796,12 +993,12 @@ export function useHtmlAnnotation({
         startOffset: 0,
         endOffset: 0,
         type: AnnotationType.COMMENT,
-        text: comment,
         originalText: text,
         author: getIdentity(),
         createdA: Date.now(),
-        images,
+        ...body,
         htmlAnchor: pendingAnchorRef.current ?? undefined,
+        elementContext: pendingContextRef.current ?? undefined,
         htmlAdditionalTargets: additionalTargets,
       });
 
@@ -809,53 +1006,37 @@ export function useHtmlAnnotation({
       setDraftTargets([]);
       pendingTextRef.current = "";
       pendingAnchorRef.current = null;
+      pendingContextRef.current = null;
     },
     [post],
   );
 
-  // The composer's one-click "Looks good" (the restored thumbs-up for
-  // comment-only surfaces, where pinpoint clicks land straight in the
-  // composer and never see the selection toolbar). Mirrors
-  // handleCommentSubmit — same anchor, same multi-select targets — but
-  // emits the hardcoded positive label instead of typed prose.
-  const handleCommentLooksGood = useCallback(() => {
-    if (!enabledRef.current) return;
-    const text = commentPopoverRef.current?.selectedText || pendingTextRef.current;
-    if (!text) return;
+  const handleCommentSubmit = useCallback(
+    (comment: string, images?: ImageAttachment[], mentions?: readonly string[]) =>
+      commitComposerDraft({
+        text: comment,
+        images,
+        // Host capability: present only when a mentionSource was supplied AND
+        // a token survived, so a comment without one is unchanged.
+        ...(mentions && mentions.length > 0 ? { mentions } : {}),
+      }),
+    [commitComposerDraft],
+  );
 
-    const targets = draftTargetsRef.current;
-    const additionalTargets: HtmlAnnotationTarget[] | undefined =
-      targets.length > 1
-        ? targets.slice(1, 1 + MAX_ADDITIONAL_TARGETS).map((t) => ({
-            label: t.label,
-            text: t.text,
-            anchor: t.anchor ?? undefined,
-          }))
-        : undefined;
-
-    const id = nextHtmlAnnId();
-    post({ type: `${PREFIX}create-mark`, id, annotationType: "comment" });
-    onAddRef.current?.({
-      id,
-      blockId: "",
-      startOffset: 0,
-      endOffset: 0,
-      type: AnnotationType.COMMENT,
-      text: THUMBS_UP_LABEL.text,
-      originalText: text,
-      isQuickLabel: true,
-      quickLabelTip: THUMBS_UP_LABEL.tip,
-      author: getIdentity(),
-      createdA: Date.now(),
-      htmlAnchor: pendingAnchorRef.current ?? undefined,
-      htmlAdditionalTargets: additionalTargets,
-    });
-
-    setCommentPopover(null);
-    setDraftTargets([]);
-    pendingTextRef.current = "";
-    pendingAnchorRef.current = null;
-  }, [post]);
+  // The composer's one-click 👍. A pinpoint click opens this composer
+  // directly and never shows the selection toolbar, so without it a reviewer
+  // could not mark an element "looks good" in one click. Emits the same
+  // hardcoded positive label as the toolbar's 👍 (the only label comment-only
+  // surfaces may create), on the pinned element(s).
+  const handleCommentLooksGood = useCallback(
+    () =>
+      commitComposerDraft({
+        text: THUMBS_UP_LABEL.text,
+        isQuickLabel: true,
+        quickLabelTip: THUMBS_UP_LABEL.tip,
+      }),
+    [commitComposerDraft],
+  );
 
   const handleCommentClose = useCallback(() => {
     post({ type: `${PREFIX}cancel-selection` });
@@ -863,6 +1044,7 @@ export function useHtmlAnnotation({
     setDraftTargets([]);
     pendingTextRef.current = "";
     pendingAnchorRef.current = null;
+    pendingContextRef.current = null;
   }, [post]);
 
   const removeDraftTarget = useCallback(
@@ -885,6 +1067,7 @@ export function useHtmlAnnotation({
     setToolbarState(null);
     pendingTextRef.current = "";
     pendingAnchorRef.current = null;
+    pendingContextRef.current = null;
   }, [post]);
 
   const applyQuickLabel = useCallback(
@@ -893,6 +1076,7 @@ export function useHtmlAnnotation({
       const text = pendingTextRef.current;
       if (!text) return;
       const id = nextHtmlAnnId();
+      mintedIdsRef.current.add(id);
       post({ type: `${PREFIX}create-mark`, id, annotationType: "comment" });
       onAddRef.current?.({
         id,
@@ -907,10 +1091,12 @@ export function useHtmlAnnotation({
         author: getIdentity(),
         createdA: Date.now(),
         htmlAnchor: pendingAnchorRef.current ?? undefined,
+        elementContext: pendingContextRef.current ?? undefined,
       });
       clearState();
       pendingTextRef.current = "";
       pendingAnchorRef.current = null;
+      pendingContextRef.current = null;
     },
     [post],
   );
@@ -953,7 +1139,7 @@ export function useHtmlAnnotation({
         const additionalAnchors = (ann.htmlAdditionalTargets ?? [])
           .map((t) => t.anchor)
           .filter((a): a is HtmlElementAnchor => !!a)
-          .slice(0, MAX_ADDITIONAL_TARGETS);
+          .slice(0, maxTargetsRef.current);
         post({
           type: `${PREFIX}find-and-mark`,
           id: ann.id,
@@ -989,5 +1175,6 @@ export function useHtmlAnnotation({
     removeDraftTarget,
     flashDraftTarget,
     composerFocusToken,
+    createdAnnotationIds: mintedIdsRef.current,
   };
 }

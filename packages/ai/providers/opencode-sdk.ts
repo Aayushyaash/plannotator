@@ -1,10 +1,13 @@
 /**
  * OpenCode provider — bridges Plannotator's AI layer with OpenCode's agent server.
  *
- * Uses @opencode-ai/sdk to connect to an existing `opencode serve` first and
- * only spawns a new server when nothing is reachable. One server is shared
- * across all sessions. The user must have the `opencode` CLI installed and
- * authenticated.
+ * Uses @opencode-ai/sdk to spawn a dedicated `opencode serve` on an
+ * OS-assigned port. One server is shared across all sessions of this process,
+ * closed on dispose and on process exit. This provider deliberately never
+ * attaches to a server it did not spawn: an attached server cannot be cleaned
+ * up by us, and opencode's per-directory instances accumulate in it without
+ * eviction, so a shared long-lived server grows without bound. The user must
+ * have the `opencode` CLI installed and authenticated.
  */
 
 import type { OpencodeClient } from "@opencode-ai/sdk";
@@ -58,13 +61,19 @@ export class OpenCodeProvider implements AIProvider {
 	private server: { url: string; close: () => void } | null = null;
 	private client: OpencodeClient | null = null;
 	private startPromise: Promise<void> | null = null;
-	private lastAttachError: string | null = null;
+	private exitHandler: (() => void) | null = null;
+	/**
+	 * Bumped by dispose() to invalidate an in-flight doStart: a spawn that
+	 * completes after its epoch has passed reaps its own server instead of
+	 * resurrecting a provider the runtime already considers disposed.
+	 */
+	private startEpoch = 0;
 
 	constructor(config: OpenCodeConfig) {
 		this.config = config;
 	}
 
-	/** Attach to an existing OpenCode server or spawn one if needed. */
+	/** Spawn this process's OpenCode server if it is not already running. */
 	async ensureServer(): Promise<void> {
 		if (this.client) return;
 		this.startPromise ??= this.doStart().catch((err) => {
@@ -75,55 +84,80 @@ export class OpenCodeProvider implements AIProvider {
 	}
 
 	private async doStart(): Promise<void> {
-		this.lastAttachError = null;
+		const epoch = this.startEpoch;
 		const { createOpencodeServer, createOpencodeClient } = await getSDK();
-		const attachedClient = await this.tryAttachExistingServer(createOpencodeClient);
-		if (attachedClient) {
-			this.client = attachedClient;
-			return;
-		}
-
+		// port 0 asks opencode for an OS-assigned free port (the SDK reads the
+		// real URL back from the child's "listening" line), so every Plannotator
+		// process gets its own server instead of piling onto a shared default
+		// port. An explicitly configured port is still honored verbatim.
+		let server: { url: string; close: () => void };
 		try {
-			this.server = await createOpencodeServer({
+			server = await createOpencodeServer({
 				hostname: this.config.hostname ?? "127.0.0.1",
-				...(this.config.port != null && { port: this.config.port }),
+				port: this.config.port ?? 0,
 				timeout: 15_000,
 			});
-		} catch (err) {
-			const spawnMessage = err instanceof Error ? err.message : String(err);
-			if (this.lastAttachError) {
-				throw new Error(`${this.lastAttachError}\nFallback startup also failed: ${spawnMessage}`);
+		} catch (err: unknown) {
+			// A missing CLI is a spawn error with code ENOENT in every runtime
+			// (Node: "spawn opencode ENOENT"; Bun: "Executable not found in
+			// $PATH"; cross-spawn re-emits the Windows cmd.exe miss the same
+			// way). Match the code only: the SDK's other failures embed the
+			// child's stderr in the message, which can say "not found" for
+			// reasons that have nothing to do with the binary.
+			if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+				throw new Error(
+					"OpenCode CLI (`opencode`) was not found on PATH. Install it (https://opencode.ai) or choose a different AI provider.",
+					{ cause: err },
+				);
 			}
 			throw err;
 		}
+		// A SIGINT/SIGTERM death is routed through process.exit() by the CLI, so
+		// an "exit" handler is what keeps Ctrl-C from orphaning the spawned
+		// `opencode serve` child (server.close() kills it synchronously). The
+		// closure captures ITS server — never `this.server`, which a failed
+		// retry could have replaced, leaving the first child unreachable by any
+		// cleanup. No SIGHUP listener: that would override the ignored
+		// disposition `nohup` depends on.
+		const exitHandler = () => {
+			try {
+				server.close();
+			} catch {
+				// Best effort — the process is exiting either way.
+			}
+		};
+		process.once("exit", exitHandler);
 
-		this.client = createOpencodeClient({
-			baseUrl: this.server!.url,
-			directory: this.config.cwd ?? process.cwd(),
-		});
-	}
+		const reap = () => {
+			process.removeListener("exit", exitHandler);
+			try {
+				server.close();
+			} catch {
+				// Best effort — the child may already be gone.
+			}
+		};
 
-	private async tryAttachExistingServer(
-		createOpencodeClient: (config?: { baseUrl?: string; directory?: string }) => OpencodeClient,
-	): Promise<OpencodeClient | null> {
-		const cwd = this.config.cwd ?? process.cwd();
-		const baseUrl = `http://${this.config.hostname ?? "127.0.0.1"}:${this.config.port ?? 4096}`;
-		const client = createOpencodeClient({
-			baseUrl,
-			directory: cwd,
-		});
+		if (epoch !== this.startEpoch) {
+			// dispose() ran while the spawn was in flight: the runtime no longer
+			// wants this provider, so reap the just-spawned server instead of
+			// resurrecting a disposed provider with a live child.
+			reap();
+			throw new Error("OpenCode provider was disposed during startup.");
+		}
 
 		try {
-			await client.config.get({
-				throwOnError: true,
-				signal: AbortSignal.timeout(1_000),
+			this.client = createOpencodeClient({
+				baseUrl: server.url,
+				directory: this.config.cwd ?? process.cwd(),
 			});
-			return client;
 		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			this.lastAttachError = `Failed to attach to existing OpenCode server at ${baseUrl}: ${message}`;
-			return null;
+			// A post-spawn failure must not leak the child: close it and drop the
+			// handler so a retry starts from a clean slate.
+			reap();
+			throw err;
 		}
+		this.server = server;
+		this.exitHandler = exitHandler;
 	}
 
 	private getClient(): OpencodeClient {
@@ -198,6 +232,13 @@ export class OpenCodeProvider implements AIProvider {
 	}
 
 	dispose(): void {
+		// Invalidate any in-flight doStart so a spawn completing after this
+		// point reaps itself instead of resurrecting the provider.
+		this.startEpoch++;
+		if (this.exitHandler) {
+			process.removeListener("exit", this.exitHandler);
+			this.exitHandler = null;
+		}
 		if (this.server) {
 			this.server.close();
 			this.server = null;

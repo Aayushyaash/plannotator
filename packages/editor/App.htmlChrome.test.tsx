@@ -1,12 +1,15 @@
 /**
  * HTML-surface chrome contract (DOM-gated).
  *
- * The header "Hide tools" eye toggle (left of the pen) removes ALL floating
- * chrome over the page from the DOM: the sidebar tongue tabs and the
- * comment/attachments cluster, with no residual artifact. The toggle itself
- * lives in the header, so a hidden state (including one restored from an old
- * cookie) always has a way back. Sidebar/panel halves of the persisted state
- * round-trip; the pen reports the armed-by-default Interact/Annotate state.
+ * An HTML surface opens with the floating tools HIDDEN — the page gets the
+ * whole viewport — and the header "Hide tools" eye (left of the pen) is what
+ * reveals them. Hiding removes ALL floating chrome over the page from the
+ * DOM: the sidebar tongue tabs and the comment/attachments cluster, with no
+ * residual artifact. The toggle itself lives in the header, so the hidden
+ * state (default, or restored from a cookie) always has a way back, and a
+ * fresh cookie recording shown tools still wins over the default.
+ * Sidebar/panel halves of the persisted state round-trip; the pen reports the
+ * armed-by-default Interact/Annotate state.
  */
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import React, { act } from "react";
@@ -21,6 +24,7 @@ const hasDom = typeof document !== "undefined";
 
 if (hasDom) {
   document.cookie = "plannotator-look-feel-announcement-seen=2; path=/";
+  document.cookie = "plannotator-announce-tui-herdr-seen=1; path=/";
   document.cookie = "plannotator-vim-mode-announcement-seen=2; path=/";
   document.cookie = "plannotator-plan-ai-announcement-seen=1; path=/";
 }
@@ -60,6 +64,7 @@ const memoryBackend: StorageBackend = {
 
 function seedAnnouncementsSeen(): void {
   memory.set("plannotator-look-feel-announcement-seen", "2");
+  memory.set("plannotator-announce-tui-herdr-seen", "1");
   memory.set("plannotator-vim-mode-announcement-seen", "2");
   memory.set("plannotator-plan-ai-announcement-seen", "1");
 }
@@ -114,6 +119,60 @@ const annotateFetch: typeof fetch = async (input) => {
   return Response.json({});
 };
 
+// A session whose file has a saved previous version: /api/plan carries the
+// rendered diff, and the root's /api/doc read (what Refresh performs) carries
+// the diff recomputed against the bytes just read.
+const DIFF_HTML = "<h1>Rendered <ins>page</ins></h1><p>Body copy.</p>";
+const REFRESHED_HTML = "<h1>Rendered page</h1><p>Body copy, edited.</p>";
+const REFRESHED_DIFF_HTML = "<h1>Rendered page</h1><p>Body copy<ins>, edited</ins>.</p>";
+const versionedPlan = {
+  ...htmlAnnotatePlan,
+  diffHtml: DIFF_HTML,
+  previousPlan: "<h1>Rendered</h1><p>Body copy.</p>",
+  versionInfo: { version: 2, totalVersions: 2, project: "test" },
+};
+const versionedFetch: typeof fetch = async (input) => {
+  const rawUrl = input instanceof Request ? input.url : String(input);
+  const url = new URL(rawUrl, "http://localhost");
+  if (url.pathname === "/api/plan") return Response.json(versionedPlan);
+  if (url.pathname === "/api/doc" && url.searchParams.get("path") === htmlAnnotatePlan.filePath) {
+    return Response.json({
+      rawHtml: REFRESHED_HTML,
+      renderAs: "html",
+      filepath: htmlAnnotatePlan.filePath,
+      diffHtml: REFRESHED_DIFF_HTML,
+      previousPlan: versionedPlan.previousPlan,
+      versionInfo: versionedPlan.versionInfo,
+    });
+  }
+  return annotateFetch(input);
+};
+
+// A folder annotate session that happens to be rendering an HTML document.
+// Its file browser owns the left sidebar, which is why the sidebar/panel halves
+// of the persisted chrome do not apply here — but the eye does.
+const folderAnnotatePlan = {
+  ...htmlAnnotatePlan,
+  mode: "annotate-folder",
+  filePath: "/tmp/docs",
+};
+
+const folderFetch: typeof fetch = async (input) => {
+  const rawUrl = input instanceof Request ? input.url : String(input);
+  const url = new URL(rawUrl, "http://localhost");
+  if (url.pathname === "/api/plan") return Response.json(folderAnnotatePlan);
+  return annotateFetch(input);
+};
+
+function diffToggle(): HTMLButtonElement | undefined {
+  return Array.from(document.querySelectorAll("button"))
+    .find((button) => /changes vs previous version/.test(button.title));
+}
+
+function refreshButton(): HTMLButtonElement | null {
+  return document.querySelector<HTMLButtonElement>("[data-html-refresh]");
+}
+
 function findButtonByText(label: string): HTMLButtonElement | undefined {
   return Array.from(document.querySelectorAll("button"))
     .find((button) => button.textContent?.trim() === label);
@@ -142,8 +201,8 @@ async function settle(): Promise<void> {
   });
 }
 
-async function mountHtmlAnnotate(): Promise<void> {
-  globalThis.fetch = annotateFetch;
+async function mountHtmlAnnotate(fetchImpl: typeof fetch = annotateFetch): Promise<void> {
+  globalThis.fetch = fetchImpl;
   // SAFETY: the App only uses EventSource's constructor, handlers, and close;
   // this test double implements those browser-facing members without I/O.
   globalThis.EventSource = SilentEventSource as unknown as typeof EventSource;
@@ -165,8 +224,8 @@ function armedRing(): HTMLElement | null {
 
 /** Compact mounts wait on the armed ring: neither the pen nor the eye toggle
  * exists on the compact touch shell (that absence is what these tests guard). */
-async function mountCompactHtmlAnnotate(): Promise<void> {
-  globalThis.fetch = annotateFetch;
+async function mountCompactHtmlAnnotate(fetchImpl: typeof fetch = annotateFetch): Promise<void> {
+  globalThis.fetch = fetchImpl;
   // SAFETY: the App only uses EventSource's constructor, handlers, and close.
   globalThis.EventSource = SilentEventSource as unknown as typeof EventSource;
   host = document.createElement("div");
@@ -216,18 +275,19 @@ afterAll(() => {
 });
 
 describe.if(hasDom)("HTML annotate chrome (tools toggle + pen toggle)", () => {
-  test("tools default visible: eye toggle present, tongue tabs + cluster render", async () => {
+  test("tools default HIDDEN: no tongue tabs or cluster, and the eye renders its hidden state", async () => {
     setStorageBackend(memoryBackend);
     seedAnnouncementsSeen();
     await mountHtmlAnnotate();
 
+    expect(sidebarTabs()).toBeNull();
+    expect(floatingCluster()).toBeNull();
+    // The eye is the way back, and it reports "hidden" from the first paint.
     expect(toolsToggle()).not.toBeNull();
-    expect(toolsToggle()!.getAttribute("aria-pressed")).toBe("false");
-    expect(sidebarTabs()).not.toBeNull();
-    expect(floatingCluster()).not.toBeNull();
+    expect(toolsToggle()!.getAttribute("aria-pressed")).toBe("true");
   });
 
-  test("Hide tools removes ALL floating chrome from the DOM, with no residual artifact; Show tools brings it back", async () => {
+  test("Show tools brings ALL floating chrome back; Hide removes it again with no residual artifact", async () => {
     setStorageBackend(memoryBackend);
     seedAnnouncementsSeen();
     await mountHtmlAnnotate();
@@ -236,15 +296,30 @@ describe.if(hasDom)("HTML annotate chrome (tools toggle + pen toggle)", () => {
     if (!toggle) throw new Error("tools toggle missing");
     await act(async () => toggle.click());
 
+    expect(sidebarTabs()).not.toBeNull();
+    expect(floatingCluster()).not.toBeNull();
+    expect(toolsToggle()!.getAttribute("aria-pressed")).toBe("false");
+
+    await act(async () => toolsToggle()!.click());
     expect(sidebarTabs()).toBeNull();
     expect(floatingCluster()).toBeNull();
     // No leftover pill/expander: the toggle in the header is the only way back.
     expect(toolsToggle()).not.toBeNull();
     expect(toolsToggle()!.getAttribute("aria-pressed")).toBe("true");
+  });
 
-    await act(async () => toolsToggle()!.click());
-    expect(sidebarTabs()).not.toBeNull();
+  test("a fresh cookie recording toolsHidden:false still shows the tools (the default never overrides an explicit choice)", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    memory.set(
+      "plannotator-html-chrome",
+      JSON.stringify({ toolsHidden: false, sidebarOpen: false, panelOpen: false, savedAt: Date.now() }),
+    );
+    await mountHtmlAnnotate();
+    await settle();
+
     expect(floatingCluster()).not.toBeNull();
+    expect(toolsToggle()!.getAttribute("aria-pressed")).toBe("false");
   });
 
   test("a cookie recording toolsHidden:true restores hidden, and the header toggle is the way back", async () => {
@@ -266,18 +341,15 @@ describe.if(hasDom)("HTML annotate chrome (tools toggle + pen toggle)", () => {
     expect(sidebarTabs()).not.toBeNull();
   });
 
-  test("compact touch layout: a toolsHidden:true cookie is undoable through the Options menu 'Show tools' action", async () => {
+  test("compact touch layout: the hidden-by-default tools are undoable through the Options menu 'Show tools' action", async () => {
     setStorageBackend(memoryBackend);
     seedAnnouncementsSeen();
-    memory.set(
-      "plannotator-html-chrome",
-      JSON.stringify({ toolsHidden: true, sidebarOpen: false, panelOpen: false, savedAt: Date.now() }),
-    );
     window.matchMedia = coarseMatchMedia as typeof window.matchMedia;
     await mountCompactHtmlAnnotate();
 
-    // The cookie applies (desktop parity), but compact is not stranded: the
-    // desktop-only eye toggle is absent and the menu action is the way back.
+    // Hidden applies on compact too (desktop parity), but compact is not
+    // stranded: the desktop-only eye toggle is absent and the menu action is
+    // the way back — and it must read "Show tools", not "Hide tools".
     expect(floatingCluster()).toBeNull();
     expect(toolsToggle()).toBeNull();
 
@@ -311,6 +383,28 @@ describe.if(hasDom)("HTML annotate chrome (tools toggle + pen toggle)", () => {
     if (!annotate) throw new Error('compact menu is missing the "Annotate page" action');
     await act(async () => annotate.click());
     expect(armedRing()).not.toBeNull();
+  });
+
+  test("compact touch layout: Refresh from disk is offered through the Options menu (the header refresh is absent)", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    window.matchMedia = coarseMatchMedia as typeof window.matchMedia;
+    await mountCompactHtmlAnnotate(versionedFetch);
+
+    // The desktop-only header refresh is not rendered on compact, so the
+    // menu action is the only way to re-read the file.
+    expect(refreshButton()).toBeNull();
+
+    await openOptionsMenu();
+    const refresh = findMenuItem("Refresh from disk");
+    if (!refresh) throw new Error('compact menu is missing the "Refresh from disk" action');
+    expect(refresh.disabled).toBe(false);
+    await act(async () => refresh.click());
+    for (let attempt = 0; attempt < 20 && !document.querySelector('iframe[srcdoc*="edited"]'); attempt += 1) {
+      await settle();
+    }
+    // The refreshed bytes reached the viewer.
+    expect(document.querySelector<HTMLIFrameElement>("iframe[srcdoc]")?.getAttribute("srcdoc")).toContain("Body copy, edited.");
   });
 
   test("the restore commit never writes stale pre-restore values to the cookie", async () => {
@@ -383,6 +477,178 @@ describe.if(hasDom)("HTML annotate chrome (tools toggle + pen toggle)", () => {
     expect(findButtonByText("Contents")).not.toBeUndefined();
   });
 
+  test("Refresh keeps the version-diff toggle available (the server recomputes the diff for the root document)", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    // The version-diff toggle lives in the floating cluster over the page,
+    // which an HTML surface hides by default — this test is about refresh, so
+    // start from a session whose reviewer had the tools showing.
+    memory.set(
+      "plannotator-html-chrome",
+      JSON.stringify({ toolsHidden: false, sidebarOpen: false, panelOpen: false, savedAt: Date.now() }),
+    );
+    await mountHtmlAnnotate(versionedFetch);
+    await settle();
+
+    // The toggle is offered on load, in normal (non-diff) mode.
+    expect(diffToggle()).not.toBeUndefined();
+    expect(diffToggle()!.title).toBe("Show changes vs previous version");
+
+    // Enter the diff view, then refresh: the view returns to normal mode and
+    // the toggle is still there (it used to disappear for the session).
+    await act(async () => diffToggle()!.click());
+    expect(diffToggle()!.title).toBe("Hide changes vs previous version");
+
+    const refresh = refreshButton();
+    if (!refresh) throw new Error("refresh button missing");
+    await act(async () => refresh.click());
+    for (let attempt = 0; attempt < 20 && refreshButton()?.getAttribute("aria-disabled") !== "false"; attempt += 1) {
+      await settle();
+    }
+
+    expect(diffToggle()).not.toBeUndefined();
+    expect(diffToggle()!.title).toBe("Show changes vs previous version");
+    // And the recomputed diff is what a second toggle renders.
+    await act(async () => diffToggle()!.click());
+    await settle();
+    const frame = document.querySelector<HTMLIFrameElement>("iframe[srcdoc]");
+    expect(frame?.getAttribute("srcdoc")).toContain("<ins>, edited</ins>");
+  });
+
+  test("an Unanchored chip from one refresh clears when the next refresh's restore report is empty", async () => {
+    // The bridge answers the parent's post-restore report request with the
+    // complete set, empty included (pinned in htmlPinpointProtocol.test);
+    // the App replaces its chip set with each report, so a chip from
+    // refresh 1 must not survive a refresh 2 on which everything anchors.
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    const draftedFetch: typeof fetch = async (input) => {
+      const rawUrl = input instanceof Request ? input.url : String(input);
+      const url = new URL(rawUrl, "http://localhost");
+      if (url.pathname === "/api/draft" && (!(input instanceof Request) || input.method === "GET")) {
+        return Response.json({
+          annotations: [{
+            id: "X",
+            blockId: "",
+            startOffset: 0,
+            endOffset: 0,
+            type: "COMMENT",
+            text: "pinned note",
+            originalText: "Body copy.",
+            createdA: 1,
+            htmlAnchor: { selector: "p", tagName: "p", text: "Body copy." },
+          }],
+          codeAnnotations: [],
+          globalAttachments: [],
+        });
+      }
+      return versionedFetch(input);
+    };
+    await mountHtmlAnnotate(draftedFetch);
+    await settle();
+    // The draft arrives behind the "Draft Recovered" dialog; restore it.
+    for (let attempt = 0; attempt < 20 && !findButtonByText("Restore"); attempt += 1) {
+      await settle();
+    }
+    const restore = findButtonByText("Restore");
+    if (!restore) throw new Error("draft restore dialog missing");
+    await act(async () => restore.click());
+    await settle();
+    // The chip lives on the panel card; the HTML surface opens with the
+    // panel collapsed, so open it.
+    const showPanel = document.querySelector<HTMLButtonElement>('button[title="Show annotations"]');
+    if (showPanel) await act(async () => showPanel.click());
+    await settle();
+    expect(document.querySelector('[data-annotation-id="X"]')).not.toBeNull();
+    const chip = () => document.querySelector('[data-annotation-unanchored]');
+    const frame = () => document.querySelector<HTMLIFrameElement>("iframe[srcdoc]");
+    const report = async (ids: string[]) => {
+      const iframe = frame();
+      if (!iframe?.contentWindow) throw new Error("HTML iframe missing");
+      await act(async () => {
+        window.dispatchEvent(new MessageEvent("message", {
+          source: iframe.contentWindow,
+          data: { type: "plannotator-bridge-unanchored", ids },
+        }));
+      });
+    };
+    const refresh = async () => {
+      const button = refreshButton();
+      if (!button) throw new Error("refresh button missing");
+      await act(async () => button.click());
+      for (let attempt = 0; attempt < 20 && refreshButton()?.getAttribute("aria-disabled") !== "false"; attempt += 1) {
+        await settle();
+      }
+    };
+    expect(chip()).toBeNull();
+
+    // Refresh 1: the remounted viewer's bridge reports X unanchored.
+    await refresh();
+    await report(["X"]);
+    expect(chip()).not.toBeNull();
+
+    // Refresh 2: the page anchors everything; the report is the empty set.
+    await refresh();
+    await report([]);
+    expect(chip()).toBeNull();
+  });
+
+  test("Mod+Shift+A toggles annotate mode in BOTH directions (the way back in after Esc)", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    await mountHtmlAnnotate();
+
+    const press = async () => {
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "a", metaKey: true, shiftKey: true, bubbles: true,
+        }));
+      });
+    };
+
+    expect(penToggle()!.getAttribute("aria-pressed")).toBe("true");
+    await press();
+    expect(penToggle()!.getAttribute("aria-pressed")).toBe("false");
+    // The direction Esc cannot provide: the chord re-arms.
+    await press();
+    expect(penToggle()!.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  test("Mod+Shift+X flips the tools, from the parent document and from inside the iframe", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    await mountHtmlAnnotate();
+
+    const pressInParent = async () => {
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "x", metaKey: true, shiftKey: true, bubbles: true,
+        }));
+      });
+    };
+    // What the bridge posts when the same chord is pressed with focus inside
+    // the sandboxed page (the parent's listener never sees that keystroke).
+    const pressInFrame = async () => {
+      const iframe = document.querySelector<HTMLIFrameElement>("iframe[srcdoc]");
+      if (!iframe?.contentWindow) throw new Error("HTML iframe missing");
+      await act(async () => {
+        window.dispatchEvent(new MessageEvent("message", {
+          source: iframe.contentWindow,
+          data: { type: "plannotator-bridge-tools-toggle" },
+        }));
+      });
+    };
+
+    expect(floatingCluster()).toBeNull();
+    await pressInParent();
+    expect(floatingCluster()).not.toBeNull();
+    expect(toolsToggle()!.getAttribute("aria-pressed")).toBe("false");
+
+    await pressInFrame();
+    expect(floatingCluster()).toBeNull();
+    expect(toolsToggle()!.getAttribute("aria-pressed")).toBe("true");
+  });
+
   test("the pen toggle starts ARMED (aria-pressed) on a static HTML session and click flips it to Interact", async () => {
     setStorageBackend(memoryBackend);
     seedAnnouncementsSeen();
@@ -397,5 +663,85 @@ describe.if(hasDom)("HTML annotate chrome (tools toggle + pen toggle)", () => {
 
     await act(async () => penToggle()!.click());
     expect(penToggle()!.getAttribute("aria-pressed")).toBe("true");
+  });
+});
+
+describe.if(hasDom)("HTML chrome in a folder annotate session", () => {
+  function persistedChrome(): Record<string, unknown> {
+    const raw = memory.get("plannotator-html-chrome");
+    if (!raw) throw new Error("no persisted chrome record");
+    const { toolsHidden, sidebarOpen, panelOpen } = JSON.parse(raw) as Record<string, unknown>;
+    return { toolsHidden, sidebarOpen, panelOpen };
+  }
+
+  test("a saved 'tools shown' record is honoured (the flipped default is not permanent here)", async () => {
+    // The whole chrome restore used to be suppressed in folder sessions, so
+    // the eye could never remember anything: every folder session opened with
+    // the tools hidden no matter how many times the reviewer showed them.
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    memory.set(
+      "plannotator-html-chrome",
+      JSON.stringify({ toolsHidden: false, sidebarOpen: false, panelOpen: false, savedAt: Date.now() }),
+    );
+    await mountHtmlAnnotate(folderFetch);
+    await settle();
+
+    expect(floatingCluster()).not.toBeNull();
+    expect(toolsToggle()!.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  test("the eye persists, and a folder session never records its own sidebar/panel state", async () => {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    memory.set(
+      "plannotator-html-chrome",
+      JSON.stringify({ toolsHidden: false, sidebarOpen: true, panelOpen: true, savedAt: Date.now() }),
+    );
+    await mountHtmlAnnotate(folderFetch);
+    await settle();
+
+    await act(async () => toolsToggle()!.click());
+    await settle();
+
+    // The eye's own half is recorded; the two halves the folder file browser
+    // owns keep whatever the last ordinary HTML session left.
+    expect(persistedChrome()).toEqual({ toolsHidden: true, sidebarOpen: true, panelOpen: true });
+  });
+
+  test("annotation activity re-stamps the record without recording the folder sidebar", async () => {
+    // Annotating re-stamps the record so the preference does not expire for
+    // an active reviewer. That re-stamp used to write the live chrome raw,
+    // bypassing the merge: one comment in a folder session (whose file
+    // browser forces the sidebar open) rewrote both halves, and the next
+    // ordinary `annotate page.html` session opened with the sidebar and the
+    // annotations drawer forced open.
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    memory.set(
+      "plannotator-html-chrome",
+      JSON.stringify({ toolsHidden: false, sidebarOpen: false, panelOpen: false, savedAt: Date.now() }),
+    );
+    await mountHtmlAnnotate(folderFetch);
+    await settle();
+
+    const commentButton = findButtonByText("Comment");
+    if (!commentButton) throw new Error("the floating cluster did not render its Comment button");
+    await act(async () => commentButton.click());
+    await settle();
+
+    const input = document.querySelector<HTMLTextAreaElement>('[data-comment-popover="true"] textarea');
+    if (!input) throw new Error("the global comment composer did not open");
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+      setter.call(input, "one comment from a folder session");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const submit = findButtonByText("Add");
+    if (!submit) throw new Error("the global comment composer has no submit control");
+    await act(async () => submit.click());
+    await settle();
+
+    expect(persistedChrome()).toEqual({ toolsHidden: false, sidebarOpen: false, panelOpen: false });
   });
 });

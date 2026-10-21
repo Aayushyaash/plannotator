@@ -51,6 +51,14 @@ plannotator sessions --open 2     # reopens session #2
 
 Stale sessions from crashed processes are cleaned up automatically. You can also force cleanup with `plannotator sessions --clean`.
 
+Every session also prints its URL on one line to stderr when it starts, before it opens a browser:
+
+```
+  Plannotator session ready: http://localhost:54321
+```
+
+The format is stable (two spaces, the prefix, then the URL), so an agent or a script can find the line in the output it already captures. A remote session adds a line under it about forwarding the port, and a browser that could not be opened adds "Could not open a browser automatically". For a session whose output you no longer have, use `plannotator sessions`: it lists only the servers that are still running.
+
 ## Where does Plannotator store data?
 
 Plannotator-managed files live under `~/.plannotator/` by default:
@@ -70,6 +78,7 @@ If the UI doesn't open automatically, check:
 
 - **Remote/SSH session?** Set `PLANNOTATOR_REMOTE=1` and `PLANNOTATOR_PORT` to a port you'll forward. See the [remote guide](/docs/guides/remote-and-devcontainers/).
 - **Wrong browser?** Set `PLANNOTATOR_BROWSER` to the app name or path, or use `--browser` for a one-off override.
+- **`Not opening a browser (PLANNOTATOR_BROWSER=none)`?** That is on purpose: `PLANNOTATOR_BROWSER` (or `--browser`) is set to `none`, `false`, `0`, `off`, `no`, `true`, `1` or `:`. Open the printed URL, or unset the variable. (`BROWSER=true` does not do this; only `PLANNOTATOR_BROWSER` does.)
 - **URL still works** — even if the browser didn't open, the server is running. Check `plannotator sessions` for the URL and open it manually.
 
 ## Hook doesn't fire
@@ -80,6 +89,16 @@ If `ExitPlanMode` doesn't trigger Plannotator:
 2. Restart Claude Code after installing (hooks load on startup)
 3. Verify `plannotator` is on your PATH: `which plannotator`
 4. Check that plan mode is enabled in your Claude Code session
+
+## Claude Code still waits for my review
+
+On Claude Code 2.1.287 or newer, the [Plannotator mod](/docs/guides/claude-code/#the-plannotator-mod) lets Claude keep going while you review. If Claude still waits:
+
+1. Update the plugin: `claude plugin marketplace update plannotator`, then `claude plugin update plannotator@plannotator`, then restart Claude Code. Refreshing the marketplace alone does not update the plugin.
+2. Update the `plannotator` binary by running the install script again. With an older binary, plan review falls back to the classic flow.
+3. Check that `PLANNOTATOR_CLAUDE_MOD` is not set to `0` and `~/.plannotator/config.json` has no `"claudeCodeMod": false`.
+4. The mod does not run in `claude -p` or SDK runs, or on Windows. Those always use the classic flow.
+5. To report a problem, start Claude Code with `PLANNOTATOR_MOD_DEBUG=1` and attach `~/.plannotator/claude-code-mod/debug.log`.
 
 ## Codex plan review doesn't open
 
@@ -92,6 +111,35 @@ If a Codex plan turn completes without opening Plannotator:
 3. Check `~/.codex/config.toml` contains `hooks = true` under `[features]`
 4. Check `~/.codex/hooks.json` has a `Stop` hook whose command points to `plannotator`
 5. Run `plannotator sessions` in case the browser failed to open but the session is running
+6. Check your Codex version: `codex --version`
+
+### Minimum Codex version
+
+The `Stop` hook Plannotator uses arrived in Codex **rust-v0.114.0**, so anything
+older has no Codex plan review at all. Three later changes matter:
+
+| Codex version | What changed |
+|---------------|--------------|
+| `rust-v0.114.0` | Hooks engine ships; the feature key is `codex_hooks` and it is off by default |
+| `rust-v0.117.0` (`0.116.0-alpha.12`) | The Stop payload starts carrying `turn_id` |
+| `rust-v0.124.0` (`0.124.0-alpha.3`) | Hooks become enabled by default |
+| `rust-v0.129.0` (`0.129.0-alpha.5`) | The feature key is renamed to `hooks`, with `codex_hooks` kept as a legacy alias |
+
+Step 3 above assumes `rust-v0.129.0` or newer, which is the version this
+installer targets. On `rust-v0.114.0`–`rust-v0.128.x` the key Codex reads is
+`codex_hooks = true`, so a config that says `hooks = true` alone has no effect
+there — write `codex_hooks = true` (both keys together are fine) and restart
+Codex.
+
+You do **not** need a Codex new enough to send `turn_id`. On `rust-v0.114.0`,
+`v0.115.0` and `v0.116.0` the Stop payload omits that field, and Plannotator
+resolves the turn from the session rollout instead, which is why plan review
+opens there as well. Requesting changes behaves the same there too: Codex
+records the feedback as a developer message rather than the `<hook_prompt>`
+item newer versions use, and Plannotator reads either shape, so a plan the
+model did not revise is not put back in front of you. When the fallback runs it
+prints one line to stderr naming the turn it used, so a hook run captured with
+stderr visible shows exactly what happened.
 
 Codex hooks are currently disabled on Windows in the official Codex docs, so the Windows installer prints manual guidance instead of changing Codex config automatically.
 

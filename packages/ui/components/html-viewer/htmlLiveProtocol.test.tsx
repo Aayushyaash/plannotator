@@ -18,6 +18,7 @@ import React from 'react';
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Annotation } from '../../types';
+import { BRIDGE_PROTOCOL_VERSION } from './bridge-script';
 
 const hasDom = typeof document !== 'undefined';
 const hookModule = hasDom ? await import('./useHtmlAnnotation') : null;
@@ -176,7 +177,7 @@ describe.if(hasDom)('live parent side (HtmlViewer with src + liveSession)', () =
     const { post, postedToIframe } = await mountLiveViewer({
       annotations: [],
     });
-    await post({ type: 'plannotator-bridge-ready', pageUrl: '/', token: LIVE_TOKEN });
+    await post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION, pageUrl: '/', token: LIVE_TOKEN });
     expect(postedToIframe.length).toBeGreaterThan(0);
     for (const posted of postedToIframe) {
       expect(posted.data.token).toBe(LIVE_TOKEN);
@@ -190,10 +191,10 @@ describe.if(hasDom)('live parent side (HtmlViewer with src + liveSession)', () =
   test('an unauthenticated ready is ignored; an authenticated one forwards its pageUrl', async () => {
     const pages: string[] = [];
     const { post, postedToIframe } = await mountLiveViewer({ onPageChange: (p) => pages.push(p) });
-    await post({ type: 'plannotator-bridge-ready', pageUrl: '/spoofed' }, LIVE_ORIGIN);
+    await post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION, pageUrl: '/spoofed' }, LIVE_ORIGIN);
     expect(pages).toEqual([]);
     expect(postedToIframe.length).toBe(0);
-    await post({ type: 'plannotator-bridge-ready', pageUrl: '/dashboard?x=1', token: LIVE_TOKEN });
+    await post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION, pageUrl: '/dashboard?x=1', token: LIVE_TOKEN });
     expect(pages).toEqual(['/dashboard?x=1']);
   });
 
@@ -227,7 +228,7 @@ describe.if(hasDom)('live parent side (HtmlViewer with src + liveSession)', () =
       annotations: [pageAnn('on-home', '/'), pageAnn('on-about', '/about')],
       currentPageUrl: '/',
     });
-    await post({ type: 'plannotator-bridge-ready', pageUrl: '/', token: LIVE_TOKEN });
+    await post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION, pageUrl: '/', token: LIVE_TOKEN });
     const restores = postedToIframe.filter((p) => p.data.type === 'plannotator-bridge-find-and-mark');
     expect(restores.map((p) => p.data.id)).toEqual(['on-home']);
     // Numbering still ships the FULL list (global numbers across pages).
@@ -239,9 +240,86 @@ describe.if(hasDom)('live parent side (HtmlViewer with src + liveSession)', () =
     ]);
   });
 
+  test('a page change delivers no unanchored set until that page\'s forced answer arrives', async () => {
+    // Between the page change and the bridge's answer to the parent's
+    // report request, a prop-side change must not deliver a union computed
+    // against the previous page's bridge report.
+    if (!htmlViewerModule) throw new Error('DOM test environment is not registered');
+    const HtmlViewer = htmlViewerModule.HtmlViewer;
+    const row = (id: string, overrides: Partial<Annotation> = {}): Annotation => ({
+      id,
+      blockId: '',
+      startOffset: 0,
+      endOffset: 0,
+      type: 'COMMENT' as Annotation['type'],
+      text: 'c',
+      originalText: 'o',
+      createdA: 1,
+      ...overrides,
+    } as Annotation);
+    const received: string[][] = [];
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    mountedRoots.push(root);
+    const render = async (currentPageUrl: string, annotations: Annotation[]) => {
+      await act(async () => {
+        root.render(
+          <HtmlViewer
+            rawHtml=""
+            src="about:blank"
+            liveSession={{ origin: LIVE_ORIGIN, token: LIVE_TOKEN }}
+            currentPageUrl={currentPageUrl}
+            annotations={annotations}
+            onAddAnnotation={() => {}}
+            onSelectAnnotation={() => {}}
+            selectedAnnotationId={null}
+            mode="selection"
+            inputMethod="pinpoint"
+            onUnanchoredChange={(ids) => received.push(ids)}
+            fullViewport
+          />,
+        );
+      });
+    };
+    await render('/', [row('home-1', { pageUrl: '/' })]);
+    const iframe = host.querySelector<HTMLIFrameElement>('iframe');
+    if (!iframe?.contentWindow) throw new Error('live iframe missing');
+    const posted: Array<Record<string, unknown>> = [];
+    const realPost = iframe.contentWindow.postMessage.bind(iframe.contentWindow);
+    (iframe.contentWindow as unknown as { postMessage: (data: unknown, origin?: unknown) => void }).postMessage =
+      ((data: unknown, targetOrigin?: unknown, ...rest: unknown[]) => {
+        if (data && typeof data === 'object') posted.push(data as Record<string, unknown>);
+        return (realPost as (...args: unknown[]) => unknown)(data, targetOrigin, ...rest);
+      }) as typeof iframe.contentWindow.postMessage;
+    const post = async (data: Record<string, unknown>) => {
+      await act(async () => {
+        window.dispatchEvent(new MessageEvent('message', {
+          source: iframe.contentWindow,
+          origin: LIVE_ORIGIN,
+          data: { ...data, token: LIVE_TOKEN },
+        }));
+      });
+    };
+    await post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION, pageUrl: '/' });
+    await post({ type: 'plannotator-bridge-unanchored', ids: ['home-1'] });
+    expect(received).toEqual([['home-1']]);
+
+    // Navigate: the parent clears marks, re-applies, and asks for a report.
+    const before = posted.length;
+    await render('/about', [row('home-1', { pageUrl: '/' })]);
+    expect(posted.slice(before).map((m) => m.type)).toContain('plannotator-bridge-report-unanchored');
+    // A prop-side change before the answer delivers nothing.
+    await render('/about', [row('home-1', { pageUrl: '/' }), row('textless-1', { originalText: '', pageUrl: '/about' })]);
+    expect(received).toEqual([['home-1']]);
+    // The page's answer is delivered, completed with the textless row.
+    await post({ type: 'plannotator-bridge-unanchored', ids: [] });
+    expect(received).toEqual([['home-1'], ['textless-1']]);
+  });
+
   test('the Interact/Annotate mode is pushed on EVERY bridge ready, so it survives page-change reloads and bridge re-injection', async () => {
     const { post, postedToIframe } = await mountLiveViewer({ annotateModeActive: false });
-    await post({ type: 'plannotator-bridge-ready', pageUrl: '/', token: LIVE_TOKEN });
+    await post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION, pageUrl: '/', token: LIVE_TOKEN });
     const modePosts = () =>
       postedToIframe.filter((p) => p.data.type === 'plannotator-bridge-set-annotate-mode');
     expect(modePosts().length).toBe(1);
@@ -250,7 +328,7 @@ describe.if(hasDom)('live parent side (HtmlViewer with src + liveSession)', () =
     // again from a FRESH document: the mode must be re-established, not lost
     // to the fresh bridge's default.
     postedToIframe.length = 0;
-    await post({ type: 'plannotator-bridge-ready', pageUrl: '/about', token: LIVE_TOKEN });
+    await post({ type: 'plannotator-bridge-ready', protocolVersion: BRIDGE_PROTOCOL_VERSION, pageUrl: '/about', token: LIVE_TOKEN });
     expect(modePosts().length).toBe(1);
     expect(modePosts()[0]!.data.active).toBe(false);
   });
@@ -489,6 +567,238 @@ describe.if(hasDom)('live bridge gate (composed body in the eval harness)', () =
     postToBridge({ type: 'plannotator-bridge-cancel-selection', token: bridgeToken });
   });
 
+  function probeLink(): HTMLAnchorElement {
+    let link = bridgeDocument.getElementById('live-probe-link') as HTMLAnchorElement | null;
+    if (!link) {
+      link = bridgeDocument.createElement('a');
+      link.id = 'live-probe-link';
+      link.href = '/settings';
+      link.textContent = 'Settings';
+      bridgeDocument.body.appendChild(link);
+    }
+    return link;
+  }
+
+  // One rule while armed (owner's ruling html-link-click): a plain click on a link follows it. A live
+  // app navigates for real, so the bridge leaves the click to the browser: no pin, no prevented default.
+  test('ARMED: a plain click on a link follows it natively (no pin, never prevented), and posts no link-click', () => {
+    const before = primaryPosts('link-click').length;
+    const selectionsBefore = selectionPosts().length;
+    // What the bridge left the click as, read last on its way up; then the test stops the
+    // navigation itself, so the harness window stays on this page for the tests after it.
+    let preventedByBridge: boolean | null = null;
+    const last = (e: Event) => {
+      preventedByBridge = e.defaultPrevented;
+      e.preventDefault();
+    };
+    bridgeWindow.addEventListener('click', last);
+    try {
+      probeLink().dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    } finally {
+      bridgeWindow.removeEventListener('click', last);
+    }
+    expect(preventedByBridge).toBe(false);
+    expect(selectionPosts().length).toBe(selectionsBefore);
+    expect(primaryPosts('link-click').length).toBe(before);
+  });
+
+  test('ARMED: Cmd-click and Ctrl-click on a link pin it for a comment and never navigate', () => {
+    for (const init of [{ metaKey: true }, { ctrlKey: true }]) {
+      const before = selectionPosts().length;
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true, ...init });
+      probeLink().dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(true);
+      expect(selectionPosts().length).toBe(before + 1);
+      expect(selectionPosts().at(-1)!.data.pinpoint).toBe(true);
+      expect((selectionPosts().at(-1)!.data.anchor as { tagName: string }).tagName).toBe('a');
+      postToBridge({ type: 'plannotator-bridge-cancel-selection', token: bridgeToken });
+    }
+  });
+
+  // Touch (owner's amendment): the same rule as srcdoc pages. A tap follows natively; a
+  // press-and-hold pins the link, and its release never navigates the app.
+  function touchProbe(type: string, el: Element, live = true): Event {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    const point = { identifier: 7, clientX: 4, clientY: 4, target: el };
+    Object.defineProperty(event, 'touches', { value: live ? [point] : [] });
+    Object.defineProperty(event, 'changedTouches', { value: [point] });
+    el.dispatchEvent(event);
+    return event;
+  }
+
+  test('ARMED, touch: press-and-hold on a link pins it, and the release never navigates the app', async () => {
+    const link = probeLink();
+    const before = selectionPosts().length;
+    touchProbe('touchstart', link);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(selectionPosts().length).toBe(before + 1);
+    expect(selectionPosts().at(-1)!.data.pinpoint).toBe(true);
+    expect((selectionPosts().at(-1)!.data.anchor as { tagName: string }).tagName).toBe('a');
+    const end = touchProbe('touchend', link, false);
+    expect(end.defaultPrevented).toBe(true);
+    const release = new MouseEvent('click', { bubbles: true, cancelable: true });
+    link.dispatchEvent(release);
+    expect(release.defaultPrevented).toBe(true);
+    expect(selectionPosts().length).toBe(before + 1);
+    postToBridge({ type: 'plannotator-bridge-cancel-selection', token: bridgeToken });
+  });
+
+  function pointerProbe(type: string, el: Element, pointerId = 7): Event {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'pointerType', { value: 'touch' });
+    Object.defineProperty(event, 'pointerId', { value: pointerId });
+    el.dispatchEvent(event);
+    return event;
+  }
+
+  test("ARMED, touch: the release of a hold never reaches the app's own pointerup, touchend or click; a tap's does", async () => {
+    const link = probeLink();
+    const seen: string[] = [];
+    const app = (e: Event) => seen.push(e.type);
+    // The app's listeners, on the window and the link, as a router or a gesture library adds them.
+    for (const type of ['pointerup', 'touchend', 'click']) {
+      bridgeWindow.addEventListener(type, app, true);
+      link.addEventListener(type, app);
+    }
+    const stopNavigation = (e: Event) => e.preventDefault();
+    bridgeWindow.addEventListener('click', stopNavigation);
+    try {
+      pointerProbe('pointerdown', link);
+      touchProbe('touchstart', link);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      pointerProbe('pointerup', link);
+      touchProbe('touchend', link, false);
+      link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      expect(seen).toEqual([]);
+      postToBridge({ type: 'plannotator-bridge-cancel-selection', token: bridgeToken });
+      // A tap afterwards is the app's: every event reaches it.
+      pointerProbe('pointerdown', link, 8);
+      touchProbe('touchstart', link);
+      pointerProbe('pointerup', link, 8);
+      touchProbe('touchend', link, false);
+      link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      expect(seen).toEqual(['pointerup', 'pointerup', 'touchend', 'touchend', 'click', 'click']);
+    } finally {
+      for (const type of ['pointerup', 'touchend', 'click']) {
+        bridgeWindow.removeEventListener(type, app, true);
+        link.removeEventListener(type, app);
+      }
+      bridgeWindow.removeEventListener('click', stopNavigation);
+    }
+  });
+
+  test("ARMED, touch: after a hold the app's press ends (pointercancel and touchcancel stand in for the stopped release), and a later tap still follows", async () => {
+    const link = probeLink();
+    // A press library's shape (React Aria usePress, Motion whileTap): open on pointerdown, closed on pointerup or pointercancel.
+    let pressed = false;
+    let touching = false;
+    const cancels: Array<{ type: string; pointerId?: number; pointerType?: string; isPrimary?: boolean; touchId?: number }> = [];
+    let activations = 0;
+    const onDown = () => { pressed = true; };
+    const onUp = () => { if (pressed) activations += 1; pressed = false; };
+    const onPointerCancel = (e: Event) => {
+      pressed = false;
+      const p = e as PointerEvent;
+      cancels.push({ type: e.type, pointerId: p.pointerId, pointerType: p.pointerType, isPrimary: p.isPrimary });
+    };
+    const onTouchStart = () => { touching = true; };
+    const onTouchEnd = () => { touching = false; };
+    const onTouchCancel = (e: Event) => {
+      touching = false;
+      cancels.push({ type: e.type, touchId: (e as TouchEvent).changedTouches?.[0]?.identifier });
+    };
+    link.addEventListener('pointerdown', onDown);
+    link.addEventListener('pointerup', onUp);
+    link.addEventListener('pointercancel', onPointerCancel);
+    link.addEventListener('touchstart', onTouchStart);
+    link.addEventListener('touchend', onTouchEnd);
+    link.addEventListener('touchcancel', onTouchCancel);
+    const stopNavigation = (e: Event) => e.preventDefault();
+    bridgeWindow.addEventListener('click', stopNavigation);
+    const selectionsBefore = selectionPosts().length;
+    try {
+      pointerProbe('pointerdown', link, 11);
+      touchProbe('touchstart', link);
+      expect(pressed).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(selectionPosts().length).toBe(selectionsBefore + 1);
+      pointerProbe('pointerup', link, 11);
+      touchProbe('touchend', link, false);
+      link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      expect(pressed).toBe(false);
+      expect(touching).toBe(false);
+      expect(activations).toBe(0);
+      expect(cancels).toEqual([
+        { type: 'pointercancel', pointerId: 11, pointerType: 'touch', isPrimary: true },
+        { type: 'touchcancel', touchId: 7 },
+      ]);
+      // The bridge's own listeners took the stand-ins for nothing: no second pin, and the next tap is a tap.
+      expect(selectionPosts().length).toBe(selectionsBefore + 1);
+      postToBridge({ type: 'plannotator-bridge-cancel-selection', token: bridgeToken });
+      bridgeWindow.removeEventListener('click', stopNavigation);
+      // What the bridge left the tap's click as, read last; then the test stops the navigation itself.
+      let preventedByBridge: boolean | null = null;
+      const last = (e: Event) => {
+        preventedByBridge = e.defaultPrevented;
+        e.preventDefault();
+      };
+      bridgeWindow.addEventListener('click', last);
+      try {
+        pointerProbe('pointerdown', link, 12);
+        touchProbe('touchstart', link);
+        pointerProbe('pointerup', link, 12);
+        const end = touchProbe('touchend', link, false);
+        expect(end.defaultPrevented).toBe(false);
+        link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      } finally {
+        bridgeWindow.removeEventListener('click', last);
+      }
+      expect(activations).toBe(1);
+      expect(preventedByBridge).toBe(false); // the app's link follows
+      expect(selectionPosts().length).toBe(selectionsBefore + 1);
+      expect(cancels.length).toBe(2);
+    } finally {
+      link.removeEventListener('pointerdown', onDown);
+      link.removeEventListener('pointerup', onUp);
+      link.removeEventListener('pointercancel', onPointerCancel);
+      link.removeEventListener('touchstart', onTouchStart);
+      link.removeEventListener('touchend', onTouchEnd);
+      link.removeEventListener('touchcancel', onTouchCancel);
+      bridgeWindow.removeEventListener('click', stopNavigation);
+    }
+  });
+
+  test('ARMED, touch: a tap on a link follows it natively (no pin, never prevented)', () => {
+    const link = probeLink();
+    const selectionsBefore = selectionPosts().length;
+    touchProbe('touchstart', link);
+    const end = touchProbe('touchend', link, false);
+    let preventedByBridge: boolean | null = null;
+    const last = (e: Event) => {
+      preventedByBridge = e.defaultPrevented;
+      e.preventDefault();
+    };
+    bridgeWindow.addEventListener('click', last);
+    try {
+      link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    } finally {
+      bridgeWindow.removeEventListener('click', last);
+    }
+    expect(end.defaultPrevented).toBe(false);
+    expect(preventedByBridge).toBe(false);
+    expect(selectionPosts().length).toBe(selectionsBefore);
+  });
+
+  test('ARMED: a drag that selected the link text and ended on it never navigates the app', async () => {
+    const link = probeLink();
+    await dragSelectContents(link);
+    const trailing = clickProbe(link);
+    expect(trailing.prevented).toBe(true);
+    expect(trailing.selections).toBe(0);
+    postToBridge({ type: 'plannotator-bridge-cancel-selection', token: bridgeToken });
+    bridgeWindow.getSelection()!.removeAllRanges();
+  });
+
   test('ARMED: a real text drag posts a drag selection, and its trailing click never re-pins', async () => {
     const p = dragProbeParagraph();
     const before = selectionPosts().length;
@@ -640,6 +950,23 @@ describe.if(hasDom)('live bridge gate (composed body in the eval harness)', () =
     bridgeDocument.body.dispatchEvent(chord);
     expect(countToggles()).toBe(before + 1);
     expect(chord.defaultPrevented).toBe(true);
+  });
+
+  test('Mod+Shift+X inside the iframe forwards a tools toggle, and other Mod+Shift chords are left to the page', () => {
+    // The header eye is unreachable from inside the frame otherwise: focus
+    // lives in the page on a live app, so the parent listener never sees it.
+    const countTools = () => primaryPosts('tools-toggle').length;
+    const before = countTools();
+    const chord = new KeyboardEvent('keydown', { key: 'X', shiftKey: true, metaKey: true, bubbles: true, cancelable: true });
+    bridgeDocument.body.dispatchEvent(chord);
+    expect(countTools()).toBe(before + 1);
+    expect(chord.defaultPrevented).toBe(true);
+
+    // Only the two reserved chords are claimed; the page keeps the rest.
+    const other = new KeyboardEvent('keydown', { key: 'K', shiftKey: true, metaKey: true, bubbles: true, cancelable: true });
+    bridgeDocument.body.dispatchEvent(other);
+    expect(countTools()).toBe(before + 1);
+    expect(other.defaultPrevented).toBe(false);
   });
 
   test('a placed marker still opens its comment in Interact mode', async () => {

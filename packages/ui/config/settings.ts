@@ -15,6 +15,14 @@ import {
 } from '@plannotator/core/agent-terminal';
 import type { DiffLineBgIntensity } from '@plannotator/core/config-types';
 import { isFaviconStyle, type FaviconStyle } from '@plannotator/core/favicon';
+import {
+  DEFAULT_TOKEN_HOVER_DELAY_MS,
+  isTokenHoverDelay,
+  resolveStoredTokenHoverTrigger,
+  type TokenHoverDelay,
+  type TokenHoverTrigger,
+} from '@plannotator/core/token-hover';
+import { DEFAULT_DIAGRAM_SHADOW, isDiagramShadow } from '../utils/diagramShadow';
 import { storage } from '../utils/storage';
 import { generateIdentity } from '../utils/generateIdentity';
 import {
@@ -163,6 +171,27 @@ export const SETTINGS = {
     serverKey: undefined, fromServer: undefined, toServer: undefined,
   },
 
+  /**
+   * How strong the drop shadow under Mermaid diagram nodes is, 0..100, where
+   * 100 is Mermaid 12's own default geometry. Default 70: the shipped neo look
+   * with its halo toned down (the colour is always derived from the palette,
+   * see `utils/mermaidTheme`). Cookie-only, like the other display knobs.
+   */
+  diagramShadow: {
+    defaultValue: DEFAULT_DIAGRAM_SHADOW as number,
+    fromCookie: () => {
+      // `Number(null)` and `Number('')` are 0, which is a VALID amount here
+      // (unlike the token-hover steps), so an absent cookie must be rejected
+      // before the guard sees it — otherwise no cookie reads as "no shadow".
+      const raw = storage.getItem('plannotator-diagram-shadow');
+      if (raw === null || raw.trim() === '') return undefined;
+      const parsed = Number(raw);
+      return isDiagramShadow(parsed) ? parsed : undefined;
+    },
+    toCookie: (value: number) => storage.setItem('plannotator-diagram-shadow', String(value)),
+    serverKey: undefined, fromServer: undefined, toServer: undefined,
+  },
+
   vimModeEnabled: {
     // Vim bindings deliberately default OFF. Unmodified letter keys must remain
     // inert for existing users until they explicitly opt into modal document
@@ -207,15 +236,21 @@ export const SETTINGS = {
 
   // Which left-panel view a code review OPENS in. 'sections' = the git-status
   // view (Committed/Changes/Untracked); 'tree' = the classic file tree.
-  // Cookie-only. Written ONLY by Settings and the first-run setup dialog —
-  // the in-review header toggle is session-scoped and never writes this
-  // (looking at another view mid-review must not silently change the default).
+  // Cookie-only. Written ONLY by Settings — the in-review header toggle is
+  // session-scoped and never writes this (looking at another view mid-review
+  // must not silently change the default).
+  //
+  // The default is 'tree': the classic file tree renders every diff type, so
+  // the (reviewPanelView, defaultDiffType) pair is trivially consistent for a
+  // reviewer who has chosen neither. 'sections' is reachable from the panel's
+  // Tree | Git status | Commits toggle and settable as the default here in
+  // Settings. Anyone with a persisted cookie keeps whatever they chose.
   //
   // Deliberately NOT a value here: 'commits'. The Commits view is session-only
   // and never the opening view — a review always opens on files. A
   // previously-persisted 'commits' cookie is treated as unset.
   reviewPanelView: {
-    defaultValue: 'sections' as 'sections' | 'tree',
+    defaultValue: 'tree' as 'sections' | 'tree',
     fromCookie: () => {
       const v = storage.getItem('plannotator-review-panel-view');
       return v === 'tree' || v === 'sections' ? v : undefined;
@@ -261,6 +296,59 @@ export const SETTINGS = {
     serverKey: undefined, fromServer: undefined, toServer: undefined,
   },
 
+  // Mark a file viewed when the reviewer scrolls past it or moves on to
+  // another file. Cookie-only like the other review-chrome preferences: it
+  // shapes how the local file list checks itself off and changes no review
+  // semantics (viewed gates nothing on submit).
+  reviewAutoViewed: {
+    defaultValue: true as boolean,
+    fromCookie: () => {
+      const value = storage.getItem('plannotator-review-auto-viewed');
+      return value === 'true' ? true : value === 'false' ? false : undefined;
+    },
+    toCookie: (value: boolean) =>
+      storage.setItem('plannotator-review-auto-viewed', String(value)),
+    serverKey: undefined, fromServer: undefined, toServer: undefined,
+  },
+
+  // Hovering a token in a code-review diff opens a card with what the search
+  // backend knows about that symbol. Cookie-only like the other review-chrome
+  // preferences: it is presentational, per-browser, and changes no review
+  // semantics — `off` simply means no listeners, no requests and no card.
+  //
+  // This one select REPLACED the original `tokenHoverCards` boolean rather
+  // than sitting beside it: a toggle plus a mode has an unreachable state
+  // (disabled + modifier) and asks one question with two controls. The legacy
+  // cookie is still read — on every load until the user touches this setting,
+  // since a migrating read returns a value and so never triggers the
+  // registry's default-seeding write — so an early adopter who turned cards
+  // off stays off. Resolution is pure and identical every time; see
+  // resolveStoredTokenHoverTrigger.
+  tokenHoverTrigger: {
+    defaultValue: 'hover' as TokenHoverTrigger,
+    fromCookie: () => resolveStoredTokenHoverTrigger(
+      storage.getItem('plannotator-token-hover-trigger'),
+      storage.getItem('plannotator-token-hover-cards'),
+    ),
+    toCookie: (value: TokenHoverTrigger) =>
+      storage.setItem('plannotator-token-hover-trigger', value),
+    serverKey: undefined, fromServer: undefined, toServer: undefined,
+  },
+
+  // How long the pointer rests on a symbol before a card is requested. Three
+  // fixed steps, not a slider: "too eager" is a real complaint that neither
+  // `modifier` nor `off` answers, but nobody can tell 340ms from 360ms.
+  tokenHoverDelay: {
+    defaultValue: DEFAULT_TOKEN_HOVER_DELAY_MS as TokenHoverDelay,
+    fromCookie: () => {
+      const parsed = Number(storage.getItem('plannotator-token-hover-delay'));
+      return isTokenHoverDelay(parsed) ? parsed : undefined;
+    },
+    toCookie: (value: TokenHoverDelay) =>
+      storage.setItem('plannotator-token-hover-delay', String(value)),
+    serverKey: undefined, fromServer: undefined, toServer: undefined,
+  },
+
   reviewShowStageControls: {
     defaultValue: true as boolean,
     fromCookie: () => {
@@ -273,18 +361,18 @@ export const SETTINGS = {
   },
 
   defaultDiffType: {
-    defaultValue: 'since-base' as 'since-base' | 'uncommitted' | 'unstaged' | 'staged' | 'merge-base' | 'all',
+    defaultValue: 'since-base' as 'since-base' | 'local-vs-remote' | 'uncommitted' | 'unstaged' | 'staged' | 'merge-base' | 'all',
     fromCookie: () => {
       const v = storage.getItem('plannotator-default-diff-type');
       if (v === 'branch') return 'merge-base' as const;
-      return v === 'since-base' || v === 'uncommitted' || v === 'unstaged' || v === 'staged' || v === 'merge-base' || v === 'all' ? v : undefined;
+      return v === 'since-base' || v === 'local-vs-remote' || v === 'uncommitted' || v === 'unstaged' || v === 'staged' || v === 'merge-base' || v === 'all' ? v : undefined;
     },
     toCookie: (v: string) => storage.setItem('plannotator-default-diff-type', v),
     serverKey: 'diffOptions',
     fromServer: (sc: Record<string, unknown>) => {
       const v = (sc.diffOptions as Record<string, unknown> | undefined)?.defaultDiffType;
       if (v === 'branch') return 'merge-base' as const;
-      return v === 'since-base' || v === 'uncommitted' || v === 'unstaged' || v === 'staged' || v === 'merge-base' || v === 'all' ? v : undefined;
+      return v === 'since-base' || v === 'local-vs-remote' || v === 'uncommitted' || v === 'unstaged' || v === 'staged' || v === 'merge-base' || v === 'all' ? v : undefined;
     },
     toServer: (v: string) => ({ diffOptions: { defaultDiffType: v } }),
   },
@@ -510,6 +598,23 @@ export const SETTINGS = {
       return typeof value === 'boolean' ? value : undefined;
     },
     toServer: (value: boolean) => ({ reviewAnalysis: { callFlow: value } }),
+  },
+  /**
+   * Opt-in background auto-update of the compiled CLI (#1634). The server
+   * always sends the config-file value (default false), so the cookie is only
+   * a mirror and can never turn this on by itself.
+   */
+  autoUpdate: {
+    defaultValue: false as boolean,
+    fromCookie: () => {
+      const v = storage.getItem('plannotator-auto-update');
+      return v === 'true' ? true : v === 'false' ? false : undefined;
+    },
+    toCookie: (v: boolean) => storage.setItem('plannotator-auto-update', String(v)),
+    serverKey: 'autoUpdate',
+    fromServer: (sc: Record<string, unknown>) =>
+      typeof sc.autoUpdate === 'boolean' ? sc.autoUpdate : undefined,
+    toServer: (v: boolean) => ({ autoUpdate: v }),
   },
   conventionalComments: {
     defaultValue: false as boolean,

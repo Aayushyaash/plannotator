@@ -92,22 +92,32 @@ Pass any subset of these to `configurePlannotatorUI({ ... })`. Anything omitted 
 | `aiTransport` | `AITransport` | The "Ask AI" chat session/query/abort/permission | `POST /api/ai/{session,query,abort,permission}` |
 | `serverSync` | `ServerSyncFn` | Push a settings change back to the server | No-op-ish (Plannotator's local sync) |
 | `loadSettingsFromBackend` | `boolean` | After install, re-hydrate settings from your `storageBackend` | off |
+| `mathRendererLoader` | `() => Promise<MathRenderer>` | How KaTeX is loaded when no renderer is registered before the first math node renders (see "Lazy renderers and eager entries"). Once registered, the package default is never called, not even as a fallback after a rejected load, and `resetMathRenderer()` keeps the registration (0.34.0); a default load already in flight at registration still fills the slot (pre-existing, see `setMathRendererLoader`), so register before the first math render | `utils/math-default-loader`'s `import('katex')`, JS only; CSS stays yours |
+| `identityGenerator` | `() => string` | The synchronous generator behind the default "tater" display name when no `identityProvider` is installed | A built-in 16 x 16 word pool of the same `adjective-noun-tater` shape; Plannotator registers the full dictionary via `utils/identity-tater` |
+| `alertIconRenderer` | `(name: string) => ReactNode | null` | The icon rendered for a GitHub alert whose title line carries `<!-- icon: name -->` (0.38.0; grammar in `utils/alertTitle`). Called only for a title line with an icon comment and no leading emoji; a null return falls back to the type icon | `null` for every name: the type's own icon, the package bundles no icon set |
+| `fenceTheme` | `(colorTheme: string, mode: 'light' \| 'dark') => string \| undefined` | The Shiki theme every fence-style surface renders in (Viewer fences, `CodeBlock`, the code-file hover preview, the plan diff view, code review suggestion snippets: everything that reads `useFenceTheme` / `resolveFenceTheme`). Return a theme name to use it, `undefined` to keep the default for that (palette, mode); a throw or an empty string also falls through, and a name Shiki does not know renders the block as plain text. Install it before the first render; it is read on every render, so a later change applies the next time a fence re-renders. The code-review diff pane's dark/light pair (`resolveSyntaxTheme`) is not affected. Also `setFenceThemeResolver` / `resetFenceThemeResolver` on `utils/syntaxTheme` (0.50.0) | The palette's `SHIKI_THEME_MAP` entry, else `pierre-dark` / `pierre-light`. Replaces mutating the exported `SHIKI_THEME_MAP`, which keeps working but is not a supported seam |
+| `skillCatalogTransport` | `() => Promise<SkillCatalogEntry[]>` | The skill catalog the comment composers' `/` and `$` picker lists | `GET /api/skills` on the page origin |
+| `skillContentTransport` | `(name: string) => Promise<unknown>` | A human-only skill's SKILL.md, pasted into feedback | `GET /api/skills/content?name=` on the page origin |
+| `skillReferenceExport` | `boolean` | Whether the fetched catalog feeds each comment's "Skills referenced" list in the export; false for a host that composes one block per message (ui 0.53.0) | true |
+| `skillInstructionsDestination` | `string` | What a composer's "Includes skill instructions" line says the instructions go with (ui 0.53.0) | `'your feedback'` |
+| `webmcp` | `WebMcpPolicy` | The WebMCP provider policy, `{ enabled, namePrefix }` | Enabled whenever the browser exposes `document.modelContext`, prefix `plannotator.` |
+| `componentTooltips` | `boolean` | Draw ui's own hover text through `components/HostTitle` as ui's `Tooltip` instead of a native `title` (ui 0.53.0) | false: native titles |
 
 ### Interface details worth knowing
 
-**`StorageBackend`** — must be **synchronous** (`getItem`/`setItem`/`removeItem` return immediately). If Workspaces' real store is async (KV, D1, a Durable Object), back this with an in-memory cache that you hydrate before mounting the UI, and write through asynchronously. That's also what `loadSettingsFromBackend: true` is for — it re-reads settings from your backend right after install, once it's in place.
+**`StorageBackend`** — must be **synchronous** (`getItem`/`setItem`/`removeItem` return immediately). If the host's real store is async (a key-value store, a database, a server round trip), back this with an in-memory cache that you hydrate before mounting the UI, and write through asynchronously. That's also what `loadSettingsFromBackend: true` is for — it re-reads settings from your backend right after install, once it's in place.
 
 **No cookies on a configured host.** Settings resolution is **lazy** (first settings access, not module import). Plannotator's default backend is cookies (its servers run on random ports, so cookies are the only storage that survives across sessions there), and on first resolution the store seeds missing defaults — including a generated identity — into whatever backend is live. Because `configurePlannotatorUI` installs your `storageBackend` before anything reads a setting, a host that configures at startup gets **zero `plannotator-*` cookies** written to its origin, ever: all reads and seeding writes go to your backend. (Covered by `config/configStore.lazyInit.seam.test.ts`.) Only an unconfigured consumer — or one that reads settings before calling configure — falls back to cookie writes.
 
 > **⚠️ Ordering is load-bearing and nothing enforces it.** Call `configurePlannotatorUI` only **after** your settings hydration has completed. If you configure while the cache is still empty, `loadSettingsFromBackend` finds nothing, **seeds generated defaults into your backend via `setItem`** (including a freshly generated random display name), and nothing ever re-runs hydration — so the junk defaults can win over the user's real settings, and if your `setItem` writes through to durable storage they persist. The sync-and-prehydrated rule is a contract, not a runtime check. (For `localStorage`, which is already synchronous, none of this bites.)
 
-**`IdentityProvider`** — `getIdentity(): string` (display name), `isCurrentUser(author): boolean`, and optional `isEditable(): boolean` (default editable). For Workspaces this is your auth'd user. **Return `isEditable() => false`** for logged-in users: Workspaces stamps the author from the server-side account id and users can't rename themselves, so the UI must hide its rename/regenerate controls — otherwise a locally-chosen name diverges from the server-stamped author (the "split author" hazard). Two things to know from the Workspaces side: (1) the current `Me` projection (`GET /v1/me`) carries only `user_id` + `email` — **no display name** — so until the backend adds a name field, `getIdentity()` can only return the email or id; (2) free-text author names *are* accepted for anonymous commenters on open docs, so `isEditable()` may return `true` for that branch.
+**`IdentityProvider`** — `getIdentity(): string` (display name), `isCurrentUser(author): boolean`, and optional `isEditable(): boolean` (default editable). For Workspaces this is your auth'd user. **Return `isEditable() => false`** for logged-in users: Workspaces stamps the author from the server-side account id and users can't rename themselves, so the UI must hide its rename/regenerate controls — otherwise a locally-chosen name diverges from the server-stamped author (the "split author" hazard). Two things to know: (1) when the host's user record carries no display name, `getIdentity()` can only return the email or id until the backend adds one; (2) free-text author names *are* accepted for anonymous commenters on open docs, so `isEditable()` may return `true` for that branch.
 
-**`UploadTransport`** — `upload(file: File): Promise<{ path: string; originalName? }>`. The default does Plannotator's `POST /api/upload` and returns the server path. For Workspaces, send the bytes to your asset API (`PUT /v1/workspaces/:wsId/assets/:assetPath`) and return the content-addressed URL (or an opaque ref) in `path`. Notes from the Workspaces asset layer: your API makes the **caller choose the asset path** and 409s if a document owns it, so your adapter — not the UI — owns path selection (namespace uploads, e.g. an `assets/` prefix); it enforces a **10 MiB cap + content-type allowlist**, so surface upload failures; and because asset URLs need **no signing** (content-addressed, served from the cookieless `tot.page` origin), `imageSrcResolver` can be a pass-through — returning a full URL in `path` renders directly (the default resolver passes http(s) URLs through).
+**`UploadTransport`** — `upload(file: File): Promise<{ path: string; originalName? }>`. The default does Plannotator's `POST /api/upload` and returns the server path. For a host, send the bytes to your asset API and return the content-addressed URL (or an opaque ref) in `path`. Things a host asset layer commonly does that the adapter must handle: if the API makes the **caller choose the asset path** (and refuses a path a document owns), your adapter — not the UI — owns path selection (namespace uploads, e.g. an `assets/` prefix); if it enforces a **size cap or content-type allowlist**, surface upload failures; and when asset URLs need **no signing** (content-addressed, served from a cookieless origin), `imageSrcResolver` can be a pass-through — returning a full URL in `path` renders directly (the default resolver passes http(s) URLs through).
 
-**`DraftTransport`** — `load()`, `save(body, { keepalive })`, `remove(generation, { keepalive })`. The generation-gated tombstone and keepalive retry logic stay inside the hook; you only provide the three transport calls. `keepalive: true` means "best-effort deliver this even though the page is closing" (maps to `fetch(..., { keepalive: true })` or `navigator.sendBeacon`). One non-obvious contract on `load()`: it returns `{ data, generation }`, where `generation` is the **deletion tombstone counter** for the no-draft case — Plannotator's server encodes it in the 404 body so a stale tab can't resurrect a deleted draft. If your backend tracks draft deletions, return the tombstone generation with `data: null`; if it doesn't, return `{ data, generation: null }` and the hook still works (you just lose stale-tab deletion protection).
+**`DraftTransport`** — `load()`, `save(body, { keepalive })`, `remove(generation, { keepalive })`. The generation-gated tombstone and keepalive retry logic stay inside the hook; you only provide the three transport calls. `keepalive: true` means "best-effort deliver this even though the page is closing" (maps to `fetch(..., { keepalive: true })` or `navigator.sendBeacon`). One non-obvious contract on `load()`: it returns `{ data, generation }`, where `generation` is the **deletion tombstone counter** for the no-draft case — Plannotator's server encodes it in the 404 body so a stale tab can't resurrect a deleted draft. If your backend tracks draft deletions, return the tombstone generation with `data: null`; if it doesn't, return `{ data, generation: null }` and the hook still works (you just lose stale-tab deletion protection). Optionally, `save()` may resolve `{ staleGeneration }` when your store refused the body as stale (Plannotator's server answers `409 { draftGeneration }`); the hook then raises its counter above that generation and saves once more. Resolving nothing (the old `Promise<void>`) keeps the previous behavior.
 
-**`ExternalAnnotationTransport<T>`** — `subscribe(onEvent, onError) => unsubscribe`, `getSnapshot(since) => { annotations, version } | null` (return `null` for "no changes", i.e. the 304 case), plus `add/remove/update/clear`. For Workspaces this is your realtime layer — a Durable Object WebSocket or SSE fanning out comment events. `T` extends `{ id: string; source?: string }`; if your annotation type adds fields, call `setExternalAnnotationTransport<YourType>()` directly for full type safety (the `configure` front door pins the base type for ergonomics).
+**`ExternalAnnotationTransport<T>`** — `subscribe(onEvent, onError) => unsubscribe`, `getSnapshot(since) => { annotations, version } | null` (return `null` for "no changes", i.e. the 304 case), plus `add/remove/update/clear`. For a host this is your realtime layer — a WebSocket or SSE channel fanning out comment events. `T` extends `{ id: string; source?: string }`; if your annotation type adds fields, call `setExternalAnnotationTransport<YourType>()` directly for full type safety (the `configure` front door pins the base type for ergonomics).
 
 **`AITransport`** and **`FileTreeBackend`** currently return `Response` objects** (the raw `fetch` response) rather than parsed domain types — `session/query` return `Promise<Response>`, `loadTree/loadVaultTree` return `Promise<Response>` whose JSON is a known shape. **This is a known rough edge** (see "Known rough edges"). To satisfy these today, Workspaces has to hand back something `Response`-shaped (status, `.json()`, and for `query`, an SSE body stream). It works, but it leaks the old HTTP contract. We deliberately left it as-is for the first cut (move-don't-rewrite); expect to clean it up in a v2 driven by what's actually painful when you wire it.
 
@@ -133,12 +143,12 @@ configurePlannotatorUI({
   storageBackend,                 // your settings store (localStorage is already sync)
   identityProvider,               // your auth'd user (isEditable:false for logged-in users)
   imageSrcResolver,               // your asset URL scheme (pass-through for content-addressed URLs)
-  uploadTransport,                // upload pasted images to your R2 asset API
+  uploadTransport,                // upload pasted images to your asset API
   docPreviewFetcher,              // your doc store
   fileTreeBackend,                // your workspace file tree + realtime watch
   draftTransport,                 // your draft store
-  externalAnnotationTransport,    // adapt your Yjs/WebSocket realtime onto this
-  // aiTransport,                 // omit — Workspaces has no AI backend yet (stays default/off)
+  externalAnnotationTransport,    // adapt your realtime (WebSocket, SSE) onto this
+  // aiTransport,                 // omit unless you have an AI backend (stays default/off)
   serverSync,                     // your settings push
   loadSettingsFromBackend: true,  // re-hydrate settings from storageBackend after install
 });
@@ -151,24 +161,24 @@ import { Viewer } from "@plannotator/ui/components/Viewer";
 
 A few component-specific behaviors (e.g. an "open this diff in the editor" action) are passed as **props** at the render site rather than through `configure` — those are local to one component, not app-global.
 
-### Mapping the seams to Workspaces' actual stack
+### Mapping the seams to a host backend
 
-Grounded in a read of the Workspaces repo (`apps/app`, `apps/usercontent`, `apps/web`, the DocumentDO). The web app doesn't import this UI yet, so this is the greenfield wiring plan.
+What each seam asks of a host, and how much adapter work it usually takes. The host app's own routes and storage are its business; this table only names the shape the seam needs.
 
-| Seam | Workspaces backing | Effort |
+| Seam | What the host provides | Effort |
 |---|---|---|
-| `storageBackend` | `window.localStorage` — already synchronous, matches the seam as-is. (Server-syncing prefs later is optional; not needed for the seam.) | trivial |
-| `identityProvider` | Read the already-hydrated `me` from `SessionContext` (`GET /v1/me`). `getIdentity()` returns email/id (no name field yet), `isCurrentUser(a) = a === me.user_id`, `isEditable() => false` for logged-in users. | thin adapter |
-| `imageSrcResolver` | Pass-through — asset URLs are content-addressed and need no signing. | trivial |
-| `uploadTransport` | `PUT /v1/workspaces/:wsId/assets/:assetPath` → R2 (`AssetBytes` interface). Adapter owns asset-path selection. | new adapter |
-| `docPreviewFetcher` | `GET /v1/workspaces/:wsId/documents/:docId` (D1 + git content store). | thin adapter |
-| `fileTreeBackend` | `GET /v1/workspaces/:wsId/documents` (D1 doc list); live-watch via the DocumentDO. | thin adapter |
-| `draftTransport` | KV or a per-doc Durable Object; `sendBeacon` for keepalive. | thin adapter |
-| `externalAnnotationTransport` | **Transport kind differs** — Workspaces realtime is Yjs-over-WebSocket (DocumentDO), and comments are REST with no live push. Adapt comment events onto the DO awareness channel (or add an SSE endpoint). | biggest adapter |
-| `aiTransport` | **No AI backend exists** in Workspaces. Leave at default/off until one is built. | new infra (later) |
-| `serverSync` | A Worker endpoint that persists the settings delta. | thin adapter |
+| `storageBackend` | A synchronous settings store (`window.localStorage` already matches as-is; an async store needs a prehydrated in-memory cache, see "Interface details"). | trivial |
+| `identityProvider` | The signed-in user the host already holds. `getIdentity()` returns whatever display value the host has (an email or id when there is no name), `isCurrentUser(a)` compares against the user's id, `isEditable() => false` for signed-in users. | thin adapter |
+| `imageSrcResolver` | Pass-through when asset URLs are content-addressed and need no signing; otherwise the host's URL mapping. | trivial |
+| `uploadTransport` | A call to the host's asset upload API. The adapter owns asset-path selection. | new adapter |
+| `docPreviewFetcher` | A read of one document from the host's document store. | thin adapter |
+| `fileTreeBackend` | The host's document list, plus its own live-watch if it has one. | thin adapter |
+| `draftTransport` | Any per-document store the host has; `sendBeacon` (or `fetch` keepalive) for the close path. | thin adapter |
+| `externalAnnotationTransport` | **The transport kind may differ.** A host whose realtime is a WebSocket channel, or whose comments are REST with no live push, adapts its comment events onto `subscribe` (or adds an SSE endpoint). | biggest adapter |
+| `aiTransport` | Only if the host has an AI backend. Leave at default/off until it does. | new infra (later) |
+| `serverSync` | An endpoint that persists the settings delta. | thin adapter |
 
-**Backend follow-up (Workspaces side, not a UI change):** if you want readable author names instead of raw `user_…` ids in comments, the `Me`/annotation projections need to start carrying a display-name field (WorkOS has `first_name`/`last_name`; the current `Me` projection drops them).
+**Backend follow-up (host side, not a UI change):** readable author names instead of raw user ids in comments need the host's user and annotation data to carry a display-name field.
 
 ---
 
@@ -186,13 +196,19 @@ We deliberately did **not** restructure the exports map in this PR (move-don't-r
 | `theme` / `styles.css` | Theme tokens + precompiled stylesheet. **Prefer `styles.css`.** The raw `theme` export still `@import`s KaTeX (re-acquiring the fonts `styles.css` deliberately excludes, as separate lazy files) and contains Tailwind v4 `@theme` at-rules, so it's inert without Tailwind processing. |
 | `types` | `Annotation`, `Block`, `AnnotationType`, etc. |
 | `utils/parser` (`parseMarkdownToBlocks`, `exportAnnotations`) | Pure — no backend. |
+| `utils/questionAnswers` (`upsertQuestionAnswerAnnotation`, `collectQuestionAnswers`, `resolveQuestionAnswers`, `questionAnswerToAnnotation`, `buildQuestionPanelRows`, `questionProgress`, `nextOpenQuestionKey`, `focusQuestionCard`) | Pure (except `focusQuestionCard`, which scrolls and focuses a card in the DOM). Applies `Viewer`'s `onAnswerQuestion` to your annotation list and derives the panel rows and progress (0.48.0; see "Questions in documents"). |
+| `components/QuestionProgressChip`, `components/QuestionsPanelSection` | The header "N/M answered" chip and the panel's Questions section (0.48.0). `AnnotationPanel` renders the section itself when you pass `questionRows`. |
 | `components/BlockRenderer` + the block components it renders (`TableBlock`, `HtmlBlock`, `Callout`, `MermaidBlock`, `MathBlock`, …) | Pure rendering. |
 | `components/InlineMarkdown` | Code-file hover previews route through the `docPreviewFetcher` seam. Wiki-link rendering takes the sync `resolveLinkedDoc` prop (live labels + deleted-doc treatment; see "Wiki-link seams (0.27.0)"). |
-| `components/Viewer` | The full annotatable document. Required props: `markdown` and `taterMode` (pass `false`). **Pass `disableCodePathValidation` unless you implement `/api/doc/exists`** — code-path validation is a prop-level opt-out, not a `configure` seam. |
-| `components/MarkdownEditor` | Theme-bridging wrapper over `@plannotator/markdown-editor`. Takes CM6 extensions via the `extensions` prop (captured ONCE per `documentId` — see "Wiki-link seams (0.27.0)") and re-exports `wikiLinks`, `embedPicker`, `embedSlashItem`, `planEmbedInsert`, and their public types. |
+| `components/Viewer` | The full annotatable document. Required props: `markdown` and `taterMode` (pass `false`). **Pass `disableCodePathValidation` unless you implement `/api/doc/exists`** — code-path validation is a prop-level opt-out, not a `configure` seam. `annotationHeader={{ onInputMethodChange, onModeChange, hideQuickLabel? }}` opts into one Viewer-owned, in-flow header containing the compact annotation controls and existing document actions. It reserves its measured responsive height, preserves all document badges, and follows `stickyActions` as one unit; omit it for the legacy action bar. Compact mode contains no help link. `hideQuickLabel` still requires the host to clamp restored mode state away from `'quickLabel'`. A host-owned scroll element must be supplied through `ScrollViewportProvider` (`hooks/useScrollViewport`) so stuck chrome and anchor clearance use the real scroller. |
+| `components/MarkdownEditor` | Theme-bridging wrapper over `@plannotator/markdown-editor`. Takes CM6 extensions via the `extensions` prop (captured ONCE per `documentId` — see "Wiki-link seams (0.27.0)") and re-exports `wikiLinks`, `linkWidgets`, `refreshLinkWidgets` (0.47.0), `embedPicker`, `embedSlashItem`, `planEmbedInsert`, and their public types. |
 | `components/MarkdownDiff` | Theme-bridging wrapper over `@plannotator/markdown-editor`'s frozen two-revision diff. Same shim pattern as `components/MarkdownEditor` (ThemeProvider bridge, `extensions` passthrough, grid card chrome); never editable. See "Frozen markdown diff (0.28.0)". |
 | `components/CommentPopover` | Anchor capture + comment entry. Ask-AI UI renders only if you pass `onAskAI`. |
 | `components/AnnotationPanel` | Renders from your annotation state; no fetches of its own. |
+| `components/AnnotationToolstrip` | The annotation mode toolstrip (Select / Pinpoint / Markup / Comment / Redline / Label). **Pass `showHelpLink={false}` in a host** — the default help modal embeds Plannotator's own YouTube walkthroughs. `hideQuickLabel` omits only the Label button (`StickyHeaderLane` forwards it, so the pinned scroll header matches); it hides the control, it does **not** clamp the mode — keep host mode state out of `'quickLabel'` (including preferences restored through `utils/editorMode`, which accepts it from storage) or text selection silently opens the quick-label picker with no visible cause. `hideInputMethodSwitch` likewise omits the pinpoint/drag switch. *(Blessed in 0.35.0.)* |
+| `components/StickyHeaderLane` | The backward-compatible standalone ghost lane used by Plannotator beside Viewer's legacy action bar. Defaults remain hidden/inert at rest and visible only while stuck, including the incumbent hidden chrome during its fade. Its `visibility="always"` mode remains a zero-height overlay and therefore requires host-owned clearance. New hosts that need a visible in-flow header should use `Viewer.annotationHeader` instead; it owns both clusters and their clearance. **The `visibility="always"` / `sticky={false}` pair is soft-deprecated as of 0.37.0**: it shipped in 0.36.0, its one intended consumer moved to `Viewer.annotationHeader` before adopting it, and it has no known consumers. It is retained for compatibility and still tested, but do not build new integrations on it. `sticky={false}` uses normal-flow positioning, creates no intersection observer, and must be paired with `visibility="always"`. Wide active-label, tight icon-only, and narrow stacked fallbacks remain measurement-driven, and `hideQuickLabel` still forwards to the compact toolstrip. |
+| `components/DiffFileTree` (`DiffFileTree`, plus the row atoms `DiffFileTreeFolderRow`, `DiffFileTreeFileRowContent`, `ChangeTypeLetter`, `DiffCounts`, `diffFileTreeIndent`) | Read-only diff file tree: required `files` / `selectedPath` / `onSelect`. Pure React; no backend. See "Diff file tree". |
+| `utils/diffFileTree` (`buildDiffFileTree`, `getAncestorPaths`, `getVisualFileOrder`, `getAllFolderPaths`) + `hooks/useDiffFileTreeExpansion` | The tree builder and folder open/closed state behind it. Pure. |
 | `components/ThemeProvider` | Color-mode context. |
 | `theme-modes` (`THEME_MODES`, `Mode`) | The supported Light/Dark/System catalog and mode type. `Mode` also remains exported from `components/ThemeProvider` for compatibility with existing consumers. |
 | `components/ImageThumbnail` / `getImageSrc` | Routes through `imageSrcResolver`. |
@@ -204,8 +220,20 @@ We deliberately did **not** restructure the exports map in this PR (move-don't-r
 | `hooks/useActiveSection` | Scroll-spy over rendered headings; no backend. *(Blessed in 0.24.0.)* |
 | `hooks/useScrollViewport` | Resolves the scrolling element for viewport-aware UI; no backend. *(Blessed in 0.24.0.)* |
 | `utils/annotationHelpers` | Pure annotation utilities (`getAnnotationCountBySection`, `buildTocHierarchy` + `TocItem`). *(Blessed in 0.24.0.)* |
-| `components/html-viewer` (`HtmlViewer`) | The raw-HTML annotation viewer: overlay-projected placed markers, pinpoint anchors, multi-target comments. Props + validated bridge protocol; no backend of its own. See "Raw-HTML annotation viewer + syntax-highlighting migration (0.29.0)". *(Blessed in 0.29.0.)* |
+| `components/html-viewer` (`HtmlViewer`, `projectHostThreads`, `buildPersistedHtmlAnchor`) | The raw-HTML annotation viewer: overlay-projected placed markers, pinpoint anchors, multi-target comments. Props + validated bridge protocol; no backend of its own. See "Raw-HTML annotation viewer + syntax-highlighting migration (0.29.0)" and "HTML annotation parity seams". *(Blessed in 0.29.0.)* |
+| `components/HtmlSurfaceControls` | The eye / refresh / pen header controls for an HTML surface, with per-string `labels` overrides. Presentation only. See "HTML annotation parity seams". |
+| `hooks/useHtmlRefresh` | Re-fetch a rendered HTML document through a host-supplied `fetchSnapshot`, remount the viewer on a reload generation, acknowledge the restore report once. See "HTML annotation parity seams". |
+| `shortcuts` (`useHtmlAnnotateShortcuts`, `defineShortcutScope`, the scope registry) | The declarative keyboard-shortcut engine and the per-surface scopes, including the HTML annotate scope (Mod+Shift+A toggles annotate mode, Mod+Shift+X shows/hides the tools). Pure: React plus `utils/platform`; no backend. |
+| `utils/selectionActions` + `components/SelectionActionsDropdown` | The host selection-actions seam: `SelectionAction`, `SelectionActionContext`, the pure `buildSelectionActionContext`, and the dropdown `AnnotationToolbar` opens. Pure React; no backend. *(Blessed in 0.43.0.)* |
+| `utils/mentions` + `components/MentionPicker` + `hooks/useMentionAutocomplete` | The `@` mention seam behind `CommentPopover`'s `mentionSource` (and, since 0.43.1, `Viewer`'s and `HtmlViewer`'s): the pure grammar (`mentionTrigger`, `mentionMatches`, `applyMentionPick`, `survivingMentions`), the portaled picker, and the keyboard state machine. Pure React; no backend. *(Blessed in 0.43.0.)* |
+| `utils/composerTokens` | The comment composer's token highlight ranges: `skillTokenRanges`, `mentionTokenRanges`, `mergeTokenRanges` and `ComposerTokenRange`. Pure (no DOM, no styling) — the one place that decides which bytes of a composer's text are a token and which source wins when two claim the same ones. *(Blessed in 0.44.0.)* |
+| `utils/inputMethod` (`getInputMethod`, `saveInputMethod`, `refreshInputMethodStamp`) | The per-surface pinpoint/drag input-method preference with its TTL. Persists through the `storageBackend` seam; no backend of its own. |
 | `utils/codeHighlight` / `utils/codeBlockMark` / `utils/syntaxTheme` | The Shiki-based fence highlighter, swap-surviving annotation marks, and palette→Shiki theme mapping. Replaces all `.hljs` styling. *(Blessed in 0.29.0.)* |
+| `utils/math` (`loadMathRenderer`, `getMathRenderer`, `getMathRendererSource`, `setMathRenderer`, `setMathRendererLoader`, `getMathRendererLoader`, `resetMathRenderer`) and `utils/math-eager` | The math renderer slot and its eager KaTeX registration. Import `utils/math-eager` for synchronous typesetting on the first commit; call `loadMathRenderer()` to pre-warm the lazy path. `resetMathRenderer()` empties the slot and keeps the registered loader; `setMathRendererLoader(null)` drops it. See "Lazy renderers and eager entries". |
+| `utils/mermaid-math-slot` | Alias target only: what a host redirects Mermaid's own `katex` import to, so `$$` labels in diagrams typeset through the math slot and the host build carries one KaTeX chunk. Never import it yourself. See "Lazy renderers and eager entries", item 2. |
+| `utils/identity-tater` | Side-effect entry that registers the full username dictionary into the identity generator slot. Import it only if you rely on the default tater names and want the full dictionary; a host with `identityProvider` should not. |
+| `utils/mermaid` (`loadMermaidRuntime`, `getMermaidRuntime`, `getMermaidRuntimeSource`, `setMermaidRuntime`, `MERMAID_CONFIG`) and `utils/mermaid-eager` | The Mermaid runtime slot and its eager registration. Omit `utils/mermaid-eager` for the lazy path with retry, which is what Plannotator itself does since 0.40.0 (Mermaid 12); import it to register the runtime in your entry chunk at startup. See "Lazy renderers and eager entries" and "Mermaid 12 (0.40.0)". |
+| `utils/mermaidTheme` (`buildMermaidThemeVariables`, `readThemeTokens`, `applyMermaidTheme`, `mermaidThemeKey`, `buildMermaidConfig`, `ensureContrast`, `buildMermaidShadow`, `DEFAULT_MERMAID_SHADOW_AMOUNT`), `utils/diagramShadow` and `utils/cssColor` | Theme-aware diagram configuration: the pure token-to-`themeVariables` mapping with its contrast guard, the palette-derived node shadow (`options.shadowAmount`, default 0.7 of Mermaid's own), the document token reader, and the cached per-`(palette, mode, shadow amount)` `initialize` step `MermaidBlock` runs before each render. Additive; with no theme tokens on the document the static `MERMAID_CONFIG` stays in force. See "Theme-aware Mermaid diagrams (0.40.0)". |
 
 **AI is fully avoidable** — with one precision worth knowing. No AI *UI* is reachable from the supported components: `useAIChat` is imported only by `components/ai/DocumentAIChatPanel` and `useAIProviderConfig`, neither of which any supported component imports, and `CommentPopover`'s Ask-AI affordance exists only behind the optional `onAskAI` prop. `configure.ts` does statically import the `useAIChat` module (it needs `setAITransport`), but if you never use AI the hook is dead code and bundlers eliminate it — verified empirically: a standalone consumer's production bundle importing the full supported surface contains zero `/api/ai` strings. Don't import `components/ai/*` and don't pass `aiTransport`, and you ship no AI code.
 
@@ -225,6 +253,7 @@ Don't import these in a host. Each hits hardcoded Plannotator endpoints:
 - `utils/sharing` — Plannotator's public paste service (share-URL feature).
 - `hooks/useUpdateCheck`, `components/MenuVersionSection`, `components/PlanHeaderMenu` — Plannotator release checks.
 - `utils/planAgentInstructions`, `utils/reviewAgentInstructions` — generate agent instructions that curl Plannotator's local API.
+- `components/DecisionControl`, `utils/decisionSpec`, `hooks/useDismissablePopover` — session decision chrome for Plannotator's own approve/deny/exit endpoints (a host's session decisions are its own outcomes against its own backend).
 
 If Workspaces ever wants one of these surfaces, the path is the same as everything else: add a seam to the module in a Plannotator PR, don't fork the component.
 
@@ -237,6 +266,8 @@ The renderer's `MathBlock` (and inline math) uses KaTeX. **KaTeX's stylesheet an
 3. **Bundler import:** `import 'katex/dist/katex.min.css';` next to your `styles.css` import — your bundler ships the fonts as separate lazy-loaded files. With npm/bun this resolves out of the box (`katex` is a dependency of `@plannotator/ui` and gets hoisted); under pnpm's strict `node_modules`, add `katex` to your own dependencies to import it directly.
 
 If you skip all three and render math, equations appear as broken-looking raw HTML — that's the symptom to recognize. If you never render math, do nothing.
+
+The JS side is separate and lazy by default: KaTeX's runtime is no longer on the static import graph of `MathBlock` / `InlineMarkdown`. A host that renders `Viewer` without importing `@plannotator/ui/utils/math-eager` gets the TeX source in the same wrapper for one frame, then the typeset markup once `import('katex')` resolves. See "Lazy renderers and eager entries" for the opt-back and the loader seam.
 
 ---
 
@@ -395,7 +426,7 @@ Consumer-enablement round for wiki-links (Workspaces' `[[doc_01XYZ|label]]` link
 
 ---
 
-## Embed media picker (unreleased)
+## Embed media picker (0.31.0)
 
 The package now owns the reusable two-stage `/embed` authoring flow. The host still owns its target catalog, serialized embed grammar, and upload UI/API. This is a per-editor extension seam, not a `configurePlannotatorUI()` backend seam.
 
@@ -430,11 +461,133 @@ The package now owns the reusable two-stage `/embed` authoring flow. The host st
 
 4. **Grammar belongs to the host; splicing belongs to the package.** `buildInsertLine(target)` returns the exact line the host wants stored. `planEmbedInsert()` then normalizes that line into its own blank-line-delimited paragraph and places the caret on the following line. Host-specific path resolution, label escaping, and embed-fragment grammar stay outside the package.
 
+   **Host labels (0.45.1).** `EmbedPickerConfig.labels?: { upload?: string; empty?: string; noMatch?: (query: string) => string }` replaces the three rows that name the target type ("Upload HTML...", "No HTML files in this workspace", "No HTML files match “<query>”") for a host that feeds the picker more than HTML files. Each absent key keeps the built-in text, so a host passing nothing (Plannotator) renders exactly the menu it always did. The "Uploading..." row and the notice row are unchanged.
+
 5. **Upload is optional and single-flight.** When `uploadTarget` is absent, no upload row is rendered. When present, every picker state includes `Upload HTML...`. While its promise is pending, the typed `/embed` text stays visible and a reopened picker shows an inert `Uploading...` row. Resolving with a target inserts it through `buildInsertLine` and the same splice as an existing target; resolving `null` or rejecting leaves the typed command untouched. The package maps the anchor through CodeMirror transactions and silently drops the insert if the command was edited away. The host owns all failure UI.
 
 6. **One CodeMirror dependency graph.** The picker imports `@codemirror/autocomplete`, `@codemirror/state`, and `@codemirror/view` from `@plannotator/ui`'s declared dependencies. `@plannotator/atomic-editor` declares these as peers, so a consumer must resolve one shared copy. A second live copy of `@codemirror/state` breaks extensions just as it does for `wikiLinks`.
 
 Behavior is pinned by `components/MarkdownEditor.embedPicker.test.ts`, the supported re-export by `components/MarkdownEditor.embedPicker.reexport.test.ts`, and the pure splice planner by `../core/embed-insert.test.ts`.
+
+---
+
+## Lazy renderers and eager entries (0.32.0)
+
+Four modules that used to ride every document read for a host that bundles by route now load on demand: the Mermaid runtime, the Graphviz engine, KaTeX, and the username dictionary. Plannotator's own apps register KaTeX and the dictionary eagerly in both the plan editor and the review editor, and through 0.39.0 the plan editor also registered the Mermaid runtime eagerly (the review editor never renders a Mermaid block and deliberately does not), so every surface rendered exactly as before; the single-file builds were unchanged in size and first paint and the portal entry chunk kept Mermaid as on main (the built-HTML markers and the A/B proof live in `tests/entry-assets.test.ts` and the PR that shipped this). **Since 0.40.0 the plan editor takes the lazy Mermaid path too** — see "Mermaid 12 (0.40.0)" for why and for the host contract; the paragraph below describes the slot, which is unchanged.
+
+1. **Graphviz: no seam, nothing to do.** `GraphvizBlock` imports `@viz-js/viz` inside its render effect. It already showed the source fence until the SVG landed, so the only change for a chunking host is that the first dot fence on a page fetches the engine. A failed import is dropped from the memo and re-attempted once with a fresh `import()` after a short delay; a persistently failing chunk surfaces as the existing error panel with the source, plus a Retry button that issues another fresh attempt (a diagram syntax error shows the panel exactly as before, without Retry). Hosts that aliased the specifier to a lazy shim can delete the shim.
+
+   **Mermaid: a runtime slot, filled eagerly by Plannotator.** `utils/mermaid` holds the slot (`getMermaidRuntime`, `setMermaidRuntime`, `getMermaidRuntimeSource`) and the one code path `MermaidBlock` uses, `loadMermaidRuntime()`: it resolves at once from a filled slot and otherwise imports `mermaid` lazily, initialized once with `MERMAID_CONFIG` (`securityLevel: 'strict'` pinned by test), with the same drop-on-rejection, one automatic re-attempt and Retry button as Graphviz. `utils/mermaid-eager` imports the runtime statically, initializes it at module evaluation (where the old module-scope `initialize` ran) and fills the slot; through 0.39.0 `packages/editor/App.tsx` imported it by policy, so Plannotator's plan surfaces kept Mermaid in their entry chunk and it could never fail separately from the app. Since 0.40.0 neither Plannotator app imports it (Mermaid 12's runtime is too large to ride every plan read; `tests/entry-assets.test.ts` now asserts the eager marker is ABSENT from both bundles). A host that wants startup registration adds `import '@plannotator/ui/utils/mermaid-eager'`; a host that omits it gets the lazy path, exactly like Plannotator.
+
+   **Retry, honestly.** An in-page retry cannot recover a chunk whose first fetch failed: browsers record a failed module fetch in the module map for the page lifetime, so a fresh `import()` of the same URL rejects without a request, and package code cannot re-import under a new URL because Rollup minifies the chunk's export names. The retry therefore recovers failures after the fetch (engine instantiation, `initialize`) and hosts that version chunk URLs; a host that needs recovery from a failed first fetch uses versioned chunk URLs or a `vite:preloadError` reload at app level. The panel with the source is always shown, never a blank.
+
+2. **KaTeX: a renderer slot, filled eagerly by Plannotator.** `utils/math` holds a synchronous slot (`getMathRenderer`, `setMathRenderer`, `subscribeMathRenderer`), an idempotent `loadMathRenderer()` whose default loader is `import('katex')` (JS only; stylesheet policy is unchanged, see "Math rendering"; since 0.33.0 that default lives in its own module, `utils/math-default-loader`, see the paragraph on dropping its chunk below), and `setMathRendererLoader`. `MathBlock` and inline math read the slot during render: filled, they typeset synchronously in the same render exactly as before; empty, they render the same wrapper (`math-block` / `math-inline`, `math-annotatable`, `data-math-tex`, `data-math-display`, `aria-label`, `data-block-id`) with the trimmed TeX as a text child, load the renderer from an effect, and re-render typeset when it lands. Annotation restore and block targeting key on those attributes, so a placeholder is addressable exactly like the typeset node. `throwOnError: false` and `trust: false` are applied to every renderer, including one you register.
+
+   **This is the one place the pass-nothing law bends.** A host that renders `Viewer` and never imports the eager entry now gets lazy math: one frame of TeX text, then typeset. The one-line opt-back for the old behavior:
+
+   ```ts
+   import '@plannotator/ui/utils/math-eager';
+   ```
+
+   The seam for the lazy path: `configurePlannotatorUI({ mathRendererLoader: () => Promise.all([import('katex'), import('katex/dist/katex.min.css')]).then(([m]) => m.default) })` puts KaTeX and its CSS on one chunk; `loadMathRenderer()` can be awaited before mounting a body that carries math if you would rather gate first paint yourself.
+
+   **Where the default `import('katex')` lives, and how to drop its chunk (0.33.0, from 0.32.0 adoption feedback).** The default loader is `utils/math-default-loader` (`loadDefaultMathRenderer`), the package's only runtime mention of `katex` outside `math-eager`; `utils/math` calls it only while no loader is registered (`loader === null`), and a registered loader is never backfilled by it, not even after the host's load rejects (pinned in `utils/math.test.ts`). So with a loader registered the default is never *requested*. One pre-existing ordering rule still applies: a default load already in flight when the host registers its loader keeps going and fills the slot when it lands (documented on `setMathRendererLoader`), so register the loader before the first math node renders, in your entry, not in an effect. It is still *emitted*: Rollup decides chunks statically and cannot see a runtime registration, so a host build that registers a loader still carries a `katex-*.js` chunk with an `import()` site pointing at it from the package. Measured on a two-entry Vite 6 consumer of this checkout (one entry registering a loader that is not KaTeX, one registering nothing): both builds emit one 484 KB chunk carrying the KaTeX body. A host that wants that chunk gone aliases the default module at a stub, which is why it is its own module:
+
+   ```ts
+   // vite.config.ts of a host that registers mathRendererLoader
+   resolve: { alias: [{ find: /^(\.\/|@plannotator\/ui\/utils\/)math-default-loader$/, replacement: '/src/no-default-math.ts' }] }
+   // src/no-default-math.ts
+   export function loadDefaultMathRenderer(): Promise<never> { return Promise.reject(new Error('default math loader aliased out')); }
+   ```
+
+   With the alias the same consumer build emits zero chunks carrying the KaTeX body out of the package and the entry's only `import()` in that area is the host's own loader chunk. Do not alias without registering a loader: math would then render as TeX text forever. Plannotator's entries import `math-eager`, so the slot is filled before the first render and this branch is never reached there; the single-file builds inline the default through `inlineDynamicImports` as before (`tests/entry-assets.test.ts` pins the split: `utils/math` has no `import('katex')` site, `utils/math-default-loader` has the only one).
+
+   **Mermaid's own KaTeX, and the last shared chunk (0.34.0, from 0.33.0 adoption feedback).** The alias above is not the whole story once a page can render a Mermaid diagram. The Mermaid runtime (11.15.0 when this was written; 12.0.0 since 0.40.0, same import) typesets `$$...$$` labels through its own `import("katex")`, inside `renderKatexUnsanitized`, and it offers nothing to turn that off: `legacyMathML` / `forceLegacyMathML` only choose the output mode, the guard around the import is the `@mermaid-js/tiny` build marker, and there is no hook to hand it a renderer. The import only *runs* for a label that matches Mermaid's `$$` test, but it is *emitted* regardless, so a host that registered a loader and aliased the default still built a `katex-*.js` chunk, and because that chunk then had two dynamic importers (the host's loader module and the Mermaid runtime) Rollup kept it separate from the host's loader chunk: a math document fetched two files, the 57-byte loader chunk plus the shared 261 KB KaTeX chunk. Measured on the scratch Vite 6 consumer of this checkout (loader registered, default aliased, a document with inline math, a display block and a flowchart with a `$$` label): one chunk carried the KaTeX body before, `katex-*.js`, imported by `mermaid.core-*.js` and by the host's loader chunk; 367 JS chunks in all.
+
+   The fix is a bundler-facing redirect to a package module, `utils/mermaid-math-slot`, whose default export has the one method Mermaid calls (`renderToString`) and delegates to whatever fills the math slot, with Mermaid's own options (`throwOnError: true`, `displayMode: true`, the MathML `output` mode) passed through untouched, so a KaTeX renderer produces exactly the markup Mermaid produced from its direct import. Redirect the `katex` specifier for importers inside the `mermaid` package ONLY; a plain `resolve.alias` on `katex` would also rewrite your own loader's import and break math everywhere:
+
+   ```ts
+   // vite.config.ts of a host that registers mathRendererLoader (beside the math-default-loader alias)
+   import { fileURLToPath } from 'node:url';
+   const configFile = fileURLToPath(import.meta.url);
+   const mermaidKatexToSlot: Plugin = {
+     name: 'mermaid-katex-to-plannotator-slot',
+     enforce: 'pre',
+     resolveId(source, importer) {
+       if (source !== 'katex' || !importer || !/[\\/]node_modules[\\/]mermaid[\\/]/.test(importer)) return null;
+       return this.resolve('@plannotator/ui/utils/mermaid-math-slot', configFile, { skipSelf: true });
+     },
+   };
+   // plugins: [mermaidKatexToSlot, react(), ...]
+   ```
+
+   Two details of that snippet are layout-proofing. The importer test is `node_modules/mermaid/` anywhere in the path, not a pattern for one install layout: a hoisted install puts the runtime at `node_modules/mermaid/`, Bun's isolated layout at `node_modules/.bun/mermaid@12.0.0/node_modules/mermaid/`, and pnpm's at `node_modules/.pnpm/mermaid@12.0.0/node_modules/mermaid/`; every one of them ends in that segment, and the trailing separator keeps `mermaid-something` packages out. The slot module is resolved from the host's own config file (`configFile`), not from the Mermaid importer: resolving from the importer walks up from Mermaid's location, which finds `@plannotator/ui` on hoisted and Bun-isolated installs but not under pnpm's strict `node_modules`, where the package is only visible from the host root. Resolving from the config file is the same lookup the host's own imports use; passing an absolute path to the file (`path.resolve(...)` of the installed `utils/mermaid-math-slot.ts`) works too.
+
+   With the redirect the same consumer build emits one chunk carrying the KaTeX body, the host's own loader chunk (`host-katex-*.js`, 261 KB, reached only by the entry's `import()`), `mermaid.core-*.js` has no KaTeX import left, and the chunk count drops to 366: one KaTeX chunk, owned by the host, one file fetched. The slot must be filled by the time Mermaid asks, so `MermaidBlock` awaits `loadMathRenderer()` before rendering a diagram whose source carries a `$$` label (`hasMermaidMath`, Mermaid's own regex); on a filled slot that resolves at once, on the lazy path it runs your loader, and if that load fails the label throws a message naming the cause (`MERMAID_MATH_SLOT_EMPTY_MESSAGE`) which the block's error panel shows with the source. Do not import the module yourself; it exists to be resolved to. Plannotator does not redirect: its Mermaid keeps its direct KaTeX, inlined by the single-file builds with everything else, and the pre-render wait is a resolved promise there because `math-eager` filled the slot at startup. No test in the repo renders a real Mermaid diagram with a math label (Mermaid does not render under happy-dom), and nothing in Plannotator's own documents exercises `$$` labels; the bridge is pinned by `utils/mermaid-math-slot.test.ts` (delegation with Mermaid's exact options, KaTeX parity, the empty-slot error, the label regex) and the pre-render warm by the "Mermaid math labels warm the math slot" cases in `components/DiagramBlock.lazyRetry.test.tsx`.
+
+   **`resetMathRenderer()` keeps the loader (0.34.0).** Through 0.33.0 the reset hook also nulled the registered loader, so a host test harness that reset the slot between cases silently fell back to the package default `import('katex')` on the next render. Reset now empties the renderer and its source, forgets a load in flight (its late result no longer fills the slot; the next `loadMathRenderer()` invokes the registered loader afresh) and leaves the loader registered. `setMathRendererLoader(null)` is the explicit way back to the package default, and `getMathRendererLoader()` reads the registration; `configurePlannotatorUI` cannot unregister a loader (a `null` or absent `mathRendererLoader` is a no-op there), so only a direct `setMathRendererLoader(null)` does. `setMathRendererLoader` itself is unchanged: a load already in flight at registration still fills the slot, because the component that started it is waiting on that result. The other reset-style helpers were reviewed and are consistent with their names: `resetIdentityProvider` and `resetIdentityGenerator` reset exactly the thing they name (the provider, the generator), and Mermaid's `__setMermaidRuntimeLoaderForTests` is a stand-in by name. Pinned in `utils/math.test.ts`.
+
+3. **Identity: a generator slot, filled eagerly by Plannotator.** `utils/generateIdentity` no longer imports `unique-username-generator`. It holds a synchronous generator slot (`setIdentityGenerator`, `getIdentityGenerator`) with a built-in fallback that produces the same `adjective-noun-tater` shape from a 16 x 16 pool. `utils/identity-tater` registers the full dictionary as a side effect and is what Plannotator's entries import. A host with `identityProvider` never calls the generator and, with the static import gone, no longer ships the word lists; delete any dictionary shim. A host that wants the full dictionary without its own provider imports `@plannotator/ui/utils/identity-tater`, or passes its own `identityGenerator` to `configurePlannotatorUI`. The slot is synchronous on purpose: `configStore` persists the first generated name to the identity cookie during the first render-time settings read, so a name that arrived later would be a visible identity change.
+
+4. **Scope, as of 0.34.0.** 0.32.0 shipped items 1 to 3 and deliberately left two things out of the design record's list: the raw-HTML bridge script as a separately served asset, and a lazy table popout. 0.33.0 ships the first (see "HTML viewer bridge as an asset" below) and, from adoption feedback, the `utils/math-default-loader` split in item 2. 0.34.0 adds the Mermaid KaTeX redirect and the `resetMathRenderer` fix in item 2, both from 0.33.0 adoption feedback. The lazy table popout is still not shipped and stays tracked in the design record for a follow-up.
+
+Pinned by `utils/math.test.ts`, `utils/mermaid-math-slot.test.ts`, `components/MathBlock.firstPaint.test.tsx`, `utils/generateIdentity.test.ts`, `components/MermaidBlock.test.ts`, `components/DiagramBlock.lazyRetry.test.tsx`, and the eager-entry and built-HTML marker guards in `tests/entry-assets.test.ts`.
+
+---
+
+## HTML viewer bridge as an asset (0.33.0)
+
+`HtmlViewer` injects a 185 KB bridge script (`BRIDGE_SCRIPT`, `components/html-viewer/bridge-script.ts`) into every srcdoc document it renders. For a host that bundles by route that literal rode in the viewer chunk and was re-parsed by the browser per document. This release adds an opt-in, `bridgeScriptUrl`, and leaves the default untouched: Plannotator passes nothing, every Plannotator surface (the annotate srcdoc path, the version diff, PR HTML artifacts, linked `.html` docs, the share portal) still inlines the string, the live-app proxy still serves the same inline bridge from its own `/__plannotator__/bridge.js` route, the Pi and OpenCode copies are built from the same code, and the single-file bundles carry the literal exactly once as before (`tests/entry-assets.test.ts` counts it; the A/B of a Plannotator HTML annotate session on a main build against this build found identical DOM, requests and console).
+
+**What the package ships.** `prepack` now also runs `scripts/build-bridge-assets.ts`, which derives two gitignored files beside the source module, both deterministic and both verified against the module's exports by `components/html-viewer/bridgeAsset.test.ts`:
+
+- `components/html-viewer/bridge-script.asset.js`: byte-for-byte `BRIDGE_SCRIPT`, the runnable IIFE. Export subpath `@plannotator/ui/components/html-viewer/bridge-script.asset.js`. The `.asset.js` name is deliberate: a plain `bridge-script.js` next to `bridge-script.ts` would be picked first by Vite's extension probe for the package's own `./bridge-script` imports and break every consumer build.
+- `components/html-viewer/bridge-script.lite.ts`: the same `ANNOTATION_HIGHLIGHT_CSS`, `BRIDGE_PROTOCOL_VERSION` and `LIVE_BRIDGE_BOOTSTRAP` with `BRIDGE_SCRIPT = ""`. Export subpath `@plannotator/ui/components/html-viewer/bridge-script.lite`. An alias target only (below).
+
+The TS module stays the source of truth because the Plannotator CLI and the Pi extension import its string exports under Bun.
+
+**Host wiring (Workspaces).** Serve the asset same-origin as a hashed file through a Vite `?url` import and pass the URL to the viewer:
+
+```ts
+import bridgeScriptUrl from "@plannotator/ui/components/html-viewer/bridge-script.asset.js?url";
+
+<HtmlViewer
+  rawHtml={html}
+  bridgeScriptUrl={bridgeScriptUrl}
+  bridgeReadyTimeoutMs={5000}          // default; the wait for `ready` per document load
+  onBridgeUnavailable={(info) => ...}  // { kind: 'timeout' | 'version-mismatch', url, ... }
+  ...
+/>
+```
+
+With the prop set, `buildSrcdocInjection` emits `<script src="…"></script>` in the exact position the inline `<script>` occupied (there is one injection point, `buildBridgeScriptTag` in `srcdoc.ts`, for both paths), so placement is unchanged: at the end of `<head>`, before the body, on both paths (the page's head scripts run before the bridge, its body scripts after). The URL is resolved against the PARENT document (`resolveBridgeScriptUrl(url, document.baseURI)`) before it is written into the srcdoc, never against the framed page: the injection follows any `<base href>` the page declares, so a relative URL left unresolved would let a hostile document point the viewer at an attacker-served bridge and defeat the version check. The srcdoc is rebuilt on `rawHtml`, theme and diff changes and the browser then re-fetches the asset from cache, so serve it with normal immutable-asset cache headers. An empty string counts as absent (inline). The prop is ignored in live (`src`) mode, where the proxy injects the bridge.
+
+**CSP.** Confirmed by grep and pinned by test: the package never writes a CSP `<meta>` into the srcdoc document (the injection is one `<style>` and one `<script>`; an author-written CSP meta is still neutralized as before), and the bridge sets none at runtime. The srcdoc frame is an opaque origin, and a classic `<script src>` executes without CORS; no `crossorigin` attribute is set, so do not expect one. A `Content-Security-Policy` HTTP header on the host page IS inherited by the srcdoc document: a host with its own CSP must allow `script-src` for the origin the asset is served from (same-origin `'self'` in the wiring above). Note the asset form is easier under CSP than the inline form, which would need `'unsafe-inline'` or a nonce. One more header to check: an asset served with `Cross-Origin-Resource-Policy: same-origin` (common with COEP) is blocked for the opaque-origin frame; serve the bridge asset with a CORP that admits cross-origin loads (`cross-origin`) or without CORP.
+
+**Protocol version.** `BRIDGE_PROTOCOL_VERSION` (exported from `components/html-viewer/bridge-script` and re-exported from `components/html-viewer`) is embedded in the bridge text and stamped on its `ready` message as `protocolVersion`. Note for the design record's "current state": `BRIDGE_SCRIPT` now carries its first `${}` interpolation (that constant, evaluated at module load); it remains a plain string export with no per-session values, so the CLI, Pi and the live proxy consume it exactly as before. The parent (`checkBridgeProtocolVersion`, `HtmlViewer`'s ready branch) compares it: on the inline path and in live sessions the two sides come from one bundle and always match; on the URL path a cached asset from a previous package version answers with an older stamp, or none, and the viewer logs one console warning naming both versions, shows a dismissible error banner over the top of the frame (`[data-bridge-error="version-mismatch"]`, `role="alert"`, a `[data-bridge-error-dismiss]` button; the page stays visible) and calls `onBridgeUnavailable` once. The ready is still honored (an older bridge answers every message shape it knows), so this is a loud diagnostic, not a refusal. Bump the constant whenever a bridge message shape changes in a way an older bridge or parent would misread; a bump forces a warning against any not-yet-redeployed asset, which is the point.
+
+**Who renders the strip (`bridgeErrorDisplay`; 0.34.0, from 0.33.0 adoption feedback).** The package owns the failure strip by default: `bridgeErrorDisplay="banner"` renders the `[data-bridge-error]` element for both the mismatch and the timeout states exactly as 0.33.0 did, so Plannotator and every existing host are unchanged. A host that renders its own notice from `onBridgeUnavailable` passes `bridgeErrorDisplay="none"`: no strip and no dismiss button are rendered for either state, while `onBridgeUnavailable` fires exactly as before and a version mismatch still logs its one console warning. Through 0.33.0 the strip could not be suppressed, so such a host showed two banners. The prop is meaningless on the inline path, which never shows a strip. Pinned by the two `bridgeErrorDisplay` cases in `components/html-viewer/HtmlViewer.bridgeAsset.test.tsx`.
+
+**Ready timeout.** On the URL path only, `bridgeReadyTimeoutMs` (default 5000) is armed once per document load (URL or srcdoc change), read through a ref, so changing the prop after the bridge is ready never re-arms it; with no `ready` in time the surface shows `[data-bridge-error="timeout"]` naming the URL and the wait (not dismissible: the surface is dead), and `onBridgeUnavailable({ kind: 'timeout', url, timeoutMs })` fires. A late `ready` clears it. The inline path arms no timer and can never show a banner.
+
+**Dropping the literal from the host chunk (optional).** The URL path alone leaves the inline string in the chunk unused, because `srcdoc.ts` imports it statically (the default must stay synchronous). To remove it, alias the package's `./bridge-script` resolution to the generated lite module in your bundler; with Vite:
+
+```ts
+resolve: {
+  alias: [{
+    find: /^\.\/bridge-script$/,
+    replacement: "@plannotator/ui/components/html-viewer/bridge-script.lite",
+  }],
+}
+```
+
+The `find` is anchored on purpose (0.34.0; 0.33.0 documented `/\/bridge-script$/`). Every import of the module inside the package is the relative sibling form, `./bridge-script` (`srcdoc.ts`, `useHtmlAnnotation.ts`, `index.ts`), so `/^\.\/bridge-script$/` matches exactly those. The unanchored form matched any specifier ENDING in `/bridge-script`, which is also the shape of another package's entry point (`some-dependency/bridge-script`) or of a deeper import in your own tree (`../vendor/bridge-script`), and would have silently swapped those for the lite module too. If your own source has a sibling module named `bridge-script`, add an importer check (a `customResolver` on the alias entry, or a `resolveId` plugin that tests `importer` for `@plannotator/ui/components/html-viewer/`) rather than widening the pattern.
+
+Under that alias an `HtmlViewer` rendered WITHOUT `bridgeScriptUrl` throws at render (`buildBridgeScriptTag` refuses to emit an empty inline script), so the misconfiguration cannot ship as a silently dead surface. Measured on the proof harness (PR #1398's description): the viewer chunk shrinks by the size of the literal, 557 kB to 371 kB (168 kB to 118 kB gzip).
+
+**Live app annotation is unaffected.** `packages/shared/live-proxy-bridge-inline.test.ts` pins at source level that both proxy transports and both runtimes' composers still ship the inline bridge from the proxy route and never reference `bridgeScriptUrl` or the generated files.
+
+Pinned by `components/html-viewer/bridgeAsset.test.ts` (generator bytes, manifest wiring, the single injection point, no CSP meta, the real bridge's stamped ready), `components/html-viewer/HtmlViewer.bridgeAsset.test.tsx` (URL srcdoc, stale-asset warning and banner, timeout and late ready, inline path unchanged), `packages/shared/live-proxy-bridge-inline.test.ts` and the bridge marker count in `tests/entry-assets.test.ts`.
 
 ---
 
@@ -508,15 +661,1714 @@ Pinned by "unanchored ids are reported on change" in `components/html-viewer/src
 
 ---
 
+## HTML annotation parity seams (0.32.0)
+
+Nine additive seams so a host can run the raw-HTML annotation surface with the same experience Plannotator ships, without app-local code around `HtmlViewer`. Every default reproduces 0.31.0 behavior; Plannotator's own app passes the same defaults and renders the same DOM (proven by a real-browser A/B of the header, the overlay markers and the annotations panel on a main build versus this build).
+
+1. **`projectHostThreads(threads, { openOnly?, documentLevel?, maxTargets? })`** and **`buildPersistedHtmlAnchor(source, { maxBytes = 16384, maxTargets = 16 })`** are exported from `components/html-viewer` (pure, from `@plannotator/core/html-anchor`). The first projects a host's stored rows (`{ id, originalText, htmlAnchor?, htmlAdditionalTargets?, state?, text?, author?, createdA?, images? }`) onto the `annotations` prop **in the host's order, which is the marker numbering**; an element anchor without quoted text stays a page `COMMENT`, anchors validate fail-closed, and `maxTargets` caps additional targets on read (default: the viewer's 16). A row with nothing restorable (no quote, no element anchor) projects by `documentLevel`: **`'global'` (the default, Plannotator's model)** makes it a `GLOBAL_COMMENT`, a document-level comment the panel renders without a quote line and the unanchored report never names; **`'unanchored'`** keeps it a page `COMMENT` with an empty quote and no anchor, which the unanchored report names (the panel shows an empty quote line), for hosts that treat such rows as comments that lost their place. The second trims a composed comment's anchor for persistence: product cap first, then a byte budget that truncates the quote down to its 400-char floor before shedding targets from the end, with `droppedTargets` (the total), `capDroppedTargets` and `sizeDroppedTargets` reported (a size drop must never be announced as the product cap). Kept targets serialize with keys in `text, label, anchor` order, the reference host's wire order, so stored anchors and fingerprints over them are stable on adoption. An input already in that order and within every bound round-trips byte-identical. **`projectHostThreads` is HTML-only.** The projection carries exactly what the raw-HTML surface reads (`originalText`, `htmlAnchor`, `htmlAdditionalTargets`, the type, the presentational fields) and pins `blockId` to `""`, `startOffset` / `endOffset` to `0`, with no `startMeta` / `endMeta`. On the markdown `Viewer` a projected `COMMENT` with quoted text still re-anchors: `hooks/useAnnotationHighlighter` requires `blockId` only on the math path and for a metas restore, and with no metas it falls to `findTextInDOM(originalText)`, a whole-container text search never scoped by block. What such a row loses with `blockId` `""` and offsets `0`: export ordering (`exportAnnotations` sorts by block index, which is `-1` for every such row, so they all sort first and tie), the "lines N-M" location label (`null` without a block), disambiguation when the same text appears more than once (first match wins), and the no-flash meta restore. A host that needs any of those carries `blockId`, the offsets and the web-highlighter metas in its own projection; a markdown-aware projection is more than a metas passthrough (the block id and offsets are the anchor) and is deliberately not attempted here.
+
+2. **`onUnanchoredChange` is complete over the `annotations` prop and keyed to the bridge's restore.** On every bridge `ready` (a fresh document, a srcdoc reload) the viewer posts its restore batch and then asks the bridge for one complete report (`report-unanchored`); the bridge answers after its next complete overlay pass **even when the set is unchanged, the empty set included**, and that answer is the first delivery for that document. Nothing is delivered before it, per document and per reload generation: a prop-side change that lands before the bridge's first post-restore report is folded into that report, not delivered on its own, so a host must not wait on a prop-side set arriving before the restore (a "no callback yet" state until then is the contract, not a missed event). Later bridge reports deliver as they arrive; a prop-side change delivers only when the union actually changes. The union adds what the bridge cannot see: page rows with no quoted text and no element anchor are reported without being posted (a `GLOBAL_COMMENT` is not, by design), and an id the viewer minted for a locally created comment that the host swapped out of `annotations` for its own id is dropped. What this replaces on the host side: the `mark-applied` bookkeeping that fed an unanchored set (failed verdicts, textless rows, the swapped-out local id). It does not replace `mark-applied` for the local-to-server mark swap itself: the package still does not parse that message, and a host that wants the no-flash swap keeps removing its local mark with `removeHighlight` on its own refetch (a host content with one frame of no mark removes it on the prop change instead).
+
+3. **`hooks/useHtmlRefresh({ enabled?, documentKey?, fetchSnapshot, onSnapshot, onUnanchored?, onResult? })`** returns `{ canRefresh, isRefreshing, reloadGeneration, refresh, reportAnnotationRestore }`. `fetchSnapshot(documentKey)` resolves `{ status: 'ok', rawHtml } | { status: 'missing' } | { status: 'unavailable' }`; a rejection counts as `unavailable`. Key the viewer on `reloadGeneration` and wire its `onUnanchoredChange` to `reportAnnotationRestore`. The hook owns the guards: a fetch superseded by a newer refresh or by a `documentKey` change never applies, and the restore acknowledgement fires once per reload generation with the viewer's first report for the remounted document, which by item 2 is the bridge's post-restore set, the empty set included, so a host clears its chip when a previous orphan re-anchors. Notifications are the host's, through `onResult`.
+
+4. **`components/HtmlSurfaceControls({ armed, onToggleArmed?, toolsHidden?, onToggleTools?, canRefresh?, onRefresh?, isRefreshing?, compact?, labels? })`**: the eye, the refresh and the pen with the exact markup, data attributes (`data-html-tools-toggle`, `data-html-refresh`, `data-html-annotate-toggle`), `aria-pressed` on the pen and the eye, `aria-disabled` on an in-flight refresh (focus is kept), and the pen's pixel-stable border. Descriptions ride the package's `Tooltip` (hover AND focus-visible) instead of a native `title`, with the control's shortcut under it as keycaps; `shortcuts` (`{ annotate?, tools?, refresh? }`, normalized bindings, `null` for none) overrides them and defaults to the `html-annotate` scope. Each control renders only when its handler is passed; `compact` renders nothing. `labels` overrides any string per key (`annotateTitle`, `interactTitle`, `annotateLabel`, `interactLabel`, `hideTools`, `showTools`, `refresh`, `refreshing`, `refreshTitle`, `refreshingTitle`); the defaults are Plannotator's pen and eye strings, the refresh default is the neutral "Refresh document", and no pen `aria-label` is emitted unless a label is passed. Pin the armed state to `annotateModeActive` and pass `onAnnotateModeExit` / `onAnnotateModeToggle` / `onToolsToggle` to the viewer so Esc, Mod+Shift+A and Mod+Shift+X work with focus inside the frame.
+
+5. **`AnnotationPanel` `unanchoredIds?: ReadonlySet<string>`** renders a small "Unanchored" chip (`data-annotation-unanchored`) on matching cards. Absent, the DOM is unchanged (pinned by comparing the markup against an explicit empty set).
+
+6. **`HtmlViewer` `scrollBehavior?: 'smooth' | 'auto'`** rides `scroll-to { id, behavior? }` so a host can carry its `prefers-reduced-motion` across the iframe boundary. Absent means smooth, as before; anything else fails closed to smooth.
+
+7. **`HtmlViewer` `maxAdditionalTargets?: number`** (0..16, default 16) is the host's product cap on shift-click targets per comment: enforced at the parent trust boundary, on submit and on restore, and carried on `arm-multi-select { key, max }` so the bridge's toggle stops at the same number for that draft (reset with the arm on every draft; a value above 16 never raises the package cap). Absent leaves the arm message unchanged. A host that adopts the package's 16 needs neither this prop nor a message-counting listener. Consequence for a host that passes a smaller cap: because it is enforced upstream at every step (the bridge stops the toggle, the parent boundary trims on submit and on restore, `projectHostThreads` `maxTargets` trims on read), a composed comment never reaches host code with more targets than the cap, so the host's own cap-dropped handling (`capDroppedTargets` from `buildPersistedHtmlAnchor`, or a counting listener) is unreachable in normal operation. Keep it only as a backstop for rows written by an older host build or another writer; the byte-budget drop (`sizeDroppedTargets`) is a different path and remains reachable.
+
+8. **`ExternalAnnotationTransport.subscribe` may emit `snapshot` from a host push.** `useExternalAnnotations` falls back to 500 ms version-gated polling only when the stream errors before its first event. A transport whose `subscribe` delivers a `{ type: 'snapshot', annotations, version }` event whenever the host's realtime layer signals a change (a Durable Object poke, a socket message) keeps the hook on the push path and the fallback poll is never entered. No package change; this is the sanctioned shape.
+
+9. **Blessed imports:** `shortcuts` (`useHtmlAnnotateShortcuts` and the scope registry) and `utils/inputMethod` join the supported table above. Both are fetch-free and `/api`-free (verified by grep over the modules and everything they import); `utils/inputMethod` persists through the `storageBackend` seam.
+
+Behavior is pinned by `../core/html-anchor.test.ts`, `components/html-viewer/unanchored.test.ts` and the "unanchored report" suite in `components/html-viewer/htmlPinpointProtocol.test.tsx`, `hooks/useHtmlRefresh.test.tsx`, `components/HtmlSurfaceControls.test.tsx`, `components/AnnotationPanel.unanchored.test.tsx`, and the cap and scroll-to cases in `components/html-viewer/srcdoc.test.ts` and `htmlPinpointProtocol.test.tsx`.
+
+### `@plannotator/core` 0.25.0
+
+Additive only, but required: `@plannotator/ui` 0.32.0 imports the new `@plannotator/core/html-anchor` subpath (`projectHostThreads`, `buildPersistedHtmlAnchor`), absent from published core 0.24.0, so core 0.25.0 must be installed/published first. Also carries the regenerated `guide-viewer-manifest` that pins the guides.show stylesheet with the `HtmlSurfaceControls` rules (see "Publishing & versioning").
+
+0.32.0 also ships the WebMCP provider engine (`@plannotator/ui/webmcp`, the `webmcp` seam on `configurePlannotatorUI`, and the additive `Annotation.inReplyTo` field); see README.md "WebMCP provider".
+
+---
+
+## Theme-aware Mermaid diagrams (0.40.0)
+
+Mermaid diagrams used to render from one static config in every palette and both modes: `MERMAID_CONFIG` pinned Mermaid's `dark` base theme plus a slate `themeVariables` palette, so a diagram was blue-on-slate under GitHub Light and Catppuccin alike. Diagrams now follow the active colour theme and mode the way code fences already do (`resolveFenceTheme` / `useFenceTheme`), through ONE dynamic mapping rather than per-palette themes.
+
+**How it works.** `utils/mermaidTheme` has three layers. `readThemeTokens(el?)` reads the theme custom properties off the document element (`--background`, `--foreground`, `--card`, `--card-foreground`, `--popover`, `--border`, `--muted`, `--muted-foreground`, `--primary`, `--primary-foreground`, `--secondary`, `--accent`, `--destructive`, `--success`, `--warning`, `--font-sans`) via `getComputedStyle`, resolving anything the pure parser cannot read as written (`color-mix()`, a `var()` chain) through a throwaway probe element, and returns `undefined` when neither `--background` nor `--foreground` resolves. `buildMermaidThemeVariables(tokens, mode)` is pure: it parses the tokens (hex, `rgb()`, `hsl()`, `oklch()`, `oklab()`, `lab()`, `lch()`, `color()`; alpha composited over the background, output always opaque hex because Mermaid's colour library does not read `oklch()`), fills any missing optional token from the two required ones, and returns `{ theme, themeVariables }` — base theme `dark` when the resolved mode is dark, `default` when light, with a complete override for every documented family: general, flowchart, sequence (`actor*`, `signal*`, `note*`, `activation*`, `labelBox*`, `sequenceNumberColor`), state, class, ER (`attributeBackgroundColor*`, `rowOdd/Even`), requirement, gitGraph (`git0..7`, `gitInv*`, `gitBranchLabel*`, `commitLabel*`, `tagLabel*`), gantt, pie (`pie1..12`, `pieOpacity: 1`), the `cScale*` scale behind mindmap/timeline, journey (`fillType0..7`), quadrant, venn, architecture, C4, plus the nested `xyChart`, `packet`, `radar`, `wardley`, `cynefin` objects. `applyMermaidTheme(mermaid, key, root?)` is the runtime step `MermaidBlock` runs before every render: `mermaid.initialize` is global, so it runs only when the `(palette, mode)` key (`mermaidThemeKey(colorTheme, mode)`, from `useTheme()`) or the runtime object changed since the last apply; a key change also re-runs the block's render effect, which is what re-themes an already rendered diagram (the fence re-highlight pattern).
+
+**Token → variable mapping** (the canvas is `muted` at 30% over `card`, matching the block container's `bg-muted/30`; the same mix over `background` is also checked as a surface, since the container can sit on either): `background`/`labelBackground`/`edgeLabelBackground`/`commitLabelBackground`/`relationLabelBackground`/`altSectionBkgColor` ← canvas; node/actor/state/entity/requirement/person fills (`primaryColor`, `mainBkg`, `nodeBkg`, `actorBkg`, `stateBkg`, `requirementBackground`, `tagLabelBackground`, `attributeBackgroundColorOdd`, `rowOdd`) ← `card`; their text (`primaryTextColor`, `nodeTextColor`, `actorTextColor`, `stateLabelColor`, `classText`, `requirementTextColor`, `tagLabelColor`) ← `card-foreground`; borders (`primaryBorderColor`, `nodeBorder`, `border1`, `actorBorder`, `activationBorderColor`, `compositeBorder`, `taskBorderColor`, `gridColor`, `pieOuterStrokeColor`, `archGroupBorderColor`, `quadrant*BorderStrokeFill`) ← `border`; edges and arrowheads (`lineColor`, `arrowheadColor`, `defaultLinkColor`, `signalColor`, `actorLineColor`, `labelBoxBorderColor`, `transitionColor`, `relationColor`, `archEdge*`, `innerEndBackground`, `specialStateColor`) ← `muted-foreground`; page text (`textColor`, `titleColor`, `labelColor`, `signalTextColor`, `transitionLabelColor`, `commitLabelColor`, `pieTitleTextColor`, `pieLegendTextColor`, `taskTextOutsideColor`, quadrant/xyChart/wardley text) ← `foreground`; cluster/subgraph, composite state, label box, activation and gantt section fills (`clusterBkg`, `secondaryColor`, `secondBkg`, `compositeBackground`, `labelBoxBkgColor`, `activationBkgColor`, `sectionBkgColor`, `doneTaskBkgColor`) ← `muted`; `tertiaryColor` ← `popover`; notes ← `card` tinted 18% toward `warning` with a `warning` border; error fills ← `card` tinted toward `destructive`; accents (`activeTaskBorderColor`, `vertLineColor`, `quadrantPointFill`, `taskTextClickableColor`) ← `primary`; `todayLineColor`/`critBorderColor` ← `destructive`. The twelve categorical fills (`cScale0..11`, `pie1..12`, `git0..7`, `fillType0..7`, `venn1..8`, `taskBkgColor`, `activeTaskBkgColor`, `xyChart.plotColorPalette`) are seeded from the palette's own accent tokens in the order `primary`, `accent`, `success`, `warning`, `destructive`, `secondary` (greys skipped, hues closer than 18° merged) and completed with hue rotations of the first seed, all normalized to one OKLCH lightness per page polarity (0.74 on a dark page, 0.50 on a light one; chroma clamped to 0.06..0.15) so one ink — the `background` token — reads on all of them (`cScaleLabel*`, `gitBranchLabel*`, `gitInv*`, `pieSectionTextColor`). `fontFamily` ← `--font-sans` when present. `darkMode` follows the mode.
+
+**Contrast rule.** Every text-on-fill pair the mapping produces must reach WCAG 4.5:1 and every line-on-canvas pair 3:1 (`ensureContrast`; the mapping adds 0.1 of headroom because a browser composites the container tint in its own space). Page-level text and lines are guarded against every surface they can cross rather than one: the canvas (the block's `bg-muted/30` tint over the document card, which is where Plannotator's article puts it, and over the bare page for a host that mounts the block there), node fills (`card`), cluster and composite-state fills (`muted`), popovers and ER rows — the first sweep found edges at 2.4–2.9:1 and cluster titles at 4.0:1 in 20 palettes precisely because they had been guarded against the page background alone. A pair that falls short is repaired by moving the text or line colour toward the mode's `foreground` token by the smallest OKLab step that satisfies the ratio (hue is kept where possible); when `foreground` cannot reach the ratio on that fill, the `background` token is used as the ink; when neither token can, pure black or white is the last resort (a mid-luminance fill such as the line colour under a sequence number); ratios are measured on the 8-bit colour Mermaid receives. Categorical fills are additionally pushed in lightness until the `background` ink reaches 4.5:1 on each. Structural strokes (node, cluster, actor borders) are guaranteed 1.5:1 against the canvas, nudged toward `muted-foreground`, so a palette with a near-invisible `border` still draws outlines. Page polarity (which lightness the fills are normalized to) is decided from the measured luminance of the `background` token, not from the mode label, so a dark-only palette rendered under a light label still gets fills its ink can carry; the label only picks the Mermaid base theme. `packages/ui/utils/mermaidTheme.test.ts` sweeps every palette in `packages/ui/themes` in both modes against these pairs, so a new palette cannot regress the guard.
+
+**Fallback contract for hosts.** Nothing changes for a host that does not use the tokens: with no `--background`/`--foreground` on the document (no `ThemeProvider`, no `theme.css`), `readThemeTokens` returns `undefined`, `buildMermaidThemeVariables` returns `null`, `buildMermaidConfig(null)` is `MERMAID_CONFIG` itself, and `applyMermaidTheme` records the key without calling `initialize` at all, so the runtime keeps the static config the loader or the eager entry initialized it with and renders byte-identically to 0.39.0 (pinned by `utils/mermaidTheme.test.ts` and `components/MermaidBlock.theme.test.tsx`). Outside a `ThemeProvider`, `useTheme()` yields the default context (Plannotator dark), which only names the key. `MERMAID_CONFIG` keeps its value and meaning (`securityLevel: 'strict'` still pinned by `components/MermaidBlock.test.ts`; `flowchart.htmlLabels` and `curve` are carried into the dynamic config unchanged) and `loadMermaidRuntime` / the eager entry are untouched: the runtime is still initialized once at registration, and the theme apply is a second, cached `initialize` on top. A host that ships its own tokens under the same names gets themed diagrams for free; a host that wants the old slate look in a themed document can keep the tokens off the diagram's ancestors, since `readThemeTokens` reads the document element by default. New exports are additive; the only behaviour change is for documents that carry the tokens, where diagrams now follow them.
+
+**Node shadow (the one thing that is not a colour).** Mermaid 12's neo look paints a drop shadow on every node, cluster and actor, from its own fixed `drop-shadow(1px 2px 2px rgba(185,185,185,1))` — a grey that reads as a halo on a themed page and follows no palette. The look is kept and that one filter is replaced: `buildMermaidThemeVariables(tokens, mode, options?)` takes an optional **`options.shadowAmount`, 0..1, default `DEFAULT_MERMAID_SHADOW_AMOUNT` (0.7)**, and publishes `themeVariables.dropShadow` from the new pure `buildMermaidShadow(ground, amount)`; the returned `MermaidThemeSpec` carries the resolved `shadowAmount`. Geometry scales over a small floor — `x = 0.3 + 0.7a`, `y = blur = 0.6 + 1.4a` — so **1 reproduces Mermaid's `1px 2px 2px` exactly** and **0 publishes `dropShadow: false`** (plus `nodeShadow: false`, the only thing that reaches the inline `filter:url(#…-drop-shadow-small)` on a state diagram's small start/end dots), which the neo rules render as `filter: none`. The colour comes from the palette's own ground and its POLARITY follows the page, the same rule Mermaid's `insertLookDefs` uses (`floodColor = theme.includes('dark') ? '#FFFFFF' : '#000000'`): on a dark page the ground lifted 82% toward white at alpha `0.18 + 0.72a`, on a light page darkened 40% toward black at `0.25 + 0.3a`, each asserted to differ from the ground in the direction that reads (falling back to plain white or black; to Mermaid's own grey when the ground is not a usable colour at all). Polarity, not just alpha, is the point: a black shadow on a near-black ground is a valid filter that paints nothing.
+
+`mermaidThemeKey(colorTheme, mode, shadowAmount?)` takes the amount as a third argument and appends `#s<amount>` to the key **only when it is not the default**, so the cache key for a host that never names an amount is byte-identical to the `(palette, mode)` key of 0.40.0 and no extra `initialize` happens. `DiagramTheme` (`utils/diagram-render`) gains an optional `shadowAmount`, which `DiagramBlock` fills from Plannotator's cookie-only `diagramShadow` setting (Settings → Display → "Diagram Shadow": 0 / 40 / 70 / 100 on a 0-100 percent scale; `utils/diagramShadow` exports `DEFAULT_DIAGRAM_SHADOW`, `DIAGRAM_SHADOW_OPTIONS`, `isDiagramShadow` and `diagramShadowAmount`, and is deliberately import-free so the settings registry can read it without pulling the diagram mapping into every surface's module graph).
+
+**What a host does.** Nothing, to get the toned-down default. To keep **Mermaid's own grey**, pass your own `themeVariables.dropShadow` after ours (`{ ...buildMermaidConfig(spec), themeVariables: { ...spec.themeVariables, dropShadow: 'drop-shadow(1px 2px 2px rgba(185,185,185,1))' } }`) — or simply `buildMermaidThemeVariables(tokens, mode, { shadowAmount: 1 })` for the same geometry in your palette's own colour. To ship **no shadow**, pass `{ shadowAmount: 0 }`, or build the key with `mermaidThemeKey(palette, mode, 0)` if you drive `applyMermaidTheme` yourself. The static `MERMAID_CONFIG` a token-less host renders with carries the same 0.7 geometry with one fixed light colour (its own slate palette is dark) — that is the ONE byte that changed in the fallback config; `securityLevel: 'strict'`, `startOnLoad`, `flowchart.htmlLabels` and `curve` are untouched. The shadow is paint-time only: at every amount the fills and label colours the mapping produces are identical (pinned in `utils/mermaidTheme.test.ts`, which also sweeps every shipped palette in both modes for a default shadow in the readable direction).
+
+**Known limits.** `GraphvizBlock` already maps its output to `var(--foreground)` / `var(--muted-foreground)` / `var(--muted)` and needs nothing. Mermaid hardcodes a `#000000` stroke on the sequence `crosshead` marker (lost messages, `-x`), which no theme variable reaches; it stays as in every Mermaid theme. The Mermaid 12 upgrade shipped in the same 0.40.0 publish and reuses this mapping unchanged; the re-sweep on 12 is in "Mermaid 12 (0.40.0)".
+
+## Element context through the host seam (0.40.0)
+
+`@plannotator/ui` 0.39.0 captured **element context** on raw-HTML and live-app pinpoints but deliberately left `@plannotator/core/html-anchor` untouched, so a host persisting through `buildPersistedHtmlAnchor` and reading through `projectHostThreads` dropped the field on save and never got it back on projection. That gap (#1521) is closed: the field now survives the whole host round trip.
+
+**The validator lives in core.** `parseHtmlElementContext` is exported by **`@plannotator/core/html-anchor`**, beside `parseHtmlElementAnchor`, along with `MAX_ELEMENT_CONTEXT_BYTES` (2048) and `MAX_PAGE_URL_LENGTH` (2048). `@plannotator/ui/components/html-viewer` imports it and **re-exports it unchanged**, so the 0.39.0 import site keeps working and no host code has to move; what is gone is the hand-mirrored copy that used to live in `components/html-viewer/useHtmlAnnotation.ts` (the rule since core 0.25.0: no mirror validators). Behavior is byte-faithful to 0.39.0 — the same scalar bounds, the same `CONTEXT_ATTR_ALLOWLIST` with href/src scrubbed of query and fragment, the same `outline → text → attrs → classes → path → heading → landmark → component` shed order inside the 2 KiB serialized bound, and the same fail-closed `undefined` for anything that is not a record or carries no `tag`. A host that calls the validator directly gets identical output for identical input.
+
+**What a host passes.** `buildPersistedHtmlAnchor(source, options)` now accepts `elementContext?: HtmlElementContext | null` on `source`, and each entry of `source.htmlAdditionalTargets` accepts `context?`. Both go through the same fail-closed parser the read path uses, so nothing is persisted that would be refused on read back. `HostThread` (the `projectHostThreads` input) accepts `elementContext?` the same way.
+
+**What a host gets back.** `PersistedHtmlAnchor` gains `elementContext?` and `HtmlAnnotationTarget` gains `context?`. **Key order is fixed and matters:** `elementContext` serializes strictly AFTER `htmlAdditionalTargets`, and a target's `context` after its `anchor` (so a kept target's key order is `text, label, anchor, context`). A row that carries no context serializes byte-identically to what 0.39.0 wrote — the key is absent, not `undefined` — so a wire fingerprint over stored anchors does not move when you adopt this. `projectHostThreads` returns `elementContext` on the projection and `context` on each projected target, so a host's panel and its per-row Copy (which calls `exportAnnotationEntry`) see the field. Paint never reads it: the repaint path still posts only anchors to the bridge.
+
+**The 16 KiB budget is unchanged, and contexts are the first thing it sheds.** `DEFAULT_HTML_ANCHOR_MAX_BYTES` stays 16384: one primary context at 2 KiB plus 16 extras at 1 KiB each already exceeds it, and raising the default is not the answer (the 48 KiB figure that appeared in the design write-up was never shipped). Under `maxBytes` the stages are now: the quote down to its 400-char floor → **per-target contexts, from the end** → **the primary context** → targets from the end → the rest of the quote. Shedding context before targets is deliberate: a context is descriptive and re-derivable on the next click, while a dropped target loses a marker the reviewer placed. Context shedding is silent — `droppedTargets`, `capDroppedTargets` and `sizeDroppedTargets` count targets only and keep their exact 0.39.0 meanings, so a host notice that distinguishes a product-cap drop from a size drop is unaffected.
+
+**The field stays descriptive.** Restore never reads it, `HtmlElementAnchor` and the restore path are untouched, there is no `BRIDGE_PROTOCOL_VERSION` bump, and share links still drop it exactly as they drop anchors.
+
+### Export without the outline
+
+`elementContextExportBlock(ann, opts)` and `exportAnnotationEntry(ann, opts)` on `@plannotator/ui/utils/parser` take a new **`includeOutline?: boolean`, default `true`**. Pass `false` to print the identity lines (`selector`, `path`, `role · name · component`, `attrs`, `text`, `route`, `box`, `near`) WITHOUT the fenced HTML skeleton: in a model turn the 600-char outline is the expensive part per annotation, and the identity lines are what an agent greps. Defaulting to true keeps every existing caller's bytes unchanged.
+
+**Default change to know about before you upgrade:** `exportAnnotationEntry`'s **`includeRoute` now defaults to `true` per field**, not only when `opts` is omitted. In 0.39.0 the default lived on the parameter (`opts = { includeRoute: true }`), so passing any explicit options object replaced it and `exportAnnotationEntry(ann, {})` silently dropped the live-app `route` line. A host that was passing an options object in order to suppress the route must now pass `includeRoute: false` explicitly. Callers that pass nothing, or that already pass `{ includeRoute: true }` or `{ includeRoute: false }`, are unaffected. `elementContextExportBlock`'s own default is unchanged (route off unless asked, because the grouped export prints a `## Page:` heading above the entries).
+
+Behavior is pinned by `../core/html-anchor.test.ts` (the wire fingerprint of a context-less row, the shed order, and the projection) and the element-context cases in `utils/parser.test.ts`.
+
+---
+
+## Mermaid 12 (0.40.0)
+
+`@plannotator/ui` 0.40.0 moves the diagram runtime from `mermaid` `^11.17.2` to an exact `mermaid` `12.0.0` and, in the same release, stops registering it eagerly in Plannotator's own plan editor. The theme mapping from 0.39.x (see "Theme-aware Mermaid diagrams") is unchanged and was re-swept on 12: all 52 palettes in `packages/ui/themes` in every mode they define (78 combinations — 26 palette halves do not exist, 22 palettes being dark-only and 4 light-only — 15 diagrams each), 12,870 text-on-fill pairs and 7,410 line-on-canvas pairs measured from the rendered SVG in Chromium, **0 failures** against the 4.5:1 / 3:1 rule and 0 render errors. This section is the contract a host needs to adopt 0.40.0; the publish order is at the end.
+
+**What Mermaid 12 changes, and what we took.** We take 12's defaults rather than pinning the 11 ones (owner ruling). Concretely:
+
+- **ELK is the effective default layout** for flowchart (`graph`, `flowchart`), state, class, ER and requirement diagrams — through Mermaid 12's per-diagram defaults, while the top-level `config.layout` still reads `dagre` (so do not infer the renderer from that key): orthogonal right-angle edge routing, tighter node boxes with more label wrapping, different subgraph packing, and a different rendered `viewBox` for the same source. ELK is now part of `mermaid` itself (`elkjs` is a dependency; the separate `@mermaid-js/layout-elk` package is gone) and is loaded by Mermaid's own internal `import()` on the first ELK layout, so in a chunked host build it is a separate `elk-*.js` chunk (1,435 KB, 438 KB gzip) whether or not you import `mermaid-eager`. `flowchart-elk` as a diagram id still parses and renders (`aria-roledescription="flowchart-elk"`). The `defaultRenderer` option under `flowchart` / `class` / `state` config is removed upstream; use the top-level `layout` option if you need dagre back (`mermaid.initialize({ ..., layout: 'dagre' })` on the runtime after ours; `MERMAID_CONFIG` does not set `layout`).
+- **Per-diagram default theme/look** (`redux-color` theme and the `neo` look for flowchart, class, state, ER, requirement, sequence, use case, swimlane, Venn and agentflow) does not reach a Plannotator-themed document: `applyMermaidTheme` passes an explicit base theme (`dark` / `default`) and a complete `themeVariables` set, and `MERMAID_CONFIG` passes `theme: 'dark'`, so the rendered look is the classic one in the 0.39 sweep and in the 0.40 sweep alike. A host that renders with no theme tokens keeps `MERMAID_CONFIG` (still `theme: 'dark'`, still `securityLevel: 'strict'`, pinned by `components/MermaidBlock.test.ts`).
+- **Legacy diagram ids** `flowchart`, `class`, `state` are gone from `detectType`; `flowchart-v2`, `classDiagram`, `stateDiagram` are what 11 already returned for the same sources, and every `aria-roledescription` in the sweep is identical 11 → 12.
+- **Removed public exports** (`clearLayoutRenderState`, `createCommonLayoutRenderer`, `defaultMeasureLayout`, `paintLayoutData`, the `CommonLayout*` types) are internal layout helpers that nothing in `@plannotator/ui` used or re-exported.
+- **`lodash-es` override does not travel.** This repo pins `lodash-es` to `4.18.1` through a root `overrides` entry (the Mermaid 12 dependency tree pulls an older range); npm does not apply a dependency's `overrides`, so a consumer adds its own root `"overrides": { "lodash-es": "4.18.1" }` (pnpm: `pnpm.overrides`) to get the same tree.
+- **Browser floor: Safari 17.4+ and ES2024.** Mermaid 12 is built to that target ("Mermaid is now built to target Safari 17.4+ and ES2024"; Node 22.12+ for anything that imports it server-side, e.g. a test harness). A host that must render diagrams on an older Safari stays on ui 0.39.x. Nothing else in `@plannotator/ui` moved its floor.
+
+**SVG ids are byte-identical 11 → 12** (measured from the real rendered SVG in the plan editor across 15 diagrams in 7 families, all 12 ids per diagram matched). `MermaidBlock` renders with `mermaid.render("mermaid-" + block.id, source)`, so every id below is prefixed by that render id (`{renderId}`), and a host that anchors on these keeps working:
+
+| Family | Anchor | Pattern (11 and 12) |
+|---|---|---|
+| flowchart / `graph` / `flowchart-elk` | node | `<g id="{renderId}-flowchart-{nodeId}-{n}" class="node default">` |
+|  | edge | `<path id="{renderId}-L_{from}_{to}_{n}" class="flowchart-link">` |
+|  | subgraph | `<g id="{renderId}-{subgraphId}" class="cluster">` under `g.clusters` |
+|  | markers | `<marker id="{renderId}_flowchart-v2-{pointEnd\|pointStart\|circleEnd\|circleStart\|crossEnd\|crossStart}[-margin]">` |
+| state (`stateDiagram-v2`) | state | `{renderId}-state-{stateId}-{n}` (`.node.default.statediagram-state`); pseudo-states `{renderId}-state-{scope}_start-{n}` / `_end-{n}`; composite cluster `{renderId}-state-{stateId}-{n}` (`.statediagram-cluster`) |
+|  | transition | `<path id="{renderId}-edge{n}" class="transition">` (note `edge{n}`, not `L_a_b_0`); markers `{renderId}_stateDiagram-barbEnd` and, new under 12, `{renderId}_stateDiagram-barbEnd-margin` |
+| class | class box | `{renderId}-classId-{ClassName}-{n}` |
+|  | relation | `<path id="{renderId}-id_{From}_{To}_{n}" class="relation">`; markers `{renderId}_classDiagram-{kind}[-margin]` |
+| ER | entity | `{renderId}-entity-{ENTITY}-{n}` |
+|  | relationship | `<path id="{renderId}-id_entity-{A}-{i}_entity-{B}-{j}_{n}" class="relationshipLine">`; attribute cells are class-only (`.attribute-type`, `.attribute-name`, `.attribute-keys`, `.row-rect-odd/even`) |
+| requirement | node / relation | `{renderId}-{reqId}` / `<path id="{renderId}-{a}-{b}-{n}">` |
+| sequence | lifeline / root | `line#actor{n}`, `g#root-{n}` — **global, un-prefixed**; messages, notes, activations and loops carry classes only (`.messageLine0/1`, `.messageText`, `.sequenceNumber`, `.note`, `.activation0`, `.loopLine`) and no ids |
+| gitGraph / pie | — | no ids at all (`.commit`, `.commit{n}`, `.branch{n}`, `.pieCircle`, `.slice`); the per-commit hash class on gitGraph circles is derived from generated commit ids and was never stable |
+| every family | gradient | one `<linearGradient id="{renderId}-gradient">` |
+
+Three class-level deltas, none of which breaks an id- or class-based selector: `g.edgePaths` gains a second class (`<g class="edges edgePaths">`, additive, same element); empty `g.edgeLabel > g.label > div.labelBkg` placeholder groups are no longer emitted for edges without a label (a host that assumed one `.edgeLabel` per edge must count labeled edges only); and the gitGraph auto-hash class differs, as it always could.
+
+**One DOM-order change a host must know about.** Children of `g.edgePaths` are now in **declaration order**. Under 11/dagre the eval's state diagram emitted `edge0, edge1, edge5, edge6, edge10, edge2, edge3, edge4`; under 12/ELK it emits `edge0 … edge10` in source order. Anything that indexes edges by DOM position (`edgePaths.children[i]`, `:nth-child`, walking siblings to pair an edge with a label) breaks; anything that selects by id (`{renderId}-L_{from}_{to}_{n}`, `{renderId}-edge{n}`, `{renderId}-id_{From}_{To}_{n}`) does not. If you need a stable order, sort by id or by the numeric suffix, never by position.
+
+**Lazy-load contract.** Since 0.32.0 `utils/mermaid` has loaded the runtime through a slot: filled, it resolves at once; empty, `loadMermaidRuntime()` runs `import('mermaid')` on the first diagram, memoized, with a rejected load dropped so the block's automatic re-attempt and its Retry issue a fresh import (`utils/mermaid.test.ts`, `components/DiagramBlock.lazyRetry.test.tsx`). Through 0.39.0 Plannotator's plan editor filled the slot eagerly by importing `utils/mermaid-eager`, so a host copying its entry got the same. **0.40.0 removes that import**: with 12's runtime ~1.8 MB larger, a plan with no diagram must not pay for it, so Plannotator itself now takes the lazy path, and `tests/entry-assets.test.ts` fails if the eager import comes back into either app. What that means for a host:
+
+- Nothing to change to get the lazy behaviour: it is the default of the package and always was. The first diagram on a page fetches `mermaid.core-*.js` (625 KB, 148 KB gzip on this checkout's portal build) and, for an ELK family, Mermaid then fetches `elk-*.js` (1,435 KB, 438 KB gzip); until the SVG lands the block shows the source fence under a quiet `role="status"` line ("Rendering diagram…", `data-mermaid-pending`), never the error panel, and the panel with the source plus Retry appears only for a failure (pinned by the "Mermaid pending state" case in `DiagramBlock.lazyRetry.test.tsx`).
+- To keep the 0.39 behaviour — runtime registered and initialized at startup, in your entry chunk, unable to fail separately from the app — add the one line Plannotator used to have, before the first render: `import '@plannotator/ui/utils/mermaid-eager';`. It statically imports `mermaid`, runs `mermaid.initialize(MERMAID_CONFIG)` at module evaluation and fills the slot (`setMermaidRuntime(mermaid, 'plannotator-mermaid-eager')`); the ELK chunk is still Mermaid's own lazy import and is not hoisted by this.
+- Own loader: `setMermaidRuntime(runtime, 'host')` after your own `import('mermaid')` + `initialize(MERMAID_CONFIG)` fills the slot the same way; there is no `mermaidRuntimeLoader` seam on `configurePlannotatorUI` (the test hook `__setMermaidRuntimeLoaderForTests` is not host surface).
+- `applyMermaidTheme(mermaid, key)` is keyed on the **runtime object** as well as the `(palette, mode)` key, so a lazily loaded runtime is themed on its first render exactly like an eagerly registered one, and a host that swaps runtimes gets a fresh `initialize` (pinned by `components/MermaidBlock.theme.test.tsx`).
+- Single-file builds gain nothing from the lazy import: `inlineDynamicImports` inlines the `import('mermaid')` target (and ELK) into the one HTML file, and the import resolves from the bundle. Plannotator's own hook bundle is 21.74 MB → 23.50 MB (+1.76 MB, +8.1%; gzip 6.66 MB → 7.19 MB); that delta is Mermaid 12's own size, not the loading strategy, and the review bundle is unchanged (17.43 MB, byte-identical to main) because it never carried Mermaid. On the chunked share portal the entry chunk goes 4,688 KB → 4,044 KB (-645 KB, -13.7%) with `mermaid.core` moving to its own chunk.
+
+**Theming contract, restated for 12.** `MermaidBlock` calls `applyMermaidTheme(runtime, mermaidThemeKey(colorTheme, mode))` before every render. `readThemeTokens()` reads `--background`, `--foreground`, `--card`, `--card-foreground`, `--popover`, `--border`, `--muted`, `--muted-foreground`, `--primary`, `--primary-foreground`, `--secondary`, `--accent`, `--destructive`, `--success`, `--warning` and `--font-sans` off the document element (resolving `color-mix()` / `var()` chains through a probe element); `buildMermaidThemeVariables(tokens, mode)` turns them into the base theme (`dark` / `default`) plus a complete `themeVariables` set for every family (node fills ← `card`, text ← `foreground` / `card-foreground`, borders ← `border`, edges and arrowheads ← `muted-foreground`, clusters ← `muted`, twelve categorical fills seeded from `primary`, `accent`, `success`, `warning`, `destructive`, `secondary`; every colour opaque hex, every text-on-fill pair guarded to 4.5:1 and every line 3:1 against every surface it can cross), and `mermaid.initialize(buildMermaidConfig(spec))` runs once per key change. **Without tokens** (no `ThemeProvider`, no `theme.css`, or the tokens kept off the document element) `readThemeTokens` returns `undefined`, `buildMermaidThemeVariables` returns `null`, nothing is re-initialized, and the runtime keeps the static `MERMAID_CONFIG` it was initialized with (12's own `dark` base theme with the slate `themeVariables`, ELK layout). None of the variable names changed between 11 and 12; the 0.40 sweep (78 combinations, 12,870 text pairs, 7,410 line pairs, 0 failures) is the proof that the mapping holds under ELK's re-laid-out geometry.
+
+**Publish order.** `@plannotator/ui` 0.40.0 pins `@plannotator/core` `0.25.3` exactly, so **publish `core` 0.25.3 first, then `ui` 0.40.0** (`npm publish` in `packages/core`, then in `packages/ui`; both by hand from `main` after merge — CI never publishes these packages). Nothing under `packages/core` changed for Mermaid 12 itself. Core 0.25.3 also carries #1549 (`parseHtmlElementContext`, `MAX_ELEMENT_CONTEXT_BYTES`, `MAX_PAGE_URL_LENGTH` on `@plannotator/core/html-anchor`, and the element-context round trip; see "Element context through the host seam"), which is why the ui pin moves: a ui 0.40.0 on a published core 0.25.2 would fail to compile in a consumer.
+
+---
+
+## Diagram engine (0.41.0)
+
+`@plannotator/ui` 0.41.0 makes the Workspaces diagram viewer THE diagram engine of the package (owner ruling: "the new engine, not an option"). `MermaidBlock` and `GraphvizBlock` keep fence parsing, `diagramLanguages.ts` and the lazy-retry contract, and render through ONE renderer slot and ONE canvas: their own viewBox math, `applyView` and per-block zoom controls are gone, and the popout is the same `DiagramViewer` at full size over the document (the `TablePopout` chrome). A host that installs 0.41.0 gets the viewer, its overlay and Source pane, the anchor codecs and the runtime slots as supported surface; a host that already renders the copies Workspaces carried re-pins onto these exports and deletes the copies. Requires `@plannotator/core` 0.25.4 (the `diagram-anchor` subpath), so **publish core 0.25.4 first, then ui 0.41.0**.
+
+**New exports.**
+
+- `@plannotator/ui/components/diagram` (barrel; the components also resolve as `components/diagram/<Name>`): `DiagramViewer` (+ `DiagramViewerProps`), `DiagramPopout`, `DiagramCanvas` (+ `DiagramCanvasHandle`, `DiagramEscapeOutcome`, `svgContentSize`, `KEY_PAN_PX`; props `pickTarget`, `className`), `DiagramOverlay`, `DiagramComposer`, `DiagramSourcePane`, `useDiagramComments` (+ `DiagramComment`, `DiagramCreateComment`, `DiagramComposerDraft`, `DiagramHover`, `ResolvedDiagramComment`), `useDiagramRender` (+ `DiagramRenderState`), `useDiagramSourceDraft` (+ `DiagramSourceDraft`, `SaveResult`, `PREVIEW_DEBOUNCE_MS`), `useDiagramViewport` (+ `Viewport`, `ContentSize`, `ZOOM_MIN`, `ZOOM_MAX`, `ZOOM_STEP`, `WHEEL_ZOOM_SENSITIVITY`, `DRAG_THRESHOLD_PX`, `TOUCH_DRAG_THRESHOLD_PX`, `FIT_PADDING_PX`). Also `components/diagram/anchorClaims`: `DiagramAnchorClaims`, `DiagramAnchorClaimsContext`.
+- `@plannotator/ui/utils/diagram-render`: `renderDiagram(kind, renderId, source, theme)`, `diagramFinder(kind)`, `sanitizeDiagramSvg`, `parseDiagramSvg`, `scrubDiagramSvg`, `scopeDiagramCss`, `widenEdgeHitAreas`, `diagramHitSource`, `DIAGRAM_HIT_ATTR`, `DIAGRAM_HIT_LAYER_ATTR`, `EDGE_HIT_STROKE_WIDTH`, `themeGraphvizSvg`, types `DiagramTheme`, `DiagramRenderResult`, `DiagramRenderError`, `DiagramKind`; test hook `__setDiagramSvgParserForTests`.
+- `@plannotator/ui/utils/graphviz`: the Graphviz runtime slot, the same shape as `utils/mermaid` — `loadGraphvizRuntime`, `setGraphvizRuntime`, `getGraphvizRuntime`, `getGraphvizRuntimeSource`, `getGraphvizRetryDelayMs`, `__setGraphvizRuntimeLoaderForTests`, types `GraphvizRuntime`, `GraphvizRuntimeSource`, `GraphvizRuntimeLoader`. `@viz-js/viz` is pinned exactly at `3.30.0`; the only runtime spelling of the package is the slot's `import('@viz-js/viz')`.
+- `@plannotator/ui/utils/diagram-anchor`: the Mermaid finder over a rendered svg — `DiagramFinder` (the seam: `targetSelector`, `targetFromElement`, `findTarget`, `sourceLine`), `MERMAID_FINDER`, `DIAGRAM_TARGET_SELECTOR`, `diagramFamilyOf`, `nodeIdsOf`, `splitEdgeStem`, `targetFromElement`, `findDiagramTarget`; it re-exports everything from `@plannotator/core/diagram-anchor` so a host imports one module.
+- `@plannotator/ui/utils/diagram-anchor-graphviz`: `GRAPHVIZ_FINDER`, `GRAPHVIZ_TARGET_SELECTOR`, `graphvizTargetFromElement`, `graphvizFindTarget`, `graphvizSourceLine`.
+- `@plannotator/ui/utils/diagram-projection`: `projectElement(el, hostRect)` (+ `ScreenRect`).
+- `@plannotator/core/diagram-anchor` (core 0.25.4): types `DiagramFamily`, `DiagramTargetKind`, `DiagramTarget`, `DiagramAnchor`, `DiagramKind`; `parseDiagramAnchor`, `parseDiagramTarget`, `parseDiagramAdditionalTargets`, `buildDiagramAnchorValue`, `buildDiagramAnchor` (the opaque-blob shape a host that stores every anchor kind in one JSON column writes), `sameTarget`, `diagramTargetText`, `diagramTargetName`, `diagramAnchorLocationLine`, `lineMentions`, `diagramSourceLine`, `diagramWholeSourceLines`, `diagramFirstSourceLine`, `DIAGRAM_ANCHOR_KEY`, `DIAGRAM_ADDITIONAL_TARGETS_KEY`, `MAX_DIAGRAM_ANCHOR_STRING_LENGTH`.
+- `Annotation.diagramAnchor?: DiagramAnchor` on `@plannotator/ui/types` (also re-exported there as a type), and additive `annotations`, `selectedAnnotationId`, `onSelectAnnotation`, `onAddAnnotation`, `readOnly`, `onRestoreReport` props on `MermaidBlock` / `GraphvizBlock` (`DiagramBlockProps`; `Viewer` passes its own).
+
+**Removed.** `components/mermaidSvg` (`normalizeMermaidSvgMarkup`) is gone: it never sanitized anything (it baked `max-width: none`, `preserveAspectRatio` and `height="100%"` into the root tag for the old innerHTML mount), and the canvas now sizes the mounted node itself. A host that imported it drops the import. `GraphvizBlock` no longer exports `__setVizLoaderForTests` as its own function; the name is kept as an alias of `__setGraphvizRuntimeLoaderForTests`.
+
+**The adapter (`DiagramViewer` props).** `kind: 'mermaid' | 'graphviz'`, `source: string`, `theme: { colorTheme, mode: 'dark' | 'light' }` (the pair `useTheme()` resolves; a host without `ThemeProvider` passes any palette id with the mode it renders in — with no tokens on the document the Mermaid entry keeps the static `MERMAID_CONFIG`), `comments: DiagramComment[]` (`{ id, anchor: DiagramAnchor, additionalTargets?, text, author?, resolved? }`; array order is the badge numbering), `onCreateComment?(anchor, text, additionalTargets)` (absent: clicks open nothing; `anchor.sourceLine` already carries `sourceLineOffset`), `onSave?(source) => Promise<SaveResult>` with `SaveResult = { status: 'ok' } | { status: 'stale', currentSource }` (absent: no Source pane; a thrown error is the save error shown in the pane; `stale` shows the Reload strip, holds Save and keeps the draft, and Reload adopts `currentSource` as the baseline), `readOnlySource?` (pane shown, no Save), `sourceOpen?` (the host owns the toggle; `DiagramPopout` renders one), `selectedCommentId?` / `onSelectComment?`, `onUnanchoredChange?(ids)` (once per membership change after every render, the `HtmlViewer` contract), `onResolutionChange?(map)` (every comment's verdict, whenever one changes or the list does), `canvasClassName?` (the canvas is `touch-action: pan-y` so a finger can scroll the page past an inline diagram; a viewer that owns the screen passes `touch-none`, as `DiagramPopout` does), `onDismiss?` (Escape with nothing left to close), `renderId?` (two viewers over one document need two), `sourceLineOffset?` (0 when the document IS the diagram; a fence's opening line for a fence, so `sourceLine` names document lines), `maxAdditionalTargets?` (default 0: a comment covers one part; pass 16 to keep shift-click multi-select — Workspaces' `MAX_PERSISTED_ADDITIONAL_TARGETS`), `commentingDisabledReason?` (the composer shows the reason and a Close instead of a textarea — what `CommentingPolicy.reason` was), `retryToken?`, `onRenderState?`, `renderFallback?` (what to show while there is no svg yet), `autoFocus?`, `className?`. Nothing else reaches the viewer: identity, storage, the comments rail and the save transport are the host's.
+
+**The anchor shape** (`DiagramAnchor`; Workspaces' `diagram` value plus two additive members within `v: 1`, the `sequence` family and the `diagram` kind): `{ v: 1, family: 'flowchart' | 'state' | 'class' | 'er' | 'requirement' | 'sequence' | 'other' | 'graphviz', kind: 'node' | 'edge' | 'cluster' | 'diagram', id?, from?, to?, label, sourceLine: [first, last] | null }` — the diagram's own id for the part (never the rendered element id with its counter, never geometry), the label at write time, and 1-based DOCUMENT lines. Restore order: id, label, source line (the pane's gutter mark), unanchored but listed. `parseDiagramAnchor` is the one fail-closed validator (strings capped at 400, a bad `sourceLine` drops to null while the target survives); the external-annotations POST (both runtimes), the feedback archive and the export all run it. Share links drop the anchor exactly like `htmlAnchor` (pinned by `sharing.multiTarget.test.ts`).
+
+**Codec families.** Flowchart, state, class, ER and requirement parts are addressed by Mermaid's own ids (table in "Mermaid 12"). **Sequence** diagrams carry classes, not ids, so the ids are the codec's: an actor is a `node` whose id is the actor's `name` attribute (`rect.actor`, `text.actor`, `line.actor-line`; the top and bottom boxes of one actor are the same target, and the element is the top box); a message is an `edge` `msg-<n>` by document order (`.messageLine0/1`, and its `text.messageText` resolves to the same message; `from` / `to` come from the line's `data-from` / `data-to` when the renderer wrote them; the label is the message text); a note is a `node` `note-<n>` (`rect.note` + `text.noteText`); a loop / alt / opt frame is a `cluster` `frame-<n>` (the group that holds its `line.loopLine`s, label from `text.labelText` + `text.loopText`). `sourceLine` for an ordinal is the n-th statement of its kind in the text (`diagramSourceLine`). Because an ordinal moves when a statement is inserted above it, sequence restore checks the label too: the part at the ordinal when its label still matches, else the ONE part that carries the stored label, else the part at the ordinal (its text was edited in place). Everywhere, the label fallback (restore step 2) applies only while the label names exactly one part; with duplicates it is skipped and the comment falls through to the source line. gitGraph and pie carry neither ids nor stable classes: a comment there is a whole-diagram comment.
+
+**Comments that name no diagram block.** A comment composed in a block carries that block's `blockId`. One posted through `POST /api/external-annotations` carries `blockId: "external"`, and one whose fence was deleted carries a dead id. `Viewer` provides `DiagramAnchorClaimsContext` (`components/diagram/anchorClaims`, a `DiagramAnchorClaims` over the document's diagram block ids in order); every diagram block tries such a comment against its own render (`onResolutionChange`, the per-comment verdict map the viewer reports whenever a verdict or the list changes) and reports to the coordinator; the FIRST block in document order whose finder resolves it shows it, and when every block has answered and none did, the first block reports it unanchored (a document with no diagram at all: `Viewer` reports it). A block rendered without the context coordinates with itself only. A Graphviz-family anchor is only ever tried against dot fences.
+
+**The runtime slots.** Mermaid: `utils/mermaid` as before (`loadMermaidRuntime`, `setMermaidRuntime`; the eager entry unchanged), with `applyMermaidTheme(runtime, mermaidThemeKey(colorTheme, mode))` still called per (palette, mode) before every render — `MermaidBlock.theme.test.tsx` and the `securityLevel: 'strict'` pin are unchanged. Graphviz: `utils/graphviz`, the same shape, filled lazily on the first dot fence or by a host through `setGraphvizRuntime(await import('@viz-js/viz').then((m) => m.instance()), 'host')`. Both are loaded with ONE automatic re-attempt after the slot's retry delay; a load failure resolves the render to `{ ok: false, runtimeUnavailable: true }`, which is the one failure the block's Retry (a shared epoch per engine, so one Retry re-attempts every failed sibling) can change.
+
+**The sanitizer, and the delta.** `sanitizeDiagramSvg` = `parseDiagramSvg` (DOMPurify under the svg, svg-filter and html profiles with `foreignobject` added back the way Mermaid's own pass adds it, `RETURN_DOM_FRAGMENT`, the root adopted into the page document) + `scrubDiagramSvg` (in place on the tree about to be mounted: `script`/`iframe`/`object`/`embed`/`link`/`meta` removed, every `<style>` reduced by `scopeDiagramCss(css, rootId)` to the rules scoped under the svg's own root id plus `@keyframes` — `@import` and every other statement at-rule dropped, any rule that fetches dropped (`url(` that is not a `#fragment`, `image-set(`, `image(`, `src(`, `cross-fade(`, `paint(`, `element(`; CSS escapes are decoded first, so `u\72l(` is caught), any rule with a selector NOT starting at `#<rootId>` dropped (it could restyle the page around the diagram), `@media` / `@supports` / `@container` / `@layer` filtered recursively, `@font-face` and the rest dropped; a style element left empty is removed. Mermaid scopes every rule it emits under the render id, so all of its rules survive: pinned over six captured families, and in Chromium the computed node, label and edge styles equal main's on three palettes with identical rule counts, every `<a>` loses `href`/`xlink:href` so a `click A "https://…"` binding cannot turn a pinpoint click into a navigation, every `on*` attribute removed, `href`/`xlink:href`/`src` kept only for `#fragment` or `http(s)` values). No markup string ever reaches the app DOM: the canvas mounts the node with `replaceChildren`. Delta against what Plannotator had: nothing to merge in the security direction (the old `normalizeMermaidSvgMarkup` and the old Graphviz regex rewrite did no sanitizing); the one case ours covered that the moved code did not — a Graphviz root whose size is only `width="206pt" height="188pt"` with no `viewBox` — is now handled in `svgContentSize`, which accepts `pt`/`px`-suffixed lengths as the fallback. Also consolidated: the old Graphviz stroke color `var(--muted-foreground)` becomes `var(--foreground)` (the moved `themeGraphvizSvg`), so dot fences and Workspaces' `.dot` documents draw the same line. **Test note:** happy-dom cannot host DOMPurify (its `DOMParser` lands the fragment in a foreign realm and mislabels svg namespaces; in-place mode reads `nodeName` through a cached `Node.prototype` getter happy-dom overrides on `Element`), so DOM tests parse through an inert XML/`<template>` parse via `__setDiagramSvgParserForTests` (`test-setup/diagramSvg.ts`) while `scrubDiagramSvg` still runs on every test render; the DOMPurify parse is proven in Chromium.
+
+**Interaction (owner feedback, twice: watching the first runs, then testing the build by hand).** Click-to-select, drag-to-pan: a press that travels under the drag threshold is a click and opens the composer (so a slightly moving click still selects); one that travels further is a pan and never opens it. The threshold is pointer-type aware: `DRAG_THRESHOLD_PX` (4 px) for a mouse or pen, `TOUCH_DRAG_THRESHOLD_PX` (10 px) for a finger. **Hover targeting was removed at the owner's request** — it read as messy and fought the pan hand — so nothing highlights on a plain mouse-over; the one pre-click affordance left is the ring and label chip under the pointer while the platform modifier is held (Cmd on macOS, Ctrl elsewhere; `isModKeyHeld`), and it disarms on the modifier's release, on any other key while it is held, and on window blur, like the code review's token cards. Canvas keys (`+` `-` `0`, arrows) ignore events carrying Meta, Ctrl or Alt, so `Mod+0`, `Mod+-` and `Alt+Arrow` stay the browser's. The wheel ignores `|deltaY| < 0.1`.
+
+**The hit layer and the priority rule.** Edges were nearly impossible to click. Measured cause (headless Chromium, `elementsFromPoint` at 20 points along every edge of a flowchart with nested subgraphs, a state, a class and an ER diagram): the ONLY thing painted over an edge is that edge's **own label** (`g.edgeLabel > foreignObject > … > p`), which covers 5–40% of every labelled edge, centred on its midpoint — exactly where a person clicks an edge; unlabelled edges were reachable at 20 of 20 points. Mermaid 12 + ELK emits ONE `g.root` even with nested subgraphs, and clusters are painted before the edge paths, so nested roots and cluster rects cover nothing. The fix is structural anyway, so it also holds for a renderer that does nest: `widenEdgeHitAreas(svg)` (exported from `utils/diagram-render`, with `DIAGRAM_HIT_ATTR`, `DIAGRAM_HIT_LAYER_ATTR`, `EDGE_HIT_STROKE_WIDTH`, `diagramHitSource`) collects one invisible hit path per edge into ONE `<g data-diagram-hit-layer>` appended LAST in the svg root. Each hit path is a bare element of the edge's tag carrying only its geometry (`d` / `x1 y1 x2 y2` / `points`), a `transform` that re-creates the ancestors' placement (every ancestor's `transform` attribute joined outermost first, plus the edge's own: an svg transform list composes left to right, so this needs no layout and runs on the detached node), `data-diagram-hit="<index>"`, `stroke: transparent`, `fill: none`, `stroke-width: 14`, `pointer-events: stroke`, the width, stroke, dash pattern and markers also set `!important` inline. It keeps NO `id`, `class`, marker, inline style or `data-*` of the edge, so a host's `[data-id="L_A_B_0"]` still matches exactly what it matched before. `diagramHitSource(hitEl)` (a WeakMap) maps one back to its visible edge. Covered: Mermaid `g.edgePaths > path`, `path.flowchart-link`, `path.transition`, `path.relation`, `path.relationshipLine`, the sequence `.messageLine0/1`; Graphviz `g.edge > path`. Because the layer sits over the nodes too, `DiagramCanvas` never trusts the topmost element: it takes `document.elementsFromPoint` at the pointer, maps hit paths to their edges, reduces each element to its addressable ancestor, and hands the candidates (topmost first) to `pickTarget`, which the viewer implements as **node, then edge, then cluster** (`useDiagramComments.pickTarget`). An edge LABEL is a target too and resolves to its edge (`g.edgeLabel` → the edge whose id its `data-id` names); the composer and the ring always land on the part's ONE element (`finder.findTarget` canonicalizes). Numbered badges and rings for existing comments are unchanged.
+
+**A click never does nothing: the `diagram` kind.** A click that resolves no part opens the composer on the WHOLE diagram (with a draft already open it closes the draft instead): `{ kind: 'diagram', family, label: <the diagram's first source line>, sourceLine: <the source's full range, offset into the document> }`, no `id`. This covers gitGraph, pie, and any family the codec does not address. Its ring is the svg's content bounds and its badge sits top-left; it is never unanchored while the diagram renders (`findTarget` returns the svg root). The export line reads `Diagram (<family>), lines a–b`.
+
+### 0.41.1 — the engine is lazy, and the controls are not part of the diagram
+
+Two fixes, no API change: every export named in this section still resolves
+from the same path, and a host upgrading from 0.41.0 changes nothing.
+
+**Lazy.** 0.41.0 reached the whole engine through STATIC imports from
+`components/Viewer`: `Viewer` → `MermaidBlock` / `GraphvizBlock` →
+`DiagramBlock` → `DiagramPopout` and `DiagramViewer` → `DiagramSourcePane` →
+CodeMirror. Any host that statically imports `Viewer` therefore shipped the
+canvas, the overlay, the finders, the popout and the editor on EVERY document
+read, including a markdown document with no diagram and — since no host passes
+`onSave` for a fence — an editor that could never open. Three edges are now
+`React.lazy`: the two block wrappers in `Viewer` (one chunk each over a shared
+`DiagramBlock` chunk), `DiagramPopout` in `DiagramBlock` (loaded when Expand
+is pressed, fallback `null`), and `DiagramSourcePane` in `DiagramViewer`
+(loaded when the pane first opens, fallback a box with the pane's own class
+list so the split never collapses). A host that imports `DiagramViewer`
+directly still gets a working viewer; its pane simply arrives one chunk later.
+`svgContentSize` moved to its own dependency-free module and is re-exported
+from `DiagramCanvas` and the barrel, so both published paths are unchanged.
+The Suspense fallback for a fence is the block's own pending state
+(`components/diagram/DiagramPending`, new, exported for hosts that render
+their own fence chrome), so the source fence under "Rendering diagram…" paints
+once and neither wait flashes. Measured on `Viewer`'s own document-read
+closure (minified, gzip): 980.3 KB → 829.4 KB, -150.9 KB. Single-file builds
+inline everything and are unchanged, which is why
+`components/Viewer.diagramClosure.test.ts` bundles the entry and walks its
+static imports.
+
+**Controls.** The canvas resolves a click over everything under the pointer
+(`elementsFromPoint`, node → edge → cluster) because the edge hit layer sits
+above the nodes. The chrome painted over the canvas is not in the svg, so that
+walk stepped past it to the part behind: pressing Zoom out over a node opened
+the composer on that node, and a press on the strip could start a pan. A
+pointer event whose composed path contains a control surface now resolves no
+target, opens no composer and starts no pan. Mark host chrome inside the
+canvas with `data-diagram-control`; `button`, `[role=toolbar]`, inputs, the
+composer and the source pane count without marking
+(`components/diagram/diagramControls`).
+
+**A diagram comment restored before its diagram mounts.** Making the two
+block wrappers lazy opens a window in which the document has painted and a
+draft has restored but no diagram exists in the DOM yet. That window was
+investigated after a report of diagram comments being lost across a reload;
+the report did not hold (the probe behind it never answered the "Draft
+Recovered" modal and then counted an un-restored session), and the three
+properties that make the window safe were already in place. They are now
+pinned, because every one of them is a way to lose a comment that has no text
+to fall back on:
+
+- the highlighter skips a row carrying `diagramAnchor` outright — it is
+  neither painted, attempted nor reported unanchored — including the shape
+  with no quote and no `blockId` that a whole-diagram or label-less anchor
+  produces (`hooks/useAnnotationHighlighter.diagramSkip.test.tsx`);
+- `Viewer`'s "this document has no diagram, so nobody can resolve this row"
+  report keys on the PARSE, never on what has mounted, so a lazy load does
+  not flash the "Unanchored" chip on a comment that restores fine;
+- the row stays listed either way, and the block claims it and paints its
+  badge whenever it mounts — no second restore pass, no reload
+  (`components/Viewer.diagramLazyRestore.test.tsx`, which holds the engine
+  open on a gated runtime loader and asserts the panel row, the absent chip,
+  then the badge).
+
+**Migration for a host that carried the copies.** `useDiagramRender(kind, documentId, source, theme, { retryToken })` now takes the `{ colorTheme, mode }` theme and reports `error.runtimeUnavailable`; `useDiagramAnnotations` becomes the host's projection of its rows onto `comments` plus its mutation behind `onCreateComment` (the viewer half is `useDiagramComments`); `useDiagramDraft`'s `preview`/`dirty`/`stale`/`reload` semantics live in `useDiagramSourceDraft` behind `onSave` (the PATCH, `If-Match`, the query cache and the fence slice stay host-side; answer `stale` on a 412); `DiagramComposer` takes `disabledReason`/`error` instead of a `CommentingPolicy`; the canvas's `onEscape` returns `'consumed' | 'pass'` so a popout can walk the Escape ladder; arrow keys pan (`KEY_PAN_PX`, Shift ×5) in addition to `+` `-` `0`. Icons come from `lucide-react` (already a dependency).
+
+---
+
+## Host toolbar seams (0.43.0)
+
+Two additive props, ruled in together by Plannotator's owner **on one
+condition: each is an opt-in host capability that changes nothing for
+Plannotator's own users when it is not supplied.** Plannotator is the provider
+of these capabilities; it is not a product that uses them. It passes neither
+prop anywhere, and `packages/editor` / `packages/review-editor` are untouched
+by this release. Core is UNCHANGED at `0.25.5`, so **ui 0.43.0 publishes
+alone**.
+
+### 1. `AnnotationToolbar` `selectionActions` — the host's own commands on a selection
+
+```ts
+import type { SelectionAction, SelectionActionContext } from "@plannotator/ui/types";
+// (also @plannotator/ui/utils/selectionActions)
+
+interface SelectionActionContext {
+  text: string;          // the toolbar's copy text, else the element's text
+  blockId: string;       // the enclosing [data-block-id], '' on raw-HTML surfaces
+  startOffset: number;   // offset of the selection inside that block's text
+  endOffset: number;     // startOffset + text.length
+  element: HTMLElement;  // the element the toolbar is anchored to
+}
+
+interface SelectionAction {
+  id: string;
+  label: string;
+  detail?: string;         // dimmed second line
+  icon?: React.ReactNode;  // a colored accent bar is drawn when absent
+  onSelect(ctx: SelectionActionContext): void;
+}
+```
+
+One toolbar button (a wand, `data-selection-actions`) opens the package's own
+dropdown directly below it, in the quick-label picker's placement and chrome
+(`components/SelectionActionsDropdown`: `SelectionActionsDropdown` is the list,
+`FloatingSelectionActionsPicker` the portaled, viewport-clamped, flip-above
+picker; rows carry `data-selection-action="<id>"` under `role="listbox"`).
+Selecting an item calls `onSelect(ctx)` and closes the toolbar exactly as a
+quick label does — **the package creates no annotation**; what an action means
+is entirely the host's business.
+
+- **Keyboard:** ArrowDown / ArrowUp move, Enter invokes, Escape closes the
+  dropdown (and only the dropdown — the toolbar stays open). Nothing is
+  preselected until the first arrow, the package-wide rule, so a stray Enter
+  over an open dropdown never fires a host command. Pointer hover highlights a
+  row and a click invokes it directly. While the dropdown is open, the
+  toolbar's own type-to-comment and Alt+digit listeners stand down, the same
+  way they do for `FloatingQuickLabelPicker`.
+- **Where it sits:** the wand takes the slot the quick-labels Zap occupied and
+  the Zap moves one place right (`Copy | Delete | Comment | Actions | Quick
+  label | 👍 | Cancel`). Chosen over "actions to the right of the Zap" so that
+  ONE geometry rule covers both host configurations: with `quickLabels: false`
+  — the expected host setup — the wand sits exactly where the Zap sat, and a
+  host that keeps both gets its own actions in the primary slot it opted into.
+- `undefined` or `[]` renders no button at all, and the empty array is pinned
+  by a test because "the host has no actions right now" is a real state.
+- **The context is derived, not threaded.** `buildSelectionActionContext`
+  (`utils/selectionActions`, pure) walks up from the anchor element for
+  `[data-block-id]` and computes the offset by splitting the block's text on
+  the selection — deliberately the same arithmetic
+  `createAnnotationFromSource` uses, so an action sees the coordinates an
+  annotation created from that same selection would carry. On a surface with
+  no blocks (raw HTML) it degrades to `blockId: ''` and `startOffset: 0`
+  (`endOffset` is then the selection's length; an HTML annotation itself
+  stores `0`/`0`). The one deliberate deviation from the annotation path is
+  a selection the block does not contain — one spanning two blocks — where
+  the annotation path reports `blockText.length` and a host gets `0`.
+
+### 2. `AnnotationToolbar` `quickLabels` — the opt-out switch
+
+`quickLabels?: boolean`, default `true`. `false` hides the Zap picker button
+**and** makes the Alt+digit label shortcuts inert on that toolbar (hiding the
+button while leaving the keys live was the obvious bug; a test pins both). It
+does not touch the one-click 👍, which is a separate affordance, and it does
+not clamp editor mode — a host that persists `'quickLabel'` mode still keeps
+that state out of `Viewer`, exactly as with `AnnotationToolstrip`'s
+`hideQuickLabel` (0.35.0).
+
+### 3. `CommentPopover` `mentionSource` — an `@` mention source for the composer
+
+> **Agent tags (ui 0.53.1; opt-in, byte-identical when absent):** `MentionSource.kinds?: readonly ('user' | 'agent')[]` (default `['user']`) is the kinds `mentionMatches` offers; `MentionSource.matchDetail?: boolean` (default `true`) whether a query also matches `detail`; `MentionPerson.group?: string` makes `MentionPicker` draw each run of one group as `role="group"` (`data-mention-group`) labelled by its heading (`data-mention-group-heading`), the option ids unchanged (`<id>-option-<flat index>`); `MentionSource.renderNotice?: (tagged: readonly MentionPerson[]) => ReactNode` is drawn under the composer field in both `CommentPopover` layouts. The Plannotator Inbox uses all four to tag agent sessions in a file comment. `mentionGroups(people)` (`components/MentionPicker`) is the run splitter, exported for a host that draws its own grouped list.
+
+> **0.43.2 additions (opt-in, byte-identical when absent):** `MentionSource.heading?: string | null` draws one non-selectable heading row (`data-mention-heading`, e.g. "People in this workspace") above the list; `MentionPerson.avatar?: { url?, initials?, tint? }` draws an avatar (`data-mention-avatar="image" | "initials"`) before the label — an `<img>` when `url` is set, else `initials` (defaulting to the label's first letter) on a disc tinted with `tint` (any CSS color; absent means the muted surface). Neither the grammar, the keyboard state machine, `onMentionsChange`, `onPickBlocked` nor `Annotation.mentions` changes.
+
+```ts
+import type { MentionPerson, MentionSource } from "@plannotator/ui/types";
+// (also @plannotator/ui/utils/mentions)
+
+interface MentionPerson {
+  readonly id: string;                    // opaque host id, reported back verbatim
+  readonly kind: "user" | "agent";        // agents are never taggable in a comment
+  readonly label: string;
+  readonly detail: string | null;         // right-aligned hint (an email, "Agent")
+  readonly canOpen: boolean;              // host access data; see onPickBlocked
+}
+
+interface MentionSource {
+  readonly people: readonly MentionPerson[];
+  readonly emptyNotice?: string | null;                     // honest-empty row
+  readonly heading?: string | null;                         // 0.43.2: heading row above the list, absent → none
+  readonly onMentionsChange?: (ids: readonly string[]) => void;
+  readonly onPickBlocked?: (person: MentionPerson) => void;
+}
+```
+
+This is the shape the host's own reply box already uses (`MentionPerson` is
+copied field for field from its `plannotator/mention-extension.ts`), so the
+host fills `people` from its existing candidate hook and nothing has to be
+mapped. The **package owns the typing rules and the picker**; the host owns
+the people and what a mention means.
+
+- **The grammar is ported, not reinvented** (`utils/mentions`, pure, unit
+  tested): the same `MENTION_QUERY_RE = /@[\w .-]*$/`, the same word-boundary
+  guard that makes `a@b.com` never open a menu, the same users-only /
+  not-already-tagged filtering on label OR detail, the same `@Label ` insertion
+  with the caret after it, the same `sanitizeMentionLabel`, and the same
+  surviving-token rule — deleting a token untags that person, so the body and
+  the reported ids can never disagree about who was named.
+- **The picker** (`components/MentionPicker`) is portaled and `position:
+  fixed`, measured from the textarea's rect, above it by default and below
+  when there is not 196px of headroom — the composer card clips its own box,
+  so a menu positioned inside the textarea's wrapper is cut off. `role=
+  "listbox"` with `data-mention-picker`, rows `data-mention-option="<id>"`, the
+  empty notice `data-mention-empty` (one non-selectable row; with `people: []`
+  and no notice the menu simply stays closed).
+- **Keyboard** (`hooks/useMentionAutocomplete`, modelled on
+  `useSkillReferenceAutocomplete` and living in the same textarea beside it —
+  `handleKeyDown` offers the event to the skill hook first, then this one):
+  nothing is preselected, so Enter is a newline and Tab leaves the field until
+  an arrow engages a row; ArrowDown from none lands on the first row, ArrowUp
+  on the last; a mouse pick uses `mousedown` + `preventDefault` so it beats the
+  blur. **One deliberate difference from the `/` and `$` trigger:** the arrows
+  engage this menu even on a bare `@`, and Escape closes it whenever it is
+  visible. `$` and `/` are ordinary prose characters whose menu must yield the
+  arrows back to caret navigation; `@` at a word boundary is an unambiguous tag
+  gesture, and typing `@` then ArrowDown is how the host's own reply box
+  behaves.
+- **`onPickBlocked` is the no-access rule.** When a `canOpen: false` person is
+  picked AND the host supplied `onPickBlocked`, the handler fires and
+  **nothing is inserted** (the host shows its own no-access dialog). Without
+  the handler such a person inserts like anyone else — the package never
+  renders a disabled row it cannot explain. Both branches are pinned by tests.
+- **The ids reach the host two ways.** `onMentionsChange(ids)` fires on every
+  text change with the surviving ids, and `onSubmit` gained an optional THIRD
+  argument: `onSubmit(text, images?, mentions?)`. The third argument is passed
+  **only when `mentionSource` is supplied** — without one the call is the
+  two-argument call it has always been (`arguments.length === 2`, pinned).
+  Hosts can use either; `onMentionsChange` alone is enough for a host that
+  keeps its draft state outside the popover.
+- Nothing is wired to Plannotator data: there is no mention provider in this
+  repo, and `configurePlannotatorUI` gains no seam for one. A host passes the
+  prop where it renders the composer, the `HtmlViewer` / `Viewer` pattern.
+
+### Threading points
+
+- `AnnotationToolbar` (`selectionActions`, `selectionActionsIcon`, `quickLabels`) — the props live here.
+- **ui 0.45.2 (registry default):** `SETTINGS.reviewPanelView.defaultValue` is now `'tree'` (was `'sections'`). `configStore.ensureLoaded` seeds registry defaults into the host's `storageBackend`, so a host that never persisted a panel view now seeds `tree`; a persisted value still wins. No API change. Plannotator removed its first-run review setup dialog in the same change (#1587). `selectionActionsIcon?: React.ReactNode` (0.43.1) is the glyph on the wand button, forwarded by `Viewer` (both toolbars) and `HtmlViewer`; absent → the package's own wand, which 0.43.1 also simplified to one thick diagonal with a single star (the six-spark glyph read as noise at 16px). Name, `data-selection-actions`, size and behavior of the button are untouched either way.
+- `Viewer` forwards both to BOTH of its toolbars (the text-selection toolbar
+  and the code-block hover toolbar).
+- `HtmlViewer` forwards `selectionActions` to its selection toolbar. It does
+  not take `quickLabels`: that surface is already `commentOnly`, which hides
+  the Zap and the Alt+digit keys outright.
+- `plan-diff/PlanCleanDiffView` mounts a toolbar too and is deliberately NOT
+  threaded: it is a Plannotator-only surface (the plan-version diff) and is not
+  on the supported-import list. Ask if a host needs it.
+- `CommentPopover` (`mentionSource`). `Viewer` does NOT forward it: the viewer
+  owns several composers and a per-composer decision belongs to the host that
+  renders them. Ask if you would rather pass it once on `Viewer`.
+  **Answered in 0.43.1 — both viewers now forward it; see the next section.**
+
+### The no-op guarantee, and how it is pinned
+
+With neither prop supplied, the rendered DOM of both components is **byte-for-byte
+what `origin/main` renders**: the same components were mounted on the base commit
+and on this branch in the same harness and their `outerHTML` diffed to zero
+(`.annotation-toolbar` + `[data-comment-popover]`, 6376 bytes each, identical).
+On top of that, committed tests pin the structure rather than a snapshot:
+the default toolbar's button set and order (`Copy, Delete, Comment, Quick
+label, Looks good, Cancel`), the absence of `[data-selection-actions]` and of
+the picker, the exact attribute list on the Zap button, and — for the composer —
+that typing `@` opens nothing and that submit stays a two-argument call.
+`useMentionAutocomplete` with no source registers no listener, opens no menu
+state and returns one frozen empty id array; `AnnotationToolbar` renders no
+extra element and spreads no extra attributes.
+
+Tests: `utils/mentions.test.ts` (11, DOM-free),
+`components/AnnotationToolbar.selectionActions.test.tsx` (8, DOM-gated),
+`components/CommentPopover.mentionSource.test.tsx` (11, DOM-gated).
+
+## `mentionSource` on the viewers (0.43.1)
+
+0.43.0 left `mentionSource` on `CommentPopover` alone, with an open question
+("ask if you would rather pass it once on `Viewer`"). The answer is yes, so
+0.43.1 threads it one level up and gives the picked ids somewhere to land.
+Same ruling as 0.43.0: an opt-in host capability that changes nothing for
+Plannotator's own users when it is not supplied. `packages/editor` and
+`packages/review-editor` are untouched by this release; core is UNCHANGED at
+`0.25.5`, so **ui 0.43.1 publishes alone**.
+
+### 1. The prop
+
+`Viewer` and `HtmlViewer` each gain `mentionSource?: MentionSource` — the same
+type, unchanged, from `@plannotator/ui/types` (also `utils/mentions`) — and
+each forwards it to EVERY comment composer it mounts:
+
+- `Viewer` → the text-selection composer (`useAnnotationHighlighter`'s) and the
+  global / code-block one.
+- `HtmlViewer` → the pinpoint (selection) composer and the global one.
+
+A host that wants mentions on a surface passes one prop instead of reaching
+into the viewer's composers. Passing it directly to a `CommentPopover` you
+mount yourself still works and is unchanged.
+
+Deliberately NOT threaded: `plan-diff/PlanCleanDiffView`, `CodeFilePopout` and
+`goal-setup/GoalSetupSurface` mount composers too, but they are Plannotator-only
+surfaces off the supported-import list — the same line 0.43.0 drew for
+`selectionActions`. Ask if a host needs one.
+
+### 2. `Annotation.mentions` — where the ids go
+
+```ts
+interface Annotation {
+  // …
+  mentions?: readonly string[];   // opaque host ids, additive
+}
+```
+
+`onSubmit(text, images?, mentions?)` used to stop at the viewer: the third
+argument was received and dropped. It now rides onto the annotation the viewer
+hands `onAddAnnotation`, on every creation path behind those composers
+(`createAnnotationFromSource`, `createAnnotationFromMathSource`, the code-block
+path, both global comments, and the HTML pinpoint comment).
+
+**The presence rule** is the whole no-op guarantee, so it is worth stating
+exactly: the key exists only when a `mentionSource` was supplied AND at least
+one id survived to submit. No source → no third argument → no key. A source
+whose tokens the author deleted before submitting → `[]` from the composer →
+still no key, never an empty array. Every write is a conditional spread
+(`...(mentions && mentions.length > 0 ? { mentions } : {})`), not `mentions,`,
+because the bare shorthand would put the key on the object with an `undefined`
+value and `'mentions' in ann` would start answering true for Plannotator.
+
+The ids are opaque to the package. Mapping one to a person, notifying them, or
+rendering an avatar is entirely the host's business — `MentionPerson.id` is
+reported back verbatim, exactly as it was handed in.
+
+### 3. What the field does NOT touch
+
+An id from a host's directory means nothing outside that host, so the field
+stays out of everything Plannotator produces:
+
+- **Export.** `exportAnnotations`, `exportAnnotationEntry` and
+  `exportLinkedDocAnnotations` never print it: an annotation carrying
+  `mentions` exports byte-identically to the same annotation without it
+  (`utils/parser.mentions.test.ts`). The readable `@Label` token is in the
+  comment body, which is what the coding agent reads.
+- **Share links.** Dropped exactly like `htmlAnchor`, `elementContext` and
+  `diagramAnchor` — the compact tuple format never carried extra fields, and a
+  round trip restores `mentions: undefined` (pinned in
+  `utils/sharing.multiTarget.test.ts`).
+- **External annotations.** `POST /api/external-annotations` builds its rows
+  from an explicit field list and `PATCH` from an allowlist, so a `mentions`
+  key on the wire is dropped as any unknown key is. No change was needed in
+  `@plannotator/core/external-annotation`, in either runtime.
+- **The feedback archive.** `packages/shared/feedback-archive.ts` copies named
+  fields into its record; `mentions` is not one of them and never reaches
+  `index.jsonl` or a sidecar. No change needed.
+- **Drafts** carry it for free (annotations are opaque JSON to the draft
+  transport), which is the behavior a host wants: a restored draft still knows
+  who was named.
+
+### 4. Edit and reply paths
+
+There is none to thread in these two viewers: both `Viewer` composers and both
+`HtmlViewer` composers are CREATION composers. Editing an existing comment
+happens in `AnnotationPanel`'s card, a plain textarea that has never had an
+`@` picker and takes no `mentionSource`; replies (`inReplyTo`) are created by
+the WebMCP catalog, not by a composer. So no annotation's `mentions` is
+rewritten after creation by this package — a host that edits a comment owns
+the field from then on. If you want the panel editor to pick people too, that
+is a separate prop on `AnnotationPanel` and worth asking for.
+
+### No-op guarantee, and how it is pinned
+
+With no `mentionSource`, both viewers mount the composers they always did, no
+`@` listener is registered, no picker DOM exists, and the annotation object
+handed to `onAddAnnotation` has no `mentions` key at all (`'mentions' in ann`
+is false, asserted rather than `toBeUndefined()` — the difference between the
+conditional spread and the bare shorthand is invisible to the latter).
+
+Tests (both DOM-gated, both in the workflow's DOM_TESTS step):
+`components/Viewer.mentionSource.test.tsx` (5) drives the real Viewer — the
+selection composer through the Vim toolbar's type-to-comment gesture and the
+global composer through its button — and
+`components/html-viewer/HtmlViewer.mentionSource.test.tsx` (3) drives the real
+HtmlViewer through a bridge pinpoint message and its global button. Plus the two DOM-free pins in
+§3 above.
+
+## Mention token chips in the composer (0.44.0)
+
+0.43.0-0.43.2 gave the composer an `@` picker; the token it inserted was
+then plain text in the textarea. 0.44.0 paints it as a **chip**, so a tag
+looks the same in the picker row, in the input, and in the comment the host
+posts. Same ruling as the three releases before it: an opt-in host
+capability that changes nothing for Plannotator's own users when it is not
+supplied. `packages/editor` and `packages/review-editor` are untouched; core
+is UNCHANGED at `0.25.5`, so **ui 0.44.0 publishes alone**.
+
+### One overlay, two sources (the refactor)
+
+`ComposerTextarea` already used exactly the right technique for skill
+references: a mirrored, aria-hidden overlay rendered BEHIND a
+transparent-text textarea (a textarea cannot style substrings), sharing the
+font/padding/wrapping metrics and mirroring scroll, with `.pn-ref-composing`
+hiding it during IME composition. Chips do not add a second overlay — two
+mirrored layers could never stay pixel-aligned with each other, and only one
+of them could own the scroll sync. Instead the overlay became a TOKEN
+HIGHLIGHT LAYER fed by a merged list of ranges, and it turns on when EITHER
+source is active.
+
+The range computation moved out of the render loop into
+`utils/composerTokens` (pure — no DOM, no styling, no React):
+
+- `skillTokenRanges(tokens)` — today's positioned occurrences, unchanged.
+- `mentionTokenRanges(text, people)` — every occurrence of each surviving
+  person's readable `@Label` token.
+- `mergeTokenRanges(text, groups)` — `groups` in priority order; drops
+  ranges outside `[0, text.length)` and empty/inverted ones, then keeps
+  earlier `start`, longer at the same start, earlier group at the same start
+  and length, and drops anything beginning inside a range already kept.
+  Nothing nests, so the overlay stays a flat sequence of spans.
+
+With a single skill source this reproduces the pre-refactor loop exactly
+(which dropped a token whose `start` fell behind the cursor or whose `end`
+ran past the text). The component keeps the Tailwind classes and the `data-*`
+attributes in `renderTokenSpan`, both so the class scanner still sees them
+and so the metric rule below is read with the classes it governs.
+
+### The chip
+
+A chip is painted only for a person the author PICKED whose token still
+survives — `useMentionAutocomplete` now also returns those survivors as
+`mentions` (frozen-empty with no source, the same treatment `mentionIds`
+gets), so the ranges come from the mention id model and never from a regex
+over arbitrary `@words`. Editing one byte of a token un-chips it in the same
+render that drops the id from `onMentionsChange`, so a chip follows the body
+rather than a stale pick. The one case where the chips and the reported IDS
+can still part company is the prefix case in the limitations below, which
+the chips inherit rather than introduce.
+
+```
+<span data-mention-token="user_1" data-mention-kind="user" class="…">@Marcus Chen</span>
+```
+
+- `data-mention-token` is the opaque host id; `data-mention-kind` carries
+  `MentionPerson.kind` verbatim — the host's styling hook. Know what that
+  means today: the picker offers USERS ONLY (`mentionMatches` drops every
+  person whose `kind !== 'user'`), so only a user can be picked, only a user
+  can be tagged, and the attribute only ever reads `user`. `agent` is the
+  reserved value for the day agents become taggable — a host rule for
+  `[data-mention-kind="agent"]` matches nothing until then.
+- `MentionSource.tokenClassName?: string` (new, optional) is appended to the
+  span verbatim for a host that wants its own look.
+- The package default is `text-primary bg-primary/15` and a 3px radius —
+  the skill-reference treatment one shade stronger, so the two token kinds in
+  one overlay read as siblings. Deliberately no ring: every class it uses is
+  one the package already emitted, so a host's generated CSS is unchanged
+  (and so is the portable guide viewer's bundle — `guide-viewer-manifest.ts`
+  needed no regeneration, which is why core is untouched).
+
+**THE METRIC RULE (and it is the host's too).** A chip may change COLOR,
+BACKGROUND, BORDER-RADIUS, BOX-SHADOW and TEXT-DECORATION only. Padding,
+margin, border width, font-weight, letter-spacing and font-size all move a
+glyph, and the overlay's glyphs must coincide with the textarea's own layout
+or the caret drifts away from the text it is painting. A pill's horizontal
+breathing room is faked with `box-shadow: 0 0 0 Npx <background>`, which
+paints without occupying space — that is the way to a pill look through
+`tokenClassName`, and the reason the rule bans padding rather than the
+appearance.
+
+### What did NOT change
+
+The overlay exists for the whole life of a mention composer, not only once
+somebody is tagged, so the first pick never swaps the textarea element under
+the caret. IME composition, scroll sync, the resize gutter, the placeholder,
+the `/` + `$` skill autocomplete and its menu, the Alt-typing path, drafts
+(`initialDraft` / `draftKey`), image attachments and `Mod+Enter` submit are
+all untouched, and `onSubmit(text, images?, mentions?)` is the same call.
+`Viewer` and `HtmlViewer` needed no change at all: they already forward
+`mentionSource` (0.43.1), and the chips are inside the composer it reaches.
+
+Three inherited limitations are worth stating rather than fixing here:
+
+- **Two people whose labels sanitize to the same token** are
+  indistinguishable in a plain-text body, so the FIRST of them listed owns
+  every occurrence of it. That is the same first-match rule
+  `survivingMentions` already applies to the ids; it renders and never
+  throws.
+- **A restored draft has no chips** until the author picks again, because
+  the survivors come from the picks made in THIS composer — exactly the same
+  reason `onMentionsChange` reports `[]` for a restored draft today (0.43.x
+  behavior, unchanged). It reports no STALE ids either: a reopened draft
+  starts with nobody tagged, so the chips and the ids agree on "none".
+- **A label that is a prefix of another label** (`Ann` and `Anna Lee`, both
+  picked): the CHIPS are right — longest-wins means `@Anna Lee` is painted
+  whole and is never half-covered by an `@Ann` chip. The IDS are the loose
+  end: delete `@Ann` from a body that still reads `@Anna Lee` and
+  `survivingMentions` keeps reporting Ann, because it asks
+  `text.includes('@Ann')`. So the id list can outlive the chip. That is
+  0.43.x behavior in `survivingMentions`, unchanged here — the chips only
+  make it visible.
+
+### The no-op guarantee, and how it is pinned
+
+The same components were mounted on `origin/main` and on this branch in one
+harness and their `outerHTML` diffed:
+
+- **No `mentionSource`, no `skillReferences`:** the composer is
+  byte-identical — 3192 bytes, and the same `addEventListener` and
+  `setTimeout` counts (287 / 1 in that harness). No overlay element exists
+  at all.
+- **`skillReferences` only:** the popover (4821 bytes) and the overlay
+  itself (634 bytes) are byte-identical, same listener and timer counts
+  (150 / 1). `data-skill-ref-overlay="true"` is written only when
+  `skillReferences` is on, so a skill composer's overlay keeps the exact
+  attribute list it had; a mentions-only overlay is found by its
+  `data-pn-mobile-editable-mirror` attribute instead.
+- A mention composer's overlay costs exactly one extra listener (the
+  textarea's `scroll`, which is what mirrors the layer) — the same one a
+  skill composer has always paid.
+- **The portable guide viewer's build is byte-identical** (`viewer.*.js` and
+  `viewer.*.css` hashes and their SRI unchanged against `origin/main`), so
+  `packages/core/guide-viewer-manifest.ts` is in sync and core is untouched.
+  That is also why the default chip reuses classes the package already
+  emitted instead of introducing one.
+
+**Real-browser metric proof** (headless Chromium, throwaway Vite harness):
+typing `Nice catch @ma`, picking Marcus and continuing to type, the chip's
+bounding rect and the textarea's own text run for that token agree to
+**0.000px** on both axes and in width — at 420px and 1200px, on a wrapped
+line (3 lines above it) and with the textarea scrolled (`scrollTop` 40) —
+and the caret x after the token is **0.016px** from the span's end.
+
+Tests: `utils/composerTokens.test.ts` (16, DOM-free) and
+`components/CommentPopover.mentionChips.test.tsx` (11, DOM-gated, in the
+workflow's DOM_TESTS step).
+
+## Annotation card header slot and mentions on the edit box (0.45.0)
+
+0.43.1 closed with an open question: "Editing an existing comment happens in
+`AnnotationPanel`'s card, a plain textarea that has never had an `@` picker…
+If you want the panel editor to pick people too, that is a separate prop on
+`AnnotationPanel` and worth asking for." It was asked for, so 0.45.0 adds it —
+together with the header twin of the panel's existing `renderCardFooter`.
+Same ruling as the four releases before it: opt-in host capabilities that
+change nothing for Plannotator's own users when they are not supplied.
+`packages/editor` and `packages/review-editor` have ZERO source diff in this
+release; core is UNCHANGED at `0.25.5`, so **ui 0.45.0 publishes alone**.
+
+### 1. `renderCardHeader` — the twin of `renderCardFooter`
+
+```ts
+renderCardHeader?: (annotation: Annotation) => React.ReactNode;
+```
+
+Rendered inside each plan-annotation card's HEADER row — the row carrying the
+type word, the `diff` / page / `Unanchored` chips and `author · time` — after
+the timestamp and before the built-in edit/delete cluster, which keeps the
+right edge on its `ml-auto`. That is the slot for a status stamp (resolved,
+needs reply, a reviewer badge); the footer remains the slot for reply and
+resolve UI.
+
+It follows the footer's contract line for line:
+
+- The wrapper is `[data-annotation-card-header="true"]` (the footer's
+  `[data-annotation-card-footer="true"]` spelled for the header — the attribute
+  the host queries and styles), and it stops `click` and `keydown`
+  propagation, so interacting with your stamp never selects the card.
+- **It renders under `readOnly`**, exactly as the footer does and for the same
+  reason: the contents are host-owned and a stamp is a read affordance. The
+  built-in mutation affordances stay hidden.
+- In the All-files grouped view it rides the OPEN document's cards only
+  (`group.isCurrent`), the footer's rule — a slot built from the open
+  document's state has nothing to say about another document's card.
+- Returning `null` / `undefined` / `false` for a card renders no wrapper for
+  that card. Omitting the prop renders no wrapper anywhere: there is no empty
+  container to lay out or style around.
+- The header row is ONE non-wrapping flex line shared with the type word, the
+  `diff` / page / `Unanchored` chips and the timestamp. The wrapper is
+  `min-w-0` and shrinks, but a host node that cannot shrink will overflow
+  toward the built-in actions rather than wrap — keep the stamp compact, or
+  give it its own truncation.
+
+**Not on `CodeAnnotation` cards.** `CodeAnnotationCard` (the review-editor
+shape) takes no `renderCardFooter` either, so neither new prop was threaded
+into it; mirroring the footer is the rule. Ask if a host needs both there.
+
+### 2. `mentionSource` — the `@` picker on the card's edit box
+
+```ts
+mentionSource?: MentionSource;   // the same type, unchanged, from 0.43.0
+```
+
+Supplied on the panel and threaded to every plan-annotation card, it gives the
+card's EDIT textarea the same `@` machinery `CommentPopover` has:
+`useMentionAutocomplete` over the host's `people`, the portaled `MentionPicker`,
+the same grammar (`@` at a word boundary, never inside `a@b.com`), the same
+no-preselection keyboard rule (Enter is a newline until an arrow engages a
+row), the same `onMentionsChange`, and the same `onPickBlocked` no-access
+behavior (a blocked pick inserts NOTHING and the host shows its own dialog).
+
+**Key order at the textarea.** The menu is offered the key FIRST, then the
+card's own handlers run only if it did not consume the event:
+
+- `Escape` while the menu is open closes the MENU (the hook consumes it and
+  stops propagation). A second `Escape` cancels the edit, as it always did.
+- `Enter` with a row arrowed to inserts that person. `Enter` with nothing
+  active is untouched — still a newline.
+- `Mod+Enter` is never consumed by the menu (the hook declines any event
+  carrying a modifier), so save still saves.
+
+ARIA follows `CommentPopover`: `aria-autocomplete="list"` and
+`aria-haspopup="listbox"` exist only when a source is supplied,
+`aria-controls` / `aria-owns` only while the menu is open, and
+`aria-activedescendant` only while a row is active. With no source all five
+resolve to `undefined`, so the rendered attribute list is the one the edit box
+has always had.
+
+### 3. The save rule
+
+`handleSaveEdit` called `onEdit({ text })`. It now calls:
+
+```ts
+if (mentionSource && mentions.length > 0) onEdit({ text: editText, mentions });
+else onEdit({ text: editText });
+```
+
+which is the presence rule the creation composers already keep, one level
+down: **the key exists only when a source was supplied AND at least one id
+survived to save.** Never `mentions: []`, never the key with an `undefined`
+value — an untouched or pick-less edit calls `onEdit({ text })` byte for byte
+as it did in 0.44.0, so it can never wipe tags the annotation already carries.
+`source.onMentionsChange` fires from the hook exactly as it does in the
+composer, which on this surface means it reports `[]` once when the editor
+OPENS, before any pick: it is the live state of this edit session, not the
+annotation's stored `mentions`. Only `onEdit` is authoritative — a host that
+mirrors `onMentionsChange` into its own record must not treat that opening
+`[]` as a clear. The Save BUTTON and `Mod+Enter` go through the same call.
+
+**"This edit session" is literal.** The edit box was extracted into
+`AnnotationEditComposer`, mounted only while a card is in edit mode, so the
+hook's tagged-people state lives and dies with one session: reopen the editor
+and nobody is picked, and a save with no new pick is `{ text }` again — even
+if the previous session's `@Label` token is still sitting in the body. That is
+the conservative direction (the host owns `mentions` from then on, 0.43.1 §4),
+and it is the same reason a restored draft starts with nobody tagged.
+
+### 4. No chips in the edit box (known difference, and the follow-up)
+
+A picked token renders as a CHIP in `CommentPopover` (0.44.0) and as plain
+text here. The chip layer is `ComposerTextarea`'s mirrored, aria-hidden
+overlay behind a transparent-text textarea, with scroll mirroring and IME
+handling; the card's edit box is a plain `<textarea>` with its own sizing and
+classes. Duplicating that overlay for one more textarea is exactly the "two
+mirrored layers" mistake 0.44.0 avoided.
+
+**Named follow-up: move the card's edit box onto `ComposerTextarea`.** That is
+the one change that gets chips here without a second overlay, and it is a
+visible change to a surface Plannotator itself renders — a separate PR with
+its own no-op argument, not a rider on a seam release.
+
+Everything else about mentions is inherited unchanged and documented in the
+0.43.x / 0.44.0 sections above, including the three limits: two labels that
+sanitize to the same token, a restored draft reporting no ids, and a label
+that is a prefix of another label.
+
+### 5. One internal module, not a new seam
+
+`components/MentionAutocomplete.tsx` (`MentionAutocompleteMenu` +
+`mentionActiveOptionId`) is the glue between a `useMentionAutocomplete` result
+and `MentionPicker` — the id→index lookup, the no-op hover and the
+`aria-activedescendant` string. It exists so the third mount did not become a
+third verbatim copy of the same fifteen lines; `CommentPopover`'s two mounts
+were moved onto it in the same change, with no DOM difference (proven below).
+It is **internal**: it is not on the supported-import list and hosts never
+touch it — they pass `mentionSource`.
+
+### The no-op guarantee, and how it is pinned
+
+The same components were mounted on `origin/main` and on this branch in one
+harness and their `outerHTML` diffed, with `addEventListener` and `setTimeout`
+counts taken across each mount. With NEITHER new prop supplied, all six are
+byte-identical with identical counts:
+
+| scenario | bytes | listeners | timers |
+| --- | --- | --- | --- |
+| empty panel | 733 | 140 | 0 |
+| nine cards (comment, deletion, global, quick label, external `source`, unanchored, `inReplyTo` reply, a card with `renderCardFooter`, a `diffContext` card) | 17543 | 141 | 0 |
+| the same panel `readOnly` | 7854 | 141 | 0 |
+| a card in EDIT mode | 18586 | 142 | 0 |
+| the All-files grouped view (two document groups) | 19629 | 141 | 0 |
+| `CommentPopover` (the module the glue refactor touched) | 3130 | 286 | 1 |
+
+The edit-mode row is the one that matters for the hook: mounted with
+`source: undefined`, `useMentionAutocomplete` registers no listener, opens no
+menu state, returns the frozen empty id array, and the picker renders nothing —
+one extra listener would have shown up as 143.
+
+On top of the diff, committed tests pin the structure rather than a snapshot:
+with neither prop there is no `[data-annotation-card-header]` on any card, the
+edit textarea carries none of the five mention ARIA attributes, typing `@`
+opens nothing, and `onEdit` is called with an updates object whose key list is
+exactly `['text']`.
+
+Tests (both DOM-gated, both added to the workflow's DOM_TESTS step):
+`components/AnnotationPanel.cardHeader.test.tsx` (6) and
+`components/AnnotationPanel.editMentions.test.tsx` (10).
+
+## Discovered model catalogs (0.46.0, core 0.25.6) — BREAKING for hosts
+
+Claude and Codex model lists are no longer hand-maintained in `@plannotator/ui`. They come from the installed CLIs through the Ask AI provider (`/api/ai/capabilities?activate=<id>`), in the shared `CatalogModel` shape from the new `@plannotator/core/model-catalog` subpath, with one small static fallback per provider (`CLAUDE_FALLBACK_MODELS`, `CODEX_FALLBACK_MODELS`). A host that imported any of the following must switch:
+
+| Removed | Use instead |
+| --- | --- |
+| `@plannotator/ui/utils/codexModels` (the whole module: `CODEX_MODELS`, `CODEX_EFFORT_LABELS`, `codexReasoningOptions`, `clampCodexReasoning`) | `useModelCatalogs(capabilities)` for the live list, `effortSelectOptions` / `resolveEffortChoice` / `EFFORT_LABELS` from `@plannotator/core/model-catalog` |
+| `CLAUDE_MODELS`, `CLAUDE_EFFORT`, `TOUR_CLAUDE_MODELS`, `CODEX_MODELS`, `codexReasoningOptions` exports of `components/AgentsTab` | the same catalog helpers (`modelSelectOptions`, `effortSelectOptions`) |
+| `sanitizeCodexPerModel`, `migrateCodexSection` from `hooks/useAgentSettings` | nothing: saved picks now resolve at read time with `resolveModelChoice` |
+
+Behaviour changes a host may notice:
+
+- `DEFAULT_CODEX_MODEL` (and the tour/guide Codex defaults) are now `''`, meaning "the model the Codex list marks default"; `DEFAULT_CLAUDE_MODEL` is `'opus'` (was `'claude-opus-5'`).
+- `useAgentSettings(catalogs?)` takes the catalogs and returns EFFECTIVE (resolved) model/effort values; called without catalogs it returns the saved values unchanged, as before.
+- `AIProviderModel` is now an alias of `CatalogModel` (adds optional `resolvedId`, `fastMode`); `resolveAIModelForProvider` uses the shared resolver, so a stale pinned id keeps its model family instead of snapping to the provider default.
+
+## Forge-aware `#123` / `@user` links (additive; #1596; published in core 0.25.6 / ui 0.46.x)
+
+Bare `#123` and `@user` in a document used to link to github.com whenever `githubRepo` held a slash, so GitLab and GitHub Enterprise repos got links to the wrong forge. `InlineMarkdown` (and every block component that forwards `githubRepo`: `BlockRenderer`, `RenderedMarkdown`, `TableBlock`, `TablePopout`, `AlertBlock`, `Callout`, `proseBody`) gains an optional `repoHost?: string` beside it; `Viewer` passes `repoInfo.host`. The rule is the new `@plannotator/core/forge-refs` subpath (`forgeRefLinks`, `classifyForgeHost`, `normalizeForgeHost`). The host is normalized first: lowercased, port dropped, `www.github.com` / `ssh.github.com` / SSH aliases starting `github.com-` folded to `github.com` and `altssh.gitlab.com` to `gitlab.com`; a host that is not a plausible DNS name (no dot, brackets, `@`, a dotless SSH alias) counts as absent. Then a github host (`github.com`, `github.*`) links to `https://<host>/<path>/issues/N`, a gitlab host (`gitlab.com`, `gitlab.*`, `*.gitlab.*`) to `https://<host>/<path>/-/issues/N`, users to `https://<host>/<user>`, and any other host renders the ref as an unlinked span. **A host that passes no `repoHost` (or an implausible one) keeps the old github.com links**, so nothing changes until it opts in. Because ui imports a new core subpath and `@plannotator/ui` pins `@plannotator/core` EXACTLY (currently `"0.25.6"`), the core version bump and ui's pin must move together in the same release: bump core, set ui's `@plannotator/core` dependency to that same version, `bun install`, then publish `core` first and `ui` second. A ui built against this code on the old core pin would import a `forge-refs` subpath the pinned core does not ship.
+
+## Guided Review generation in core (core 0.25.6, published, additive)
+
+Core-only; `@plannotator/ui` imports none of it, so ui's exact `0.25.6` pin is unchanged. The pure half of Guided Review generation moved verbatim from the private `@plannotator/server` (`packages/server/guide/guide-review.ts`, which re-exports every name) so a host such as Workspaces generates guides with Plannotator's exact prompt and holds the output to the same coverage rule. All three subpaths are browser-safe and zero-dependency:
+
+- `@plannotator/core/guide-prompt`: `GUIDE_REVIEW_PROMPT` (the organizer methodology), `GUIDE_SCHEMA_JSON` (the output JSON schema, as a string), `buildGuideUserMessage(patch, diffType, options?, prMetadata?, changedFiles?)`, `validateGuideOutput(raw, changedFiles)`, `GUIDE_NO_SECTIONS_ERROR`, the sanitizers `sanitizeGuideSection` / `sanitizeGuideSections` / `sanitizeUnplacedFiles`, and the types `GuideChangedFile` and `GuidePromptPRMetadata` (`{ url, baseBranch }`, structural, so a full GitHub/GitLab `PRMetadata` is accepted).
+- `@plannotator/core/review-prompt` (what `buildGuideUserMessage` frames a local diff with): `getLocalDiffInstruction`, `buildWorkspacePromptContextLines`, and the types `LocalDiffInstruction`, `WorkspaceReviewPromptContext`, `WorkspacePromptRepoContext`, `WorkspaceChildVcsType`.
+- `@plannotator/core/diff-type`: the `DiffType` union (including jj's `jj-commit:<id>`) plus `parseCommitDiffType`, `parseJjCommitDiffType`, `jjCommitRevset`, `commitFamilyId`, `parseWorktreeDiffType`, `JJ_TRUNK_REVSET`, `jjLineBaseRevset`, `jjCompareTargetRevset`, `parseRemoteBookmark`, `BARE_HEX_SHA_RE` (moved from `packages/shared/review-core.ts`, which re-exports them).
+
+The guide chain's engine plumbing (Claude/Codex/marker commands, output parsing, `composeGuideMethodology`, sessions) stays in the server. It ships in core 0.25.6 alongside what that unpublished version already carries; ui needs no change for it.
+
+## Host link widgets (0.47.0, core 0.25.7)
+
+Additive. `components/MarkdownEditor` re-exports the engine's new link seam beside `wikiLinks`: `linkWidgets(...specs: LinkWidgetSpec[]): Extension`, `refreshLinkWidgets: StateEffectType<null>`, and the types `LinkWidgetSpec` (`{ match(link: LinkWidgetLink): WidgetType | null }`) and `LinkWidgetLink` (`{ url; text; title?; from; to }`). They are the engine's own objects (identity pinned by `MarkdownEditor.linkWidgets.test.tsx`); hosts import them from `@plannotator/ui/components/MarkdownEditor`, never from `@plannotator/atomic-editor`.
+
+- **What it does.** For a single-line `[text](url)` link the inline preview would draw with its syntax hidden, the engine asks each registered spec in order; the first non-null widget replaces the whole link range (no link mark, no hidden `[` / `](url)` replaces, no open-in-new-tab icon beside it). `null` keeps the engine's link. Revealed links, multi-line links, reference / autolinks / wiki links, links inside tables and links wrapping an image are never offered. A spec that throws is logged once and skipped.
+- **The reveal rule stays the engine's.** Caret inside, overlapping selection, focus, the pointer-press freeze and `MarkdownDiff` changed ranges decide when the raw bytes show, exactly as for a normal link, so a widget comes and goes when the hidden syntax would. The source text is never changed.
+- **`match` runs on every rebuild** (selection, focus, document change): synchronous, no side effects, and implement `eq` on the widget so an unchanged widget keeps its DOM. Do not `preventDefault` on `mousedown` in the widget: it blocks a drag selection that starts on it.
+- **Refreshing.** When a spec's answer changes without a document edit (a record arrives after mount), dispatch `view.dispatch({ effects: refreshLinkWidgets.of(null) })`. It changes no text, adds no history entry and sends nothing through collab bindings; during a held pointer press the rebuild waits for the release.
+- **Composition.** `linkWidgets(spec)` goes in the same stable `extensions` array as `wikiLinks`, captured once per `documentId`. Several `linkWidgets(...)` extensions concatenate in extension order.
+
+**Dependency note:** 0.47.0 requires `@plannotator/atomic-editor ^0.9.0` (adds the seam) and `@plannotator/markdown-editor ^0.5.0` (widens its engine peer to `^0.8.0 || ^0.9.0`). A host that pins either exactly (e.g. through package-manager overrides) must move both pins with the ui bump. Plannotator's own apps pass no `linkWidgets`, so their editor is unchanged.
+
+Also new in 0.47.0 (all additive, all no-op for a host that passes nothing):
+
+- **`useCodeAnnotationDraft` `persistViewedFiles?: boolean`** (default `true`, #1632). `false` leaves viewed-file state out of the draft: autosave omits `viewedFiles` / `autoViewSuppressed`, an empty-annotations session with only viewed files counts as empty, the restore banner ignores viewed counts, and `restoreDraft()` returns empty viewed lists. For hosts that persist review progress on their own (Plannotator's review app now does, server-side).
+- **Model source hint** (#1616). New module `components/ModelSourceHint` (`ModelSourceHint`, `modelSourceHint`, `modelSourceToolForProvider`, types `ModelSourceTool` / `ModelSourceInfo`): a muted line under a Claude/Codex model picker ("From your installed Codex 0.155.1", or the built-in-list variant). `ModelCatalog` (`hooks/useModelCatalogs`) and `AIProviderConfig` (`utils/aiProvider`) gain optional `modelsSource` and `toolVersion`, read from `/api/ai/capabilities`; the hint renders only when the server sends `toolVersion`, so a host whose backend omits it sees no change. `AgentsTab`, `AISettingsTab` and `AIProviderBar` render it.
+- **Guided Review Codex default** (#1616): `PREFERRED_GUIDE_CODEX_MODEL` (`'gpt-6-luna'`) from `hooks/useAgentSettings`; an unset guide Codex pick resolves to it when the catalog offers it, else to Codex's own default. Never written to the cookie.
+- **Agent job warnings** (#1627): `AgentsTab` shows `AgentJobInfo.warning` under a job row when present.
+- **Request changes on PR reviews** (#1611): `buildDecisionSpec`'s platform input takes optional `requestChangesSupported`. Absent keeps the previous copy; `false` says request-changes posts as a comment; `true` with `selfAuthored` mutes Request changes and adds a live `Comment…` row.
+
+### `@plannotator/core` 0.25.7
+
+Required by ui 0.47.0 (`components/ModelSourceHint` and `hooks/useModelCatalogs` import the new `ModelsSource` type). Changes since the published 0.25.6, all additive:
+
+- `@plannotator/core/model-catalog`: new `ModelsSource` type (`'fallback' | 'discovered'`) and `cliVersionFrom(text, toolLine?)` (reads a CLI's version out of `claude --version` or the codex app-server `userAgent`). `CODEX_FALLBACK_MODELS` refreshed to what codex 0.155.1 reports (GPT-6 Sol / Astra / Luna, GPT-5.6 Sol / Terra / Luna, GPT-5.5; efforts up to `max` / `ultra`). `claudeCatalogFromSdk` names a model from `displayName` when the SDK `description` is only a tagline (no ` · `), which Claude Code 2.1.282+ emits (#1615).
+- `@plannotator/core/agent-jobs`: optional `AgentJobInfo.warning` (#1627).
+- `@plannotator/core/agents`: the `mistral-vibe` origin in `AGENT_CONFIG` (#1480, merged just after 0.25.6 was published).
+- `@plannotator/core/review-prompt`: workspace review context lines now tell the model the inline diff is the complete combined changeset and to read files by folder-prefixed path, instead of suggesting `git -C` (#1629). Prompt text only.
+
+Minor rather than patch because of the new exports (`cliVersionFrom`, `ModelsSource`).
+
+## Questions in documents (0.48.0, core 0.25.8)
+
+Additive. An agent can ask the reviewer questions inside a markdown document with a `:::question` directive, and the reviewer answers in place. The approved design is the "Card" variant: an eyebrow ("Question 2 of 4", "· pick any" on multi), a status tag (Open / ✓ Answered / Skipped / ✓ Settled), the prompt, its context, the choices, and a footer with Add note · Skip · a right-aligned **Accept recommended**.
+
+```markdown
+:::question
+Where should losing conflict versions be kept?
+
+Last-write-wins silently drops the loser unless we keep it somewhere.
+
+- [ ] Local only, purged after 30 days — cheap, no server change
+- [ ] Server-side per user — survives reinstall, needs a retention policy
+
+Recommended: Local only, purged after 30 days
+:::
+```
+
+**`@plannotator/core/question-block` (new subpath, pure):**
+
+- `parseQuestionBlock(directiveKind, body)` returns a `ParsedQuestion` or **null** when the block is not a question (no prompt, wrong kind, over `MAX_QUESTION_BODY_CHARS`). It never throws. It is tolerant: tight or spaced markdown, `-`/`*`/`+`/`1.` markers, plain bullets as choices when there are no task-list items, indented continuation lines, `Recommended:` / `**Recommended:**` / `Recommendation:` / `➡️` / `->` / `=>` / `→`, a `label — reason` recommendation, and a `,` / `;` / `and` list on multi questions. `- [x]` means **settled** (already decided), not recommended.
+- `indexQuestionBlocks(blocks)` numbers the document's question blocks, gives the prompt's document line, and de-duplicates keys (`-2`, `-3`…). It takes a structural block shape, so it works on your own block list.
+- `questionKey(kind, prompt)` = `q-` + an 8-hex FNV-1a hash of the kind and the normalized prompt. It is stable across versions while the prompt is unchanged. A reworded prompt is a new question.
+- `QuestionAnswer` (`{ v: 1, key, kind, prompt, selected: labels[], other?, text?, note?, skipped?, sourceLine? }`), `parseQuestionAnswer` (fail-closed: wrong types return null, strings are truncated to the caps), `isQuestionAnswered`, `isQuestionAnswerEmpty`, `recommendedQuestionAnswer`, `buildQuestionAnswerAnnotation` (structural record, `type: 'COMMENT'`).
+- `formatQuestionAnswersSection(items, answers, { headingLevel })`, `questionExportItems(index)`, `formatQuestionAnswerLines`, `formatQuestionAnswerText`.
+- `QUESTION_AUTHORING_GUIDE`: the syntax reference as one markdown string. Put it in your own agent prompts. Plannotator's `plannotator` skill carries the same text byte for byte (a test keeps them equal).
+
+**`@plannotator/ui`:**
+
+- `Annotation.questionAnswer?: QuestionAnswer`. An answer is ONE annotation, id `ann-question-<key>`, `blockId` = the question block, `originalText` = the prompt, `text` = a one-line answer (`Answer: Local only — note: …`), offsets 0. A consumer that does not know the field still reads it as a comment. Your annotation store and `draftTransport` carry it as opaque JSON. Nothing new to persist.
+- `Viewer` `onAnswerQuestion?(blockId, answer | null, key)`: the only new prop. The Viewer derives every card's state from its `annotations` prop (matched by key, so an answer follows its question across re-parses). On a change it calls the handler with the next answer, or `null` when the answer became empty. Apply it with `upsertQuestionAnswerAnnotation(annotations, blockId, answer, key)` (`utils/questionAnswers`; replaces in place and keeps `createdA`, appends when new, removes on null/empty). With no handler, or `readOnly`, the cards render disabled and still show stored answers.
+- `BlockRenderer` takes optional `question` / `questionTotal` / `questionAnswer` / `onAnswerQuestion`. Without them (plan diff, `RenderedMarkdown`) a question block is parsed alone and renders read-only and unnumbered.
+- `components/blocks/QuestionBlock` is exported for a host that renders blocks itself.
+- The highlighter skips rows carrying `questionAnswer` (neither painted nor attempted nor unanchored), the same rule `diagramAnchor` rows follow.
+- Exporters: `exportAnnotations` prints `## Answers to your questions` right after the title (before reference images and the numbered feedback): `N of M questions answered.`, one `### Q<n>. <prompt> (line L)` entry per answered, skipped or noted question (`Answer: X (your recommendation)`, a bullet list for several picks, a blockquote for free text, `Skipped`, `Note: …`), an `### Unanswered` list, and answers whose question is no longer in the document. Answers are not counted in "I've reviewed this plan and have N pieces of feedback". Questions the agent settled with `[x]` and the reviewer left alone are neither counted nor listed as unanswered. `exportLinkedDocAnnotations` prints the same section per document one level deeper; `exportAnnotationEntry` prints one answer. A row whose `questionAnswer` fails validation exports as an ordinary comment. A document with questions but no answers and no feedback still exports `No changes detected.`
+- Interaction: native `<input type=radio|checkbox>` inside a `<label>`. A click on a row picks only when the pointer moved less than 4 px (10 px touch) and no text is selected, so a drag across option text is an annotation, never a pick. The eyebrow, tags and footer are `annotation-exclude` / `select-none` / `data-pinpoint-ignore`; the prompt, context and choice text are not. "Other…" is always offered. There are no required questions and no new keyboard shortcuts.
+- Fallback: an unparseable block renders through the existing directive `Callout`; a ui older than 0.48.0 renders every `:::question` that way (the prompt and the task list as text).
+
+**Progress, the panel and history (also 0.48.0, the editor PR):**
+
+- `AnnotationPanel` `questionRows?` + `onSelectQuestion?`: pass `buildQuestionPanelRows(blocks, annotations)` and the panel renders a **Questions** section (progress, one row per question with its answer or "Not answered yet" and an Open / answered / Skipped state) above a **Comments** heading, and stops listing answer rows as comment cards. A row whose question is no longer in the document shows the Unanchored chip and a "Remove answer" link that calls your `onDelete(annotationId)`; it still exports. Without `questionRows` the panel is unchanged (answers list as comment cards, as in the first 0.48.0 cut).
+- `QuestionProgressChip` (`done`, `total`, `hasOpen`, `onJump`): the header "N/M answered" chip. `questionProgress(rows)` counts answered and settled questions; `nextOpenQuestionKey(rows, afterKey)` walks the open ones in document order and wraps; `focusQuestionCard(key)` scrolls the card to the centre and focuses its first control.
+- Core: `questionStatus(question, answer)` is the one status rule (answered / skipped / settled / open) the card, the rows and the chip share. The export counts a settled `[x]` question the reviewer only added a note to as answered, printing its settled choice with the note, and a multi-line note keeps its line breaks as a blockquote.
+- Card fixes: a double-click on a word in an option selects the word and takes back the pick its first click made; in pinpoint input mode a click on option text pins the text and does not pick the option (a click on the radio itself answers and does not pin); the free-text, "Other…" and note fields are `annotation-exclude`, so a text-search restore never lands inside typed text.
+- History: `useUndoHistory` gains `replaceLast(expected, next)` (fold into the newest entry while it is still the one you recorded). Plannotator records one entry per answer change and folds a typing burst into one; a host with its own history can do the same.
+
+**No `configurePlannotatorUI` seam** is involved. Plannotator's server does not change.
+
+**guides.show:** the viewer JS is unchanged, but the shared stylesheet gained the card's utility classes, so `guide-viewer-manifest.ts` pins a new CSS hash. Deploy guides.show before a release that ships this manifest.
+
+## Question host seams (ui 0.49.0, core 0.25.9)
+
+Additive. What a host that keeps question answers ITSELF needs (Workspaces stores answers beside the document as structured records, not as Plannotator annotations, and turns some answers into project decisions). Plannotator passes none of the new props: its cards render exactly as in 0.48.0, except that a block carrying a `Decision:` line now shows it (below).
+
+**`@plannotator/core/question-block`:**
+
+- **Decision lines.** A `Decision:` line after the prompt, at the start of a line (no indentation), is read once per block and kept out of `context`:
+  - `Decision: when answered` (case-insensitive, trailing period allowed) sets `ParsedQuestion.decisionOnAnswer: true`: the asker flags that the answer should become a recorded decision.
+  - `Decision: [statement](url)` (exactly one markdown link, absolute `http:`/`https:` only) sets `ParsedQuestion.decision: { statement, url }` (`QuestionDecisionLink`): the decision exists. When both lines are present the link wins and `decisionOnAnswer` is absent.
+  - Any other `Decision:` value (a relative or `javascript:` link, prose around the link, a second flag line) stays context prose. A `Decision:` line BEFORE the prompt is the prompt, as before. Neither form changes `questionKey`, so adding, removing or replacing the line never orphans an answer.
+  - An older Plannotator shows both lines as one line of context, which still reads correctly.
+- **`findQuestionBlocks(markdown, { frontmatter? })`** returns `QuestionBlockLocation[]`: `{ key, directiveKind, startLine, endLine, text }` per parseable question block in document order. Lines are 1-based lines of the original text (frontmatter counted); `endLine` is the closing `:::`, or the last line when the block is never closed (it then runs to the end, as it renders); `text` is the exact source of those lines. Keys are de-duplicated exactly like `indexQuestionBlocks` (`-2`, `-3`… for repeated prompts; one shared helper), so **always address a block by the returned key**. For a server that has to find or verify a question without the UI parser.
+- **`@plannotator/core/markdown-structure`** (new subpath): the block splitter's structural rules, moved out of `@plannotator/ui/utils/parser` so `findQuestionBlocks` and `parseMarkdownToBlocks` share one copy: `splitFrontmatter`, `resolveReferenceLinks`, `markProtectedLines`, `htmlBlockEndAt` / `findHtmlBlockEnd` / `HTML_BLOCK_TAGS`, `codeFenceCloseIndex`, `scanDisplayMath`, `DIRECTIVE_OPEN_RE` / `directiveCloseIndex`. `utils/parser` still exports `HTML_BLOCK_TAGS`, `resolveReferenceLinks` and `extractFrontmatter`, unchanged. A parity test (`packages/ui/utils/questionBlockParity.test.ts`) runs both over fenced, nested, quoted, HTML, math, frontmatter, reference-link, CRLF and unclosed cases and asserts the same keys and lines.
+
+**`@plannotator/ui` (`Viewer`, forwarded through `BlockRenderer` to `QuestionBlock`):**
+
+- **`questionAnswers?: ReadonlyMap<string, QuestionAnswer> | Record<string, QuestionAnswer>`**, keyed by the de-duplicated question key. When given, the cards read their answers from it and NEVER from `annotations` (an empty map means "no answers"); entries that fail `parseQuestionAnswer` are dropped. Absent: the annotation path, unchanged. The pure resolver is `resolveQuestionAnswers(annotations, hostAnswers?)` in `utils/questionAnswers`.
+- **`onSaveQuestionAnswer?(key, answer | null) => void | Promise<unknown>`**: explicit save mode, taking precedence over `onAnswerQuestion`. Edits stay a draft inside the card; while the draft differs from the host's answer the footer shows **Save answer** and **Cancel**, and **Skip is not offered** (skip is a live-mode draft state that a save never writes). Save calls the handler once with the key and the answer (null when the draft is empty); return a promise to keep the draft on screen until it settles, and a rejection keeps the draft for a retry (report the error yourself). Cancel returns to the host's `answer`. Ignored under `readOnly`.
+- **`saveQuestionAnswerLabel?: string | ((question: ParsedQuestion) => string)`**: the Save button's label in explicit save mode (e.g. "Save and record decision" for a flagged question). Default "Save answer". The card never picks a label from `decisionOnAnswer` itself: the host does the recording, so only the host may claim it.
+- **`renderQuestionFooter?(question: IndexedQuestion, answer: QuestionAnswer | undefined) => ReactNode`**: host actions at the right end of a card's footer (e.g. "Mark as decision"), given the SAVED answer, never the draft. Rendered in read-only cards too (return null for nothing). To make that work, read-only cards now disable each input instead of the whole `<fieldset>` (a disabled fieldset disables every button inside it); the fieldset carries `aria-disabled` instead.
+- **Decision display.** A flagged question shows a "Records a decision" tag in the eyebrow and a row under the prompt reading "Answering this records a decision"; a linked one shows a "Decision" tag and a row with the statement as a link to the URL (new tab, `noopener noreferrer`). The card carries `data-question-decision="on-answer" | "recorded"` and the row `data-question-decision-row`. The banner's "Don't record a decision" toggle and the guest/no-project variants in the Workspaces frames are host UI: put them in the footer slot.
+
+**guides.show:** the viewer JS is unchanged, but the shared stylesheet gained the decision row's utility classes, so `guide-viewer-manifest.ts` pins a new CSS hash. Deploy guides.show before a release that ships this manifest.
+
+Not here (dropped with the owner's Q2 answer): record lines inside the block (`Other:`, `Answer:`, `Note:`, `Answered:`) and a `writeQuestionAnswer` byte rewriter.
+
+## Fence theme seam and srcdoc frame height (0.50.0)
+
+Additive; Plannotator passes nothing, so its output is unchanged.
+
+- **`fenceTheme` on `configurePlannotatorUI`** (row in the seam catalog above; `FenceThemeResolver` type exported from `configure` and `utils/syntaxTheme`). Hosts that mutated `SHIKI_THEME_MAP` to pick their own code colors should move to it.
+- **`HtmlViewer` frame height.** The bridge measured `document.body.scrollHeight`, which leaves out a first child's top margin (and a last child's bottom margin) that collapses through a margin-less body, so a page like `body{margin:0}` + a card with `margin-top` was cut short by its margins. It now measures body's box in document coordinates plus the bottom margins that can collapse through it (`measureContentHeight` in `bridge-script.ts`). It deliberately does not use `documentElement.scrollHeight`: that never drops below the frame's own viewport (and an `html{height:100%}` root is the frame's height), so the frame could grow but never shrink. Content sized by the frame itself (`html,body{height:100%}`, `min-height:100vh`, a `100vh` section) plus a margin around it always measures taller than the frame, so a feedback guard (`nextResizeHeight`) stops growing when the first measure after a grow the parent applied still overflows by as much as before: such a page settles one or two grows above its old height (e.g. 600 → 640) instead of growing forever, and a later content change still resizes the frame. Absolutely positioned content whose containing block is the root (not body) is still not measured, as before. No `BRIDGE_PROTOCOL_VERSION` bump: the `resize` message shape is unchanged, only the value is more accurate, so a cached older asset keeps the old measure and nothing misreads.
+
+## Ask this session (shipped in 0.50.0; bridge-only change in 0.51.0, BREAKING for 0.50.0 consumers)
+
+Ask AI can be answered by the agent session that opened Plannotator ("Ask this session"), when the server registers a `session-bridge` provider. A host whose backend never advertises one sees the same provider list, default selection, requests and DOM as before, and has nothing to pass.
+
+As shipped in 0.50.0 the bridge sat beside the SDK providers: an explicit saved pick won over it, and a gone or blocked session offered "Ask a separate AI instead". **ui 0.51.0 makes the bridge the ONLY Ask AI choice** (Plannotator's servers now register nothing else for Ask AI while a bridge is present):
+
+- **`utils/aiProvider`:** `resolveAIProviderSelection` selects a bridge in the list in every status (ready, busy, blocked, gone), ahead of any saved pick; the saved cookies are not rewritten, and with no bridge in the list the order is unchanged. New export `findSessionBridge(providers)`. Kept from 0.50.0: `AIProviderOption.label` / `sessionBridge`, `SESSION_BRIDGE_PROVIDER_NAME`, `SESSION_ASK_ERROR_CODES`, `isSessionBridgeProvider`.
+- **`components/ai/SessionAskNotice`:** `SessionAskActions` keeps the busy actions ("Ask when it finishes" / "Interrupt and ask now", rendered only with `onAction`); for a gone or blocked session it renders a plain note (`[data-session-ask-unreachable]`, with or without `onAction`) instead of a fallback button.
+- **Pickers:** with a bridge in the list, `AIProviderBar` renders only the bridge label (`[data-ai-provider-session-bridge]`, no `<select>`), and `AISettingsTab` shows the bridge read-only and writes nothing.
+- **`hooks/useAIProviderActivation`:** additive. New optional `providers?: ReadonlyArray<{ id }>` option, the Ask AI providers the server currently lists: an id not in it is never activated (at page load a saved id such as `codex-sdk` can sit in the selection for one render before the resolver moves it to the bridge, and activating it would start model discovery Ask AI does not offer). Omitted keeps the old behavior.
+- **`hooks/useModelCatalogs`:** additive. The launchers' catalog loader also reads `catalogProviders` from `/api/ai/capabilities?activate=<id>`, which a bridged Plannotator server uses to report the Claude / Codex catalogs without listing those providers for Ask AI. A backend that never sends the field behaves as before.
+
+**Removed (BREAKING for consumers of 0.50.0):**
+
+| Removed | Use instead |
+| --- | --- |
+| `findUsableSessionBridge` (`utils/aiProvider`) | `findSessionBridge`; the bridge is selected whatever its status |
+| `resolveSessionBridgeFallback` (`utils/aiProvider`) | nothing: there is no other Ask AI provider while a bridge is present |
+| `'fallback'` member of `SessionAskAction` (`components/ai/SessionAskNotice`) | nothing: it is now `'wait' \| 'interrupt'` |
+| `fallbackLabel` prop of `SessionAskActions` | nothing: gone/blocked render the note |
+| `sessionAskFallbackLabel` prop of `DocumentAIChatPanel` | nothing |
+
+Unchanged from 0.50.0: `hooks/useAIChat` (`AskAIParams.busyPolicy`, `retry(questionId, AIRetryOptions)`, `AIResponse.errorCode` / `status`; `AIRetryOptions.providerId` still exists for hosts that offer another provider), `hooks/useAIProviderConfig`'s `applyConfigChange(config, { persist: false })`, and `components/ProviderIcons`' `getProviderMeta(name, label?)`.
+
+Also in 0.51.0 (#1703, additive): an answer the session stopped because another message took its turn over arrives as the error code `session_taken_over` (`SESSION_ASK_ERROR_CODES.takenOver`). `useAIChat` no longer treats it as an error: the streamed text stays, `AIResponse.notice` carries the server's note, `error` stays unset, and `DocumentAIChatPanel` renders the note under the answer through the new `SessionAskNote` (`components/ai/SessionAskNotice`, `[data-session-ask-note="taken-over"]`). A backend that never sends the code sees no change.
+
+## Questions, restore, drafts and the rest (ui 0.51.0, core 0.25.11)
+
+Everything host-facing that changed between ui 0.50.0 / core 0.25.10 and this pair, apart from the three sections above (Ask this session, composer trim, diagram Ask AI). Plannotator's own app needs nothing; a host that passes nothing new gets the fixes below and the noted behavior changes.
+
+**Question cards (#1683, #1699, #1702).**
+
+- **Pinpoint inside a card targets what was clicked (#1683).** The card (`fieldset.question-block`) is now one block target whose prompt, context and each choice's text are child targets, marked `data-question-part="prompt" | "context" | "choice"`. Before, every pinpoint hover or click in a card resolved to the prompt. Clicking the radio/checkbox still answers.
+- **Plain-bullet choices keep their wrapped lines (#1699, core).** A `:::question` / `:::question-multi` with no task-list items reads each plain bullet the way CommonMark reads a list item (indented lines, lazy lines, an indented paragraph after a blank line), and those lines no longer leak into `context`. A bullet written `- **Name:** prose` (bold name set off by punctuation, `**` only) takes `Name` as its label and the prose as its description; a label longer than `MAX_QUESTION_CHOICE_LABEL_CHARS` (200) is cut at its first sentence, the rest leading the description; two bullets never end up with the same label. A `Recommended:` line continues onto the next line only when that line wraps the same sentence. **Task-list choices (`- [ ]`) parse exactly as before**, and `questionKey` does not change.
+- **Behavior change for hosts that store answers themselves:** the labels of PLAIN-BULLET choices can differ from what core 0.25.10 produced (the wrapped text joins the label, or a bold lead becomes the label). An answer stores the labels it picked, so core 0.25.11 adds **`QuestionChoice.aliases?: string[]`** (the older names of a plain-bullet choice: its full text, its first line, that line's earlier label) and **`canonicalQuestionAnswer(question, answer)`** (`@plannotator/core/question-block`), which maps a stored label that names exactly one choice by an alias to its current label and returns the same object when nothing maps; an ambiguous label stays as stored. `QuestionBlock`, the Questions panel rows (`utils/questionAnswers`), WebMCP `read_document` and `formatQuestionAnswersSection` all read answers through it, so a host that renders `QuestionBlock` with its stored answer sees the right pick without changes. **A host that reads stored answers on its own (turning an answer into a decision, its own export) should run them through `canonicalQuestionAnswer` too.** `QuestionExportItem` gains an optional `choices` (label + aliases) so the export prints current labels.
+- **Context renders with the document's block renderers (#1699).** A card's context goes through `parseMarkdownToBlocks` + `BlockRenderer` (new `components/blocks/QuestionContext`), so tables, lists, fences, quotes, headings and images look as they do in the document. Those blocks carry no `data-block-id`. Its styles are a `<style href="plannotator-question-context" precedence="default">` that React 19 hoists into `<head>` once, so a host needs no Tailwind change. `useActiveSection` observes only headings that have a block id, so a heading inside a card never stalls the table of contents.
+
+**Restore after an edit (#1717).**
+
+- **`AnnotationRestoreReport.moved?: RestoredAnchor[]`** (`hooks/useAnnotationHighlighter`, additive): when a restore re-anchors comments by their text after the document changed, each comment whose stored `blockId` no longer holds its text is listed with `{ id, blockId, startOffset?, positionsStale }`, where `blockId` is the block the highlight landed in or `''` when the text is gone, and `positionsStale` says the stored `startMeta`/`endMeta` should be dropped. An unchanged document reports nothing here. **A host that derives line numbers from `blockId` (an export, a gutter) should write these back**; Plannotator does so in `packages/editor/restoredAnchors.ts`. A restore that paints nothing is now reported unanchored even when there were no stored positions to try.
+- **`utils/annotationOwnsHighlight`** (new): `annotationOwnsHighlight(annotation)` is false for diff-view comments, general comments, checkbox toggles (`CHECKBOX_ANNOTATION_PREFIX`) and question answers, which the text highlighter never draws. The highlighter skips them itself; a host that re-applies a stored list through `ViewerHandle.applySharedAnnotations` should filter with it, as `useLinkedDoc` now does, or those rows come back unanchored.
+
+**Drafts (#1710).** `DraftTransport.save` may now resolve `{ staleGeneration }` (`DraftSaveRefused`, `hooks/useAnnotationDraft`) when the store refused the body as stale; the hook raises its counter above that generation and saves once more. Resolving nothing (the old `Promise<void>`) keeps the old behavior, so a host transport needs no change. Also documented in the seam catalog above. The hook's return value gains `flushPendingSave()`, which sends a pending debounced save now. Plannotator's DEFAULT transport now reads a `409 { draftGeneration }` as that refusal (never when the body says `decided: true`).
+
+**The agent closes a review (#1709).** `ExternalAnnotationEvent` (`@plannotator/core/external-annotation`) gains a member that is not an annotation change: `{ type: "session-closed"; by: "agent"; unsentAnnotations: number }`. `useExternalAnnotations` takes an optional `onSessionClosed({ unsentAnnotations })` and calls it when the stream delivers that event (the polling fallback never does). A host transport that never emits it is unaffected. **A host with an exhaustive `switch` over `ExternalAnnotationEvent['type']` (a `never` check) must add the case.** `utils/agentClosed` (new) holds the copy Plannotator shows (`AGENT_CLOSED_TITLE`, `agentClosedSubtitle(count, surface)`).
+
+**HTML pinpoints and exports (#1694, #1700).**
+
+- A text-less pinpoint's quote (`originalText`) now names the element, not just its kind: `[element: Image "Team photo" (team.jpg)]` instead of `[element: Image]` (hover label, accessible name, and for media the scrubbed file name). Restore never reads the quote, so older pins keep restoring.
+- `HtmlElementContext.sourceName?` (ui `types` and core `html-anchor`, additive, validated by `parseHtmlElementContext`): the file a media element shows, resolved by the bridge the same way the quote names it. The export heading reads it, falling back to the `src` attribute for older contexts. Core exports the shed order as `ELEMENT_CONTEXT_SHED_ORDER`; `sourceName` is shed last.
+- Ask AI from an HTML pinpoint composer sends the element's identity: `CommentAskAIContext.detail?` / `AIQuestion.scope.detail?` (additive), built by the new `elementIdentityForAskAI(targets)` (`utils/parser`), which `buildDefaultPrompt` appends under "Selected element:". It is not shown in the chat.
+- Export order: comments made in the plan/version diff view (`blockId` `diff-block-N`) now print AFTER the document's other comments, in diff order (they printed first). A list with no diff comments sorts exactly as before.
+
+**Linked documents and several-file reviews (#1696, #1718).**
+
+- `useLinkedDoc` gains `getFeedbackDocuments()` → `FeedbackDocuments { root, documents }`: the root once and every other document once. `getDocAnnotations()` also carries the active document's live state (for counts), so an export that used it beside the host's own live annotations printed the open document twice. Export from `getFeedbackDocuments()`.
+- `exportLinkedDocAnnotations(docAnnotations, heading?)` takes an optional heading (`LINKED_DOC_EXPORT_HEADING` default, `FOLDER_DOC_EXPORT_HEADING`, `BUNDLE_DOC_EXPORT_HEADING`) and renders every document through the same entry renderer as `exportAnnotations`: document order, `[In diff content]`, quick labels with their tip and Label Summary, threaded replies. Plain comment, deletion and global output is unchanged.
+- `groupAnnotationsByDocument` / `buildAnnotationDocumentGroups` (`utils/annotationScope`) take an optional fixed `order` of paths. `DocBadges`' `linkedDocInfo.onBack` is optional (absent: no Close pill). `PlanHeaderMenu` item ids gain `'bundle-previous' | 'bundle-next'`. Core: `AnnotateAgentTerminalMode` gains `"annotate-bundle"` (and `supportsAnnotateAgentTerminalMode` accepts it; the type already includes `string`, so no `never` switch over it can break); `AnnotateContext.bundlePosition?: { index, total }`.
+
+**Agent tool switch and offer (#1725, ui only).** Additive; a host whose server never sends the fields sees no row and no offer.
+
+- **`Settings`** takes optional `agentToolSetting?: AgentToolSetting` and `onAgentToolChange?: (enabled: boolean) => Promise<void>`. Only when BOTH are passed does General render the row `[data-agent-tool-setting="<host>"]` ("Let the agent open reviews (plannotator tool)"). A rejected `onAgentToolChange` shows its message in `[data-agent-tool-setting-error]`; the switch is disabled when `setting.env` is set (`PLANNOTATOR_AGENT_TOOL` decides).
+- **`utils/agentToolSetting`** (new): `AgentToolHost` (`'claude-code' | 'pi' | 'opencode'`), `AgentToolSetting` (`host`, `enabled`, `configured`, `env?`), `parseAgentToolSetting(serverConfig)`, `withSavedAgentTool(setting, value)`, `saveAgentToolSetting(value, fetchImpl?)` (POST `/api/config` `{ agentTool }`, rejects with a readable message unless the server confirms), and the copy helpers `agentToolHostName`, `agentToolAppliesWhen`, `agentToolCostNote`. `parseAgentToolSetting` returns `undefined` unless the server config carries `agentToolHost` and a boolean `agentToolEnabled`, so a Workspaces-style backend gets nothing to render.
+- **`hooks/useAgentToolSetting`** (new): `{ setting, adopt(serverConfig), save(enabled) }`, the shared state the Settings row and the offer read: `adopt` takes the fields from a `/api/plan` or `/api/diff` `serverConfig`, `save` calls `saveAgentToolSetting` and then `withSavedAgentTool`.
+- **`utils/agentToolAnnouncement`** (new, cookie gate for the one-time offer: `needsAgentToolAnnouncement`, `markAgentToolAnnouncementSeen`, `agentToolAnnouncementPendingThisLoad`, `agentToolOfferApplies`, `agentToolOfferHostOf`, `agentToolAnnouncementEligible`) and **`components/AgentToolAnnouncementDialog`** (new): the one-time offer to turn the tool on, shown on Pi and OpenCode 2. Nothing in the library mounts it; Plannotator's apps do.
+
+**Internal exports, deliberately not supported.** `XMark` (`components/TerminalToolsAnnouncementDialog`, exported in #1690 so the announcement dialogs share one close icon) and `hooks/useLatchedTrue` (#1725, the apps' "an announcement was shown on this load" latch) are exported only so Plannotator's own components and apps can share them. They are not seams, carry no compatibility promise, and may change or move in any release; a host should not import them.
+
+**Smaller changes.**
+
+- **`DecisionControl` / `DecisionNoteDialog` (#1711):** the keyboard hint under the decision note composer is gone; keys unchanged.
+- **Pi thinking levels (#1704):** core `model-catalog` adds `PI_THINKING_LEVELS`, `PI_SESSION_SCOPED_THINKING_VERSION`, `piThinkingLevelsSupported`, `piSupportedThinkingLevels`, `piCatalogFromRpc`, `PiRpcModel`, and an `off` entry in `EFFORT_LABELS`. `AgentsTab`'s `PI_THINKING` is now derived from them (same values and labels as before).
+- **"Ask this session" announcement (#1690):** new `components/AskSessionAnnouncementDialog`, `utils/askSessionAnnouncement` (cookie `plannotator-announce-ask-session-seen`) and `hooks/useFirstRunAnnouncementWindow`. Plannotator's apps mount it; nothing in the library mounts it for a host.
+- **gruvbox palette (#1721):** sets `--diffs-addition-color-override` (dark `#b8bb26`, light `#79740e`), so added diff lines draw in gruvbox green instead of the text colour. This changed the guides.show viewer stylesheet (see "Publishing & versioning").
+
+## Two fewer forced layouts on document open (ui 0.53.1)
+
+No API change. Two reads that forced a synchronous layout every time a
+`Viewer` mounted are gone (found by the Workspaces perf program: a warm
+document open spent most of its mount task in forced layouts):
+
+- **`useVimSelection`** no longer resets on a mount, or on a `contentVersion`
+  change, while vim was never on. The reset (state, focus, HUD, and the page
+  selection inside the viewer through `window.getSelection()`) now runs only
+  when vim goes from on to off. Behaviour change a host may notice: with vim
+  off, a selection already inside the viewer's container is no longer
+  cleared when the document mounts or its content changes; it is left to the
+  browser, as on any page. Turning vim off still clears it, and a selection
+  outside the container is never touched (0.46.1).
+- **`AnnotationToolstrip`**'s buttons no longer read `offsetWidth` in a layout
+  effect. The label's width comes from layout: a hidden copy of the label sits
+  in a one-column grid whose column animates `0fr` -> `1fr`, and the visible
+  label is placed beside the icon with `inset-inline-start` (so it follows the
+  icon under `dir="rtl"`) and clipped by the button. Collapsed
+  size, padding, gap, the 180 ms curve, compact / iconOnly / touch rules and
+  colours are unchanged; an expanded button is now its exact subpixel width
+  (up to 0.5 px wider than the integer `offsetWidth` it used before). The
+  button still carries the label twice in its text (the old hidden measure
+  span did too); the copy is `aria-hidden`.
+
+## Viewer `answerOnly` (ui 0.53.0)
+
+Additive, one optional `Viewer` prop; Plannotator passes none, so its render is unchanged. Added for the Plannotator Inbox window (`packages/inbox`), which shows an agent's message with answerable `:::question` cards and takes no comments on the message text.
+
+- **`answerOnly?: boolean`**: every annotation affordance is off exactly as under `readOnly` (the selection and code-block toolbars, both comment composers, quick labels, pinpoint hover, the annotation header, the global comment and attachments buttons, Vim), and the document actions (Global comment, Copy) are not drawn at all. Unlike `readOnly`, question cards keep `onAnswerQuestion` / `onSaveQuestionAnswer` / `onToggleQuestionDecisionRecording` and checkboxes keep `onToggleCheckbox`. `readOnly` still wins: `readOnly` with `answerOnly` is plain read-only.
+- Inside, `Viewer` computes `authoringOff = readOnly || answerOnly` and uses it wherever it used `readOnly` for authoring; the question and checkbox handlers still read `readOnly`. Absent or false, every path is the one it was.
+- The article keeps its card padding; a host that wants the bare text (as the Inbox does) overrides it from its own CSS on `[data-print-region="article"]`.
+
+## Viewer `textComments` (ui 0.53.1)
+
+Additive, one optional `Viewer` prop; Plannotator's plan review and annotate pass none, so their render is unchanged. Added for the Plannotator Inbox (approval "inbox-message-comments", 2026-10-19), where the person comments on the words of an agent's message.
+
+- **`textComments?: boolean`** on `Viewer`, with `answerOnly`: a text selection opens the selection toolbar again, comment-only (the toolbar's `commentOnly`: Comment and the one-click 👍, no Delete, no label picker), with its comment composer, and `annotations` are drawn as highlights (the highlighter is enabled). Question cards (and a host's `renderQuestionCard`) are wrapped `annotation-exclude`, so their words are never commented on. Nothing else of authoring comes back: no pinpoint, code-block toolbar, Global comment, Copy or Vim. Ignored without `answerOnly` and under `readOnly`. Inside, `selectionCommentsOn = !authoringOff || (answerOnly && textComments && !readOnly)` replaces `!authoringOff` for the highlighter and the selection toolbar, its composer and its label picker only.
+
+## Viewer `resolveLocalLink` (ui 0.53.0)
+
+Additive, one optional `Viewer` prop; Plannotator's plan review and annotate pass none, so their render is unchanged. Added for the Plannotator Inbox, where a link in a message to a file the message attached opens that file beside the thread.
+
+- **`resolveLocalLink?: (href: string) => LocalLinkResolution | null`** (`components/LocalLinkContext.tsx`): asked about every markdown link and raw-HTML `<a href>` whose target is a local path (`isLocalLinkTarget`: not `#anchor`, not `//host`, no URL scheme). `{ kind: 'open', open, title?, href? }` draws a real link whose click (and Enter) calls `open` and never follows the href. With `href` (the host's own address for the same thing), that is the link's href and a new-tab click (Cmd/Ctrl/Shift, middle button), "Open in new tab", drag and copy use it; without it the href is the target as written and a middle click is suppressed. `{ kind: 'unavailable', title }` draws the link text as an inert span (raw HTML: the `<a>` loses its `href`), so nothing is fetched. `null` keeps the renderer's default for that link. External links are never passed to it.
+
+## Viewer `questionDecisionLocked` (ui 0.53.0)
+
+Additive, one optional `Viewer` prop; Plannotator passes none, so its render is unchanged. Added for the Plannotator Inbox (step 3, decisions), where one message can hold a sent question and an open one. The Inbox no longer passes it: it records no decisions since #1985, parses its cards with `questionDecisionLines={false}` and locks sent questions with `questionReadOnly` instead.
+
+- **`questionDecisionLocked?: (question: IndexedQuestion) => boolean`**: true for a question passes it neither `onToggleQuestionDecisionRecording` nor `onOpenQuestionDecision`, so its decision tag draws as a plain tag (on or dimmed off, as `questionDecisionRecording` says), exactly as under `readOnly`. Other questions in the same `Viewer` keep their switch and opener. Absent or false, every path is the one it was.
+
+## Viewer `renderQuestionCard` and `renderQuestionBelowPrompt` (ui 0.53.0)
+
+Additive, two optional `Viewer` props; Plannotator passes none, so its render is unchanged. Added for the Plannotator Inbox's replaced questions, where an agent supersedes an earlier question and the host draws it as a card nobody can answer.
+
+- **`renderQuestionCard?: (question: IndexedQuestion, answer: QuestionAnswer | undefined) => ReactNode | undefined`**: a returned node is drawn in place of that question's answer card, inside a `<div data-block-id data-block-type="directive">`; `undefined` keeps the answer card. Adds no classes to the shared stylesheet.
+- **`renderQuestionBelowPrompt?: (question: IndexedQuestion) => ReactNode`** (`QuestionBlock`'s `renderBelowPrompt`, through `BlockRenderer`'s `renderQuestionBelowPrompt`): host content right under a card's prompt, e.g. "Replaces <an earlier question>"; null for none.
+
+## The composer handed to the host: `onHostDraft`, `stepPin`, `hideRedline` (ui 0.53.0)
+
+Additive, all opt-in; Plannotator passes none of it, so its render is unchanged. Added for the Plannotator Inbox surface (PLAN step S1, `packages/inbox/surface`), the single-file build a phone's native shell hosts: the shell's own sheet writes every comment, so the viewers report what a comment would be on and draw no composer.
+
+- **`HostDraft`** (`types`): `{ annotation, intent: 'selection' | 'compose', label?, cancel }`. `annotation` is the one a comment there would carry, with an empty `text`. `cancel()` drops the pending highlight or pin; a draft already replaced by a newer one ignores it. After saving, the host calls `cancel()` and draws the saved annotation through `annotations` / `applySharedAnnotations`.
+- **`Viewer` `onHostDraft?: (draft: HostDraft | null) => void`** (and the same option on `useAnnotationHighlighter`): whenever the selection toolbar or the comment composer would open, the draft goes to the host instead (`'selection'` for a settled selection, `'compose'` for Comment mode), and null when it closes. A pinpoint tap opens it as `'compose'`; the next tap replaces an open draft. The document actions (Global comment, Copy), the code-block and table hover toolbars are not drawn, and a pinpoint tap on a code block does nothing. Ignored when authoring is off. `createAnnotationFromSource` was split into a side-effect-free `buildAnnotationFromSource` and the create step; created annotations are unchanged.
+- **`HtmlViewer` `onHostDraft`** (and on `useHtmlAnnotation`): a text selection reports `'selection'`, a pin `'compose'` with the pinpoint label; the selection clearing reports null. Nothing of the package's toolbar or composer opens. Interact and Annotate set from outside need no new prop: `annotateModeActive` already is that seam.
+- **`ViewerHandle.stepPin?: (direction: 'parent' | 'child') => void`**, implemented by `HtmlViewer` only: moves a pinned draft to the element around it, or back the way it came (then the first element child), by posting the new bridge message `plannotator-bridge-step-pin`. The bridge re-pins through its own pinpoint path, so the parent sees an ordinary pinpoint selection. Additive to the protocol: an older bridge asset (`bridgeScriptUrl`) ignores it, so `BRIDGE_PROTOCOL_VERSION` is unchanged.
+- **`DiagramViewer` `onHostDraft?: (draft: DiagramHostDraft | null) => void`**: a click on a part reports `{ anchor, cancel }` (the ring stays drawn) and no `DiagramComposer` is rendered; the host passes the saved comment back in `comments`. Counts as being able to comment, like `onCreateComment`. `DiagramHostDraft` is exported from `components/diagram`.
+- **`AnnotationToolstrip` `hideRedline?: boolean`**: omits only the Redline action, as `hideQuickLabel` omits Label.
+- **Fix, `HtmlViewer` and `useHtmlAnnotation`:** both register their frame-message listeners in a layout effect instead of a passive one. A passive effect can run after a fast srcdoc frame has already posted the bridge's `ready`; the lost ready left the bridge with no input method or mode, so no pin could land (seen on a Linux WebKit CI runner in the surface's proof). Listening from the commit that inserts the iframe closes that race; nothing else changes.
+
+## `HtmlViewer` `hostNavigates`, `ViewerHandle.revealPin` and `ViewerHandle.takeSelection` (ui 0.53.0)
+
+Additive, opt-in; Plannotator passes none of it, so its render is unchanged. Added for the iPhone app's attachment screen (PLAN step M2): the app's `WKWebView` decides every link itself, and a link in an agent's page must reach it as a new window opened by a person's tap, which the app checks against its own record of the touch, rather than as a frame message, which a page's script can forge.
+
+- **`HtmlViewer` `hostNavigates?: boolean`**: in Interact, a person's tap on a non-fragment link opens it as a new window (`window.open(href, '_blank', 'noopener')`; the srcdoc sandbox becomes `allow-scripts allow-popups`) instead of being reported through the frame protocol, so `onOpenLink` does not fire for it. The host's web view hands the window to its own delegate, which decides it; the frame itself never navigates (the surface's CSP would refuse an off-folder frame load in any case). A scripted click (`isTrusted` false) opens nothing. In-page `#` links still scroll in the frame and an armed pinpoint tap still pins.
+- **Bridge message `plannotator-bridge-set-host-navigates`** (`{ active }`), posted on ready while the prop is set. Additive to the protocol: an older bridge asset ignores it and keeps cancelling, so `BRIDGE_PROTOCOL_VERSION` is unchanged.
+- **`ViewerHandle.revealPin?: () => void`** (`HtmlViewer`): scrolls the pinned draft into the middle of the frame through the new bridge message `plannotator-bridge-reveal-pin`, for a host whose own panel covers the page's lower part (the iPhone's comment panel shrinks the frame and the pin must stay in sight while Parent and Child move it). Additive to the protocol; an older bridge asset ignores it.
+- **`ViewerHandle.takeSelection?: () => boolean`** (markdown `Viewer`, from `useAnnotationHighlighter`): with `onHostDraft` set on a touch screen, a text selection is no longer painted as a pending highlight, neither by the library at `touchend` (`highlighter.run()` is not called) nor when it settles (400 ms after the last `selectionchange`); painting replaced the system selection, and the iPhone's edit menu with it, before the person could reach the app's Comment. The host calls `takeSelection()` from its own Comment action: the same paint runs then and the draft goes out through `onHostDraft` as `'selection'`. Returns false with nothing selected in the document. Without `onHostDraft`, and with a mouse, nothing changes.
+
 ## Publishing & versioning
 
-- `@plannotator/ui` is now `0.30.0`; `@plannotator/core` is `0.23.0`. **Publish `core` first** — ui 0.29.0 imports `@plannotator/core/annotatable`, which does not exist in core 0.22.0. The ui→core dependency resolves exactly at pack time.
-- They depend on each other via `workspace:*`. At publish time that must resolve to the **exact** version in the tarball, so publish with a tool that does that resolution (the repo's existing flow uses `bun pm pack` to build the tarball, then `npm publish *.tgz --access public`). Publish **`core` first, then `ui`**.
+- **core 0.25.13 / ui 0.53.0: both change. Order: `core` 0.25.13, then `ui` 0.53.0. guides.show is already deployed.** Both were published on 2026-10-18, cut from `main` at `7aba0e9a5` (#1985): the npm tarballs match that tree file for file, apart from the generated `styles.css` and bridge assets. That is later than the publish prep (#1898), so the pair also carries what merged between the two; the notable changes are listed after item 5 below. ui pins core `0.25.13` exactly and imports one core subpath that 0.25.12 lacks, `@plannotator/core/skill-reference-block` (#1914, from `utils/skillReferences`), so core goes first. core 0.25.13 moves the guides.show viewer pin from `viewer.BYGvfCcj.js` + `viewer.CBpqTZpM.css` (0.25.12) to `viewer.DERExLls.js` + `viewer.BjyNeslq.css`. Both files, `chunks/index.DfozTB5d.js` and all 59 `langs` chunks answer 200 on `https://guides.show/v1/`, and the two viewer files match the manifest's SRI hashes, so no manual deploy is needed. The previous pairs were ui 0.52.0 and ui 0.52.1 on core 0.25.12. **No export name is removed from either package** (checked name by name against core 0.25.12 and ui 0.52.1), but core removes two Inbox fields from three types (item 6), and these behave differently, so Workspaces should check them:
+  1. **Block quotes and headings (ui `utils/parser`).** `parseMarkdownToBlocks` returns ONE `blockquote` block per run of `>` lines, its `content` the quote's inner markdown, rendered by the new `BlockquoteBlock` (fences, lists, nested quotes, tables inside one `<blockquote>`). Block ids after a quote that used to split shift down (restore re-anchors by text), and a host that reads a quote's `block.content` now sees fence and list markers. A heading now needs a space (or the line's end) after its `#`s, at top level too: `#123 fixed`, `#hashtag` and `#!/bin/sh` are paragraph text, no longer `<h1>`. See "Block quotes render their content (ui 0.53.0; …)".
+  2. **Long choice labels (core `question-block`).** `parseQuestionAnswer` caps `selected` labels at the new `MAX_QUESTION_SELECTED_CHARS` (20,000) instead of 200, `canonicalQuestionAnswer` maps an answer an older build cut at 200 back to its full label, and `questionExportItems` passes `choices` for labels over 200 (`questionChoicesNeedCanonicalLabels`). A host that checks picks against the choices itself must not cut picked labels shorter than the labels it compares them with. See "Long choice labels are picked whole (core 0.25.13; …)".
+  3. **Wider unions** (a compile error only in an exhaustive `switch`): `AgentToolHost` gains `'oh-my-pi'`; core `external-annotation`'s `session-closed` event has `by: "agent" | "session"` (ui's `useExternalAnnotations` passes it on, `utils/agentClosed` adds `closedReviewCopy`); core `inbox-types` gains the `"superseded"` question state and more `InboxRecordKind` / `InboxIdPrefix` members, and `inbox-questions` reads a bare negative word (`Stopped: no`) as no stop.
+  4. **Smaller visible changes.** Core `CODE_FILE_REGEX` also matches `.mjs`, `.cjs`, `.mts` and `.cts`, so those paths link as code files; the Pi provider icon is the three-colour pi.dev mark (no longer `currentColor`); the question card's eyebrow pills share one 18 px box and an off decision tag is fainter; `hooks/useUpdateCheck` (Plannotator-only, see "not for hosts") no longer asks GitHub from the browser and returns null unless the server's advert is passed.
+  5. **Questions (core `question-block`).** (a) `QUESTION_AUTHORING_GUIDE` was rewritten (2,213 to 2,654 characters) and now ends with an Inbox-only bullet naming `read_thread`, `supersedes` and `Replaces:`. A host that pastes the guide into its own agent prompts now passes on Plannotator Inbox wording; filter that bullet out or write your own. (b) `parseQuestionBlock` reads a `Replaces:` line whose every token is id-shaped (`msg_…/q-…`, or a bare `q-…`) into the new optional `ParsedQuestion.replaces` instead of context, wherever it sits in the block. Any other `Replaces:` line is prose as before, and `questionKey` is unchanged. (c) `QuestionAnswer` gains optional `by_reply` (kept by `parseQuestionAnswer` only beside `skipped: true`). `formatQuestionAnswersSection` prints such a skip as "Skipped (not answered in this reply)" and adds a count line telling the agent to treat those as skipped.
+  Everything else is additive and inert until a host passes it: on `Viewer` `answerOnly`, `resolveLocalLink`, `questionDecisionLocked`, `renderQuestionCard` / `renderQuestionBelowPrompt`, `refRepo` and `onHostDraft` (also on `HtmlViewer` and `DiagramViewer`, with `DiagramHostDraft`); `ViewerHandle.stepPin` / `revealPin` / `takeSelection`; `HtmlViewer` `hostNavigates`; `AnnotationToolstrip` `hideRedline`; `RenderedMarkdown` `resolveLocalLink` / `resolveImage` / `headingAnchors`; the `PlanCleanDiffView` seams and `foldUnchangedPlanDiff`; `CodeAnnotation.markdownPreview`; `AnnotationPanel` `emptyHint`; `CodeFileView` (the body of `CodeFilePopout`, exported); the Oh My Pi setup hint; Plannotator's own update modules (`Settings` `updateCheckSetting`, `hooks/useUpdateToast`, `hooks/useUpdateCheckSetting`, `utils/updateNotice`). Core adds `crypto`'s `encryptWithKey` / `decryptWithKey` / `deriveRelayKeys`, `diff-files`' `isLineRangeInPatch`, `source-save`'s decided and cross-origin responses, an optional error on `serverSessionMismatchBody`, Inbox wire types (`inbox-attachments.ts`, `inbox-surface-bridge.ts`, both re-exported by `inbox-types`), and `annotatable`'s `isDotenvFileName(name)` (#1568): the dotenv-family rule on a file NAME (`.env`, any name ending in `.env`, `.envrc`, and `.env.*` outside the annotatable docs, so `.env.example` stays). The Inbox attachment rule and Plannotator's HTML asset route both use it; the attachment rule is unchanged.
+  Merged after the publish prep (#1898) and shipped in this pair:
+  6. **Inbox decisions removed (core `inbox-types`, `inbox-questions`; #1985).** The wire types `InboxQuestionRecord` and `InboxQuestion` lose `decision_on_answer` and `decision_id`, and the parser's output `ParsedInboxQuestion` loses `decision_on_answer`: code that reads them no longer compiles. `parseInboxQuestionBlocks` parses with `{ decisionLines: false }`, so a `Decision:` line in an Inbox question is context. The Inbox decision types and helpers that were on `main` between the two publishes (`InboxDecision`, `inboxDecisionWords`, the search `decision` group and others) were never published.
+  7. **Question behaviour in every host** (plan review and annotate too): a choice question whose `Recommended:` names no choice shows its Suggested line, and a read-only card draws no empty Other row (#1906); "Accept recommended" stays on a pick-any card until the picks match, and a `Recommended:` list that names a whole choice whose description holds the separator now matches it (#1913); an answer's prompt is cut between grapheme clusters (`capQuestionPrompt`, #1906). For Inbox helpers: `composeInboxReplyBody` adds the still-open line to a reply with no answer (#1903), and `deriveInboxSubject` no longer cuts inside an emoji (#1899). See "Grapheme-safe cuts on `inbox-questions`", "Question prompts are cut whole", "Question cards: the Suggested line, the read-only Other row, a host status label", "A reply with no answers leaves the questions open" and "Accept recommended on pick-any questions".
+  8. **Smaller changes.** `Tooltip`'s popup draws at `z-[110]` (was `z-50`) and carries `data-pn-tooltip` (#1982). Four default wires send `serverSession` once a tab has adopted one (`adoptServerSession`), and do nothing new otherwise: `ExportModal`'s notes wire, `PlanDiffViewer`'s VS Code diff wire and `useAgentJobs` (#1921), and `OpenInAppButton` (#1915), whose server now refuses an `/api/open-in` without a catalog `appId`. All four are on the unsupported list.
+  Additive and inert until a host passes it: `Viewer` `questionDecisionLines` with core's `ParseQuestionBlockOptions` (`decisionLines`) on `parseQuestionBlock` / `indexQuestionBlocks` (#1985; see "Questions without decision lines"), `questionReadOnly`, `questionStatusLabel` (`QuestionStatusLabel`), `imageLightboxStepping` and `onImageClick`; `AnnotationPanel` `compareAnnotations`, `title`, `titleNote` and `cardParts`, and the export-only `exportLocation` field the exporters print under an entry's heading (#1931; described in `README.md`); `components/ComposerTokenTextarea`, `HumanOnlySkillNotice` `destination`, `renderSkillReferencesBlock`, `normalizeSkillContent`, `setSkillCatalogExportRegistration` and `configurePlannotatorUI`'s `skillReferenceExport` / `skillInstructionsDestination` (#1914); `components/HostTitle`, `utils/textCut` and `configurePlannotatorUI`'s `componentTooltips` (#1982); `components/ImagePeek` and `ImageLightbox` `images` (#1944); `Tooltip` `shouldOpen`, `container` and `escapePassesThrough`; `CodeFileView` `overflow`; `hooks/useOpenInApps` and `utils/storage`'s `getStoredOpenInApp` (#1920); `utils/pasteInsert` (`installPlainTextPaste`, the Chrome 155-156 macOS paste workaround Plannotator installs, #1970); `SessionBridgeInfo.interruptible`, `hasNonInterruptibleSession` and `SessionAskNotice` `canInterrupt` (#1807: a bridge that advertises `interruptible: false` gets no "Interrupt and ask now", and its Stop reads "Stop listening"). Core adds the subpaths `file-kind` (#1916), `inbox-search` (#1902) and `skill-reference-block` (#1914), `open-in-apps`' `checkOpenInAppId` (#1915), `markdown-structure`'s `codeFenceFor` (#1914), `question-block`'s `capQuestionPrompt`, `inbox-questions`' `cutText` / `sliceText` / `inboxStillOpenLine` and the person-thread names (`derivePersonThreadSubject`, `suggestPersonThreadName`, #1956), and `inbox-types` now re-exports `inbox-open-in` (#1920). Also new in this pair, for hosts that read the Inbox's wire: `inbox-attachments`' video support (the `"video"` kind, `INBOX_VIDEO_BLOCK_ID`, `inboxVideoMeta`, `readInboxVideoTime`, `formatInboxVideoTime`; #1931) and `InboxInlineImage` (#1944); and in `inbox-types`, `InboxAck` / `INBOX_ACK_LABEL` (#1947, #1980), `InboxDraft*` / `InboxCompose*` / `InboxUpload` and the `upl` / `drf` id prefixes (#1917), `InboxNotifyReach` / `InboxWindowPermission` (#1967), `InboxThreadNaming` / `InboxThreadNamedBy` (#1956), `INBOX_TOOL_COST` / `inboxToolCostText` (#1962), `inboxRowOffersMarkRead` / `inboxRowWaitsOnPerson` (#1926) and `THREAD_NAME_BIDI` / `THREAD_NAME_CONTROL`. ui also adds `collectDocumentImages`, `LightboxImage` and `lightboxImageName` beside `ImageLightbox` (#1944), `COMPOSER_TEXT_CLASSES` and `ComposerMentionChips` on `components/ComposerTokenTextarea` (#1914), and `useRememberedOpenInApp` / `loadOpenInApps` in `hooks/useOpenInApps` (#1920).
+- **core 0.25.11 / ui 0.51.0: both change. Order: guides.show deploy, then `core` 0.25.11, then `ui` 0.51.0.** ui imports `canonicalQuestionAnswer` and `PI_THINKING_LEVELS`, which no published core before 0.25.11 has, and pins core `0.25.11` exactly. core 0.25.11 pins a new guides.show viewer stylesheet (`viewer.DuqkfIUz.css`, from the gruvbox fix #1721; the viewer JS `viewer.BYGvfCcj.js` is unchanged), which guides.show serves only after a deploy, so run the deploy by hand first (next bullet). **ui 0.51.0 is BREAKING for 0.50.0 consumers of the "Ask this session" exports**: it removes `findUsableSessionBridge`, `resolveSessionBridgeFallback`, the `'fallback'` `SessionAskAction` member, `SessionAskActions`' `fallbackLabel` and `DocumentAIChatPanel`'s `sessionAskFallbackLabel`, and makes a listed bridge the only Ask AI selection. Release notes must say so. Everything else is additive or a fix (including #1725's agent tool switch and offer); see "Ask this session (shipped in 0.50.0; …)", "Comment composer trim (0.51.0; …)", "Ask AI from a diagram comment (0.51.0; …)" and "Questions, restore, drafts and the rest (ui 0.51.0, core 0.25.11)".
+- **guides.show before a core publish that moves the viewer pin.** guides.show deploys on Plannotator release tags only. When a core publish carries a new `guide-viewer-manifest` hash (any change to the shared CSS or the guide chain) and no release tag has shipped it yet, run the deploy by hand first (`gh workflow run guides-show-deploy.yml --ref main`), then check that `curl -I https://guides.show/v1/<css>` and `<js>` from the manifest answer 200. Otherwise every host's guide pages load without that asset (core 0.25.9 hit this; fixed by a manual deploy). The deploy is add-only.
+- **core 0.25.9 / ui 0.49.0 (question host seams): both change. Publish `core` first**: ui imports the new `@plannotator/core/markdown-structure` subpath and the new `findQuestionBlocks` / decision fields, so a ui on a published core 0.25.8 fails to compile in a consumer. See "Question host seams (ui 0.49.0, core 0.25.9)".
+- **core 0.25.8 / ui 0.48.0 (questions in documents): both change. Publish `core` 0.25.8 first, then `ui` 0.48.0**, which pins core `0.25.8` exactly and imports the new `@plannotator/core/question-block` subpath. Core is a patch bump because its change is additive and pre-1.0 caret ranges would not accept a minor. See "Questions in documents (0.48.0, core 0.25.8)".
+- **core 0.25.7 / ui 0.47.0 (host link widgets + model source hint + `persistViewedFiles`): both packages change, and both need unpublished upstream packages first.** Order: `@plannotator/atomic-editor` 0.9.0, then `@plannotator/markdown-editor` 0.5.0, then `bun install` here to refresh `bun.lock`, then publish `core` 0.25.7, then `ui` 0.47.0. ui pins core `0.25.7` exactly, `@plannotator/atomic-editor` `^0.9.0` and `@plannotator/markdown-editor` `^0.5.0`. See "Host link widgets (0.47.0, core 0.25.7)".
+- **ui 0.46.1 (fix, ui only, core pin unchanged at `0.25.6`):** `useVimSelection` (mounted by every `Viewer`) now only clears a page selection whose anchor or focus lies inside the viewer's own container; with vim off it used to clear the WHOLE page's selection on every mount and `contentVersion` change, so a selection in another host panel vanished whenever the document behind it loaded or changed.
+- **ui 0.45.0 (annotation card header slot + mentions on the card's edit box): `@plannotator/ui` only — `@plannotator/core` is UNCHANGED at `0.25.5`, so this publishes alone** (core 0.25.5 must already be published). Purely additive over 0.44.0, both props on `AnnotationPanel`: `renderCardHeader` (the header-row twin of `renderCardFooter`, wrapper `[data-annotation-card-header]`, renders under `readOnly`, open-document cards only in the All-files view) and `mentionSource` (the 0.43.0 type, applied to the card's EDIT box, saving `onEdit(id, { text, mentions })` only when a source was supplied and a pick survived). Nothing is removed, no new supported imports (`components/MentionAutocomplete` is internal glue), no export-, share- or archive-visible change, and Plannotator passes neither — `packages/editor` and `packages/review-editor` have zero source diff, and the panel is byte-identical to 0.44.0. Known difference from `CommentPopover`: no chips in the card's edit box (follow-up named in the section). See "Annotation card header slot and mentions on the edit box (0.45.0)".
+- **ui 0.44.0 (mention token chips in the composer): `@plannotator/ui` only — `@plannotator/core` is UNCHANGED at `0.25.5`, so this publishes alone** (core 0.25.5 must already be published). Purely additive over 0.43.2: the `@Label` tokens a `mentionSource` composer inserted render as chips in the composer's existing highlight overlay, `MentionSource.tokenClassName?` lets a host restyle them (under the metric rule), `useMentionAutocomplete` also returns the surviving `mentions`, and `utils/composerTokens` joins the supported-import list. Nothing is removed, no export-, share- or archive-visible change, and Plannotator passes none of it — with neither `mentionSource` nor `skillReferences` the composer is byte-identical to 0.43.2. See "Mention token chips in the composer (0.44.0)".
+- **ui 0.43.1 (`mentionSource` on the viewers): `@plannotator/ui` only — `@plannotator/core` is UNCHANGED at `0.25.5`, so this publishes alone** (core 0.25.5 must already be published). Purely additive over 0.43.0: `mentionSource` on `Viewer` and `HtmlViewer` (forwarded to every comment composer each mounts) and the optional `Annotation.mentions` field the picked ids land on, set only when a source was supplied and a token survived. Nothing is removed, no new modules, no export-, share- or archive-visible change, and Plannotator passes none of it. See "`mentionSource` on the viewers (0.43.1)".
+- **ui 0.43.0 (host toolbar seams): `@plannotator/ui` only — `@plannotator/core` is UNCHANGED at `0.25.5`, so this publishes alone** (core 0.25.5 must already be published). Purely additive: `selectionActions` + `quickLabels` on `AnnotationToolbar` (forwarded by `Viewer`; `selectionActions` also by `HtmlViewer`), `mentionSource` on `CommentPopover`, an optional third `mentions` argument on that component's `onSubmit`, and the new supported modules `utils/selectionActions`, `utils/mentions`, `components/SelectionActionsDropdown`, `components/MentionPicker`, `hooks/useMentionAutocomplete`. Nothing is removed and Plannotator passes none of it. See "Host toolbar seams (0.43.0)".
+- **core 0.25.5 / ui 0.42.0 (diagram FILES, `.mmd`/`.mermaid`/`.dot`/`.gv`): additive on both packages, so the next publish is core-first.** `@plannotator/core/annotatable` gains `DiagramRenderKind`, `diagramRenderKindForPath`, `isDiagramRenderKind` and `annotateDiagramRenderKind`, and its built-in annotatable sets now include the four diagram extensions (`shouldStripFrontmatter` returns false for them — Mermaid's `--- … ---` config block is content — and they can no longer be registered through `markdownExtensions`). `@plannotator/ui` gains `diagramDocumentBlocks(text, kind)` on `utils/parser` (the ONE `code` block a whole-file diagram source renders as), `shareableDocumentMarkdown(markdown, renderAs)` on `utils/sharing`, the `DocumentRenderAs` type on `types` (`'markdown' | 'html' | DiagramRenderKind`, re-exporting core's kind), and an optional `Block.diagramSourceLineOffset` that `DiagramBlock` prefers over `Block.startLine` when resolving a diagram comment's `sourceLine` (unset on every parser-produced fence, so fences are byte-identical). `useLinkedDoc`'s `renderAs`/`setRenderAs`/`LinkedDocLoadData.renderAs` widen from `'markdown' | 'html'` to `DocumentRenderAs` — source-compatible for a host that only ever passes the old two, but a host whose own state is typed `'markdown' | 'html'` must widen its setter. Since core changes, **publish `core` first** and update UI's exact core dependency before packing ui.
+- **The pair 0.41.2 shipped as was `@plannotator/ui` `0.41.2` on `@plannotator/core` `0.25.4`.** Core is UNCHANGED from 0.41.1, so 0.41.2 publishes alone (`ui` only; core 0.25.4 must already be published). 0.41.2 ships the palette-derived Mermaid node shadow at a default of 70% (`DEFAULT_MERMAID_SHADOW_AMOUNT`) and the Settings → Display "Diagram Shadow" control (0 / 40 / 70 / 100); see "Node shadow (the one thing that is not a colour)" under "Theme-aware Mermaid diagrams (0.40.0)" for the mapping — no API removal, only additive exports (`buildMermaidShadow`, `DEFAULT_MERMAID_SHADOW_AMOUNT`, `utils/diagramShadow`).
+- The pair 0.41.1 shipped as was `@plannotator/ui` `0.41.1` on `@plannotator/core` `0.25.4`. Core is UNCHANGED from 0.41.0, so 0.41.1 published alone (`ui` only; core 0.25.4 must already be published). 0.41.1 is two fixes over 0.41.0 with no API change — the diagram engine is loaded lazily by the first diagram fence instead of riding every document read, and a press on the canvas's own controls no longer comments on the part behind them; see "0.41.1 — the engine is lazy, and the controls are not part of the diagram". The 0.41.0 notes below still describe the engine itself.
+- **The pair 0.41.0 shipped as was `@plannotator/ui` `0.41.0` on `@plannotator/core` `0.25.4`. Publish `core` 0.25.4 first, then `ui` 0.41.0** (both by hand from `main` after merge; CI never publishes these packages). 0.41.0 is the diagram engine (see "Diagram engine (0.41.0)"): one renderer slot and one canvas behind `MermaidBlock` / `GraphvizBlock`, the `components/diagram` surface, the Graphviz runtime slot with `@viz-js/viz` pinned `3.30.0`, and `Annotation.diagramAnchor`; core 0.25.4 adds the `diagram-anchor` subpath ui imports, so a ui 0.41.0 on a published core 0.25.3 would fail to compile in a consumer.
+- The previous pair was `@plannotator/ui` `0.40.0` on `@plannotator/core` `0.25.3` (publish order the same). Three things shipped in 0.40.0: (1) **Mermaid 12.0.0**, pinned exactly (was `^11.17.2`): ELK layout by default for flowchart/state/class/ER/requirement, Safari 17.4+ / ES2024 floor, SVG ids byte-identical to 11 but `g.edgePaths` children now in declaration order, and the plan editor no longer imports `utils/mermaid-eager` (the lazy path is the default for everyone; hosts that want startup registration import the eager entry themselves) — see "Mermaid 12 (0.40.0)"; (2) **theme-aware Mermaid diagrams**: New additive exports `utils/mermaidTheme` (`buildMermaidThemeVariables`, `readThemeTokens`, `applyMermaidTheme`, `mermaidThemeKey`, `buildMermaidConfig`, `ensureContrast`, `isDarkBackground`, `MERMAID_THEME_TOKEN_NAMES`) and `utils/cssColor` (parser + OKLab/contrast toolkit). `MermaidBlock` now calls `useTheme()` and `applyMermaidTheme` before each render; `MERMAID_CONFIG`, `loadMermaidRuntime`, `mermaid-eager` and `securityLevel: 'strict'` are unchanged. A host whose document carries no theme tokens renders diagrams byte-identically to 0.39.0; a host that mounts `ThemeProvider` with `theme.css` gets diagrams in its palette and mode with no configuration. No new peer dependencies; core unchanged. See "Theme-aware Mermaid diagrams (0.40.0)".; (3) **element context through the host seam (#1521, #1549), which is what moves `core` to 0.25.3:** `@plannotator/core/html-anchor` gains `parseHtmlElementContext`, `MAX_ELEMENT_CONTEXT_BYTES` and `MAX_PAGE_URL_LENGTH`; `PersistedHtmlAnchor.elementContext?` and `HtmlAnnotationTarget.context?` now round-trip through `buildPersistedHtmlAnchor` and `projectHostThreads`. **Core changes here, so bump and publish `core` first** and update UI's exact core dependency before packing ui — a ui build that imports these from an older published core fails to compile in a consumer, the 0.38.0 failure mode. `@plannotator/ui/components/html-viewer` re-exports the validator, so 0.39.0's import site is unchanged, and rows without context stay byte-identical on the wire. `utils/parser` gains `includeOutline` on `elementContextExportBlock` / `exportAnnotationEntry`, and `exportAnnotationEntry`'s `includeRoute` now defaults to true per field. See "Element context through the host seam".
+- The previous pair was `@plannotator/ui` `0.39.0` on `@plannotator/core` `0.25.2` (core unchanged; nothing under `packages/core` moved). UI 0.39.0 adds **element context** to raw-HTML and live-app pinpoint annotations (#1517, #1520): a new optional `Annotation.elementContext` (`HtmlElementContext` in `@plannotator/ui/types`) and `HtmlAnnotationTarget.context`, captured by the bridge at click time (tag, id, author classes, ancestor `path`, `role`, accessible `name`, an allowlisted `attrs` set with href/src scrubbed of query and fragment, rendered `text`, an adaptive collapsed HTML `outline`, child count, viewport `rect`, nearest `landmark` and `heading`, a `component` hint, and in live-app sessions `page`), hard-capped at 2 KiB serialized per primary and 1 KiB per extra target, and re-validated at the parent trust boundary by the new `parseHtmlElementContext` export of `@plannotator/ui/components/html-viewer`. New helpers on `@plannotator/ui/utils/parser`: `elementContextExportBlock(ann, { includeRoute })` (the fenced skeleton plus selector/path/role/name/attrs/text/box/near lines the full export now prints under a context-bearing comment) and `exportAnnotationEntry(ann, { includeRoute })` (one annotation as a standalone feedback entry, a pure helper for hosts; `AnnotationPanel`'s card chrome is unchanged from 0.38.2). The field is purely descriptive: `HtmlElementAnchor` and restore are untouched, no `BRIDGE_PROTOCOL_VERSION` bump, share links drop it like anchors, annotations without it export byte-identically, and the repaint path posts only anchors to the bridge. **Host persistence gap in 0.39.0 itself, closed in the next publish (#1521, #1549)**: as shipped, 0.39.0's `@plannotator/core/html-anchor` (`buildPersistedHtmlAnchor`, `projectHostThreads`) does not carry `elementContext`, so a host pinned to 0.39.0 that persists through those helpers drops it on save and must persist and project the field itself. The next publish carries it end to end — see "Element context through the host seam". Peer ranges are unchanged from 0.38.2: `react` / `react-dom` `^19.2.3`, `tailwindcss` as before, and `@codemirror/state ^6.7.2` beside `@codemirror/view ^6.43.10`. Decision-control change in the same window (#1516): the header primary reads `Send Feedback` / `Post Comments` with no inline count (`DecisionPrimary.count` removed; internal, not host-supported surface).
+- Before that, `@plannotator/ui` `0.38.2` on `@plannotator/core` `0.25.2`. UI 0.38.2 keeps the type word in a titled alert's accessible name through a visually hidden `sr-only` span before the title instead of an `aria-label` on the title row (naming a generic `div` is prohibited by ARIA and WebKit drops it, so VoiceOver on Safari read only the bold title in 0.38.1), and loosens the React peer back to `^19.2.3` (0.38.1 declared `^19.2.8` only because the dependency batch moved it; nothing in the package needs a newer API). **Do not consume ui 0.38.0**: it imports `@plannotator/core/token-hover` (the hover-card trigger settings, #1462) but pins core 0.25.1, which never exported that subpath, so it fails to compile in any consumer; 0.38.1 is the same UI pinning core 0.25.2, which publishes `./token-hover`, the rotated `guide-viewer-manifest` pin, and the `config-types` hover fields (core 0.25.2 is the first core publish since 0.25.1 even though those changes landed over several releases; the package smoke now diffs the UI's core imports against the registry so an unpublished core subpath fails preflight instead of the consumer). UI 0.38.1 also aligns `@codemirror/state` to `^6.7.2` beside `@codemirror/view ^6.43.10`, so a consumer can no longer resolve two state copies. UI 0.38.0 also renders a GitHub alert's bold-only first body line as its title on the icon row (an emoji on that line becomes the icon; `<!-- icon: name -->` is stripped and resolved through the new `alertIconRenderer` seam, null by default; grammar in `utils/alertTitle`, importable by a host editor so it writes the bytes the reader parses; a fenced code block inside an alert body still renders as text, deferred because nesting a `CodeBlock` inside a block interacts with the positional annotation anchors and needs its own design). UI 0.38.0 carries the whole unified decision-control stack: the internal primitives (`DecisionControl`, `utils/decisionSpec`, `hooks/useDismissablePopover` — not host-supported surface, see the unsupported list; `useDismissablePopover` also replaced the hand-rolled dismissal inside `ActionMenu`/`ApproveDropdown`, both likewise unsupported) plus one blessed-barrel addition: `decisionControlShortcuts` on `@plannotator/ui/shortcuts` (pure scope data, fetch-free, same contract as the other scopes). The removal of `ToolbarButtons`' platform-mode `muted` prop is internal — `ToolbarButtons` is not host-supported surface. UI 0.37.0 added the Viewer-owned document-header seam (a new public API, hence the minor bump; 0.36.1 was reserved for it but never published) while retaining the `hideQuickLabel` and `StickyHeaderLane` seams from the 0.35.x and 0.36.0 releases; core 0.25.1 publishes the `annotation-threads` subpath already used by `AnnotationPanel` and `utils/parser`, and UI pins that corrected core exactly.
+- Recent pairs, for the consumer's install matrix: ui 0.32.0 on core 0.25.0 (lockstep, `html-anchor`), ui 0.33.0 and ui 0.34.0 on core 0.25.0 (ui only), and ui 0.35.2, ui 0.36.0, and ui 0.37.0 on core 0.25.1 (0.36.1 was never published), ui 0.38.1, ui 0.38.2, and ui 0.39.0 on core 0.25.2, and ui 0.40.0 on core 0.25.3 (lockstep, `html-anchor` element context). Since then, from the registry: ui 0.41.0, 0.41.1 and 0.41.2 on core 0.25.4; ui 0.42.0, 0.43.0 to 0.43.2, 0.44.0, 0.45.0 and 0.45.1 on core 0.25.5; ui 0.46.0 and 0.46.1 on core 0.25.6; ui 0.47.0 on core 0.25.7; ui 0.49.0 on core 0.25.9 (core 0.25.8 and ui 0.48.0 were never published; their changes first shipped in ui 0.49.0 / core 0.25.9); ui 0.50.0 on core 0.25.10; ui 0.51.0 on core 0.25.11; ui 0.52.0 and 0.52.1 on core 0.25.12; ui 0.53.0 on core 0.25.13 (the current `latest` of both). Do not consume ui 0.35.0 externally because its published manifest contains `workspace:*`; do not consume ui 0.35.1 because its exact core 0.25.0 dependency lacks the `annotation-threads` export. Do not consume ui 0.38.0 because its exact core 0.25.1 dependency lacks the `token-hover` export.
+- When both packages change, **publish `core` first**: ui 0.32.0 imports the `@plannotator/core/html-anchor` subpath, which no earlier published core (0.24.0 and before) has, just as ui 0.29.0 needed core 0.23.0 for `@plannotator/core/annotatable`. Bump core, update UI's exact core dependency to the same new version, and run `bun install` so `bun.lock` records the new workspace versions before packing either package.
+- The HTML annotation seams also changed the guides.show viewer **stylesheet** (five utility rules from `HtmlSurfaceControls`; the viewer JS is unchanged), so `packages/core/guide-viewer-manifest.ts` now pins a CSS hash that exists on guides.show only after the deploy workflow has published this build's `/v1/` assets. A guide exported from this build before that deploy would pin a stylesheet the host does not serve yet: **deploy guides.show before any release that ships this manifest.**
+- UI declares the already published core version exactly in its source manifest. Do not replace it with `workspace:*`: direct publication can preserve that protocol and make the package impossible to install outside this repository. Bun links the local core workspace whenever its version matches the exact dependency. Before publishing, run `bun run --cwd packages/ui smoke:package`; it checks the source and packed manifests, required tarball subpaths, local Bun linking, and a real pnpm install in an external temporary consumer. When both packages change, publish **`core` first, then `ui`**.
 - **`--provenance` only works from a supported CI environment (GitHub Actions OIDC)** — a local publish fails with `Automatic provenance generation not supported for provider: null`. Until a CI publish job exists for these two packages, local publishes drop the flag. Publishing under `--tag next` first lets the consumer preflight before `npm dist-tag add <pkg>@<version> latest` promotes it.
-- `styles.css` is built by the `prepack` script (`bun run build:css`) so the published tarball always carries fresh precompiled CSS.
+- `styles.css` is built by the `prepack` script (`bun run build:css`) so the published tarball always carries fresh precompiled CSS; since 0.33.0 `prepack` also runs `build:bridge-assets`, which generates the gitignored `bridge-script.asset.js` and `bridge-script.lite.ts` beside their source. Both are in `files`, so a tarball built without `prepack` (a hand-rolled `npm pack --ignore-scripts`) would ship export subpaths that resolve to nothing; always build with `bun pm pack`.
 - There is **no CI publish job for these two packages yet** — first publish is manual from `main` after merge. (Wiring a CI publish job is a follow-up.)
 
 ---
+
+## `Settings` `annotateParity` (shipped in 0.46.0)
+
+`<Settings mode="annotate">` takes a new optional `annotateParity?: boolean`,
+default `false`. **A host that omits it sees exactly the annotate Settings it
+had**: General, Theme, Vim, Shortcuts, Files, plus the OpenCode agent-switch
+row when `origin="opencode"`. Plannotator's own annotate app passes `true`,
+which adds the plan-review document tabs (Display, Saving, Labels, Obsidian,
+Bear, Octarine) and hides the agent-switch row, which only ever applied to
+plan approval.
+
+Within those tabs the plan-decision rows stay plan-only: Save Plans and the
+three "Auto-save on Plan Arrival" switches. The Obsidian / Bear / Octarine
+enable switches are the SAME cookies plan review reads on approve, so turning
+one on from annotate also makes plan review save every approved plan there;
+the annotate description says so. `mode="plan"` and `mode="review"` are
+unaffected by the prop. Purely additive: no export, share or archive change.
+
+---
+
+## Diff file tree (0.50.0; no core change)
+
+Asked for by a host that shows a read-only per-file diff list (one Pierre
+`FileDiff` per file) and wants Plannotator's file tree beside it. The tree used
+to live only in `packages/review-editor`, tied to the review's pickers, search,
+worktrees and annotations. Its shared parts moved into this package; nothing
+was rebuilt.
+
+**What moved, and where.**
+
+| From `packages/review-editor` | To `@plannotator/ui` |
+|---|---|
+| `utils/buildFileTree.ts` (trie, folders-first sort, single-child merge, root unwrap, counts, `getAncestorPaths` / `getVisualFileOrder` / `getAllFolderPaths`) | `utils/diffFileTree.ts`, generic over the file type (`buildDiffFileTree<F>`). The review file is now a re-export shim keeping its old names, with `FileTreeNode = DiffFileTreeNode<DiffFile>`. |
+| `FileTree.tsx`'s expanded-folder state (expand all on a new tree, keep the active file's ancestors open, toggle, toggle all) | `hooks/useDiffFileTreeExpansion.ts` |
+| `FileTreeNode.tsx`'s folder button and the file row's letter / name / counts layout, the `4 + depth * 8` indent | `components/DiffFileTree.tsx`: `DiffFileTreeFolderRow`, `DiffFileTreeFileRowContent`, `diffFileTreeIndent` |
+| `FileRowBits.tsx`'s `ChangeTypeLetter`, `DiffCounts` | `components/DiffFileTree.tsx` (re-exported from `FileRowBits` so `SectionsPanel` is untouched). `ChangeTypeLetter` gained a `'binary'` status (B); the review never produces it. |
+
+The `file-tree-item` CSS was already in `theme.css`. The new pieces are the
+`DiffFileTree` component itself and its ARIA/keyboard handling.
+
+**Review-only, and why.** The review's `FileTree` keeps its own wrapper and
+renders its rows from the shared atoms, adding: the viewed checkbox and the
+hide-viewed filter, stage controls and the staged/committed/untracked marks,
+the annotation badge and `has-annotations` tint, the scroll-highlight row, the
+"Copy path" context menu, the double-click handler, the panel header, view toggle,
+diff-type / base / worktree / evolog pickers, search results, the nav rows
+(PR overview, artifacts, call flow, semantic diff, all files), and its
+**window-wide** j/k/arrow/Home/End shortcut (an app shortcut, gated on inputs,
+menus and dialogs). None of those is a host concern, so `DiffFileTree` takes no
+props for them; a host that needs any of them builds its own row from the atoms,
+as the review does. The review rows also keep their current DOM: no ARIA tree
+roles were added there (that would be a behavior change to Plannotator's app,
+out of scope here).
+
+**Keyboard in `DiffFileTree`.** Handled on the tree element only. The file keys
+match the review (ArrowDown/`j`, ArrowUp/`k`, Home, End select files in tree
+order; nothing selected + Down picks the first file); focus follows the
+selection, opening folders as needed. ArrowRight/ArrowLeft follow the WAI-ARIA
+tree pattern for folders. Modifier chords pass through.
+
+**Parity evidence.** Plannotator's code review was screenshotted on main and on
+this branch with the same static patch (merged chains, A/D/R/M marks, nested
+folders), at rest, after two `j` presses and after collapsing a folder: the
+sidebar screenshots and its `outerHTML` were byte-identical.
+
+## Comment composer trim (0.51.0; not breaking)
+
+The visible submit hint added noise and is gone from `components/CommentPopover`.
+The composer's one-click thumbs-up was removed in the same change and then
+brought back before any release, so hosts see no API change for it.
+
+- **Submit hint text removed** from both composer footers (popover and
+  dialog): the `⌘↵` / `Ctrl+Enter` label no longer renders. The keyboard
+  behavior is unchanged: `Mod+Enter` still saves.
+- **`onQuickLookGood` stays** on `CommentPopover` (published in 0.32.0), with
+  the same contract: optional, absent renders nothing, the parent owns
+  creation and closing, disabled once anything is typed or attached. Only its
+  look changed: it is now an emoji-only 👍 button beside Save (no "Looks
+  good" text), named "Looks good" through `aria-label` and its tooltip, marked
+  `data-quick-look-good`. It takes no key; `Mod+Enter` still saves. Like
+  Save, a click clears the `draftKey` draft and returns focus to the opener.
+  Its classes are all ones the pinned guides.show viewer CSS already has (the
+  disabled grey-out is an inline filter), so it does not change that bundle.
+  Why it is
+  needed: a pinpoint click on an HTML / live-app element opens this composer
+  directly and never shows the selection toolbar, so without it an element
+  cannot get a one-click thumbs-up.
+- **`handleCommentLooksGood` stays** on the `useHtmlAnnotation` return value
+  (`components/html-viewer`), and `HtmlViewer` still passes it, so hosts that
+  render `HtmlViewer` keep the button exactly as in 0.32.0 to 0.50.0. It now
+  shares one commit path with `handleCommentSubmit` (`commitComposerDraft`),
+  so the 👍 carries the same anchor, element context and shift-click extra
+  targets as a typed comment.
+
+`THUMBS_UP_LABEL` (`utils/quickLabels`) stays exported; the toolbar path,
+the composer path and `HtmlViewer`'s id filter use it. The trust-boundary
+clamp is untouched.
+
+---
+
+## Ask AI from a diagram comment (0.51.0; additive, no core change)
+
+The diagram composer can offer the same "Ask AI" the markdown and HTML
+composers offer. All new props are optional; a host that passes none of them
+renders the composer it had (Cancel + Comment, no Ask AI).
+
+- **`DiagramViewer` / `DiagramPopout` `onAskAI?: DiagramAskAI`** —
+  `(question, anchor, additionalTargets) => boolean | void | Promise<boolean | void>`.
+  `anchor` is the `DiagramAnchor` a comment on that part would carry
+  (`sourceLine` already in document lines). Resolve `false` (or throw) to keep
+  the draft open; anything else closes the composer. The button is disabled
+  until text is typed and has no key binding: Enter stays Comment.
+- **`MermaidBlock` / `GraphvizBlock` (`DiagramBlockProps`) `onAskAI?: CommentAskAIHandler`**
+  and **`askAISourcePath?: string`** — the same handler `Viewer` /
+  `CommentPopover` take. The block builds the `CommentAskAIContext` with
+  `utils/diagramAskAI`'s `diagramAskAIContext`: `kind: 'selection'`, label
+  `"Mermaid diagram node D"`, `text` = the part's label, and `detail` = the
+  export's location line (`diagramAnchorLocationLine`), the engine and family,
+  and the diagram source (bounded to 40 lines / 4000 chars, grown outward
+  from the part's line so the part is always in it; a single line over the
+  budget is cut with `…`) in document lines. `detail` is the #1694 field that
+  `buildDefaultPrompt` puts on the user message before the question. Ignored
+  when `readOnly`. A question asked in the popout closes the popout, since it
+  covers the panel the answer streams into.
+- **`Viewer`** forwards its existing `onAskAI` to its diagram fences (and the
+  `sourcePath` it already sends from the markdown composer), so a host that
+  passes `onAskAI` to `Viewer` gets Ask AI on diagram comments too. A host
+  that wants Ask AI on text but not on diagrams has no switch for that yet.
+
+Pinned by `components/DiagramBlock.askAI.test.tsx` and
+`utils/diagramAskAI.test.ts`.
+
+---
+
+## Ask AI names a text selection's source lines (ui 0.52.0; additive, no core change)
+
+An Ask AI question asked from a markdown text selection now says which
+source lines the selection is on, so a phrase that occurs more than once in
+the document is no longer ambiguous (#1731). Nothing to pass; a host that
+ignores the new fields keeps working.
+
+- **`CommentAskAIContext.lineStart?` / `lineEnd?`** and
+  **`AIQuestion.scope.lineStart?` / `lineEnd?`** (1-based, additive). `Viewer`
+  fills them on the context its text-selection composer and its code-block
+  composer hand to `onAskAI`: the span of the enclosing block, which for a
+  selection within one block is the same span the exported annotation from
+  that selection prints as `(line 41)` / `(lines 41–44)`. A selection over
+  several blocks gives a range from the first block's start line to the last
+  block's end line, while the export names only the first block. The global
+  composer, HTML / live-app
+  pinpoints and diagram comments carry none (diagrams already send their line
+  in `detail`).
+- **`buildDefaultPrompt`** appends them to the `Source:` line:
+  `Source: /docs/plan.md, line 41` or `Source: /docs/plan.md, lines 41–44`
+  (`Source: line 41` with no `sourcePath`). A scope without them, or with a
+  value that is not a positive integer, prints exactly what it printed before.
+  A host that maps `CommentAskAIContext` onto `AIQuestion.scope` field by
+  field must copy the two fields to get the line into the question.
+- **New pure helper `selectionSourceLines(blocks, blockIds)`** (`utils/parser`)
+  returns `{ lineStart, lineEnd }` or `null`.
+- **`CommentPopoverState.blockIds?`** (`hooks/useAnnotationHighlighter`,
+  additive): the `data-block-id`s the pending selection covers, which is what
+  `Viewer` maps to lines.
+
+Lines are document lines of the markdown the `Viewer` was given (frontmatter
+counted). Plannotator drops them for a converted HTML / URL source, whose
+converted markdown lines do not exist in the original file (its mapping is
+`packages/editor/askScope.ts`, pinned by `askScope.test.ts`). Pinned by
+`components/Viewer.askAISelectionLine.test.tsx` (DOM-gated),
+`utils/parser.selectionLines.test.ts` (including parity with the export
+heading for single-block selections) and `utils/aiPrompt.test.ts`.
+
+---
+
+## `CompletionOverlay` `done` state (ui 0.52.0; additive)
+
+`submitted` accepts a new value, `'done'`: the session finished with nothing
+sent (Plannotator uses it for an annotate Done with nothing to send). It
+renders a neutral check icon; the host still supplies the title and subtitle.
+`ComponentProps<typeof CompletionOverlay>['submitted']` therefore now includes
+`'done'`, so a host that switches exhaustively over that type gets one more
+case to handle.
+
+Neither `'done'` nor `'exited'` (Close) renders the footer's "Your response
+has been sent." line any more, since neither sends anything. That line only
+appears in the auto-close `closed` phase (an immediate auto-close whose close
+request went to a host window such as Glimpse or the VS Code panel's parent),
+so this is a visible change for `'exited'` only there. Every other value
+renders exactly as before. The overlay root now carries
+`data-completion-state={submitted}`.
+
+## Quick Labels: reorder and editable emoji (ui 0.52.0; additive, no core change)
+
+Settings → Labels (#1736) lets a person move a label up or down (per-row
+buttons, `aria-label="Move <text> up|down"`, a polite live region announces
+the new position and key) and change its emoji (a one-emoji field; anything
+that is not exactly one emoji is shown invalid, never saved, and reverts on
+blur). The tab now lives in `components/settings/QuickLabelsTab` and
+`Settings` renders it; nothing about `Settings`' props changed.
+
+**The persisted shape is unchanged.** Labels are still saved as
+`QuickLabel[]` under `plannotator-quick-labels` through the storage backend,
+with the same fields; a reorder is just a different array order and an emoji
+edit a different `emoji` value. Rows get a stable identity for the editing
+session only (it is never written, so an older reader sees nothing new and the
+cookie does not grow). `QuickLabel.id` keeps its old meaning (derived from the
+text when the text is edited; `custom-<ts>` for new labels) and is still not
+unique: the list renderer `QuickLabelDropdown` now keys rows by position, so
+two labels with the same text no longer collide.
+
+What a host should know:
+
+- **Position is the key binding.** Alt/⌥1…9, 0 apply the label at positions
+  1…10 (`quickLabelShortcutDigit` / `quickLabelIndexForDigit`); moving a label
+  in Settings is what remaps its key. Lists are read once when a toolbar or
+  picker mounts, so a change applies to the next selection.
+- **An annotation keeps the emoji it was created with.** The label is copied
+  into the annotation as `${emoji} ${text}`; editing the emoji (like editing
+  the text) affects only annotations created afterwards.
+- New pure exports in `utils/quickLabels`: `quickLabelShortcutDigit`,
+  `quickLabelIndexForDigit`, `moveQuickLabel`, `parseQuickLabelEmoji` (one
+  emoji grapheme, including ZWJ sequences, flags, keycaps and skin tones, or
+  null) and `emojiFromFieldInput`. Nothing was removed or renamed.
+
+## Question decision toggle and status tag (ui 0.52.0; additive, no core change)
+
+What Workspaces asked for: the reviewer can switch a `Decision: when answered`
+question's recording off and on from the card itself, and the host can draw
+its own status tag. Three optional props on `Viewer`, forwarded through
+`BlockRenderer` to `QuestionBlock` the way `renderQuestionFooter` is.
+Plannotator passes none of them, so its cards render exactly as before.
+
+| `Viewer` | `BlockRenderer` | `QuestionBlock` |
+| --- | --- | --- |
+| `questionDecisionRecording?: (question: IndexedQuestion) => boolean \| undefined` | `questionDecisionRecording?: boolean` | `decisionRecording?: boolean` |
+| `onToggleQuestionDecisionRecording?: (key, next) => void` | same | `onToggleDecisionRecording?: (key, next) => void` |
+| `questionStatusTag?: 'card' \| 'none'` | same | `statusTag?: 'card' \| 'none'` |
+
+- **Recording state** (`decisionRecording`, default `true`; on `Viewer` a
+  function of the question, called per question card, so it can read your
+  store by `question.question.key`). It applies only to a question carrying
+  `Decision: when answered` (`decisionOnAnswer`) whose decision is not
+  already recorded. Off draws the same "Records a decision" tag dimmed (since
+  the eyebrow fix below: `--muted-foreground` mixed 55% with transparent, so
+  it reads as off beside the "Open" tag, which is plain `--muted-foreground`)
+  with a dotted outline and no fill (never different
+  words), and hides the "Answering this
+  records a decision" row (`[data-question-decision-row]`). A recorded
+  decision (`Decision: [statement](url)`) and a question with no decision line
+  are never affected.
+- **The toggle** (`onToggleDecisionRecording`): the tag becomes
+  `<button type="button" aria-pressed>` with `[data-question-decision-toggle]`,
+  keyboard operable, a focus ring (a ring, not an outline: the dotted outline
+  draws the off state). A click calls the handler with the question's key and
+  the NEXT state; the card does not keep the state itself, so pass it back
+  through `decisionRecording` / `questionDecisionRecording`.
+- **Read-only cards never offer the toggle.** A card is read-only when it has
+  no answer handler (`Viewer`: `readOnly`, or neither `onAnswerQuestion` nor
+  `onSaveQuestionAnswer`); it draws the tag in its current state as a plain
+  tag. `Viewer` also drops `onToggleQuestionDecisionRecording` under
+  `readOnly`, like the answer handlers.
+- **`decisionRecording: false` without a handler** is honored: the static tag
+  is drawn off and the row is hidden. Use it to show a state the reviewer may
+  not change.
+- **Attributes.** `data-question-decision` keeps its values (`on-answer`,
+  `recorded`) whatever the toggle says, so a selector keyed on the question's
+  kind does not move. A separate `data-question-decision-recording="on" | "off"`
+  appears on the card only for a `decisionOnAnswer` question when the host
+  passed `decisionRecording` or the handler; a card with neither carries no
+  new attribute.
+- **`statusTag: 'none'`** hides the card's own Open / Answered / Settled /
+  Skipped tag; the decision tags ("Decision", "Records a decision") stay, and
+  `data-question-status` still carries the status for your own tag.
+- **No stylesheet change.** The toggle reuses utility classes the package
+  already ships, and the off state is an inline style, so `styles.css` and
+  the guides.show viewer manifest are unchanged (no guides.show deploy needed
+  for this).
+
+Pinned by `components/blocks/QuestionBlock.decisionToggle.test.tsx`
+(DOM-gated): the toggle's button, `aria-pressed` and handler arguments, the
+row hidden when off, recorded and plain questions untouched, read-only cards
+static, `statusTag: 'none'`, the `Viewer` threading, and a card with none of
+the props rendering the same markup.
+
+## Decision toggle on any question, and an opener for the host's decision card (ui 0.52.1; additive, no core change)
+
+Two gaps Workspaces found in 0.52.0 against its approved Inbox design
+("the tag is the switch" on every question, off by default; "clicking the
+tag's words opens the decision card"). Plannotator passes none of this, and a
+card without the new props renders byte-identically to 0.52.0 (checked by
+rendering main and the branch through `BlockRenderer` and `Viewer`,
+interactive and read-only, with no props, with a 0.52.0-shaped host, and with
+a 0.52.0 host returning a boolean for every question).
+
+| `Viewer` | `BlockRenderer` | `QuestionBlock` |
+| --- | --- | --- |
+| `questionDecisionScope?: 'when-answered' \| 'any'` | same | `decisionScope?: 'when-answered' \| 'any'` |
+| `onOpenQuestionDecision?: (key, anchor: HTMLElement) => void` | same | `onOpenDecision?: (key, anchor: HTMLElement) => void` |
+
+1. **Any question can record a decision, opt-in.** With
+   `questionDecisionScope="any"` (`decisionScope: 'any'`),
+   `decisionRecording` / `questionDecisionRecording` also reaches a question
+   WITHOUT a decision line: a boolean adds the "◇ Records a decision" tag in
+   that state (and, with `onToggleDecisionRecording`, makes it the toggle),
+   `undefined` leaves the question as it was (no tag). The default,
+   `'when-answered'`, is the 0.52.0 behaviour: only `Decision: when answered`
+   questions carry the tag, and a boolean returned for a plain question is
+   ignored, as 0.52.0 documented. It is an explicit opt-in rather than
+   "a boolean means show it" so that a 0.52.0 host that returns a boolean for
+   every question does not grow tags on its plain questions in a patch
+   release. On shows the same "Answering this records
+   a decision" row a `Decision: when answered` question shows; off hides it.
+   The default for such a question is whatever you return: start it `false`
+   for "off by default". A question with a recorded decision
+   (`Decision: [statement](url)`) is still never affected, and
+   `data-question-decision` still describes the question's own line (absent
+   for a plain question); `data-question-decision-recording="on" | "off"`
+   appears once you supply a state.
+2. **A separate opener (`onOpenDecision` / `onOpenQuestionDecision`).** Given,
+   the tag is drawn as two adjacent targets inside one visual tag
+   (`[data-question-decision-tag]`), siblings, never nested:
+   - the diamond is the switch: `<button aria-pressed aria-label="Record as a
+     decision" data-question-decision-toggle>` calling
+     `onToggleDecisionRecording(key, next)`. Without a toggle handler the
+     diamond is decoration, not a control.
+   - the words "Records a decision" are `<button aria-haspopup="dialog"
+     data-question-decision-open>`, calling `onOpenDecision(key, element)`
+     with the words' own button as the popover anchor. The card keeps no
+     open state; your popover owns focus and returns it to the anchor.
+   The opener is offered whether recording is on or off: what an off
+   question's card does (switch it on as it opens, or open a card that says
+   it is off) is the host's call. Tab order is switch, then words, both with
+   the `ring-2 ring-primary` focus ring the 0.52.0 toggle uses (a ring, not
+   an outline, because the dotted outline draws the off state, which is now
+   on the wrapping tag). The off look was unchanged here: muted-foreground
+   text and a dotted outline (#1744's contrast fix); see "Question card
+   eyebrow" below for the fade it has since. Without `onOpenDecision` the
+   whole tag is the toggle exactly as in 0.52.0.
+3. **Read-only cards are never interactive.** No answer handler (or
+   `Viewer` `readOnly`, which also drops `onOpenQuestionDecision`) draws the
+   tag as a plain tag in its current state.
+
+Measured in headless Chromium with the default theme: switch and words are
+7.37:1 (dark) / 8.98:1 (light) off, 5.84:1 / 5.15:1 on; the focus ring is
+7.53:1 / 6.53:1 against the card. The split tag draws exactly the 0.52.0 tag
+(127.66 × 17.75 px, the same 4 px between diamond and words). Target size
+(WCAG 2.5.8) is met without changing that look: the diamond (18 × 17.75 px
+drawn) carries an invisible `before:` box 6 px past it on every side, so it
+clicks as 24 × 29.75 px; the words, positioned and later in the tree, paint
+over the box's right-hand part, so a click on the words is always the words,
+and the words (110 px wide) meet the spacing exception.
+
+**No stylesheet change**: only utility classes the package already ships
+(the hit box is the `before:absolute before:-inset-1.5 before:content-['']`
+pattern of the annotation panel's icon buttons), so `styles.css` and the
+guides.show viewer manifest are unchanged (`check:manifest` in sync).
+
+Pinned by `components/blocks/QuestionBlock.decisionAnyQuestion.test.tsx`
+(DOM-gated): the tag on a plain question only with the `'any'` scope and a
+supplied state (a boolean without the scope changes nothing), the
+toggle's arguments and the row on/off, the switch and the opener as sibling
+buttons with the anchor element, tab order, the opener without a toggle
+handler, 0.52.0 behavior without `onOpenDecision`, read-only cards, `Viewer`
+threading, and no-prop markup.
+
+## Question card eyebrow: the off decision tag reads as off; the pills align (ui 0.53.0; styling only)
+
+No prop, attribute or markup change; a host that passes nothing renders the
+same elements with new classes on the eyebrow's pills.
+
+- **The off tag fades.** `muted-foreground` alone was exactly the color of
+  the "Open" tag beside it (8.98:1 light, 7.37:1 dark against the card in
+  the default theme), so an off tag read as barely dimmer than an on one.
+  The off color is now `color-mix(in oklab, var(--muted-foreground) 55%,
+  transparent)`: text, icon and dotted outline (all `currentColor`) at the
+  strength `opacity: 0.55` would give, measured at 2.76:1 (light) and
+  3.06:1 (dark). It is deliberately not `opacity`, which would also fade
+  the `ring-primary` focus ring on the switch and the words; the ring stays
+  at full strength. Still inline, still on `[data-question-decision-tag]`
+  (split tag) or the toggle / static tag.
+- **One pill box.** Every pill in the eyebrow (Open / Answered / Settled /
+  Skipped, "Decision", "Records a decision" in all three forms) is 18 px
+  tall (`h-[18px]`, `leading-4`) with a 1 px border, transparent except on
+  "Open", so the dashed tag is no longer 2 px taller. The pill group is an
+  `inline-flex items-center gap-1` row, so the split tag (whose inline-flex
+  baseline came from its icon-only switch) no longer sits higher than the
+  status tag. Measured in Chromium in the Inbox: every pair now shares
+  height (18 px) and centre in every state, where "Open" and "Skipped" were
+  1.6 px lower and "Open" 2 px taller.
+- **guides.show viewer unchanged.** The viewer's stylesheet scans
+  `packages/ui/components`, so only classes it already ships are used, and
+  `align-[1px]` (now inert inside the flex row) is kept because it is its
+  only use; `check:manifest` stays in sync, no deploy.
+
+---
+
+## Ask AI setup hint for Oh My Pi (ui 0.53.0; additive, no core change)
+
+New module `utils/askSessionSetupHint` (`askSessionSetupHint(origin, providers)`, `OMP_EXTENSION_INSTALL_COMMAND`) returns a one-line note when origin is `oh-my-pi` and no session-bridge provider is offered (#1814): the `plannotator` CLI run from OMP's shell has no "Ask this session", while the Plannotator extension loaded into OMP does. `AIProviderBar` gains an optional `setupHint` prop and `DocumentAIChatPanel` an optional `askSessionSetupHint` prop, rendered by the new `components/ai/AskSessionSetupHint` as a muted line under the provider bar (also under "No AI providers available"). Both are absent by default, so a host that passes neither renders exactly as before.
+
+---
+
+## Agent tool host `oh-my-pi` (ui 0.53.0; additive)
+
+`utils/agentToolSetting`'s `AgentToolHost` gains `'oh-my-pi'` (the Plannotator Pi extension running inside Oh My Pi, where the `plannotator` tool is on by default): `parseAgentToolSetting` accepts it, `agentToolHostName` answers "Oh My Pi", `agentToolAppliesWhen` "the next time Oh My Pi starts", and `agentToolCostNote` names OMP's one-line listing instead of Pi's per-request cost. `agentToolOfferApplies` / `agentToolOfferHostOf` never offer it (the offer is for hosts whose tool is off by default). A host that never sends `agentToolHost: 'oh-my-pi'` sees no change; code that switches exhaustively over `AgentToolHost` needs the new case.
+
+---
+
+## `Viewer` `refRepo` (ui 0.53.0; additive; needs no new core subpath)
+
+New optional `refRepo?: { display: string; host?: string } | null` on `Viewer`: the repository bare `#123` / `@user` refs link into (#1840), without the repo badge `repoInfo` also draws. It wins over `repoInfo` for links only; `null` and absent both fall back to `repoInfo`, so links follow `repoInfo?.display` / `repoInfo?.host` exactly as before, so Plannotator's plan and review apps are unchanged. The Inbox passes it per message (a badge on every message would be noise).
+
+---
+
+## Block quotes render their content (ui 0.53.0; parser output change, no API change)
+
+`parseMarkdownToBlocks` now returns ONE `blockquote` block per run of consecutive `>` lines (blank `>` lines included), where it used to split the run whenever a line started with a list marker, a heading, a code fence or a nested `>`. The block's `content` is the quote's own markdown: each line with its `>` and one following space or tab removed, deeper indentation kept, trailing whitespace trimmed, one content line per source line; blank lines at the quote's edges are dropped and `startLine` moves past leading ones. So `exportAnnotations` labels a quote with its real span (`lines 3–7`).
+
+The renderer is `components/blocks/BlockquoteBlock` (BlockRenderer's non-alert `blockquote` case; also the plan diff view): a quote whose inner blocks are only paragraphs renders exactly as before (same DOM, one `<p>` per paragraph). Anything else renders inside the one `<blockquote>`: a code fence as a real `CodeBlock` (no literal backticks, no mention/issue linking inside code), lists, nested quotes, tables, headings. Inner blocks carry no `data-block-id`, so selections, restores, exports and pinpoint all resolve to the quote block. Spacing comes from a hoisted `<style href="plannotator-quote-body">` (the QuestionContext pattern), scoped to `.pn-quote-body`. A `:::question` written inside a quote renders as a plain callout, never a question card (`findQuestionBlocks` already ignores it). `utils/blockTargeting` treats a `<blockquote>` block as one text block, never a code, table or display-math target (inline math keeps the paragraph rule).
+
+**Nesting cap.** `MAX_QUOTE_DEPTH` (12, exported from `BlockquoteBlock`): each nested level is a component and a parse of its own, so a quote nested thousands deep (`>>>>…`, possible in any third-party text) would overflow the stack and unmount the tree. Past the cap the rest of the quote renders as prose text, its remaining `>` markers included. Code review's `MarkdownBody` applies the same cap.
+
+**Heading rule (also changes top-level parsing).** A heading is now 1 to 6 `#` followed by a space or the end of the line (CommonMark ATX). Before, any line starting with `#` was a heading, so `#123 fixed`, `#hashtag` and `#!/bin/sh` rendered as `<h1>` (an issue ref at the start of a line lost its link). They are now paragraph text, at top level and inside quotes; `####### seven` is text too. `# Title`, `###` and `###### Six` are unchanged.
+
+**What a quoted line now renders as.** Inside a quote, a line is parsed the way the same line is parsed at top level, so these quoted lines render as their block type where they used to render as literal text in a quote of their own: `- `, `* `, `1. ` (list items, nesting by indentation), `# ` headings, ```` ``` ```` fences, `|` tables, `---` / `***` rules, `$$` / `\[` display math, `:::kind` directives (a `:::question` as a plain callout), block-level HTML tags (`<details>` …), and `>` (a nested quote).
+
+Unchanged: GitHub alerts (`> [!NOTE]` … keep their old body text and `AlertBlock`), single-line and wrapped prose quotes, the `Block` type, every prop. What a host may notice: block ids after a quote that used to split shift down (ids are positional; restore re-anchors by text as for any edit), and a host that reads `block.content` of a quote sees the inner markdown (fences, list markers) where it used to see one line.
+
+**Plan diff.** `utils/planDiffEngine` treats a quote run that holds a code fence as one atomic diff unit (like an unquoted fence), so an edit inside a quoted fence is one modified quote instead of chunks that open a fence and never close it. Quotes without a fence still diff line by line.
+
+**Known limitation (same as a top-level fence).** A partial text highlight inside a quoted code block is lost from the page when the fence re-highlights (a theme or palette change): the swap replaces the `<code>` element's children, and the swap listener re-paints only whole-block code marks. The annotation itself stays in the panel and the export, and comes back on reload.
+
+---
+
+## Stale-tab guard: `serverSession` (ui 0.52.0, core 0.25.12; additive)
+
+Plannotator's servers issue one random `serverSession` nonce per process (new `@plannotator/core/server-session`) and refuse a decision that echoes a different one with `409 { code: "session_mismatch" }`, so a tab left open on a reused port cannot decide a new session. The client half is `utils/serverSession` (`adoptServerSession`, `withServerSession`, `withServerSessionQuery`, `noteServerSessionMismatch`, `useServerSessionReplaced`) plus `components/ServerSessionReplacedBanner`. Hosts that post decisions to their own backend need none of it: nothing in the shared components sends the field on its own, and a request without it is always accepted.
+
+## `RenderedMarkdown` `resolveLocalLink`, `resolveImage` and `headingAnchors` (ui 0.53.0; additive, no core change)
+
+- **`resolveLocalLink?: LocalLinkResolver`** on `RenderedMarkdown`: the same contract as Viewer's `resolveLocalLink` (see above), provided through `LocalLinkContext` to every block it renders. Plannotator's code review passes it for the Markdown preview so a relative link opens the linked file in the review, or renders inert ("Not in this review"), and never navigates the tab.
+- **`resolveImage?: ImageResolver`** on `RenderedMarkdown` (`components/ImageResolverContext.tsx`): asked about every markdown image and raw-HTML `<img src>`, with the source as written. `{ kind: 'src', src }` loads that URL; `{ kind: 'unavailable', title }` draws an inert placeholder span (the alt text, `title` as its tooltip, `data-image-unavailable`) instead of an `<img>`, so nothing is fetched; `null` keeps the default resolution (`getImageSrc` / remote URLs as is).
+- With `resolveImage`, the host speaks for every media URL, so nothing loads from the page origin unvetted. Raw-HTML blocks are rewritten on an inert `<template>` before insertion (no request goes out first): `<img srcset>` / `sizes` are dropped (the resolved `src` stays), `<picture><source>` is dropped (its `<img>` is the fallback), and `<video>` (with its `src`, `poster` and `<source>`s) becomes a placeholder, because the resolver answers for images only. An image the resolver chose that then fails to load (`error`) turns into the same placeholder instead of a broken-image icon, in markdown and raw HTML alike.
+- **`headingAnchors?: boolean`**: headings get the plan Viewer's slug ids (`buildHeadingSlugMap`, GitHub's `-1` dedup), so a host can scroll `#section` links itself. Absent, headings carry no id.
+- Each provider wraps the output only when its prop is passed, so an enclosing provider (a `Viewer`'s) still applies when a prop is absent. A host that passes none of these renders exactly as before (`RenderedMarkdown.hostSeams.test.tsx` compares the DOM with the pre-seam body).
+
+## Plan diff line ranges, folding, and `PlanCleanDiffView` seams (ui 0.53.0; additive, no core change)
+
+- **`PlanDiffBlock.oldStart/oldEnd/newStart/newEnd`** (`utils/planDiffEngine`): `computePlanDiff` now fills the 1-based inclusive source lines of each block on each side, trimmed of blank lines; a side with no non-blank line has none (added blocks have no old range, removed blocks no new range). Every other field is unchanged.
+- **`foldUnchangedPlanDiff(blocks, { context = 1, minHidden = 2 })`** → `PlanDiffSegment[]`: pure. Changed blocks pass through; an unchanged block keeps `context` sections next to each neighbouring change and folds the rest into a `PlanDiffFold` (`pieces`, `sectionCount`, up to three plain `headings`, line span, stable `key`) when at least `minHidden` would be hidden.
+- **`PlanCleanDiffView`** gains optional `renderBlock(block, orderedIndex, side)` (`side` is `'old'` for removed content and the old half of a modified block), `lineGutter` (a `data-plan-diff-gutter` column: "11–12", "old 15–16", both on a modified block; `annotation-exclude`, `aria-hidden`, unselectable), `foldUnchanged` (a `data-plan-diff-fold` row that expands in place) and `unchangedClassName`. Plannotator's code review uses them for its rendered Markdown diff. Plan review passes none and renders the same DOM as before (`PlanCleanDiffView.seams.test.tsx`). The gutter sits on the first line of text (baseline-aligned), past a heading's top margin.
+- **`CodeAnnotation.markdownPreview?: MarkdownPreviewAnchor`** (`types`): additive. Code review sets it on a file comment made by selecting text in a Markdown preview (`originalText`, `view`, optional `diffContext` and web-highlighter positions). Hosts that never set it see no change.
+- **`reviewMarkdownPreviewShortcuts`** (`shortcuts`, code-review scope `review-markdown-preview`, section "Markdown Files": `P`, the next Markdown view): additive.
+
+## Long choice labels are picked whole (core 0.25.13; no API break)
+
+`parseQuestionAnswer` used to cut every `selected` label to `MAX_QUESTION_CHOICE_LABEL_CHARS` (200). Task-list choices (`- [ ]`) are never cut by the parser, so a task-list label over 200 characters could never be picked: the card sent the whole label, the read-back answer held the first 200 characters, the card did not show it picked, and the Plannotator Inbox refused it (`422 "<first 200 chars>" is not one of the question's choices`). Now `selected` labels are capped at the new **`MAX_QUESTION_SELECTED_CHARS`** (= `MAX_QUESTION_BODY_CHARS`, 20,000: no label a block can hold is longer), so every label round-trips whole. `MAX_QUESTION_CHOICE_LABEL_CHARS` keeps its value and its one parse use (cutting a long plain-bullet label at a sentence end). **`canonicalQuestionAnswer`** also maps an answer an older build cut at 200 characters back to the one choice whose label (or alias) begins with it; two choices sharing their first 200 characters leave it as stored. That lookup is exact: a long label adds no case or punctuation matching (normalized matching still runs only for choices with `aliases`). `questionExportItems` now also passes `choices` when a label is over 200 characters (new **`questionChoicesNeedCanonicalLabels(choices)`** decides it), so the export prints the full label for such an answer; a host that builds its own `QuestionExportItem`s should use the same rule. The parser, labels and `questionKey` do not change. **A host that validates answers itself** (Workspaces' own check that a pick is one of the choices) must not cut picked labels shorter than the choice labels it compares them with.
+
+## Grapheme-safe cuts on `inbox-questions` (core 0.25.13; additive, no new subpath)
+
+`@plannotator/core/inbox-questions` gains two exports, **`cutText(text, max, ellipsis = "…")`** and **`sliceText(text, max)`** (source `packages/core/text-cut.ts`, which is deliberately NOT its own subpath, so core's export map stays the published one). Both count UTF-16 code units like `slice`, so a limit means what it did, but cut only between grapheme clusters (`Intl.Segmenter`, with a surrogate-pair fallback): an emoji, a flag, a family or a letter with its marks is kept whole or dropped whole, never drawn as "�". **`deriveInboxSubject`** now uses `cutText`, so a derived subject whose 120-character cut used to land inside an emoji ends before it instead; any other subject is byte-identical. The UI does not import them; they shipped in core 0.25.13, with no ui change needed. The question-prompt cut changed in the next section.
+
+## Question prompts are cut whole (core 0.25.13; additive, no new subpath)
+
+`@plannotator/core/question-block` gains **`capQuestionPrompt(prompt)`**: the prompt an answer keeps, cut at `MAX_QUESTION_PROMPT_CHARS` (400) between grapheme clusters (`sliceText`), never inside an emoji. `parseQuestionAnswer` and `emptyQuestionAnswer` use it, and so does `inbox-questions` wherever it compares or stores a prompt, so the two never disagree (`checkInboxAnswer` also takes the plain 400-unit cut an older client made). A prompt of 400 code units or fewer is byte-identical; a longer one whose 400th unit is half of an emoji now ends before the emoji instead of with a lone surrogate. **A host that cuts prompts itself** (Workspaces' own answer check) should call `capQuestionPrompt` rather than `slice(0, 400)`, or an answer whose prompt was cut across an emoji will read as a different question. The Pi extension vendors `text-cut.ts` beside `question-block.ts` for this.
+
+## Question cards: the Suggested line, the read-only Other row, a host status label (ui 0.53.0; plan review and annotate change too)
+
+Three changes to `components/blocks/QuestionBlock`, from the Plannotator Inbox stress test (rows 36 to 38). The first two are bug fixes that show in plan review and annotate exactly as in the Inbox (the owner chose "fix them for everyone"); the third is an optional seam.
+
+- **The Suggested line on choice questions.** A choice question whose `Recommended:` names none of its choices kept the text in `suggestedText` and offered "Accept recommended", which fills Other with it, but never showed it, so the button did something the reader could not see. The card now draws the same "Suggested … Use" line a text question draws, above the choices, while unanswered, and adds it to the fieldset's `aria-describedby`. The line carries `data-question-suggested` (on text questions too). A choice question whose recommendation names a choice is unchanged (no `suggestedText`, no line).
+- **The read-only Other row.** A read-only card (no `onAnswer`, a closed or sent question) drew an empty Other row, a bare dashed "+", when the answer had no Other text. The row is now drawn only when the card can be answered or the answer used Other. An editable card is unchanged.
+- **`statusLabel?: (question, status) => { label, tone? } | undefined`** on `QuestionBlockProps`, passed through `BlockRenderer` and `Viewer` as **`questionStatusLabel`**, and exported type **`QuestionStatusLabel`** (`tone`: one of the card's own tag tones, `'ok' | 'open' | 'skip'`, default `'open'`). Return words for the card's status tag (Open / Answered / Settled / Skipped) to replace it, or undefined to keep it; ignored with `statusTag: 'none'`. The Inbox says "Not sent" for a pick it has saved but not sent, where the card said "Answered" next to the footer's "Picked …, not sent". Absent (Plannotator's plan review and annotate pass none): today's tags, same DOM.
+
+## Guided review cards: one count, any heading level (guide-viewer; the guides.show viewer is regenerated)
+
+`@plannotator/guide-viewer` is not published, but code review and the guides.show viewer use it, so for the record: **`GuideSectionCard`** gains **`numbered?: boolean`** (default true). `GuideView` passes `numbered={false}` to the "Everything else" card and numbers the sections against `guide.sections.length`, so the header's "14 sections" and the cards' "01 / 14" agree (the cards used to read "01 / 15"). A card with no position and no Reviewed control draws no empty row. **`renderMarkdownProse`** reads `#` to `######` as the card's one sub-heading style (an `h3`), where only `### ` was a heading and `## Heading` showed its hashes; a heading also ends the paragraph above it. Seven hashes, or none followed by a space, are prose. The pinned viewer manifest (`@plannotator/core/guide-viewer-manifest`) is regenerated: 399.7 KB gz of the 400 KB budget (it was 399.6). That was the figure for that build; the pin core 0.25.13 ships, `viewer.DERExLls.js`, is 335.1 KB gz by the same measure (gzip level 9, `apps/guides-show/build/check-budgets.ts`).
+
+## `CodeFileView` `overflow` (ui 0.53.0; additive, no core change)
+
+**`CodeFileView`** (`components/CodeFilePopout`) gains **`overflow?: 'scroll' | 'wrap'`**, handed to Pierre's `File`: `'scroll'` (the default, today's view) scrolls long lines sideways, `'wrap'` wraps them. `CodeFilePopout` passes nothing and is unchanged. The Inbox wraps a code file with a line over 1,000 characters (a minified bundle), with no toggle.
+
+## A reply with no answers leaves the questions open (core 0.25.13; additive exports, one output change)
+
+`@plannotator/core/inbox-questions` gains **`inboxStillOpenLine(questions)`** and **`INBOX_STILL_OPEN_LINE`** (a RegExp matching one line of it). **`composeInboxReplyBody`** changes output in one case only: when `sent` is empty (the reply carries no answer and no skip), it now puts the still-open line after the words: "No questions answered yet; all N are still open. Don't re-ask them; the person will answer in the Inbox." (N: the questions still open or picked and not sent, counted over the new optional `stillOpen` input, default `questions`; the Inbox passes every question the replied-to message's session asked in the thread; the singular and an "earlier answers" variant are in the source; nothing when none is open). A body with at least one answer or skip is byte-identical. A host that composes Inbox replies with it gets the new line; a host that strips the store's text from a reply (as the window's `replyWords` does) should cut at a line `INBOX_STILL_OPEN_LINE` matches. `question-block.ts` (plan review's `formatQuestionAnswersSection`) is unchanged. No ui change.
+
+## Accept recommended on pick-any questions; a whole choice in a `Recommended:` list (ui 0.53.0 and core 0.25.13; plan review, annotate and the Inbox change too)
+
+- **`QuestionBlock`**: on a `:::question-multi` card whose `Recommended:` names choices, "Accept recommended" now stays offered while the answer is not exactly those choices (`isRecommendedQuestionAnswer`), where it went away at the first tick. Accept still sets exactly `recommendedQuestionAnswer` (the recommended choices, extra ticks and Other cleared, the note kept), so after it the button goes away, and focus moves to the first checked choice (or the field holding the suggestion) instead of dropping to the page. Pick-any questions recommending only a suggestion, pick-one and text questions, settled questions and read-only cards are unchanged. No prop or DOM change otherwise.
+- **`parseQuestionBlock`** (core): a multi `Recommended:` list that names a choice by its full text, `— description` included, whose description holds the list's separator (`Reply box, Comments on attached files — one line of work, could ship first`), now matches every choice instead of none (it was a Suggested line). After the plain split fails, neighbouring parts are joined back, but only into a span that is exactly a choice's full text, label or name, and only when every part is covered. It runs only where the plain split failed, so a recommendation that split cleanly is unchanged; one main matched only through the final lettered fallback can now match more (plain bullets `a. Alpha`, `b. Beta — slow, steady` with `Recommended: a. Alpha first, b. Beta — slow, steady` named only `a.` and now names both).
+- **`Viewer` `questionReadOnly?: (question: IndexedQuestion) => boolean`** (additive): true draws that one question card read-only, exactly as under `readOnly` (no picks, Other, note, Skip or Accept recommended; its decision tag a plain tag), while the other questions in the document stay answerable. The Inbox passes it for every question whose state is not open or picked (sent, closed by a Mark read or the archive, superseded), so a sent card in a message whose other question is still open no longer offers to re-answer it (the store would take that pick and make the question picked again; the thread-state model says the window does not offer it, `adr/implementation/inbox-thread-state.md`, the Pick row). Absent (plan review, annotate): every question follows `readOnly`, unchanged.
+
+## Skill references outside the comment popover (ui 0.53.0 + core 0.25.13; additive, Plannotator unchanged)
+
+For the Plannotator Inbox's composers (approval "inbox-skill-references"). Every default reproduces today's markup and export byte for byte.
+
+- **`components/ComposerTokenTextarea`** (new, exported): the comment composer's textarea with its token highlight mirror, moved out of `CommentPopover` (which renders it with every default). New optional props: **`textClassName`** (classes on both the textarea and the mirror; default `COMPOSER_TEXT_CLASSES`, also exported), **`inputClassName`** / **`mirrorClassName`** (extra classes on one side), **`inputProps`** (further textarea attributes; an `aria-label` there replaces the placeholder default). `CommentPopover` re-exports the `ComposerMentionChips` type.
+- **`HumanOnlySkillNotice`** gains **`destination?: string`**; without it the line uses the host's word, **`setSkillInstructionsDestination`** / **`configurePlannotatorUI({ skillInstructionsDestination })`**, default `'your feedback'`. **`SkillReferenceMenu`** rows carry **`data-skill-item-part="name" | "description" | "root"`** on their three spans (a styling hook; no visual change). **`SkillReferenceMenu`** also takes optional **`boundary?: () => { top, bottom } | null`** (the box to stay inside, default the viewport), **`prefer?: 'above' | 'below'`** (default above) and **`maxListHeight?`** (default 256), and **`computeMenuPlacement`** is exported; **`useSkillReferenceAutocomplete`** takes **`bareEscapeDismisses?`** (default off: Escape on a bare trigger passes through). Without them nothing changes (the Inbox's compose dialog passes them).
+- **`utils/skillReferences`**: **`renderSkillReferencesBlock(refs, { contentOf?, injectedNames?, external?, audience? })`**, the block for references a caller already resolved; `skillReferenceExportBlock` now calls it with the reviewer wording (output unchanged). `audience` is a `SkillBlockAudience` from the new **`@plannotator/core/skill-reference-block`** (`REVIEWER_SKILL_AUDIENCE`, `INBOX_REPLY_SKILL_AUDIENCE`, `INBOX_MESSAGE_SKILL_AUDIENCE`, `skillsReferencedHeading`, `skillInstructionsIncludedNote`, and the Inbox's reader `splitInboxSkillsBlock` / `withoutInboxSkillsBlock`). ui imports this new core subpath, so ui 0.53.0 needs core 0.25.13.
+- **`@plannotator/core/markdown-structure`** gains **`codeFenceFor(code)`** (three backticks, or one more than the longest backtick run in the code). Code review's feedback export fences Highlighted text, Replaces and Suggested code with it: byte-identical unless the quoted code holds a ``` run.
+- **`utils/skillCatalog`**: **`normalizeSkillContent`** is exported; **`setSkillCatalogExportRegistration(on)`** (host configuration: `resetSkillCatalogCache` leaves it alone), and **`configurePlannotatorUI({ skillReferenceExport })`** (default true): false keeps the fetched catalog out of the per-comment export, for a host that composes one block per message itself.
+
+## The image peek, a stepping lightbox, and `Viewer` image seams (ui 0.53.0; additive, no core change)
+
+For the Plannotator Inbox's one viewer (approval "inbox-image-viewer", 2026-10-15). A host that passes none of the new props sees no change.
+
+- **`components/ImagePeek`** (new): the picture list a stepper opens ("A · Peek"). Props `rows: ImagePeekRow[]` (`{ key, label, items: ImagePeekItem[] }`; an item is `{ key, name, thumb?, tile?, count?, attached?, detail? }`), `current`, `onPick(key)`, `onClose(reason: 'key' | 'outside')`, `variant: 'popover' | 'sheet'` (a phone's bottom sheet, three across, with a backdrop), `label`, `id`, `className`. An ARIA `grid` (rows with a `rowheader`, `gridcell` items, `aria-selected` on the open one); focus starts on the open item; ← → along the items, ↑ ↓ between rows, Home / End, Enter / Space pick, Esc / Tab close. A press outside a popover closes it, except on an element marked `data-peek-opener`. `forwardRef` exposes **`ImagePeekHandle.handleKey(event)`** for a modal that intercepts keys before they reach it. Images are only `<img src>`. Also exported: `peekMove` (the key rule, pure).
+- **`ImageLightbox`** gains **`images?: LightboxImage[]`** (`{ src, alt, section? }`): with two or more it is a full-screen stepping view ("2 of 4 · in “Options”", ← → and `]` `[`, the end note, Actual size, the pill and the peek); without it, the same single-image overlay byte for byte. Also exported: `collectDocumentImages(container)` and `lightboxImageName(image)`.
+- **`Viewer`** gains **`imageLightboxStepping?: boolean`** (the lightbox steps through every zoomable image of the rendered document; Plannotator's plan review and annotate pass it) and **`onImageClick?: (src, alt) => void`** (the host takes image clicks and no lightbox opens; the Inbox opens a message's captured image in its own viewer). Both absent: unchanged.
+
+## `Tooltip` `shouldOpen` (ui 0.53.0; additive, no core change)
+
+**`Tooltip`** (`components/Tooltip`) gains **`shouldOpen?: (trigger: Element) => boolean`**, asked each time the tooltip would open; `false` keeps it closed that time (Base UI's `onOpenChange` with `cancel()`). Unset, it always opens, as before. The Inbox passes a check that the trigger's text is cut (`isTextCut` in `utils/textCut.ts`: any whole pixel of `scrollWidth` over `clientWidth`, or the text's Range width over the box's content width by a hundredth of a pixel, since Chrome draws an ellipsis for a 0.06 px overflow that the integer widths hide), so a cut label shows its whole text only while it is cut.
+
+**`components/HostTitle`** (new) and **`configurePlannotatorUI({ componentTooltips })`** (default false): ui's own hover text (the annotation panel's and toolbar's buttons and labels, a question card's "Record as a decision" tag, a host-resolved local link's `LocalLinkResolution.title`) goes through `HostTitle`. Default: the child gets a native `title`, exactly as before. With `componentTooltips: true` (the Plannotator Inbox) it is ui's `Tooltip` instead (150 ms, Escape passes through, nothing under `hover: none`), a title that was a control's only name (`name`) becomes its `aria-label`, and any other title (not a `cut` label, not equal to the control's own label) stays readable as its description: a `hidden` element the child names with `aria-describedby`, since the tooltip tags nothing for a screen reader. Off, the child gets exactly the native title it had (an empty `title=""` included) and nothing else (`HostTitle.dom.test.tsx`). `utils/textCut`'s `isTextCut(el, partSelector?)` takes the selector of a first part that counts as the text (the Inbox passes its FileName's). `Tooltip`'s popup now draws at `z-[110]` (was `z-50`), above the annotation toolbar's `z-[100]`, and carries `data-pn-tooltip` (a host styles it). `HostTitle` portals its tooltip by `tooltipContainerOf(trigger)` (exported): the open native `<dialog>` the trigger sits in, else the nearest element marked `data-pn-tooltip-root` (the Inbox's window root, so its tokens reach the popup), else the body. `setComponentTooltips` / `resetComponentTooltips` / `getComponentTooltips` for tests. Not covered yet: the ImageAnnotator toolbar, CommentPopover and other ui titles keep native titles in every host.
+
+**`Tooltip`** also gains **`container?: HTMLElement | null`**, where the popup is portaled (Base UI's `Portal` `container`). Unset or null: the document body, as before. The Inbox passes the open native `<dialog>` a trigger sits in (its search palette, compose and its modal dialogs), since a popup in the body is drawn under the dialog's top layer. And **`escapePassesThrough?: boolean`**: Escape closes the tooltip without using the key up (the close is canceled, so Base UI neither prevents nor stops it, and the tooltip closes through its own state), so a page's Escape still works while a tooltip is open. Unset: Base UI's default, unchanged.
+
+## Questions without decision lines (ui 0.53.0, core 0.25.13; additive)
+
+For a host that records no decisions; the Plannotator Inbox passes it since its Decisions were removed (#1985). Every decision seam above is unchanged.
+
+- **Core:** `parseQuestionBlock(kind, body, options?)` and `indexQuestionBlocks(blocks, options?)` take an optional **`ParseQuestionBlockOptions`** with **`decisionLines?: boolean`** (default true, the old parse). False: a `Decision:` line is kept as context, and the result never carries `decisionOnAnswer` or `decision`. A line the default parse reads still ends the choice, bullet or recommendation above it, so the prompt, `questionKey`, numbering and choices are the default parse's, and an answer stored against one parse matches the other.
+- **ui:** `Viewer` **`questionDecisionLines?: boolean`** (default true) passes that option to its question index, so with `false` no card gets a decision tag or row from a `Decision:` line. Absent: unchanged.
 
 ## The law (guardrails for anyone editing `@plannotator/ui`)
 

@@ -1,15 +1,20 @@
 import {
   type DiffResult,
+  type DiffSide,
   type DiffType,
+  type FileBytesRead,
   type GitContext,
   type GitDiffOptions,
   type ReviewGitRuntime,
   detectRemoteDefaultBranch,
+  getFileBytesForDiff as getGitFileBytesForDiff,
+  getCurrentUpstreamBranch,
   getFileContentsForDiff as getGitFileContentsForDiff,
   getGitContext,
   getGitDiffFingerprint,
   getGitSnapshotMaterializationPatch,
   gitAddFile,
+  parseJjCommitDiffType,
   gitResetFile,
   parseWorktreeDiffType,
   runGitDiff,
@@ -24,6 +29,7 @@ import {
   getJjContext,
   getJjSnapshotRevsets,
   getJjDiffFingerprint,
+  getJjFileBytesForDiff,
   getJjFileContentsForDiff,
   isJjSnapshotDiffType,
   resolveJjSnapshotEndpoint,
@@ -34,6 +40,7 @@ import {
   detectGitButlerWorkspace,
   getGitButlerContext,
   getGitButlerDiffFingerprint,
+  getGitButlerFileBytesForDiff,
   getGitButlerFileContentsForDiff,
   parseGitButlerDiffType,
   runGitButlerDiff,
@@ -50,9 +57,11 @@ export type {
 
 export {
   JJ_TRUNK_REVSET,
+  jjCommitRevset,
   jjCompareTargetRevset,
   jjLineBaseRevset,
   parseCommitDiffType,
+  parseJjCommitDiffType,
   parseRemoteBookmark,
   parseWorktreeDiffType,
   validateFilePath,
@@ -73,6 +82,17 @@ export interface VcsProvider {
     oldPath?: string,
     cwd?: string,
   ): Promise<{ oldContent: string | null; newContent: string | null }>;
+  /** One side of a changed file as raw bytes (code-review image preview).
+   * Providers without it (e.g. p4) report the preview unavailable. */
+  getFileBytes?(
+    diffType: DiffType,
+    defaultBranch: string,
+    filePath: string,
+    oldPath: string | undefined,
+    side: DiffSide,
+    maxBytes: number,
+    cwd?: string,
+  ): Promise<FileBytesRead>;
   /** Cheap staleness fingerprint for a diff (see review-core/jj-core). Providers
    * without an implementation (e.g. p4) are treated as always-fresh. */
   getDiffFingerprint?(
@@ -128,6 +148,15 @@ export interface VcsApi {
     oldPath?: string,
     cwd?: string,
   ): Promise<{ oldContent: string | null; newContent: string | null }>;
+  getVcsFileBytesForDiff(
+    diffType: DiffType,
+    defaultBranch: string,
+    filePath: string,
+    oldPath: string | undefined,
+    side: DiffSide,
+    maxBytes: number,
+    cwd?: string,
+  ): Promise<FileBytesRead>;
   /** Best-effort staleness fingerprint for the given diff parameters. `null`
    * means "cannot fingerprint" and must be treated as always-fresh. */
   getVcsDiffFingerprint(
@@ -157,6 +186,7 @@ export interface PrepareLocalReviewDiffOptions {
 }
 
 export interface PreparedLocalReviewDiff {
+  fileIdentities?: Record<string, string>;
   gitContext: GitContext;
   diffType: DiffType;
   base: string;
@@ -167,7 +197,10 @@ export interface PreparedLocalReviewDiff {
   fingerprint?: string;
 }
 
-const GIT_DIFF_TYPES = new Set(["since-base", "uncommitted", "staged", "unstaged", "last-commit", "branch", "merge-base", "all"]);
+// Exported so review-args can pin REVIEW_OPEN_DIFF_TYPES (the flat ids
+// `review --diff-type` accepts) against it — a git diff type added to one set
+// and not the other would make a valid mode unreachable from the CLI.
+export const GIT_DIFF_TYPES = new Set(["since-base", "local-vs-remote", "uncommitted", "staged", "unstaged", "last-commit", "branch", "merge-base", "all"]);
 const JJ_DIFF_TYPES = new Set(["jj-current", "jj-last", "jj-line", "jj-evolog", "jj-all"]);
 
 function selectNearestProvider(
@@ -231,6 +264,7 @@ export function createGitProvider(runtime: ReviewGitRuntime): VcsProvider {
       const effectiveDiffType = parseWorktreeDiffType(diffType)?.subType ?? diffType;
       return (
         effectiveDiffType === "since-base" ||
+        effectiveDiffType === "local-vs-remote" ||
         effectiveDiffType === "uncommitted" ||
         effectiveDiffType === "unstaged"
       );
@@ -246,6 +280,10 @@ export function createGitProvider(runtime: ReviewGitRuntime): VcsProvider {
 
     getFileContents(diffType, defaultBranch, filePath, oldPath?, cwd?) {
       return getGitFileContentsForDiff(runtime, diffType, defaultBranch, filePath, oldPath, cwd);
+    },
+
+    getFileBytes(diffType, defaultBranch, filePath, oldPath, side, maxBytes, cwd?) {
+      return getGitFileBytesForDiff(runtime, diffType, defaultBranch, filePath, oldPath, side, maxBytes, cwd);
     },
 
     getDiffFingerprint(diffType, defaultBranch, cwd?, options?) {
@@ -290,7 +328,7 @@ export function createJjProvider(runtime: ReviewJjRuntime, gitRuntime: ReviewGit
     },
 
     ownsDiffType(diffType: string): boolean {
-      return JJ_DIFF_TYPES.has(diffType);
+      return JJ_DIFF_TYPES.has(diffType) || parseJjCommitDiffType(diffType) !== null;
     },
 
     getContext(cwd?: string): Promise<GitContext> {
@@ -303,6 +341,10 @@ export function createJjProvider(runtime: ReviewJjRuntime, gitRuntime: ReviewGit
 
     getFileContents(diffType, defaultBranch, filePath, oldPath?, cwd?) {
       return getJjFileContentsForDiff(runtime, diffType, defaultBranch, filePath, oldPath, cwd);
+    },
+
+    getFileBytes(diffType, defaultBranch, filePath, oldPath, side, maxBytes, cwd?) {
+      return getJjFileBytesForDiff(runtime, diffType, defaultBranch, filePath, oldPath, side, maxBytes, cwd);
     },
 
     getDiffFingerprint(diffType, defaultBranch, cwd?) {
@@ -344,6 +386,10 @@ export function createGitButlerProvider(runtime: ReviewGitButlerRuntime): VcsPro
 
     getFileContents(diffType, _defaultBranch, filePath, oldPath?, cwd?) {
       return getGitButlerFileContentsForDiff(runtime, diffType, filePath, oldPath, cwd);
+    },
+
+    getFileBytes(diffType, _defaultBranch, filePath, oldPath, side, maxBytes, cwd?) {
+      return getGitButlerFileBytesForDiff(runtime, diffType, filePath, oldPath, side, maxBytes, cwd);
     },
 
     getDiffFingerprint(diffType, _defaultBranch, cwd?, options?) {
@@ -512,17 +558,32 @@ export function createVcsApi(providers: readonly VcsProvider[]): VcsApi {
       const { provider, gitContext } = await getContextWithProvider(options.cwd, options.vcsType);
       const ownsRequestedDiffType = options.requestedDiffType !== undefined
         && provider.ownsDiffType(options.requestedDiffType);
-      const diffType = resolveRequestedDiffType(
+      const requestedDiffType = resolveRequestedDiffType(
         provider,
         gitContext,
         options.requestedDiffType,
         options.configuredDiffType,
       );
+      const resolution = resolveAvailableDiffType(gitContext, requestedDiffType, options.requestedBase !== undefined);
+      const fallback = resolution.fallback;
+      const diffType = resolution.diffType;
       const base = resolveInitialBase(gitContext, diffType, options.requestedBase, ownsRequestedDiffType);
       const result = await provider.runDiff(diffType, base, gitContext.cwd ?? options.cwd, {
         hideWhitespace: options.hideWhitespace,
+        captureFileIdentities: provider.id === "git",
       });
-      const effectiveContext = result.gitContext ?? gitContext;
+      const resultContext = result.gitContext ?? gitContext;
+      const effectiveContext = fallback
+        ? {
+            ...resultContext,
+            diffFallback: {
+              requestedDiffType,
+              effectiveDiffType: diffType,
+              message: fallback.message,
+              candidates: fallback.candidates,
+            },
+          }
+        : resultContext;
 
       return {
         gitContext: effectiveContext,
@@ -532,6 +593,7 @@ export function createVcsApi(providers: readonly VcsProvider[]): VcsApi {
         gitRef: result.label,
         error: result.error,
         fingerprint: result.fingerprint,
+        fileIdentities: result.fileIdentities,
       };
     },
 
@@ -554,6 +616,20 @@ export function createVcsApi(providers: readonly VcsProvider[]): VcsApi {
     ): Promise<{ oldContent: string | null; newContent: string | null }> {
       const provider = await getProviderForOperation(diffType, cwd);
       return provider.getFileContents(diffType, defaultBranch, filePath, oldPath, cwd);
+    },
+
+    async getVcsFileBytesForDiff(
+      diffType: DiffType,
+      defaultBranch: string,
+      filePath: string,
+      oldPath: string | undefined,
+      side: DiffSide,
+      maxBytes: number,
+      cwd?: string,
+    ): Promise<FileBytesRead> {
+      const provider = await getProviderForOperation(diffType, cwd);
+      if (!provider.getFileBytes) return { kind: "unavailable" };
+      return provider.getFileBytes(diffType, defaultBranch, filePath, oldPath, side, maxBytes, cwd);
     },
 
     async getVcsDiffFingerprint(
@@ -613,6 +689,18 @@ export function createVcsApi(providers: readonly VcsProvider[]): VcsApi {
       }
       return provider.materializeSnapshot(options);
     },
+  };
+}
+
+export function resolveAvailableDiffType(
+  gitContext: GitContext,
+  requestedDiffType: DiffType,
+  hasExplicitBase = false,
+): { diffType: DiffType; fallback?: NonNullable<GitContext["diffAvailability"]>[string] } {
+  const fallback = hasExplicitBase ? undefined : gitContext.diffAvailability?.[requestedDiffType];
+  return {
+    diffType: (fallback?.fallbackDiffType ?? requestedDiffType) as DiffType,
+    ...(fallback && { fallback }),
   };
 }
 
@@ -722,6 +810,7 @@ function supportsGitSnapshot(diffType: string): boolean {
   const effective = parseWorktreeDiffType(diffType)?.subType ?? diffType;
   return effective !== "all" && (
     effective === "since-base"
+    || effective === "local-vs-remote"
     || effective === "uncommitted"
     || effective === "staged"
     || effective === "unstaged"
@@ -777,6 +866,14 @@ async function materializeGitSnapshot(
   if (diffType === "since-base") {
     const mergeBase = await git(runtime, cwd, ["merge-base", "--", options.base, "HEAD"]);
     return createSyntheticSnapshot(runtime, cwd, mergeBase, [patch]);
+  }
+  if (diffType === "local-vs-remote") {
+    const upstream = await getCurrentUpstreamBranch(runtime, cwd);
+    if (!upstream) {
+      throw new Error("The current branch does not have a remote tracking branch.");
+    }
+    const from = await resolveCommit(runtime, cwd, upstream);
+    return createSyntheticSnapshot(runtime, cwd, from, [patch]);
   }
   const head = await resolveCommit(runtime, cwd, "HEAD");
   if (diffType === "uncommitted" || diffType === "staged") {
@@ -882,4 +979,3 @@ async function materializeJjSnapshot(
     throw error;
   }
 }
-
