@@ -73,6 +73,8 @@ import { AboutBlock, FailedDialog, RestartDialog, UpdateDialog, WhatsNewPage } f
 import { unsentReply } from './unsent';
 import { InboxToast, type InboxToastModel, toastSpeech } from './components/Toast';
 import { canToggleRead, MARK_READ_UNDO_MS, markReadToast } from './markRead';
+import { threadLink, type RowMenuAction } from './rowMenu';
+import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import { newBatchId, projectAllArchived, projectBatchToast, projectsWithReadable, type ProjectAction } from './projectMenu';
 import { lookBoundary } from './folding';
 import { latestAgentSeq } from './seenOnSight';
@@ -1366,6 +1368,8 @@ function Inbox() {
 
   /** Archive (the MCP's resolve) or Unarchive, with Undo. */
   const archive = async (threadId: string, rootId: string, next: boolean) => {
+    const before = rowOf(threadId);
+    const open = routeRef.current.thread;
     try {
       await inboxApi.resolve(rootId, next);
     } catch (cause) {
@@ -1375,18 +1379,40 @@ function Inbox() {
     // The list leaves archived threads out (Settings lists them). While the
     // thread is open its row stays where it is, shown archived; it goes when
     // the person leaves the thread.
-    if (next && routeRef.current.thread === threadId) {
+    // A row archived from its menu while another thread is open does the same (the list holds still).
+    if (next && routeRef.current.thread !== null) {
       const at = new Date().toISOString();
       setShown((current) => (current ? markHeldRowArchived(current, threadId, at) : current));
     }
     await afterWrite();
     if (next) {
       // The thread's foot says the next message starts a new thread.
-      showToast({ icon: 'archive', lead: 'Archived', onUndo: () => void archive(threadId, rootId, false) });
+      // From a row's menu, a thread that is not the open one: the subject says which (as Mark read's toast).
+      const detail = threadId !== open && before ? `“${before.subject ?? '(no subject)'}”` : undefined;
+      showToast({ icon: 'archive', lead: 'Archived', ...(detail ? { detail } : {}), onUndo: () => void archive(threadId, rootId, false) });
     } else {
       dismissToast();
       say('Unarchived.');
     }
+  };
+
+  /**
+   * A thread row's right-click menu. Copy link and Copy thread ID say so in
+   * the window's one toast; Mark read, Move back and Archive are the row's
+   * hover action and the header's, with their toasts.
+   */
+  const rowAction = (row: InboxListRow, action: RowMenuAction) => {
+    if (action === 'read' || action === 'unread') return void markRead(row.thread_id, action === 'read');
+    if (action === 'archive') return void archive(row.thread_id, row.thread_id, true);
+    const text = action === 'copy-link' ? threadLink(row.thread_id, settings, window.location.origin) : row.thread_id;
+    void copyTextToClipboard(text).then((ok) =>
+      showToast(
+        ok
+          ? { icon: 'check', lead: action === 'copy-link' ? 'Link copied' : 'Thread ID copied', detail: `“${row.subject ?? '(no subject)'}”` }
+          : { icon: 'warn', lead: "Couldn't copy" },
+        4200,
+      ),
+    );
   };
 
   /**
@@ -2057,6 +2083,7 @@ function Inbox() {
           }}
           onOpen={openRow}
           onMarkRead={(row) => void markRead(row.thread_id, true)}
+          onRowAction={rowAction}
           onSearch={(opener) => openSearch(opener)}
           onCompose={(opener) => openCompose({}, opener)}
           phone={phone}

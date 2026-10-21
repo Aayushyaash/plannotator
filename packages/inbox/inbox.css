@@ -463,6 +463,8 @@ button.ib-mut { border-radius: 6px; }
 .ib-pmi:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 .ib-pmi[data-disabled] { opacity: 0.5; }
 .ib-pm-title { display: none; }
+/* The thread rows' right-click menu (RowMenu.tsx): the project menu's look, with a line between copying and the writes. */
+.ib-pm-sep { height: 1px; margin: 4px 2px; background: var(--border); }
 .ib-pm-scrim { display: none; }
 /* One project's list when every thread in it is archived. */
 .ib-empty-list { padding: 40px 22px; color: var(--muted-foreground); font-size: var(--ib-fs-14, 14px); line-height: 1.6; }
@@ -745,6 +747,10 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 .ib-row, .ib-nrow { border-bottom-color: var(--ib-row-line); }
 :is(.ib-row, .ib-nrow)::before { border-radius: var(--ib-rl-sm-s, 8px); }
 :is(.ib-row, .ib-nrow):hover::before { background: var(--ib-hover) !important; }
+/* A row whose right-click menu is open keeps the hover's muted pill while the pointer is on the menu (RowMenu.tsx). */
+.ib-rw[data-menu] :is(.ib-row, .ib-nrow)::before { background: var(--ib-hover) !important; }
+.ib-rw[data-menu] :is(.ib-row, .ib-nrow).ib-sel::before { background: var(--ib-sel-hover) !important; }
+.ib-mrow[data-menu] { background: var(--ib-hover-s, color-mix(in oklch, var(--muted) 50%, transparent)); }
 /* Rows that wait on nobody (Sent, Quiet): the subject steps back. Off, each row keeps today's colour: a wide
    row's subject takes its row's, a narrow row's is quiet text (`.ib-nrow .ib-l2 .ib-s`). */
 .ib-row[data-section="quiet"] .ib-s { color: var(--ib-quiet-dim, currentcolor); }
