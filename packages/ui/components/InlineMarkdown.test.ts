@@ -225,7 +225,9 @@ describe('digit-only #refs vs hex swatches (#1932)', () => {
   const render = (text: string, githubRepo?: string, repoHost?: string) =>
     renderToStaticMarkup(createElement(InlineMarkdown, { text, githubRepo, repoHost }));
   const isSwatch = (html: string) => html.includes('background-color');
-  afterEach(() => resetDigitHexIssueRefs());
+  // Another test file may have loaded the Inbox app (which turns the flag on) earlier in this process.
+  beforeEach(resetDigitHexIssueRefs);
+  afterEach(resetDigitHexIssueRefs);
 
   test('flag off (every host but the Inbox): a digit-only value stays a swatch even with a repo', () => {
     const html = render('Fixes #186379.', 'home-assistant/core');
