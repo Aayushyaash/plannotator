@@ -2380,6 +2380,16 @@ An opt-in key for every comment composer. Default off, so a host that does nothi
 - **`DecisionNoteField`** gains **`enterSubmits?: boolean`** (default false: only Mod+Enter submits, the decision control's note composer). True: `isCommentSubmitKey(event, true)`, for a field used as a comment (Plannotator's review sidebar passes the setting's value).
 - **`Settings`**: General gets an **"Enter saves a comment"** switch row, so a host that renders `Settings` gets the row too. **`hideEnterSavesComment?: boolean`** (default false) hides it.
 
+## Plan review's decision control (next ui release; additive, no core change)
+
+Plan review now uses the same adaptive `DecisionControl` annotate and code review use (#1057). Everything below is optional; a host that passes none of it renders and posts exactly what it did before.
+
+- **`utils/decisionSpec`**: `DecisionSpecInput.app` gains **`'plan'`**, and the input gains **`plan?: DecisionPlanInput`** (`{ answers, directEdits, answersOnly, agentName, approveTarget?, savedFilesOnly? }`). The plan arm: Approve (or `Approve → <agent>` for OpenCode's hand-off) with nothing to send, its caret holding "Approve with a note…" (only with `approvalNotesSupported`) and "Request changes…"; with feedback, Send Feedback (or "Send answers" when the only feedback is question answers), its caret holding "Send with a note…", "Approve with notes" (only with `approvalNotesSupported`) and "Approve, discard …" (always, with a confirm that names the agent when notes on approval would be lost). Ids are the existing `DecisionActionId`s; nothing new to handle.
+- **`DecisionControl`** gains **`menuFooter?: ReactNode | ((api: { closeMenu }) => ReactNode)`**: rows under the decisions in the same menu. The arrow keys now also walk `role="menuitemradio"` rows. Absent: the menu is the decisions alone, as before.
+- **`components/PlanDecisionMenuExtras`** (new, Plannotator chrome like `DecisionControl`): `AgentSwitchMenuSection({ agents })` (the "After approval, switch to" radio section; reads and writes the `agentSwitch` setting, the menu stays open on a pick) and `PermissionModeMenuLine({ agentName, modeLabel, onChange })` (one read-only line with a Change link).
+- **`utils/agentSwitch`** gains **`agentSwitchTargetLabel(setting, agents)`** (the display name an approval hands off to; null when switching is off, or when it is `custom` with no name). `ApproveDropdown` uses it, which fixes one label: a `custom` switch with no name used to read "Approve → custom" (an agent that does not exist; approval sends no switch then) and now reads plain "Approve". Plannotator no longer renders `ApproveDropdown`.
+- **`Settings`** gains **`onPermissionModeChange?: (mode) => void`**, called when its Permission Mode row changes. Absent: unchanged.
+
 ## The law (guardrails for anyone editing `@plannotator/ui`)
 
 These are enforced socially and, where possible, by CI. They exist because a prior from-scratch reimplementation of this UI broke the app and was reverted.

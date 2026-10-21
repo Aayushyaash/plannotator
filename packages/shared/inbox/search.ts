@@ -50,6 +50,7 @@ import {
 import { findQuestionBlocks, QUESTION_ANSWERS_HEADING, type QuestionAnswer } from "@plannotator/core/question-block";
 import { withoutInboxSkillsBlock } from "@plannotator/core/skill-reference-block";
 import {
+  displayInboxSubject,
   inboxAgentName,
   isInboxNote,
   type InboxLine,
@@ -646,7 +647,7 @@ export class InboxSearchIndex {
     }
     const facts = this.factsOf(threadId);
     const project = this.store.project(root.project_id);
-    const subject = facts?.subject ?? root.subject ?? "";
+    const subject = facts?.subject ?? displayInboxSubject(root.subject) ?? "";
     this.put(
       `t:${threadId}`,
       "thread",
@@ -937,7 +938,7 @@ export class InboxSearchIndex {
         const root = this.store.message(doc.ref);
         if (!root) return [];
         const facts = this.factsOf(doc.ref);
-        return [facts?.subject ?? root.subject ?? "", root.thread_name ?? "", this.store.project(root.project_id)?.name ?? ""];
+        return [facts?.subject ?? displayInboxSubject(root.subject) ?? "", root.thread_name ?? "", this.store.project(root.project_id)?.name ?? ""];
       }
       case "message": {
         const message = this.store.message(doc.ref);

@@ -1,17 +1,16 @@
 import type { UpdateCheckSetting } from '@plannotator/ui/hooks/useUpdateCheckSetting';
 import React from 'react';
 import type { Origin } from '@plannotator/shared/agents';
-import type { Agent } from '@plannotator/ui/hooks/useAgents';
 import type { UpdateInfo } from '@plannotator/ui/hooks/useUpdateCheck';
 import { FeedbackButton, ApproveButton, ExitButton } from '@plannotator/ui/components/ToolbarButtons';
-import { ApproveDropdown } from '@plannotator/ui/components/ApproveDropdown';
-import { DecisionControl, type DecisionHandler } from '@plannotator/ui/components/DecisionControl';
+import { DecisionControl, type DecisionControlProps, type DecisionHandler } from '@plannotator/ui/components/DecisionControl';
 import { QuestionProgressChip } from '@plannotator/ui/components/QuestionProgressChip';
 import type { DecisionActionId, DecisionSpec } from '@plannotator/ui/utils/decisionSpec';
 import { Settings } from '@plannotator/ui/components/Settings';
 import { PlanHeaderMenu } from '@plannotator/ui/components/PlanHeaderMenu';
 import type { CallbackConfig } from '@plannotator/ui/utils/callback';
 import type { UIPreferences } from '@plannotator/ui/utils/uiPreferences';
+import type { PermissionMode } from '@plannotator/ui/utils/permissionMode';
 import type { AgentToolSetting } from '@plannotator/ui/utils/agentToolSetting';
 import { SparklesIcon } from '@plannotator/ui/components/SparklesIcon';
 import type { CompactPlanAction } from '@plannotator/ui/components/PlanHeaderMenu';
@@ -83,15 +82,18 @@ interface AppHeaderProps {
   linkedDocIsActive: boolean;
   callbackShareUrlReady: boolean;
   canShareCurrentSession: boolean;
-  agentName: string;
-  availableAgents: Agent[];
-  showAnnotationsWarning: boolean;
   /** `:::question` progress: the "N/M answered" chip beside the decision
    *  control. Absent (or total 0): no chip. */
   questionProgress?: { done: number; total: number; hasOpen: boolean; onJump: () => void };
-  /** Plan review's primary feedback label ("Send Feedback" by default;
-   *  "Send answers" when the only feedback is question answers). */
-  feedbackLabel?: string;
+  /** Plan review's decision control (#1057): the same DecisionControl as
+   *  annotate, without the ghost Close (a plan review ends with a decision).
+   *  App owns the spec and every handler; `menuFooter` carries the OpenCode
+   *  agent picker or Claude Code's permission-mode line. */
+  planDecision?: {
+    spec: DecisionSpec;
+    handlers: Record<DecisionActionId, DecisionHandler>;
+    menuFooter?: DecisionControlProps['menuFooter'];
+  };
   /** The unified annotate decision control (spec + handlers + close title).
    *  App owns the spec derivation and every handler; the header only mounts
    *  the control beside the ghost Close. Absent outside annotate mode. */
@@ -132,8 +134,6 @@ interface AppHeaderProps {
   onAnnotateExit: () => void;
   onGoalSetupExit: () => void;
   onGoalSetupSubmit: () => void;
-  onFeedback: () => void;
-  onApprove: () => void;
   onAnnotationPanelToggle: () => void;
   onAIChatToggle: () => void;
   onArchiveCopy: () => void;
@@ -141,6 +141,8 @@ interface AppHeaderProps {
   onTaterModeChange: (enabled: boolean) => void;
   onIdentityChange: (oldId: string, newId: string) => void;
   onUIPreferencesChange: (prefs: UIPreferences) => void;
+  /** Settings changed Claude Code's permission mode (plan review). */
+  onPermissionModeChange?: (mode: PermissionMode) => void;
   onOpenSettings: () => void;
   onCloseSettings: () => void;
   onOpenExport: () => void;
@@ -202,12 +204,9 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   linkedDocIsActive,
   callbackShareUrlReady,
   canShareCurrentSession,
-  agentName,
-  availableAgents,
-  showAnnotationsWarning,
   questionProgress,
-  feedbackLabel = 'Send Feedback',
   annotateDecision,
+  planDecision,
   callbackConfig,
   taterMode,
   mobileSettingsOpen,
@@ -224,8 +223,6 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   onAnnotateExit,
   onGoalSetupExit,
   onGoalSetupSubmit,
-  onFeedback,
-  onApprove,
   onAnnotationPanelToggle,
   onAIChatToggle,
   onArchiveCopy,
@@ -233,6 +230,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   onTaterModeChange,
   onIdentityChange,
   onUIPreferencesChange,
+  onPermissionModeChange,
   onOpenSettings,
   onCloseSettings,
   onOpenExport,
@@ -377,42 +375,15 @@ export const AppHeader = React.memo<AppHeaderProps>(({
                   />
                 )}
               </>
-            ) : (
-              <FeedbackButton
-                onClick={onFeedback}
-                disabled={isSubmitting}
+            ) : planDecision ? (
+              <DecisionControl
+                spec={planDecision.spec}
+                handlers={planDecision.handlers}
+                busy={isSubmitting}
                 isLoading={isSubmitting}
-                label={feedbackLabel}
-                title={feedbackLabel}
+                menuFooter={planDecision.menuFooter}
               />
-            )}
-
-            {!annotateMode && (
-              origin === 'opencode' && availableAgents.length > 0 ? (
-                <ApproveDropdown
-                  onApprove={onApprove}
-                  agents={availableAgents}
-                  disabled={isSubmitting}
-                  isLoading={isSubmitting}
-                />
-              ) : (
-                <div className="relative group/approve">
-                  <ApproveButton
-                    onClick={onApprove}
-                    disabled={isSubmitting}
-                    isLoading={isSubmitting}
-                    dimmed={(origin === 'claude-code' || origin === 'gemini-cli') && showAnnotationsWarning}
-                  />
-                  {(origin === 'claude-code' || origin === 'gemini-cli') && showAnnotationsWarning && (
-                    <div className="absolute top-full right-0 mt-2 px-3 py-2 bg-popover border border-border rounded-lg shadow-xl text-xs text-foreground w-56 text-center opacity-0 invisible group-hover/approve:opacity-100 group-hover/approve:visible transition-all pointer-events-none z-50">
-                      <div className="absolute bottom-full right-4 border-4 border-transparent border-b-border" />
-                      <div className="absolute bottom-full right-4 mt-px border-4 border-transparent border-b-popover" />
-                      {agentName} doesn't support feedback on approval. Your feedback won't be seen.
-                    </div>
-                  )}
-                </div>
-              )
-            )}
+            ) : null}
 
             <div className="w-px h-5 bg-border/50 mx-1 hidden md:block" />
           </>
@@ -505,6 +476,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
             mode={annotateMode ? 'annotate' : 'plan'}
             annotateParity
             onUIPreferencesChange={onUIPreferencesChange}
+            onPermissionModeChange={onPermissionModeChange}
             externalOpen={mobileSettingsOpen}
             onExternalClose={onCloseSettings}
             gitUser={gitUser}

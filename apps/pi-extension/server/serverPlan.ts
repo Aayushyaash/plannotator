@@ -144,6 +144,12 @@ export async function startPlanReviewServer(options: {
 	 * /api/plan/revision; off by default so a review nobody revises never polls.
 	 */
 	planRevisions?: boolean;
+	/**
+	 * The host delivers notes sent with an approval to the agent. Advertised on
+	 * /api/plan as `approvalNotesSupported` (mirrors the Bun plan server's
+	 * option); absent reads as false in the tab.
+	 */
+	approvalNotesSupported?: boolean;
 }): Promise<PlanServerResult> {
 	const gitUser = detectGitUser();
 	const sharingEnabled =
@@ -393,6 +399,7 @@ export async function startPlanReviewServer(options: {
 					serverSession,
 					origin: options.origin ?? "pi",
 					permissionMode: options.permissionMode,
+					approvalNotesSupported: options.approvalNotesSupported === true,
 					previousPlan,
 					versionInfo,
 					sharingEnabled,

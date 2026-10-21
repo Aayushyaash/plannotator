@@ -24,7 +24,7 @@ export const INBOX_DEFAULT_TOOLS: readonly InboxToolInfo[] = [
           "type": "string"
         },
         "subject": {
-          "description": "A short subject when this starts a thread (ignored when it joins one). Default: the first question's prompt, else the first line.",
+          "description": "A short one-line subject when this starts a thread (ignored when it joins one). Plain text: no line breaks. Default: the first question's prompt, else the first line.",
           "type": "string"
         },
         "thread": {
@@ -294,7 +294,7 @@ export const INBOX_DEFAULT_TOOLS: readonly InboxToolInfo[] = [
           "type": "string"
         },
         "subject": {
-          "description": "A short subject when this starts a thread (ignored when it joins one). Default: the first question's prompt, else the first line.",
+          "description": "A short one-line subject when this starts a thread (ignored when it joins one). Plain text: no line breaks. Default: the first question's prompt, else the first line.",
           "type": "string"
         },
         "thread": {

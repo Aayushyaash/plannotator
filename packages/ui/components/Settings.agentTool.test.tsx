@@ -117,13 +117,13 @@ describe('Settings agent tool switch', () => {
 
   test.skipIf(!hasDom)('names the cost per host: Claude Code defers the tool, Pi sends it every request', async () => {
     await mount({ mode: 'plan', initial: { host: 'claude-code', enabled: true, configured: false }, save: async () => {} });
-    expect(document.querySelector(ROW)?.textContent).not.toContain('780');
+    expect(document.querySelector(ROW)?.textContent).not.toContain('800 tokens');
     // The mod decides once per Claude Code process, so it takes a restart, not a new session.
     expect(document.querySelector(ROW)?.textContent).toContain('next time Claude Code starts');
     await act(async () => root?.unmount());
     root = null;
     await mount({ mode: 'plan', initial: PI_OFF, save: async () => {} });
-    expect(document.querySelector(ROW)?.textContent).toContain('780');
+    expect(document.querySelector(ROW)?.textContent).toContain('800 tokens');
   });
 
   // Oh My Pi defaults the tool on: the row must show it on and must not
@@ -132,7 +132,7 @@ describe('Settings agent tool switch', () => {
     await mount({ mode: 'plan', initial: { host: 'oh-my-pi', enabled: true, configured: false }, save: async () => {} });
     expect(document.querySelector(ROW)?.getAttribute('data-agent-tool-setting')).toBe('oh-my-pi');
     expect(toggle()?.getAttribute('aria-checked')).toBe('true');
-    expect(document.querySelector(ROW)?.textContent).not.toContain('780');
+    expect(document.querySelector(ROW)?.textContent).not.toContain('800 tokens');
     expect(document.querySelector(ROW)?.textContent).toContain('next time Oh My Pi starts');
   });
 });

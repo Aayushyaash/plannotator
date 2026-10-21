@@ -58,6 +58,16 @@ export interface DecisionControlProps {
   dismissOnIframeFocus?: boolean;
   /** Confirm surface override; defaults to the ui ConfirmDialog. */
   confirmDialog?: React.ComponentType<ConfirmDialogProps>;
+  /**
+   * Rows rendered under the decisions, inside the same menu (#1057: plan
+   * review's "After approval, switch to" agent picker and Claude Code's
+   * permission-mode line). Not decisions: they never close the menu by
+   * themselves. Interactive rows use `role="menuitem"` or
+   * `role="menuitemradio"` so the arrow keys reach them. Absent: the menu is
+   * the decisions alone, exactly as before. A function receives
+   * `closeMenu`, for a row that leaves the menu (e.g. one opening Settings).
+   */
+  menuFooter?: React.ReactNode | ((api: { closeMenu: () => void }) => React.ReactNode);
 }
 
 const NOTE_MAX_HEIGHT_PX = 144;
@@ -265,6 +275,7 @@ export const DecisionControl: React.FC<DecisionControlProps> = ({
   labelBreakpoint = 'md',
   dismissOnIframeFocus = false,
   confirmDialog,
+  menuFooter,
 }) => {
   const rootRef = useRef<HTMLDivElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -412,7 +423,9 @@ export const DecisionControl: React.FC<DecisionControlProps> = ({
       const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End'];
       if (!keys.includes(event.key)) return;
       const items = Array.from(
-        popoverRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [],
+        popoverRef.current?.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitem"]:not(:disabled), [role="menuitemradio"]:not(:disabled)',
+        ) ?? [],
       );
       if (items.length === 0) return;
       event.preventDefault();
@@ -558,6 +571,9 @@ export const DecisionControl: React.FC<DecisionControlProps> = ({
                   />
                 </React.Fragment>
               ))}
+              {typeof menuFooter === 'function'
+                ? menuFooter({ closeMenu: () => closePopover() })
+                : menuFooter}
             </div>
           ) : activeItem?.composer ? (
             <div className="p-2">

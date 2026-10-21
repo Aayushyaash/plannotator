@@ -93,6 +93,8 @@ Send Feedback → feedback sent to agent
 Approve → configured approval prompt sent to agent
 ```
 
+In Claude Code, a bare Approve (no notes) on a review you opened yourself is only logged. An agent that opens a review and waits for your sign-off passes `gate: true` to its `plannotator` tool (or runs `plannotator review --gate`), and then your bare Approve reaches it too.
+
 **PR review:**
 
 ```

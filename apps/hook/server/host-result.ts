@@ -165,9 +165,11 @@ function reviewHostRecord(result: ReviewOutcomeLike, output: ReviewOutput): Host
     return { v: 1, surface: "review", decision: "dismissed", message: "", noop: true, annotationCount: 0, ...closedByFields(result) };
   }
   if (output.decision === "approved") {
-    // A bare approval (LGTM) carries nothing the agent must act on.
+    // A bare approval (LGTM) carries nothing the agent must act on, so it is
+    // `noop`; its message is still the configured approved prompt (as for an
+    // annotate approval), which a gated review (#1907) delivers.
     const noop = !hasFeedback;
-    return { v: 1, surface: "review", decision: "approved", message: noop ? "" : output.message, noop, annotationCount };
+    return { v: 1, surface: "review", decision: "approved", message: output.message, noop, annotationCount };
   }
   // The platform path's status post (the review went to GitHub/GitLab/
   // Bitbucket): the review server marks it `platform: true`. Never inferred

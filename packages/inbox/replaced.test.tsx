@@ -252,11 +252,21 @@ test.skipIf(!hasDom)('no replacement: "No longer applies", and the row links to 
   expect(document.activeElement?.getAttribute('data-message-article')).toBe(M2);
 });
 
+/** The person's words in the reply box (the box opens empty: the picks are listed beside the words, never written in). */
+function typeWords(text: HTMLTextAreaElement, words: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+  act(() => {
+    setter.call(text, words);
+    text.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
 test.skipIf(!hasDom)('the stale guard: a pick replaced while the person writes stops Send once, says why, and Esc keeps editing', async () => {
   const el = await render(before());
   act(() => button(el, 'Edit draft').click());
   const text = el.querySelector('textarea') as HTMLTextAreaElement;
   // The person types; then the agent replaces question 1.
+  typeWords(text, 'Leaning this way for now.');
   act(() => root!.render(pane(after('replace'))));
   await settle();
   expect(el.querySelector('[data-replaced-notice]')?.textContent).toContain("replaced question 1 at");
@@ -297,6 +307,7 @@ test.skipIf(!hasDom)('the stale guard: a pick replaced while the person writes s
 test.skipIf(!hasDom)('Answer the new question keeps the draft and goes to the new card', async () => {
   const el = await render(before());
   act(() => button(el, 'Edit draft').click());
+  typeWords(el.querySelector('textarea') as HTMLTextAreaElement, 'Leaning this way for now.');
   act(() => root!.render(pane(after('replace'))));
   await settle();
   act(() => button(el, 'Send').click());

@@ -287,6 +287,38 @@ Plan review is asynchronous:
 
 The other shared actions remain request/response flows. Payloads are intentionally minimal and only include fields the shared implementation actually uses.
 
+#### Review open and closed events
+
+Plannotator emits one event when a review opens in the browser and one when it ends, for every review in this Pi, whatever opened it: the `/plannotator-*` commands, the `plannotator` tool, plan mode, and `plannotator:request`. A terminal multiplexer or agent harness can show "needs review" on the agent's pane between the two (for example a Herdr pane badge).
+
+`plannotator:session-opened`:
+
+```ts
+{
+  id: string;          // "pn-3f2a9c": pairs the two events; for commands, the tool and plan mode it is the id the tool lists and the decision names
+  action: "plan-review" | "code-review" | "annotate" | "annotate-last";
+  url: string;         // the review's URL
+  openedAt: number;    // Date.now()
+  piSessionId?: string; // the Pi session that opened it
+  reviewId?: string;   // a plannotator:request plan review's reviewId
+  requestId?: string;  // the plannotator:request that opened it
+}
+```
+
+`plannotator:session-closed` carries the same fields plus:
+
+```ts
+{
+  outcome: "approved" | "submitted" | "closed"; // submitted: feedback, a denied plan, or Done
+  closedBy?: "reviewer" | "agent" | "stopped" | "error"; // only when outcome is "closed"
+  closedAt: number;
+}
+```
+
+Each review gets at most one of each, opened first. An event is dropped (never thrown) when no live event bus is there to take it: for example, a `plannotator:request` review that closes after `/reload` before the new session has started (no instance has claimed the bus yet), or with no Pi session live at all. Pair them by `id`; a host that runs several Pi sessions in one process can tell them apart by `piSessionId`. `stopped` means the review ended without a decision: plan mode was left, the session ended with a plan review open, or its server was stopped. A review that ends after `/reload` or `/resume` still sends its closed event, on the event bus of the session that is live then. The archive browser emits neither. Listen with `pi.events.on("plannotator:session-opened", ...)`; the constants and types are exported from `plannotator-events` as a typing convenience.
+
+These events go to Pi's extension event bus only. They add nothing to the conversation, the system prompt or the tool list, so the model's prompt cache is unaffected.
+
 #### External plan execution handoff
 
 Set `executionMode` to `external` when another Pi extension should orchestrate an approved plan instead of letting Plannotator execute it in the current session:
@@ -346,7 +378,7 @@ The agent can have a `plannotator` tool (off by default on Pi, on by default in 
 
 Another Pi session cannot list or close these reviews. After `/reload` or `/resume` of the same session, the agent still sees the reviews that are open. After `/new` it does not, because that is another session. In remote mode (or with a single `PLANNOTATOR_PORT`) every review uses the same port, so the tool opens only one review at a time and tells the agent which one to close first. The tool is active only in an interactive Pi session: in print or JSON mode the agent does not get it, because nothing could deliver your decision later. To review several files together, the agent passes a list as `target` (for example `["spec.md", "mock.html"]`); they open as one review in that order, with one decision. Decisions from the slash commands now also start with the same `Plannotator: … (pn-…) — …` line.
 
-The tool is off by default on Pi, because Pi sends its full definition (about 780 tokens) with every request: turn it on with `PLANNOTATOR_AGENT_TOOL=1` or `{ "agentTool": true }` in `~/.plannotator/config.json` (the environment variable wins in both directions). In Oh My Pi it is on by default, because OMP lists it as one short line; `PLANNOTATOR_AGENT_TOOL=0` or `{ "agentTool": false }` keeps it out there. Off, the agent has no `plannotator` tool and the slash commands and plan mode work as before. The setting is read when a session starts, so it applies to the next session (or after `/reload`; in OMP, restart OMP); the tool list never changes during a session, which keeps the model's prompt cache intact.
+The tool is off by default on Pi, because Pi sends its full definition (about 800 tokens) with every request: turn it on with `PLANNOTATOR_AGENT_TOOL=1` or `{ "agentTool": true }` in `~/.plannotator/config.json` (the environment variable wins in both directions). In Oh My Pi it is on by default, because OMP lists it as one short line; `PLANNOTATOR_AGENT_TOOL=0` or `{ "agentTool": false }` keeps it out there. Off, the agent has no `plannotator` tool and the slash commands and plan mode work as before. The setting is read when a session starts, so it applies to the next session (or after `/reload`; in OMP, restart OMP); the tool list never changes during a session, which keeps the model's prompt cache intact.
 
 The extension also ships the `plannotator` knowledge skill (a CLI reference) for installs without the CLI installer's copy. It is user-invoked only: load it with `/skill:plannotator`; it is not listed in the model's system prompt.
 
@@ -360,7 +392,7 @@ The Plannotator archive browser is available through the shared event API as `ar
 
 ### Progress tracking
 
-During execution, the agent marks completed steps with `[DONE:n]` markers. Progress is shown in the status line and as a checklist widget in the terminal.
+During execution, the agent marks completed steps with `[DONE:n]` markers. Progress is shown in the status line and as a checklist widget in the terminal. Pi shows at most 10 lines of a widget, so a longer checklist shows 10 items that keep the next open step in view: the first 10 until that step is past them, then a window that moves down one item per completed step. The status line keeps the full count (`📋 12/15`).
 
 ## Commands
 

@@ -1324,6 +1324,7 @@ const ReviewApp: React.FC = () => {
     ask: askAI,
     abort: abortAI,
     resetSession: resetAISession,
+    newChat: startNewAIChat,
     sessionId: aiSessionId,
   } = aiChat;
 
@@ -5897,6 +5898,7 @@ const ReviewApp: React.FC = () => {
                 aiConfig={aiConfig}
                 onAIConfigChange={handleAIConfigChange}
                 hasAISession={!!aiSessionId}
+                onAINewChat={startNewAIChat}
                 {...(hasSessionBridge && {
                   onSessionAskAction: handleSessionAskAction,
                 })}
