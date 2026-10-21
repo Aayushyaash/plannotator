@@ -849,6 +849,11 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 
 /* thread pane */
 .ib-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--card); position: relative; }
+/* The thread's place while its read has not landed (components/ThreadWait.tsx). Nothing shows for 600 ms from the open in any state, so a read that lands (or fails, then lands) at once shows nothing. */
+.ib-pwait { align-items: center; justify-content: center; padding: 24px; }
+.ib-pwait-line { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; max-width: 520px; text-align: center; color: var(--muted-foreground); font-size: var(--ib-fs-13, 13px); animation: ib-fade-in 160ms ease-out 600ms both; }
+/* Reduced motion: the same wait, then no fade. */
+@media (prefers-reduced-motion: reduce) { .ib-pwait-line { animation-duration: 1ms; } }
 /* A full-screen file covers the window: no card of its own. */
 .ib-main > .ib-view.ib-full { border-radius: 0; box-shadow: none; }
 .ib-phead { height: 46px; flex: none; display: flex; align-items: center; gap: 2px; padding: 0 14px; border-bottom: 1px solid var(--ib-hair); }
