@@ -57,7 +57,7 @@ function loopback(path: string, method = 'GET', body?: string): Promise<{ status
   });
 }
 
-const TESTS = 23;
+const TESTS = 26;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -562,36 +562,44 @@ test.skipIf(!hasDom)('a Send after a conflict carries this window\'s words and t
   expect(box(el)!.value).toBe('Theirs.');
 });
 
-test.skipIf(!hasDom)('a Send whose answer is lost after it went is treated as sent: the words never come back as a draft', async () => {
-  const { el } = await openWithSaved('Went, answer lost.');
-  const real = globalThis.fetch;
+/** An agent writing in the thread while the test runs (the DOM server's `send`): answers the new message's id. */
+async function agentSend(body: string, replyTo: string): Promise<string> {
+  const before = lines.length;
+  (child!.stdin as import('bun').FileSink).write(`${JSON.stringify({ send: { project: world.project, session: 'ses_later', body, reply_to: replyTo } })}\n`);
+  await (child!.stdin as import('bun').FileSink).flush();
+  await until(() => lines.slice(before).some((l) => l.includes('"sent"')), 'the agent\'s message');
+  return (JSON.parse(lines.slice(before).find((l) => l.includes('"sent"'))!) as { sent: string }).sent;
+}
+
+/** The reply's answer is lost after the Inbox took it. */
+function loseReplyAnswers(real: typeof fetch) {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const answer = await real(input, init);
     if ((init?.method ?? 'GET') === 'POST' && String(input).endsWith('/reply')) throw new TypeError('Failed to fetch');
     return answer;
   }) as typeof fetch;
-  act(() => button(el, 'Send').click());
-  await until(() => !!el.textContent?.includes('Your reply went, but its answer was lost.'), 'the error saying it went');
-  globalThis.fetch = real;
-  await settle(200);
-  // The draft is gone and nothing saves it again by itself; the box keeps the words for a replaying retry.
-  expect(await serverDraft(world.waiting)).toBeNull();
-  expect(box(el)!.value).toBe('Went, answer lost.');
-  expect(box(el)!.readOnly).toBe(false);
-  await settle(200);
-  expect(await serverDraft(world.waiting)).toBeNull();
-  // Send again: the same key, answered as the reply that went (not sent twice).
-  act(() => button(el, 'Send').click());
-  await until(() => box(el) === null, 'the retry');
-  const keys = posted.filter((p) => p.path.endsWith('/reply')).map((p) => p.body.idempotency_key);
-  expect(keys.at(-1)).toBe(keys.at(-2));
-  const model = JSON.parse((await loopback(`/api/inbox/threads/${world.waiting}`)).text) as { thread: { messages: { author: { kind: string }; body: string }[] } };
-  expect(model.thread.messages.filter((m) => m.author.kind === 'person' && m.body.startsWith('Went, answer lost.'))).toHaveLength(1);
-  expect(await serverDraft(world.waiting)).toBeNull();
-});
+}
 
-test.skipIf(!hasDom)('a Send carrying a comment whose answer is lost after it went: Send again replays it (the same key), never a second reply', async () => {
-  // A comment on the agent's message waits for the Send, beside the words.
+const personReplies = async (startsWith: string) =>
+  (JSON.parse((await loopback(`/api/inbox/threads/${world.waiting}`)).text) as { thread: { messages: { author: { kind: string }; body: string; reply_to: string | null }[] } }).thread.messages.filter(
+    (m) => m.author.kind === 'person' && m.body.startsWith(startsWith),
+  );
+
+test.skipIf(!hasDom)('a Send whose answer is lost after it went is read back: the box closes, the reply is there once, no draft', async () => {
+  const { el } = await openWithSaved('Went, answer lost.');
+  const real = globalThis.fetch;
+  loseReplyAnswers(real);
+  act(() => button(el, 'Send').click());
+  await until(() => box(el) === null, 'the box closed');
+  globalThis.fetch = real;
+  expect(el.textContent).not.toContain('Failed to fetch');
+  expect(liveText(el)).toContain('Your reply went.');
+  await settle(200);
+  expect(await serverDraft(world.waiting)).toBeNull();
+  expect(await personReplies('Went, answer lost.')).toHaveLength(1);
+}, 30_000);
+
+test.skipIf(!hasDom)('a Send carrying a comment whose answer is lost after it went: the box closes; the reply and its comment went once', async () => {
   const made = await loopback(
     `/api/inbox/messages/${world.waiting}/annotations`,
     'POST',
@@ -600,23 +608,93 @@ test.skipIf(!hasDom)('a Send carrying a comment whose answer is lost after it we
   expect(made.status).toBe(200);
   const { el } = await openWithSaved('Went with a comment.');
   const real = globalThis.fetch;
+  loseReplyAnswers(real);
+  act(() => button(el, 'Send').click());
+  await until(() => box(el) === null, 'the box closed');
+  globalThis.fetch = real;
+  await settle();
+  const replies = posted.filter((p) => p.path.endsWith('/reply'));
+  expect(replies).toHaveLength(1);
+  expect(replies[0]!.body.annotation_ids).toEqual(['ann-lost-answer']);
+  expect(await personReplies('Went with a comment.')).toHaveLength(1);
+  // No "Draft · 1 comment": it went with the reply.
+  expect(el.querySelector('[data-draft-foot]')).toBeNull();
+}, 30_000);
+
+test.skipIf(!hasDom)('after a lost answer, the same words sent later to a new question go to it as a new reply, never the old request', async () => {
+  const { el } = await openWithSaved('Yes.');
+  const real = globalThis.fetch;
+  loseReplyAnswers(real);
+  act(() => button(el, 'Send').click());
+  await until(() => box(el) === null, 'the box closed');
+  globalThis.fetch = real;
+  const first = posted.filter((p) => p.path.endsWith('/reply')).at(-1)!;
+  // The agent asks something new in the thread; the person answers "Yes." again.
+  const asked = await agentSend(['One more:', '', ':::question', 'Ship it today?', '', '- [ ] Yes', '- [ ] No', ':::'].join('\n'), world.waiting);
+  await act(async () => emit('record', { seq: 1 }));
+  leave();
+  const again = await renderApp(`#thread=${world.waiting}`);
+  await until(() => again.textContent!.includes('Ship it today?'), 'the new question');
+  const opener = () => [...again.querySelectorAll('.ib-pfoot button')].find((b) => ['Reply', 'Edit draft'].includes(b.textContent?.replace(/\s+/g, ' ').trim() ?? '')) as HTMLButtonElement;
+  act(() => opener().click());
+  await settle();
+  type(again, 'Yes.');
+  act(() => button(again, 'Send').click());
+  await until(() => box(again) === null, 'the second Send');
+  const second = posted.filter((p) => p.path.endsWith('/reply')).at(-1)!;
+  expect(second.path).toContain(asked);
+  expect(second.body.idempotency_key).not.toBe(first.body.idempotency_key);
+  expect(await personReplies('Yes.')).toHaveLength(2);
+}, 30_000);
+
+test.skipIf(!hasDom)('a Send the Inbox never got, then a new comment: the next Send of the same words carries the comment', async () => {
+  const { el } = await openWithSaved('Words, then a comment.');
+  const real = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (((init?.method ?? 'GET') === 'POST' && path.endsWith('/reply')) || /\/api\/inbox\/threads\/[^/]+$/.test(path)) throw new TypeError('Failed to fetch');
+    return real(input, init);
+  }) as typeof fetch;
+  act(() => button(el, 'Send').click());
+  await until(() => !!el.textContent?.includes('The reply may not have gone.'), 'the error');
+  globalThis.fetch = real;
+  // A comment made after the lost Send (the thread read again: leave and come back).
+  await loopback(
+    `/api/inbox/messages/${world.waiting}/annotations`,
+    'POST',
+    JSON.stringify({ annotation: { id: 'ann-after', blockId: 'block-1', startOffset: 0, endOffset: 13, type: 'COMMENT', text: 'Also this.', originalText: 'The docs site', createdA: 1 } }),
+  );
+  leave();
+  const again = await renderApp(`#thread=${world.waiting}`);
+  await until(() => box(again)?.value === 'Words, then a comment.', 'the words back');
+  act(() => button(again, 'Send').click());
+  await until(() => box(again) === null, 'the Send');
+  const reply = posted.filter((p) => p.path.endsWith('/reply')).at(-1)!;
+  expect(reply.body.annotation_ids).toEqual(['ann-after']);
+  expect(reply.body.words).toBe('Words, then a comment.');
+  expect(await personReplies('Words, then a comment.')).toHaveLength(1);
+}, 30_000);
+
+test.skipIf(!hasDom)('a Send the Inbox took while its thread could not be read: the next Send finds it and sends nothing again', async () => {
+  const { el } = await openWithSaved('Landed while unread.');
+  const real = globalThis.fetch;
+  // The reply reaches the Inbox but its answer is lost, and the thread read fails too.
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (/\/api\/inbox\/threads\/[^/]+$/.test(path)) throw new TypeError('Failed to fetch');
     const answer = await real(input, init);
-    if ((init?.method ?? 'GET') === 'POST' && String(input).endsWith('/reply')) throw new TypeError('Failed to fetch');
+    if ((init?.method ?? 'GET') === 'POST' && path.endsWith('/reply')) throw new TypeError('Failed to fetch');
     return answer;
   }) as typeof fetch;
   act(() => button(el, 'Send').click());
-  await until(() => !!el.textContent?.includes('Your reply went, but its answer was lost.'), 'the error saying it went');
+  await until(() => !!el.textContent?.includes('The reply may not have gone.'), 'the error');
   globalThis.fetch = real;
-  await settle();
+  const before = posted.filter((p) => p.path.endsWith('/reply')).length;
   act(() => button(el, 'Send').click());
-  await until(() => box(el) === null, 'the retry');
-  const replies = posted.filter((p) => p.path.endsWith('/reply'));
-  // The retry posted the first Send's requests unchanged: the same key, the comment with it.
-  expect(replies.at(-1)!.body.idempotency_key).toBe(replies.at(-2)!.body.idempotency_key);
-  expect(replies.at(-1)!.body.annotation_ids).toEqual(['ann-lost-answer']);
-  const model = JSON.parse((await loopback(`/api/inbox/threads/${world.waiting}`)).text) as { thread: { messages: { author: { kind: string }; body: string }[] } };
-  expect(model.thread.messages.filter((m) => m.author.kind === 'person' && m.body.startsWith('Went with a comment.'))).toHaveLength(1);
+  await until(() => box(el) === null, 'the box closed');
+  expect(posted.filter((p) => p.path.endsWith('/reply')).length).toBe(before);
+  expect(await personReplies('Landed while unread.')).toHaveLength(1);
+  expect(await serverDraft(world.waiting)).toBeNull();
 }, 30_000);
 
 test.skipIf(!hasDom)('a Send while the Inbox is down: the draft stays, and the retry clears it with the Send (no draft of the sent words)', async () => {
