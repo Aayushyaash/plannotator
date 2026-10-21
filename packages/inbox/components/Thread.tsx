@@ -1612,6 +1612,11 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, onClose, file
       try {
         const result = await inboxApi.pick(messageId, key, revision, answer);
         for (const q of result.questions) revisions.current.set(`${q.message_id}/${q.key}`, q.revision);
+        // A Send waiting on this chain reads the thread right after it, before
+        // React draws the saved picks: give it the saved questions now, or it
+        // sends a stale revision (refused) or leaves out a note just saved.
+        const latest = threadRef.current;
+        threadRef.current = { ...latest, messages: latest.messages.map((m) => (m.id === messageId ? { ...m, questions: result.questions } : m)) };
         onQuestions(messageId, result.questions);
       } catch (cause) {
         // The agent replaced the question meanwhile: reading the thread again redraws it as Replaced.
