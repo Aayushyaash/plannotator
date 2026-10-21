@@ -119,19 +119,27 @@ function liveNow(isLive: () => boolean): boolean {
  */
 function emitSafely(opener: EventBusOwner, useOpener: boolean, channel: string, payload: object): void {
 	queueMicrotask(() => {
-		const targets: EventBusOwner[] = [];
-		if (useOpener) targets.push(opener);
-		const live = slot().owner;
-		if (live && live !== opener) targets.push(live);
-		// Pi's bus throws only before it delivers (the stale-ctx guard), never
-		// for a listener's own error, so a fallback never delivers twice.
-		for (const target of targets) {
+		if (useOpener) {
 			try {
-				target.events.emit(channel, payload);
+				opener.events.emit(channel, payload);
 				return;
 			} catch (err) {
+				// The opener went stale without its session_shutdown (Pi tore it
+				// down another way). Pi's bus throws only before it delivers,
+				// never for a listener's own error, so the fallback below never
+				// delivers twice.
 				console.error(`Plannotator: could not emit ${channel}: ${describeError(err)}`);
 			}
+		}
+		const current = slot();
+		const live = current.owner;
+		if (!live || live === opener) return;
+		try {
+			live.events.emit(channel, payload);
+		} catch {
+			// That instance was torn down without releasing the slot: it is
+			// no live bus, so forget it. Quiet, like any emit with no live bus.
+			if (current.owner === live) current.owner = null;
 		}
 	});
 }

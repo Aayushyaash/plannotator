@@ -32,6 +32,8 @@ import type { BrowserDecisionSession, PlanReviewDecision } from "./plannotator-b
 import {
 	PLANNOTATOR_SESSION_CLOSED_CHANNEL,
 	PLANNOTATOR_SESSION_OPENED_CHANNEL,
+	claimSessionEventBus,
+	openSessionEvent,
 	releaseSessionEventBus,
 	type PlannotatorSessionClosedEvent,
 	type PlannotatorSessionOpenedEvent,
@@ -473,6 +475,65 @@ describe("plannotator:session-opened / session-closed", () => {
 		const fatal = await trapFatal(() => pi.reload());
 		expect(fatal).toEqual([]);
 		expect(closed(pi).map((event) => [event.action, event.outcome, event.closedBy])).toEqual([["plan-review", "closed", "stopped"]]);
+	});
+});
+
+describe("where an event goes when its opener is gone", () => {
+	const fakeBus = (behavior: "works" | "stale") => {
+		const got: string[] = [];
+		const pi = {
+			events: {
+				emit: (channel: string) => {
+					if (behavior === "stale") throw new Error(STALE_MESSAGE);
+					got.push(channel);
+				},
+			},
+		};
+		pis.push(pi);
+		return { pi, got };
+	};
+
+	test("a slot holder torn down without releasing it is forgotten quietly, never thrown or logged", async () => {
+		const opener = fakeBus("works");
+		const leftover = fakeBus("stale");
+		claimSessionEventBus(leftover.pi);
+		const logged: string[] = [];
+		const original = console.error;
+		console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+		try {
+			const fatal = await trapFatal(async () => {
+				openSessionEvent(opener.pi, () => false, { id: "pn-000001", action: "annotate", url: "http://localhost:1" }).close({ outcome: "submitted" });
+				await new Promise((resolve) => setTimeout(resolve, 5));
+			});
+			expect(fatal).toEqual([]);
+		} finally {
+			console.error = original;
+		}
+		expect(logged).toEqual([]);
+		expect(opener.got).toEqual([]);
+		// Forgotten: a live claimant gets the next one.
+		const live = fakeBus("works");
+		claimSessionEventBus(live.pi);
+		openSessionEvent(opener.pi, () => false, { id: "pn-000002", action: "annotate", url: "http://localhost:2" });
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(live.got).toEqual([PLANNOTATOR_SESSION_OPENED_CHANNEL]);
+	});
+
+	test("an opener that throws although its session was live: logged, then the live instance gets it", async () => {
+		const opener = fakeBus("stale");
+		const live = fakeBus("works");
+		claimSessionEventBus(live.pi);
+		const logged: string[] = [];
+		const original = console.error;
+		console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+		try {
+			openSessionEvent(opener.pi, () => true, { id: "pn-000003", action: "code-review", url: "http://localhost:3" });
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		} finally {
+			console.error = original;
+		}
+		expect(logged).toEqual([expect.stringContaining(`could not emit ${PLANNOTATOR_SESSION_OPENED_CHANNEL}`)]);
+		expect(live.got).toEqual([PLANNOTATOR_SESSION_OPENED_CHANNEL]);
 	});
 });
 

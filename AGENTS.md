@@ -469,7 +469,8 @@ it goes through the opener's `pi` when the opener's session was live at the
 moment of the open or close, else (or when that throws) through the instance
 that last claimed a process-wide slot (`claimSessionEventBus` at
 `session_start`, released at `session_shutdown`, on `globalThis` under a
-versioned key), else nowhere, silently. So a review that ends after `/reload`
+versioned key; a holder that throws, torn down without releasing it, is
+forgotten quietly), else nowhere, silently. So a review that ends after `/reload`
 reaches the replacement's bus and never throws out of a handler.
 `session_shutdown` now calls `stopPendingPlanReview()` first, so a plan review
 the session ends closes on its own bus. `plannotator:request` reviews use the
