@@ -10,6 +10,10 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { normalizeBrowserPath } from "@plannotator/shared/browser-paths";
 import {
   resetStorageBackend,
   setStorageBackend,
@@ -169,6 +173,136 @@ afterAll(() => {
 });
 
 const docRequests = () => requests.filter((r) => r.path === "/api/doc").map((r) => r.search.get("path"));
+
+describe.if(hasDom)("annotate folder image bases", () => {
+  let directory: string | null = null;
+  const png = {
+    a: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM9sAAAAASUVORK5CYII=", "base64"),
+    b: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"),
+  };
+
+  function createFolder(): string {
+    directory = realpathSync(mkdtempSync(join(tmpdir(), "plannotator-folder-images-")));
+    for (const name of ["a", "b"] as const) {
+      mkdirSync(join(directory, name, "images"), { recursive: true });
+      writeFileSync(join(directory, name, "prd.md"), `# ${name}\n\n![fixture](images/p.png)\n`);
+      // Distinct file bytes catch a stale base after switching documents.
+      writeFileSync(join(directory, name, "images/p.png"), png[name]);
+    }
+    return normalizeBrowserPath(directory);
+  }
+
+  async function mountImages(folder: string, singleFile = false): Promise<void> {
+    setStorageBackend(memoryBackend);
+    seedAnnouncementsSeen();
+    globalThis.EventSource = SilentEventSource as unknown as typeof EventSource;
+    globalThis.fetch = (async (input, init) => {
+      const rawUrl = input instanceof Request ? input.url : String(input);
+      const url = new URL(rawUrl, "http://localhost");
+      requests.push({ method: init?.method ?? "GET", path: url.pathname, search: url.searchParams });
+      if (url.pathname === "/api/plan") {
+        return Response.json({
+          plan: singleFile ? readFileSync(join(folder, "a/prd.md"), "utf8") : "",
+          origin: "claude-code",
+          mode: singleFile ? "annotate" : "annotate-folder",
+          filePath: singleFile ? `${folder}/a/prd.md` : folder,
+          projectRoot: folder,
+          sharingEnabled: false,
+          serverConfig: {},
+        });
+      }
+      if (url.pathname === "/api/reference/files") {
+        return Response.json({ tree: ["a", "b"].map((name) => ({
+          name, path: name, type: "folder",
+          children: [{ name: "prd.md", path: `${name}/prd.md`, type: "file" }],
+        })) });
+      }
+      if (url.pathname === "/api/doc") {
+        const path = resolve(url.searchParams.get("base") ?? folder, url.searchParams.get("path") ?? "");
+        if (!normalizeBrowserPath(path).startsWith(`${folder}/`)) return new Response(null, { status: 404 });
+        return Response.json({ markdown: readFileSync(path, "utf8"), filepath: path, renderAs: "markdown" });
+      }
+      if (url.pathname.startsWith("/api/draft")) return Response.json({ found: false }, { status: 404 });
+      if (url.pathname === "/api/ai/capabilities") return Response.json({ available: false, providers: [] });
+      return Response.json({ ok: true });
+    }) as typeof fetch;
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => { root?.render(<App />); });
+    if (!singleFile) {
+      await waitFor(() => document.querySelectorAll("button.file-tree-folder").length === 2, "two document folders");
+      for (const name of ["a", "b"]) {
+        if (document.querySelector(`button.file-tree-item[title="${name}/prd.md"]`)) continue;
+        const button = Array.from(document.querySelectorAll<HTMLButtonElement>("button.file-tree-folder"))
+          .find((item) => item.textContent?.trim() === name);
+        if (!button) throw new Error(`File browser did not discover ${name}`);
+        await act(async () => button.click());
+      }
+      expect(document.querySelectorAll("button.file-tree-item")).toHaveLength(2);
+    }
+  }
+
+  async function selectDocument(name: string): Promise<void> {
+    const button = document.querySelector<HTMLButtonElement>(`button.file-tree-item[title="${name}/prd.md"]`);
+    if (!button) throw new Error(`File browser did not discover ${name}/prd.md`);
+    await act(async () => button.click());
+    await waitFor(() => host?.querySelectorAll('img[alt="fixture"]').length === 1, "the document image");
+  }
+
+  async function expectReadableImage(folder: string, name: string): Promise<void> {
+    const images = host!.querySelectorAll<HTMLImageElement>('img[alt="fixture"]');
+    expect(images).toHaveLength(1);
+    const url = new URL(images[0].getAttribute("src")!, "http://localhost");
+    // Use native Bun Response for Bun.file bodies: happy-dom stringifies those
+    // blobs. The child reads the URL rendered by App through the real reader.
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "testing/readImage.ts"), url.href], {
+      stdout: "pipe", stderr: "pipe",
+    });
+    const [output, error, code] = await Promise.all([
+      Bun.readableStreamToText(child.stdout), Bun.readableStreamToText(child.stderr), child.exited,
+    ]);
+    if (code !== 0) throw new Error(error);
+    const response = JSON.parse(output) as { status: number; body: string };
+    expect(response.status).toBe(200);
+    expect(Buffer.from(response.body, "base64")).toEqual(readFileSync(join(folder, name, "images/p.png")));
+    expect(url.searchParams.get("base")).toBe(`${folder}/${name}`);
+  }
+
+  afterEach(async () => {
+    if (root) await act(async () => root?.unmount());
+    root = null;
+    if (directory) rmSync(directory, { recursive: true, force: true });
+    directory = null;
+  });
+
+  test("a nested folder document serves its image from its own directory", async () => {
+    const folder = createFolder();
+    expect(await Bun.file("images/p.png").exists()).toBe(false);
+    expect(await Bun.file(join(folder, "images/p.png")).exists()).toBe(false);
+    await mountImages(folder);
+    await selectDocument("a");
+    await expectReadableImage(folder, "a");
+  });
+
+  test("switching documents reads the second directory's different image", async () => {
+    const folder = createFolder();
+    await mountImages(folder);
+    await selectDocument("a");
+    await selectDocument("b");
+    await expectReadableImage(folder, "b");
+  });
+
+  test("single-file images keep their base and remote images keep their URL", async () => {
+    const folder = createFolder();
+    const remote = "https://example.test/remote.png";
+    writeFileSync(join(folder, "a/prd.md"), `# Single file\n\n![fixture](images/p.png)\n\n![remote](${remote})\n`);
+    await mountImages(folder, true);
+    await waitFor(() => host?.querySelectorAll('img[alt="fixture"], img[alt="remote"]').length === 2, "both images");
+    await expectReadableImage(folder, "a");
+    expect(host!.querySelector('img[alt="remote"]')?.getAttribute("src")).toBe(remote);
+  });
+});
 
 // --- Edit Mode against a real annotate server -------------------------------
 //

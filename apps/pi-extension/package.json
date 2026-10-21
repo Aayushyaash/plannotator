@@ -39,6 +39,8 @@
     "plannotator-browser.ts",
     "plannotator-browser-runtime.ts",
     "plannotator-events.ts",
+    "session-events.ts",
+    "checklist-window.ts",
     "plannotator-tool-host.ts",
     "session-opened.ts",
     "pi-host.ts",

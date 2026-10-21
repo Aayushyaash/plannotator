@@ -102,6 +102,7 @@ jobs:
           packages/ui/components/html-viewer/HtmlViewer.vimHud.test.tsx
           packages/ui/components/html-viewer/HtmlViewer.bridgeAsset.test.tsx
           packages/ui/components/Viewer.vimMode.integration.test.tsx
+          packages/ui/components/CodeFilePopout.lineScroll.test.tsx
           packages/ui/hooks/useVimSelection.test.tsx
           packages/ui/hooks/useVimSelection.selectionScope.test.tsx
           packages/ui/hooks/useModelCatalogs.dom.test.tsx
@@ -177,6 +178,7 @@ jobs:
           packages/inbox/archived.test.tsx
           packages/inbox/openStaysPut.test.tsx
           packages/inbox/clickToRefresh.test.tsx
+          packages/inbox/threadReadRetry.test.tsx
           packages/inbox/tabCountWindow.test.tsx
           packages/inbox/phoneList.test.tsx
           packages/inbox/listLabels.test.tsx
@@ -296,10 +298,12 @@ jobs:
           packages/editor/planDiffAutoExit.test.tsx
           packages/editor/App.archiveReadOnly.test.tsx
           packages/editor/App.htmlChrome.test.tsx
+          packages/editor/App.sidebarTabsAgentTerminal.test.tsx
           packages/editor/App.htmlLinkDraft.test.tsx
           packages/editor/App.decisionControl.test.tsx
           packages/editor/App.planDecisionControl.test.tsx
           packages/editor/App.planRevision.test.tsx
+          packages/editor/App.liveVersion.test.tsx
           packages/editor/askSessionDrafts.test.tsx
           packages/review-editor/App.decisionControl.test.tsx
           packages/ui/components/TerminalToolsAnnouncementDialog.test.tsx

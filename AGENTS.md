@@ -458,6 +458,54 @@ shell `plannotator` command: its `tool_call` event can only block a call, which
 the model reads as an error, so the skill's "use the tool" line is what steers
 it.
 
+### Pi: session events and the checklist window
+
+**`plannotator:session-opened` / `plannotator:session-closed` (#1589).** One
+pair per Pi review, whatever opened it (`apps/pi-extension/session-events.ts`):
+the `/plannotator-*` commands and the `plannotator` tool (`trackReview` in
+`index.ts`, at the registry's add and its decision or failure), plan review
+(the submit tool, closed by its decision, by `stopPendingPlanReview` or by its
+server stopping), and `plannotator:request` code-review / annotate /
+annotate-last / plan-review (`plannotator-events.ts`, which now starts the
+session and waits on it itself so the URL is known before the decision).
+Opened: `{ id, action, url, openedAt, piSessionId?, reviewId?, requestId? }`,
+`id` the registry's `pn-` id (a fresh `pn-` id for `plannotator:request`
+reviews, which are not in the registry; unique among the open reviews both
+ways: `newSessionEventId` skips ids the registry or an announced review holds,
+and the process registry skips ids an announced review holds,
+`isSessionEventIdOpen`), `action` one of `plan-review`,
+`code-review`, `annotate`, `annotate-last`. Closed: the same plus `outcome`
+(`approved`, `submitted`, or `closed` with `closedBy` `reviewer` | `agent` |
+`stopped` | `error`) and `closedAt` (`sessionEndOf` / `sessionEndOfError`).
+The handle emits closed at most once; an event with no live bus is dropped. Archive emits neither. **Cache safety:** they go
+on `pi.events` only, never a message, entry, system prompt or tool list.
+**Stale runtimes (#1864):** every emit runs on a microtask inside try/catch;
+it goes through the opener's `pi` when the opener's session was live at the
+moment of the open or close, else (or when that throws) through the instance
+that last claimed a process-wide slot (`claimSessionEventBus` at
+`session_start`, released at `session_shutdown`, on `globalThis` under a
+versioned key; a holder that throws, torn down without releasing it, is
+forgotten quietly), else nowhere, silently. So a review that ends after `/reload`
+reaches the replacement's bus and never throws out of a handler.
+`session_shutdown` now calls `stopPendingPlanReview()` first, so a plan review
+the session ends closes on its own bus. `plannotator:request` reviews use the
+listener's own `sessionLive`, so after a replacement their close goes to the
+live instance's bus or nowhere (never the dead one; `plannotator-events.test.ts`
+pins that nothing is logged). Proofs: `apps/pi-extension/session-events.test.ts`
+(over a fake Pi whose instances share one bus and whose replaced instance
+throws Pi's stale-ctx error: every model request, the active tools with their
+definitions, `before_agent_start`'s results and every message, is
+byte-identical while reviews open, close and outlive `/reload`, and identical
+again with a bus that throws; the pair per entry point and outcome) and the
+session-event cases in `plannotator-events.test.ts`.
+
+**The checklist widget scrolls (#1412).** Pi draws at most 10 lines of a
+widget (`InteractiveMode.MAX_WIDGET_LINES`), so `updateWidget` sends
+`checklistWindow(checklistItems)` (`apps/pi-extension/checklist-window.ts`):
+all items when there are 10 or fewer, else 10 items ending on the first open
+one (the first 10 until it is past them), and the last 10 once everything is
+done. `setWidget` only; the status line keeps the full count.
+
 ### Claude Code mod: non-blocking plan review, annotate, review and last
 
 Where Claude Code runs hooks modules ("Claude Mods": function hooks, CLI only,
@@ -2159,6 +2207,7 @@ Sorting and the rest:
 - Build and serve: `build:hook` copies its `dist/index.html` to `apps/hook/dist/inbox.html`. The binary embeds it, and `runInboxCommand` hands it to `startInboxServer` as `htmlContent`. Without it, `/` says to run `build:hook`.
 - Styling: `packages/inbox/inbox.css` carries the design record's values on Plannotator's theme tokens with an `ib-` prefix. Plannotator's own components draw themselves.
 - Routing is the hash: `#thread=msg_…` (the link the MCP tools hand agents), `#project=prj_…`, `#settings` (General; on a phone the list of sections), `#settings/<section>` (`general`, `agents`, `devices`, `archived`, `storage`, `about`; an unknown one reads as `#settings`), `#settings/devices/pair` (Pair a phone open), `&file=att_…`, `&guide=msg_…`, `&msg=msg_…` (land on that message: a search result; dropped from the hash once landed) (`packages/inbox/settingsRoute.ts` for the Settings addresses). An old link to the removed Decisions page (`#decisions=…`) opens the list.
+- Opening a thread (`#thread=`): the pane shows once `GET /api/inbox/threads/:id` lands. A read that fails (a dropped connection, a 5xx) or has no answer in `THREAD_READ_TIMEOUT_MS` (8 s, an AbortSignal) is read again after `THREAD_READ_RETRY_MS` (250 ms, 1 s, 2 s, 4 s, then every 5 s while the thread stays open; a 404 is not; opening another thread or closing stops it; a read the event stream lands meanwhile ends the wait; `packages/inbox/App.tsx`). Reads are numbered, so an older one never overwrites a newer one that landed. Until it lands the thread's place beside the list says so (`components/ThreadWait.tsx`: nothing for the first 600 ms from the open in any state, then "Opening the thread…" (`aria-busy`), the failure with Try again (said once, not per retry), or for a 404 "not in the Inbox" with Close; focus inside it goes to the thread's subject when the thread lands; a phone and a stacked window keep the list, as before). Before this one failed read left the right side blank until some agent wrote anywhere in the Inbox (the event stream re-reads the open thread). Proof: `packages/inbox/threadReadRetry.test.tsx`.
 - Issue refs (#1840): bare `#123` / `@user` in messages and markdown attachments link to the project's git `origin` (GitHub or GitLab, per `forgeRefLinks`, new tab). The server resolves `git remote get-url origin` per project root off the request path (`packages/server/inbox-repos.ts`: for every project once the server is listening and when a project is first seen, at most 4 gits at once, refreshed in the background after 5 min, 3 s git timeout, parsed by `parseRemoteUrl`/`parseRemoteHost`) and `GET /api/inbox/threads/:id` carries it as `thread.project.repo: { display, host } | null` (null for a folder without git or without origin, or until the first resolve lands; a git failure or timeout is cached as null for those 5 min too). The window hands it to `Viewer` as `refRepo`, which links refs without drawing `repoInfo`'s repo badge. A digit-only 6 or 8 digit ref (`#186379`) is an issue ref, not a hex swatch, only in the Inbox (`configurePlannotatorUI({ digitHexIssueRefs: true })`, off for every other host), only when a ref link can be built (a repo on a known forge), and only without a leading zero (#1932).
 - The sidebar:
   - The Tater mark (24 frames over 3.5 s, paused offscreen, the first frame under reduced motion).
@@ -2803,6 +2852,7 @@ During normal plan review, an Archive sidebar tab provides the same browsing via
 | `/api/plan`           | GET    | Returns `{ plan, origin, mode: "annotate", filePath, sourceInfo?, gate, renderAs?, rawHtml?, previousPlan?, versionInfo?, diffCurrent?, diffHtml? }`. `renderAs` is `"markdown"`, `"html"`, or — for a whole-file diagram source (`.mmd`/`.mermaid`/`.dot`/`.gv`) — `"mermaid"` / `"graphviz"`, in which case `plan` is the file's RAW text and the editor renders it as one diagram block (see "Diagram files"). The decision is the pure, shared `annotateDiagramRenderKind` (`packages/core/annotatable.ts`), so a raw-HTML, converted, URL, folder, message or live-app session is never a diagram session in either runtime. The last four power the per-file version diff: `previousPlan`/`versionInfo`/`diffCurrent` for the markdown diff, `diffHtml` (the previous→current page rendered with inline `<ins>`/`<del>`) for `--render-html` files. A local rendered-HTML root is served from its CURRENT bytes on every read (`readRootHtml`), with the startup snapshot as the fallback when the file is missing, unreadable, or over the 2MB cap; when the served bytes differ from the snapshot, `previousPlan`/`versionInfo` still name the saved baseline and `diffCurrent`/`diffHtml` are recomputed against the served bytes (`htmlDiff` is pure; a GET never writes history), so a reload after an agent edit keeps the version diff. `/api/doc` carries the same recomputed `previousPlan`/`versionInfo`/`diffHtml` when it serves that root document (the in-app Refresh path, `rootHtmlVersionDiff`), and nothing extra for any other document. Live app sessions return `{ mode: "annotate-app", appUrl, targetUrl, liveToken, sharingEnabled: false, ... }` instead: no rawHtml, no version fields (see "Live app annotation"). A review of several files answers `{ mode: "annotate-bundle", plan: "", bundle: [{ path, renderAs }], projectRoot: <bundle root>, documentDrafts: true, ... }` (see "Several files in one review"). |
 | `/api/plan/version`   | GET    | Fetch a specific stored version of the annotated file (`?v=N`) |
 | `/api/plan/versions`  | GET    | List all stored versions of the annotated file |
+| `/api/plan/versions`  | POST   | Save the session's own file, as it is on disk now, as the next version (#2037; see "Live versions" under Plan Version History). Body `{ serverSession?, hash }`: `hash` is the source hash of the text the editor shows; the server reads the file itself and saves only while its bytes still have that hash. `200 { ok: true, saved, previousPlan, versionInfo }` (`saved: false` when the text equals the latest version); `400 validation_error`, `404 not_eligible` (not a single local Markdown/text session: `.yaml`, `.json`, `.mmd` and the like answer it too), `409 history_off` / `stale` / `missing` / `empty` / `session_mismatch`, `413 too_large` (past the 2MB `MAX_ANNOTATABLE_FILE_BYTES`, checked before and after the read), `500 history_unavailable`. `/api/plan` advertises it with `liveVersions: true` (absent when history is off or the session is not eligible). Both runtimes, through `saveAnnotateLiveVersion` (`packages/shared/annotate-live-version.ts`) |
 | `/api/feedback`       | POST   | Submit annotations (body: feedback, annotations, serverSession?) |
 | `/api/approve`        | POST   | Approve without feedback (review-gate UX, `--gate`) |
 | `/api/exit`           | POST   | Close session without feedback (`?serverSession=` in the query; the body is empty) |
@@ -2998,6 +3048,8 @@ Every plan is automatically saved to `~/.plannotator/history/{project}/{slug}/` 
 This powers the version history API (`/api/plan/version`, `/api/plan/versions`) and the plan diff system.
 
 **Annotate mode** also saves history on open, so the same version diff works when annotating a standalone `.md`/`.txt`/`.html` file (or any other supported plain-text file, e.g. `.yaml`/`.json`/`.toml`). It keys the slug by **file path** — `annotate-{sanitized-basename}-{hash8}` — rather than heading + date, so re-opening the same file groups its versions even as its content (and headings) change. **Note this writes a copy of each annotated file's content** under `~/.plannotator/history/` (or `PLANNOTATOR_DATA_DIR`); disable via `PLANNOTATOR_ANNOTATE_HISTORY=0` or `{ "annotateHistory": false }` in `~/.plannotator/config.json` to keep annotate sessions stateless (the version diff is then unavailable, and the durable submitted-feedback records described in the env-var table are also skipped). Single-local-file annotate sessions additionally write each submitted decision to `history/{project}/{slug}/submissions/{timestamp}.md` BEFORE deleting the annotation draft, so feedback survives an agent-side timeout (#678); a failed record write keeps the draft as the recovery copy. For `--render-html` files the diff is rendered as the real page with inline `<ins>`/`<del>` highlights via `htmlDiff()` (`packages/shared/html-diff.ts`).
+
+**Live versions (#2037).** An open single-file Markdown/text annotate session already reloads the text in place when the file changes on disk (the editor's source-document reconcile over `/api/reference/files/stream`). That reload now also becomes a version, so the `+N/-M` badge and the Version Browser show an agent's edit in the same session instead of only after a reopen. When the session's OWN file's disk text lands on screen (`noteRootDiskText` in App: the watcher reconcile's `clean-updated`, "Reload from disk" after a conflict, and a save that found the file changed and reloaded it; linked and folder documents are not covered), and `/api/plan` advertised `liveVersions`, `useLiveAnnotateVersion` (`packages/editor/hooks/`) waits until the file has held still for `LIVE_VERSION_SETTLE_MS` (750 ms, so a burst of agent writes is one version) and posts `POST /api/plan/versions { serverSession, hash }`. The server (`saveAnnotateLiveVersion` in `packages/shared/annotate-live-version.ts`, vendored to Pi; the Bun and Pi routes only parse the body and answer) reads the file itself, saves it only while its bytes still have the hash the editor showed (`409 stale` otherwise, and the next change asks again), and runs the open-time pipeline (`computeAnnotateHistory`: dedupe against the latest version, then the one before it), keyed by the same resolved path as the open-time save. It also replaces the session's `annotateHistory`, so a tab reload's `/api/plan` names the new version. The client then sets `previousPlan`/`versionInfo` and gives `usePlanDiff` a new identity (`live-version:<n>`), so the diff base becomes the version before the edit (each edit shows on its own; the Version Browser can still pick an older base) and an open diff view stays open on the new comparison. Design choice: save a version (what the issue and the approved card asked), not the lighter "diff against the version at open" HTML Refresh does, because the reviewer wants what changed since they last looked; and never on a GET: the write is an explicit POST from the open editor. Not saved: the reviewer's own Edit Mode saves (the reconcile reads them as `unchanged`), raw HTML (HTML Refresh keeps its open-time diff), folder and bundle files, URL, message and live-app sessions. Eligible means a single local session whose named and real paths are Markdown/text (`isSourceSaveFilePath`, `annotateLiveVersionFilePath`), so data files and diagram sources are left out. A file that was empty at open has no version yet but is still advertised: its first text becomes version 1. A session without history (`PLANNOTATOR_ANNOTATE_HISTORY=0`) gets no `liveVersions` and never posts, and the server answers `409 history_off` without touching the data dir; a file past the 2MB annotate cap answers `413 too_large`. Tests: `packages/server/annotate-live-version.scenarios.ts` (both runtimes) and the DOM test `packages/editor/App.liveVersion.test.tsx`.
 
 History saves independently of the `planSave` user setting (which controls decision snapshots in `~/.plannotator/plans/`). Storage functions live in `packages/shared/storage.ts` (runtime-agnostic, re-exported by `packages/server/storage.ts`). Pi copies the shared files at build time. Slug format: `{sanitized-heading}-YYYY-MM-DD` (heading first for readability).
 
