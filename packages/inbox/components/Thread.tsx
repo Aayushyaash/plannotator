@@ -6,7 +6,7 @@ import { annotationOwnsHighlight } from '@plannotator/ui/utils/annotationOwnsHig
 import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
 import { parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 import type { InboxListRow, InboxMessageWire, InboxProjectRepo, InboxQuestion, InboxSentRecipient, InboxThread, InboxUpload } from '@plannotator/core/inbox-types';
-import type { IndexedQuestion, QuestionAnswer, QuestionStatus } from '@plannotator/core/question-block';
+import { isQuestionAnswerEmpty, type IndexedQuestion, type QuestionAnswer, type QuestionStatus } from '@plannotator/core/question-block';
 import { inboxAskingMessage, inboxDefaultSkip, isInboxNote, isInboxTextKind, readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachment, type InboxAttachmentState, type InboxInlineImage, type InboxQuestionState } from '@plannotator/core/inbox-types';
 import type { LocalLinkResolver } from '@plannotator/ui/components/LocalLinkContext';
 import { NOT_ATTACHED_TITLE, attachmentDeepLink, attachmentDisplayPath, attachmentForLink, openAttachmentTitle, useRefRepo } from '../links';
@@ -18,7 +18,7 @@ import type { OpenInSurface } from './OpenIn';
 import { attachmentSequence } from '../stepping';
 import { AnnotationsChip } from './AnnotationsChip';
 import { agentName, clockTime, dayWords, fullTime, plural, whenTime } from '../format';
-import { answerWords, foldSnippet, holdingsOf, isDelivered, isPersonReply, lastNonNote, lookBoundary, newSinceLook, planFolds, snippetText, type FoldSnippet, type Holding } from '../folding';
+import { foldSnippet, holdingsOf, isDelivered, isPersonReply, lastNonNote, lookBoundary, newSinceLook, planFolds, snippetText, type FoldSnippet, type Holding } from '../folding';
 import { highlightSearchHits } from '../search/highlight';
 import { AuthorMark, Icon } from '../icons';
 import { PILL_BAND_PX, atEnd, followBy, lookThrough, measureFirstLines, unseenArrivals, useSeenOnSight } from '../seenOnSight';
@@ -53,6 +53,7 @@ import { ReaskNote } from './ReaskNote';
 import { reaskedIn, reaskNoteAgent, reaskOffered, reaskTargets, reaskTooltip } from '../reask';
 import { ChangedNotice, ReplacedQuestionCard, ReplacesLine, StaleGuard, replacedBy, replacementOf, type JumpTarget } from './ReplacedQuestion';
 import { InboxComposerField } from './ComposerField';
+import { ReplyAnswers, draftAnswerWords, type DraftAnswer } from './ReplyAnswers';
 import { SkillsLine } from './SkillsLine';
 import { paintSkillReferences } from '../skillHighlight';
 import { paintTagReferences, type TagMarkPlace } from '../tagHighlight';
@@ -1827,13 +1828,28 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   );
   const skipping = !keepOpen && unanswered.length > 0;
 
-  const openBox = (withDraft: boolean) => {
+  // The answers this reply carries, as the cards show them now: a saved pick, or one being
+  // saved. The box lists them live (ReplyAnswers); they never go into the words, where a
+  // summary written once would go stale as the person picks on and reach the agent twice
+  // (the Send carries every answer under "Answers to your questions").
+  const draftAnswers: DraftAnswer[] = thread.messages.flatMap((m) =>
+    m.author.kind !== 'agent'
+      ? []
+      : (m.questions ?? []).flatMap((q) => {
+          if (q.state !== 'open' && q.state !== 'picked') return [];
+          const id = `${m.id}/${q.key}`;
+          const answer = pending.has(id) ? pending.get(id)! : q.answer;
+          if (!answer || isQuestionAnswerEmpty(answer)) return [];
+          return [{ id, messageId: m.id, key: q.key, number: q.position + 1, prompt: q.prompt, answer: draftAnswerWords(answer) }];
+        }),
+  );
+
+  const openBox = () => {
     setNewMessage(null);
     setRoute((current) => ({ ...current, open: false, error: null }));
-    const draft = withDraft ? picked.map((q) => (q.answer ? `${q.prompt.replace(/[?.!]\s*$/, '')}: ${answerWords(q.answer)}.` : '')).filter(Boolean).join(' ') : '';
-    // A draft's words come back as they were; picks only seed the box when there are none.
+    // A draft's words come back as they were; the picks are listed beside them, never written in.
     const kept = replyDraft.conflict ?? replyDraft.draft?.body ?? '';
-    setBox({ open: true, text: kept.trim() ? kept : draft });
+    setBox({ open: true, text: kept.trim() ? kept : '' });
     setError(null);
   };
 
@@ -2442,7 +2458,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   useEffect(() => {
     if (replyRequest !== thread.thread_id) return;
     onReplyOpened?.();
-    openBox(picksCount > 0);
+    openBox();
     // openBox reads this render's picks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [replyRequest, thread.thread_id]);
@@ -2836,7 +2852,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                   </Tip>
                   {isAgent && liveMessage(message) && (
                     <Tip content="Reply">
-                      <button type="button" className="ib-mut" onClick={() => openBox(picksCount > 0)} aria-label="Reply">
+                      <button type="button" className="ib-mut" onClick={() => openBox()} aria-label="Reply">
                         <Icon name="reply" size={15} />
                       </button>
                     </Tip>
@@ -3146,6 +3162,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                   />
                 </div>
               )}
+              {draftAnswers.length > 0 && <ReplyAnswers answers={draftAnswers} onJump={jumpTo} />}
               {(picksCount > 0 || dropped.length > 0 || takesAnnotations || unanswered.length > 0) && (
                 <div className={`ib-rfoot${keepOpen ? ' ib-keep' : ''}`}>
                   {picksCount > 0 && (
@@ -3208,7 +3225,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                 Send
               </button>
             )}
-            <button type="button" className="ib-btn" onClick={() => openBox(picksCount > 0)} data-edit-draft={waiting || draftKept ? '' : undefined}>
+            <button type="button" className="ib-btn" onClick={() => openBox()} data-edit-draft={waiting || draftKept ? '' : undefined}>
               <Icon name={waiting || draftKept ? 'pen' : 'reply'} size={15} />
               {waiting || draftKept ? 'Edit draft' : 'Reply'}
             </button>
@@ -3264,7 +3281,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             live={live}
             mode={newMessage}
             onPick={(target) => setNewMessage({ kind: 'compose', target })}
-            onReplyInstead={() => openBox(picksCount > 0)}
+            onReplyInstead={() => openBox()}
             onClose={() => setNewMessage(null)}
           />
         )}
@@ -3322,7 +3339,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
           annotations: records.length,
           onWriteReply: () => {
             setFull(false);
-            openBox(picksCount > 0);
+            openBox();
           },
         }}
       />

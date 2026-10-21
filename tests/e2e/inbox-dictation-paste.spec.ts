@@ -161,7 +161,7 @@ test('the reply box: after a pick, after a click on the message, after a chip', 
   await dictate(page, 'Focused dictation. ');
   await expectLanded(box, 'Focused dictation.');
 
-  await page.getByText('Retry with the same idempotency key').click();
+  await page.locator('fieldset[data-question-key]').getByText('Retry with the same idempotency key').click();
   await expect(box).not.toBeFocused();
   await dictate(page, 'After a pick. ');
   await expectLanded(box, 'After a pick.');
@@ -212,7 +212,7 @@ test('a range selected in the reply box before a pick is not replaced: the dicta
   await openReply(page);
   await box.fill('Keep these words.');
   await box.evaluate((el: HTMLTextAreaElement) => el.setSelectionRange(5, 10)); // "these", selected
-  await page.getByText('Fail the job').click();
+  await page.locator('fieldset[data-question-key]').getByText('Fail the job').click();
   await expect(box).not.toBeFocused();
   await dictate(page, ' Dictated.');
   await expect(box).toHaveValue('Keep these Dictated. words.');
@@ -330,7 +330,7 @@ test('search opened and closed between: the paste still goes to the reply box', 
     await expect(p.locator('dialog[data-search-palette][open]')).toBeVisible();
     await p.keyboard.press('Escape');
     await expect(p.locator('dialog[data-search-palette][open]')).toHaveCount(0);
-    await p.getByText('Fail the job').click();
+    await p.locator('fieldset[data-question-key]').getByText('Fail the job').click();
     await expect(box).not.toBeFocused();
     await dictate(p, 'After search.');
     await expect(box).toHaveValue('Start. After search.');
@@ -441,7 +441,7 @@ test('Chrome 155-156 dropping the paste: the reply box, search and compose still
     await expect(box).toHaveValue('First dictation. Second dictation. ');
     expect(await pasteInputs(p)).toEqual(['input:insertText', 'input:insertText']);
     // After a pick, the dictation follows the field (pasteTarget.ts) and is inserted by the page.
-    await p.getByText('Retry with the same idempotency key').click();
+    await p.locator('fieldset[data-question-key]').getByText('Retry with the same idempotency key').click();
     await expect(box).not.toBeFocused();
     await dictate(p, 'After a pick.');
     await expect(box).toHaveValue('First dictation. Second dictation. After a pick.');
@@ -522,7 +522,7 @@ test('with image paste (#1953): an image pasted after a pick attaches once to th
     const rbox = p.locator('section.ib-pane .ib-rbox');
     const box = rbox.locator('textarea');
     await box.fill('With a screenshot.');
-    await p.getByText('Fail the job').click();
+    await p.locator('fieldset[data-question-key]').getByText('Fail the job').click();
     await expect(box).not.toBeFocused();
     // The real clipboard holds an image only, and the browser's own paste runs (no event made by hand).
     await p.evaluate(async (b64) => {
@@ -536,7 +536,7 @@ test('with image paste (#1953): an image pasted after a pick attaches once to th
     await expect(rbox.locator('[data-compose-file]')).toHaveCount(1);
     await expect(box).toHaveValue('With a screenshot.');
     // Then text after another pick: inserted once, and the image stays the one attached.
-    await p.getByText('Retry with the same idempotency key').click();
+    await p.locator('fieldset[data-question-key]').getByText('Retry with the same idempotency key').click();
     await dictate(p, ' And words.');
     await expect(box).toHaveValue('With a screenshot. And words.');
     await expect(rbox.locator('[data-compose-file]')).toHaveCount(1);
@@ -560,7 +560,7 @@ test('WebKit: after a pick, the paste goes back to the reply box', async () => {
     await openReply(p);
     const box = p.locator('section.ib-pane .ib-rbox textarea');
     await box.fill('Typed. ');
-    await p.getByText('Retry with the same idempotency key').click();
+    await p.locator('fieldset[data-question-key]').getByText('Retry with the same idempotency key').click();
     await expect(box).not.toBeFocused();
     // WebKit gives the page no clipboard permission to set, so this proves the half that is ours:
     // the ⌘V keydown puts focus back in the reply box, caret at its end, before the browser pastes.
