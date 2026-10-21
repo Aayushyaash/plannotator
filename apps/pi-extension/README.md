@@ -287,6 +287,38 @@ Plan review is asynchronous:
 
 The other shared actions remain request/response flows. Payloads are intentionally minimal and only include fields the shared implementation actually uses.
 
+#### Review open and closed events
+
+Plannotator emits one event when a review opens in the browser and one when it ends, for every review in this Pi, whatever opened it: the `/plannotator-*` commands, the `plannotator` tool, plan mode, and `plannotator:request`. A terminal multiplexer or agent harness can show "needs review" on the agent's pane between the two (for example a Herdr pane badge).
+
+`plannotator:session-opened`:
+
+```ts
+{
+  id: string;          // "pn-3f2a9c": pairs the two events; for commands, the tool and plan mode it is the id the tool lists and the decision names
+  action: "plan-review" | "code-review" | "annotate" | "annotate-last";
+  url: string;         // the review's URL
+  openedAt: number;    // Date.now()
+  piSessionId?: string; // the Pi session that opened it
+  reviewId?: string;   // a plannotator:request plan review's reviewId
+  requestId?: string;  // the plannotator:request that opened it
+}
+```
+
+`plannotator:session-closed` carries the same fields plus:
+
+```ts
+{
+  outcome: "approved" | "submitted" | "closed"; // submitted: feedback, a denied plan, or Done
+  closedBy?: "reviewer" | "agent" | "stopped" | "error"; // only when outcome is "closed"
+  closedAt: number;
+}
+```
+
+Each review gets exactly one of each, opened first. `stopped` means the review ended without a decision: plan mode was left, the session ended with a plan review open, or its server was stopped. A review that ends after `/reload` or `/resume` still sends its closed event, on the event bus of the session that is live then. The archive browser emits neither. Listen with `pi.events.on("plannotator:session-opened", ...)`; the constants and types are exported from `plannotator-events` as a typing convenience.
+
+These events go to Pi's extension event bus only. They add nothing to the conversation, the system prompt or the tool list, so the model's prompt cache is unaffected.
+
 #### External plan execution handoff
 
 Set `executionMode` to `external` when another Pi extension should orchestrate an approved plan instead of letting Plannotator execute it in the current session:
@@ -360,7 +392,7 @@ The Plannotator archive browser is available through the shared event API as `ar
 
 ### Progress tracking
 
-During execution, the agent marks completed steps with `[DONE:n]` markers. Progress is shown in the status line and as a checklist widget in the terminal.
+During execution, the agent marks completed steps with `[DONE:n]` markers. Progress is shown in the status line and as a checklist widget in the terminal. Pi shows at most 10 lines of a widget, so a longer checklist shows 10 items that keep the next open step in view: the first 10 until that step is past them, then a window that moves down one item per completed step. The status line keeps the full count (`📋 12/15`).
 
 ## Commands
 
