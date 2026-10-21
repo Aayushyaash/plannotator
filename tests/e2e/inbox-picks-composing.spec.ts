@@ -213,9 +213,23 @@ test('phone (WebKit, iPhone 15): the box lists the answers', async () => {
     const row = await list.locator('[data-reply-answer]').first().boundingBox();
     expect(row!.height).toBeGreaterThanOrEqual(44);
     await expect(box).toHaveValue('Cards: the list is short.');
-    await box.evaluate((el) => (el as HTMLTextAreaElement).blur());
-    await pane.locator('.ib-rbox').evaluate((el) => el.scrollIntoView({ block: 'end' }));
-    await shot(page, '2-phone-composing');
+    // More answers than fit: the list holds about two and a half rows and scrolls, so the box
+    // never eats the thread with the keyboard up.
+    await choice(2, 'Code after').tap();
+    await choice(3, 'Footer').tap();
+    await expect(list).toContainText('Your 5 answers go with this reply');
+    const rows = list.locator('.ib-ranswers-l');
+    const [shown, whole] = await rows.evaluate((el) => [el.clientHeight, el.scrollHeight]);
+    expect(shown).toBeLessThanOrEqual(112);
+    expect(whole).toBeGreaterThan(shown);
+    // The keyboard up: the words focused, the window as tall as iOS leaves above the keyboard.
+    await page.setViewportSize({ width: 393, height: 470 });
+    await box.focus();
+    await page.waitForTimeout(300);
+    await expect(box).toBeFocused();
+    const boxTop = (await pane.locator('.ib-rbox').boundingBox())!.y;
+    expect(boxTop).toBeGreaterThan(120);
+    await shot(page, '2-phone-keyboard-up');
     await context.close();
   } finally {
     await phoneBrowser.close();

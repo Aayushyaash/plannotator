@@ -2,9 +2,10 @@
  * Picks made while the reply box is open (the owner: "When i edit a reply,
  * and then add new answers... do they get added to the reply? Because I dont
  * see them"). An agent asks six pick-one questions; the person picks one,
- * opens the reply (Edit draft, which writes the picks into the box), adds
- * words, then picks more on the cards. Every pick saves, and the box shows
- * what goes with the Send. The window over a REAL Inbox
+ * opens the reply (Edit draft), adds words, then picks more on the cards.
+ * Every pick saves; the box lists every answer live under the words and
+ * never writes them into the words (until 0.28.25 Edit draft seeded a
+ * one-time summary that went stale). A row jumps to its card. The window over a REAL Inbox
  * (tests/helpers/inbox-dom-server.ts).
  *
  * DOM-gated: runs under DOM_TESTS=1 (happy-dom), from the test.yml DOM list.
@@ -53,7 +54,7 @@ type ThreadModel = {
 };
 const readThread = async (id: string) => JSON.parse((await loopback(`/api/inbox/threads/${id}`)).text) as ThreadModel;
 
-const TESTS = 2;
+const TESTS = 3;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -176,9 +177,9 @@ const SIX = [
 ].join('\n');
 
 /** An agent writes while the test runs (the server's stdin). */
-async function agentSends(body: string): Promise<string> {
+async function agentSends(body: string, reply_to?: string): Promise<string> {
   const before = lines.length;
-  (child!.stdin as import('bun').FileSink).write(`${JSON.stringify({ send: { project: world.project, session: 'ses_six', body } })}\n`);
+  (child!.stdin as import('bun').FileSink).write(`${JSON.stringify({ send: { project: world.project, session: 'ses_six', body, ...(reply_to ? { reply_to } : {}) } })}\n`);
   (child!.stdin as import('bun').FileSink).flush();
   for (let i = 0; i < 200; i++) {
     const line = lines.slice(before).find((l) => l.includes('"sent"'));
@@ -215,14 +216,15 @@ const serverQuestions = async (message: string) => {
 };
 const threadOf = new Map<string, string>();
 
-async function openSix() {
+async function openSix(followUp?: string) {
   const message = await agentSends(SIX);
+  const later = followUp ? await agentSends(followUp, message) : null;
   const list = JSON.parse((await loopback('/api/inbox/threads')).text) as { sections: { threads: { thread_id: string; subject: string }[] }[] };
   const row = list.sections.flatMap((s) => s.threads).find((t) => t.subject.startsWith('Six choices') || t.thread_id === message)!;
   threadOf.set(message, row.thread_id);
   const el = await renderApp(`#thread=${row.thread_id}`);
-  await until(() => cards(el).length === 6, 'six questions');
-  return { el, message };
+  await until(() => cards(el).length === (later ? 7 : 6), 'the questions');
+  return { el, message, later };
 }
 
 const answerRows = (el: ParentNode) =>
@@ -301,4 +303,37 @@ test.skipIf(!hasDom)('a row in the answers list takes the person to its card', a
   act(() => row.click());
   await settle();
   expect(document.activeElement).toBe(cards(el)[2]!);
+}, 30_000);
+
+test.skipIf(!hasDom)('answers to two messages: grouped under each message, "go with your replies", and the chip agrees', async () => {
+  const followUp = [':::question', 'Ship it behind a flag?', '', '- [ ] Yes, a flag', '- [ ] No flag', ':::'].join('\n');
+  const { el, message, later } = await openSix(followUp);
+  clickChoice(choice(cards(el)[0]!, 0));
+  clickChoice(choice(cards(el)[6]!, 0));
+  await until(async () => (await serverQuestions(message))[0]!.state === 'picked', 'the first pick saved');
+  await until(async () => {
+    const model = await readThread(threadOf.get(message)!);
+    return model.thread.messages.find((m) => m.id === later)!.questions![0]!.state === 'picked';
+  }, 'the follow-up pick saved');
+  await settle();
+  act(() => (el.querySelector('[data-edit-draft]') as HTMLButtonElement).click());
+  await settle();
+  const list = el.querySelector('[data-reply-answers]')!;
+  // The group is named by its visible heading, not a repeated aria-label.
+  const heading = list.querySelector('.ib-ranswers-h')!;
+  expect(list.getAttribute('aria-labelledby')).toBe(heading.id);
+  expect(list.hasAttribute('aria-label')).toBe(false);
+  expect(heading.textContent).toBe('Your 2 answers go with your replies');
+  const groups = [...list.querySelectorAll('[data-reply-answers-group]')].map((g) => g.getAttribute('data-reply-answers-group'));
+  expect(groups).toEqual([message, later]);
+  expect(answerRows(el)).toEqual(['Q1 Which layout should the invoice list use? Cards', 'Q1 Ship it behind a flag? Yes, a flag']);
+  // Each Q1 says which message it answers, for a screen reader too.
+  const labels = [...list.querySelectorAll('[data-reply-answer]')].map((b) => b.getAttribute('aria-label'));
+  expect(labels[0]).toMatch(/^Q1, Which layout should the invoice list use\?: Cards\. Claude Code's message, .+\. Show the question\.$/);
+  expect(el.querySelector('[data-picks-chip]')?.textContent).toContain('2 picks');
+  // A pick still being saved counts in both at once.
+  clickChoice(choice(cards(el)[1]!, 0));
+  expect(el.querySelector('[data-picks-chip]')?.textContent).toContain('3 picks');
+  expect(heading.textContent).toBe('Your 3 answers go with your replies');
+  await until(async () => (await serverQuestions(message))[1]!.state === 'picked', 'the third pick saved');
 }, 30_000);

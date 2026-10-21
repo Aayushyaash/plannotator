@@ -1840,7 +1840,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
           const id = `${m.id}/${q.key}`;
           const answer = pending.has(id) ? pending.get(id)! : q.answer;
           if (!answer || isQuestionAnswerEmpty(answer)) return [];
-          return [{ id, messageId: m.id, key: q.key, number: q.position + 1, prompt: q.prompt, answer: draftAnswerWords(answer) }];
+          return [{ id, messageId: m.id, key: q.key, number: q.position + 1, prompt: q.prompt, answer: draftAnswerWords(answer), messageName: `${agentName(m.author)}'s message, ${whenTime(m.created_at)}` }];
         }),
   );
 
@@ -3163,12 +3163,13 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                 </div>
               )}
               {draftAnswers.length > 0 && <ReplyAnswers answers={draftAnswers} onJump={jumpTo} />}
-              {(picksCount > 0 || dropped.length > 0 || takesAnnotations || unanswered.length > 0) && (
+              {(draftAnswers.length > 0 || dropped.length > 0 || takesAnnotations || unanswered.length > 0) && (
                 <div className={`ib-rfoot${keepOpen ? ' ib-keep' : ''}`}>
-                  {picksCount > 0 && (
+                  {/* The answers the list above shows, a pick still being saved included, so the two numbers agree. */}
+                  {draftAnswers.length > 0 && (
                     <span className="ib-rchip" data-picks-chip="">
                       <Icon name="check" size={13} />
-                      {plural(picksCount, 'pick')}
+                      {plural(draftAnswers.length, 'pick')}
                     </span>
                   )}
                   <SkipChip count={unanswered.length} keepOpen={keepOpen} onToggle={toggleKeepOpen} />

@@ -912,6 +912,8 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 .ib-ranswer-p { flex: 0 1 auto; min-width: 2em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground); }
 .ib-ranswer-a { flex: 0 1 auto; min-width: 0; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .ib-ranswer-a::before { content: "\2192\00a0"; color: var(--muted-foreground); font-weight: 400; }
+/* Answers to several messages: a quiet line naming the message above its rows (each message numbers its own Q1). */
+.ib-ranswers-g { padding: 4px 4px 0; font-size: var(--ib-fs-11, 11px); font-weight: 500; color: var(--muted-foreground); }
 .ib-rfoot { display: flex; gap: 6px; padding: 6px 8px 8px; }
 /* The chips wrap as a row inside the box (a 440 px thread beside a file, a stacked pane, a phone); a chip never shrinks or breaks its own label. */
 .ib-rfoot { flex-wrap: wrap; }
@@ -2185,7 +2187,8 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   .ib-rfoot { flex-wrap: wrap; }
   .pn-inbox .ib-rchip { height: 32px; }
   .ib-ranswer { min-height: 44px; align-items: center; }
-  .ib-ranswers-l { max-height: 176px; }
+  /* About two and a half rows, then it scrolls: with the keyboard up the box must not eat the thread. */
+  .ib-ranswers-l { max-height: 110px; overscroll-behavior: contain; }
   .ib-route { padding: 10px 6px 8px; }
   .ib-opt { min-height: 44px; }
   /* menus are sheets from the bottom edge: New message's sessions, the annotations list */
