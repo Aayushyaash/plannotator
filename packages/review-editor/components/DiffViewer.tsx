@@ -54,6 +54,7 @@ import {
   findChangeElement,
   listDiffChanges,
   placementOf,
+  readingLineFor,
   resolveChangeJump,
   type ChangePlacement,
 } from '../utils/changeNavigation';
@@ -920,7 +921,10 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
     const container = containerRef.current;
     if (!container || changes.length === 0) return false;
     const view = container.getBoundingClientRect();
-    const readingLine = view.top + view.height / 2;
+    const readingLine = readingLineFor(view, direction, {
+      atTop: container.scrollTop <= 1,
+      atBottom: container.scrollTop + container.clientHeight >= container.scrollHeight - 1,
+    });
     const elements = changes.map((change) => findChangeElement(container, change));
     const placements = elements.map((el): ChangePlacement => {
       // Not rendered (should not happen here): count it by its order.
@@ -932,9 +936,10 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
     const cursorRect = cursorEl?.getBoundingClientRect();
     const cursorOnScreen = !!cursorRect && cursorRect.bottom > view.top && cursorRect.top < view.bottom;
     const target = resolveChangeJump(placements, direction, cursorOnScreen ? cursor : null);
-    if (target == null) return true;
+    // No change that way: leave the key to anyone else.
+    if (target == null) return false;
     const el = elements[target];
-    if (!el) return true;
+    if (!el) return false;
     changeCursorRef.current = target;
     const rect = el.getBoundingClientRect();
     const top = container.scrollTop + (rect.top - view.top) - view.height / 2 + rect.height / 2;

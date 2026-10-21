@@ -8,7 +8,8 @@
  * position is held by a stub: the viewport is VIEW px tall at the top of the
  * page.
  *
- * Guards: the jump landing on the wrong change (or on a whole `@@` hunk
+ * Guards: the first N at the top skipping changes already on screen, the
+ * jump landing on the wrong change (or on a whole `@@` hunk
  * instead of each change inside it), stepping back from the last change,
  * a full-content (expanded) diff numbering its rows differently, the key
  * firing while typing or with a modifier, `P` (the Markdown view key) moving
@@ -92,9 +93,11 @@ const PATCH = [
 
 const ROW = 30;
 const VIEW = 200;
+/** Height of the view in the current test (VIEW unless a test makes it taller). */
+let viewHeight = VIEW;
 
 /** Where the scroll would put a change's first row in the middle of the view. */
-const centered = (unifiedIndex: number) => unifiedIndex * ROW - VIEW / 2 + ROW / 2;
+const centered = (unifiedIndex: number) => unifiedIndex * ROW - viewHeight / 2 + ROW / 2;
 
 // The three changes' unified rows (the first row of each run of -/+ lines).
 const FIRST = 4;
@@ -113,6 +116,7 @@ describe.if(hasDom)('DiffViewer change navigation (DOM, real Pierre)', () => {
   let originalScrollTo: HTMLElement['scrollTo'];
 
   beforeEach(() => {
+    viewHeight = VIEW;
     originalRect = HTMLElement.prototype.getBoundingClientRect;
     originalScrollTo = HTMLElement.prototype.scrollTo;
     scrollTop = 0;
@@ -123,7 +127,7 @@ describe.if(hasDom)('DiffViewer change navigation (DOM, real Pierre)', () => {
         const top = Number.parseInt(index, 10) * ROW - scrollTop;
         return { top, bottom: top + ROW, height: ROW, left: 0, right: 800, width: 800, x: 0, y: top, toJSON() {} } as DOMRect;
       }
-      return { top: 0, bottom: VIEW, height: VIEW, left: 0, right: 800, width: 800, x: 0, y: 0, toJSON() {} } as DOMRect;
+      return { top: 0, bottom: viewHeight, height: viewHeight, left: 0, right: 800, width: 800, x: 0, y: 0, toJSON() {} } as DOMRect;
     };
     HTMLElement.prototype.scrollTo = function (this: HTMLElement, options?: ScrollToOptions | number) {
       if (typeof options === 'object' && options && typeof options.top === 'number') {
@@ -136,6 +140,9 @@ describe.if(hasDom)('DiffViewer change navigation (DOM, real Pierre)', () => {
       get: () => scrollTop,
       set: () => {},
     });
+    // The diff is far taller than the view: 40 lines of ROW px.
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', { configurable: true, get: () => 40 * ROW + viewHeight });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => viewHeight });
   });
 
   afterEach(async () => {
@@ -149,6 +156,8 @@ describe.if(hasDom)('DiffViewer change navigation (DOM, real Pierre)', () => {
     HTMLElement.prototype.getBoundingClientRect = originalRect;
     HTMLElement.prototype.scrollTo = originalScrollTo;
     delete (HTMLElement.prototype as { scrollTop?: number }).scrollTop;
+    delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+    delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight;
   });
 
   async function mount({ fullContents, changeNavigation = true }: { fullContents: boolean; changeNavigation?: boolean }) {
@@ -247,17 +256,39 @@ describe.if(hasDom)('DiffViewer change navigation (DOM, real Pierre)', () => {
       press('n');
       expect(scrolls).toEqual([centered(FIRST), centered(SECOND), centered(THIRD)]);
 
-      // Past the last change: nothing moves, the key is still taken.
-      expect(press('n').defaultPrevented).toBe(true);
+      // Past the last change: nothing moves, and the key is left unclaimed.
+      expect(press('n').defaultPrevented).toBe(false);
       expect(scrolls).toHaveLength(3);
 
       press('N', { shiftKey: true });
       press('N', { shiftKey: true });
       expect(scrolls.slice(3)).toEqual([centered(SECOND), Math.max(0, centered(FIRST))]);
-      press('N', { shiftKey: true });
+      expect(press('N', { shiftKey: true }).defaultPrevented).toBe(false);
       expect(scrolls).toHaveLength(5);
     });
   }
+
+  test('a tall view at the top: the first N lands on the first change, even on screen', async () => {
+    // 830 px shows all three changes' neighbourhood start: rows 4 and 12 are
+    // on screen (one above the middle), and the view cannot scroll up.
+    viewHeight = 830;
+    await mount({ fullContents: false });
+    expect(press('n').defaultPrevented).toBe(true);
+    // Centring row 4 would scroll above the top: it stays at 0.
+    expect(scrolls).toEqual([0]);
+    // Row 12 cannot be centred either; the walk still goes on from it.
+    press('n');
+    press('n');
+    expect(scrolls).toEqual([0, 0, centered(THIRD)]);
+  });
+
+  test('at the bottom, the first Shift+N lands on the last change', async () => {
+    viewHeight = 830;
+    await mount({ fullContents: false });
+    scrollTop = 40 * ROW; // scrolled to the end: the last change is on screen, above the middle
+    press('N', { shiftKey: true });
+    expect(scrolls).toEqual([centered(THIRD)]);
+  });
 
   test('after scrolling by hand, N and Shift+N step from the middle of the view', async () => {
     await mount({ fullContents: false });

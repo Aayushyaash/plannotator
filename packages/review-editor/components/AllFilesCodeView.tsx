@@ -43,6 +43,7 @@ import {
   findChangeElement,
   listDiffChanges,
   placementOf,
+  readingLineFor,
   renderedUnifiedRange,
   resolveChangeJump,
   type ChangePlacement,
@@ -2621,7 +2622,11 @@ export const AllFilesCodeView: React.FC<AllFilesCodeViewProps> = ({
     const container = viewer.getContainerElement() ?? scrollRef.current;
     if (container == null) return false;
     const view = container.getBoundingClientRect();
-    const readingLine = view.top + view.height / 2;
+    const scrolled = viewer.getScrollTop();
+    const readingLine = readingLineFor(view, direction, {
+      atTop: scrolled <= 1,
+      atBottom: scrolled + viewer.getHeight() >= viewer.getScrollHeight() - 1,
+    });
 
     const renderedElements = new Map<string, HTMLElement>();
     for (const rendered of viewer.getRenderedItems()) {
@@ -2670,7 +2675,8 @@ export const AllFilesCodeView: React.FC<AllFilesCodeViewProps> = ({
       if (rect && rect.bottom > view.top && rect.top < view.bottom) current = index;
     }
     const target = resolveChangeJump(spots.map((spot) => spot.placement), direction, current);
-    if (target == null) return true;
+    // No change that way: leave the key to anyone else.
+    if (target == null) return false;
     const spot = spots[target];
     changeCursorRef.current = { itemId: spot.itemId, unifiedIndex: spot.change.unifiedIndex };
     handle.scrollTo({

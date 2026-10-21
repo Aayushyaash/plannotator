@@ -78,6 +78,23 @@ export function resolveChangeJump(
   return index === -1 ? null : index;
 }
 
+/**
+ * The line a jump is measured from. Normally the middle of the view, which
+ * the jump centres a change on. At the top of the scroll it is the top of the
+ * view for `N`, so the first press lands on the first change below the
+ * current position instead of skipping the ones already on screen; at the
+ * bottom it is the bottom of the view for `Shift+N`, likewise.
+ */
+export function readingLineFor(
+  view: { top: number; bottom: number },
+  direction: 'next' | 'prev',
+  scroll: { atTop: boolean; atBottom: boolean },
+): number {
+  if (direction === 'next' && scroll.atTop) return view.top - 1;
+  if (direction === 'prev' && scroll.atBottom) return view.bottom + 1;
+  return (view.top + view.bottom) / 2;
+}
+
 export function placementOf(
   rect: { top: number; height: number },
   readingLine: number,

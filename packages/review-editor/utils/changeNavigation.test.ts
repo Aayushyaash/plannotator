@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { getSingularPatch } from '@pierre/diffs';
-import { changeJumpDirection, listDiffChanges, resolveChangeJump } from './changeNavigation';
+import { changeJumpDirection, listDiffChanges, readingLineFor, resolveChangeJump } from './changeNavigation';
 
 // One hunk holding two runs of changed lines, then a pure deletion.
 const PATCH = [
@@ -101,5 +101,23 @@ describe('changeJumpDirection', () => {
     expect(changeJumpDirection(typing({ tagName: 'SELECT' }))).toBeNull();
     expect(changeJumpDirection(typing({ tagName: 'DIV', isContentEditable: true }))).toBeNull();
     expect(changeJumpDirection(typing({ tagName: 'DIV', isContentEditable: false }))).toBe('next');
+  });
+});
+
+describe('readingLineFor', () => {
+  const view = { top: 0, bottom: 800 };
+  const middle = { atTop: false, atBottom: false };
+
+  test('the middle of the view while scrolled somewhere in between', () => {
+    expect(readingLineFor(view, 'next', middle)).toBe(400);
+    expect(readingLineFor(view, 'prev', middle)).toBe(400);
+  });
+
+  test('N at the top and Shift+N at the bottom take changes already on screen', () => {
+    expect(readingLineFor(view, 'next', { atTop: true, atBottom: false })).toBeLessThan(view.top);
+    expect(readingLineFor(view, 'prev', { atTop: false, atBottom: true })).toBeGreaterThan(view.bottom);
+    // The other direction keeps the middle.
+    expect(readingLineFor(view, 'prev', { atTop: true, atBottom: false })).toBe(400);
+    expect(readingLineFor(view, 'next', { atTop: false, atBottom: true })).toBe(400);
   });
 });

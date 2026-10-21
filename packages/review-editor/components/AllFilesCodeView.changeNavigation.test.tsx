@@ -28,10 +28,10 @@ const realResolveSyntaxTheme = (await import('@plannotator/ui/utils/syntaxTheme'
 
 const ROW = 30;
 const FILE = 3000;
-const VIEW = 200;
-/** Space above the first file (the review's leading content), so the first
- *  change starts below the middle of the view. */
-const LEAD = 200;
+let VIEW = 200;
+/** Space above the first file (the review's leading content). Most tests
+ *  start the first change below the middle of the view; one starts at 0. */
+let LEAD = 200;
 
 let scrollTop = 0;
 let lineScrolls: Array<{ id: string; lineNumber: number; side: string }> = [];
@@ -78,7 +78,7 @@ mock.module('@pierre/diffs/react', () => ({
         const index = items.findIndex((item) => item.id === target.id);
         const row = findRow(wrappers.current.get(target.id), target.lineNumber, target.side);
         const unified = row ? Number.parseInt(row.getAttribute('data-line-index')!, 10) : 0;
-        scrollTop = LEAD + index * FILE + unified * ROW - VIEW / 2 + ROW / 2;
+        scrollTop = Math.max(0, LEAD + index * FILE + unified * ROW - VIEW / 2 + ROW / 2);
       },
       setSelectedLines: () => {},
       getSelectedLines: () => null,
@@ -90,7 +90,7 @@ mock.module('@pierre/diffs/react', () => ({
           .map((item) => ({ id: item.id, type: 'diff', item, element: wrappers.current.get(item.id)! })),
         getScrollTop: () => scrollTop,
         getTopForItem: (id: string) => LEAD + Math.max(0, items.findIndex((item) => item.id === id)) * FILE,
-        getScrollHeight: () => 0,
+        getScrollHeight: () => LEAD + items.length * FILE,
         getHeight: () => VIEW,
         scrollTo: () => {},
       }),
@@ -208,6 +208,8 @@ describe.if(hasDom)('AllFilesCodeView change navigation (DOM, real Pierre rows)'
   let originalRect: HTMLElement['getBoundingClientRect'];
 
   beforeEach(() => {
+    VIEW = 200;
+    LEAD = 200;
     originalRect = HTMLElement.prototype.getBoundingClientRect;
     scrollTop = 0;
     lineScrolls = [];
@@ -300,11 +302,22 @@ describe.if(hasDom)('AllFilesCodeView change navigation (DOM, real Pierre rows)'
     // The centred row really is the one named (not file a's line 2).
     expect(scrollTop).toBe(LEAD + 2 * FILE + 1 * ROW - VIEW / 2 + ROW / 2);
 
-    press('n');
+    // Past the last change: nothing moves, and the key is left unclaimed.
+    expect(press('n').defaultPrevented).toBe(false);
     expect(lineScrolls).toHaveLength(4);
     press('N', { shiftKey: true });
     press('N', { shiftKey: true });
     expect(ids().slice(4)).toEqual(['b:d2', 'a:d21']);
+  });
+
+  test('a tall view at the top with nothing above the files: the first N lands on the first change', async () => {
+    LEAD = 0;
+    VIEW = 830;
+    await mount();
+    // a.ts line 2 (row 1) is on screen, above the middle: N still goes there first.
+    press('n');
+    press('n');
+    expect(ids()).toEqual(['a:d2', 'a:d21']);
   });
 
   test('collapsed files are skipped; files outside the rendered window are reached', async () => {
