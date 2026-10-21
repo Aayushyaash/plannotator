@@ -22,7 +22,11 @@
  *   approved text passes, and `classic.PermissionRequest` allows it with the
  *   reviewer's permission mode. Because modules sit above the settings hooks
  *   in that chain, the plugin's classic PermissionRequest command hook is
- *   never reached for it: no second review.
+ *   never reached for it: no second review. Where an organization's guard
+ *   plugin (Claude Code's `cc-plugin-sec-default` on Team/Enterprise
+ *   accounts) sends `classic.PermissionRequest` past this mod, the command
+ *   hook is reached; it finds the approval the mod recorded for the call in
+ *   flight (plan.ts `PLAN_APPROVALS_DIR`) and allows it without a review (#2007).
  * - `/plannotator-review`, `/plannotator-annotate`, `/plannotator-last`
  *   (`command.run`): the user's skills keep their names; the mod answers the
  *   command itself, starting the CLI detached with the same arguments, and
@@ -467,7 +471,7 @@ export function register(on: On) {
     try {
       return await next(e)
     } finally {
-      instance.onPlanCallSettled(e.tool_use_id)
+      await instance.onPlanCallSettled(e.tool_use_id)
     }
   })
 
