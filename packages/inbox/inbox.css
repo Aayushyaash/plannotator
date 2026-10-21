@@ -3559,9 +3559,15 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
 .ib-draft-for { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ib-draft-saved, .ib-draft-discard { flex: none; white-space: nowrap; }
 .ib-draft-head .ib-sp { flex: 1; }
-/* After another window's change refused a save: the words are not saved, and the person chooses (Keep mine / Use theirs). */
-.ib-draft-head[data-draft-conflict] { flex-wrap: wrap; row-gap: 2px; }
-.ib-draft-head[data-draft-conflict] .ib-draft-saved { white-space: normal; color: var(--foreground); }
+/* Both windows hold words: this window's are not saved, and the person chooses (Keep mine / Discard).
+   The line wraps; the two buttons stay together on one line, far enough apart that their hit areas
+   (the ::after boxes) never meet: 6 px each side on a desktop, 8 px on a phone. */
+.ib-draft-head[data-draft-conflict] { flex-wrap: wrap; row-gap: 4px; }
+.ib-draft-head[data-draft-conflict] .ib-draft-saved { flex: 1 1 12em; min-width: 0; white-space: normal; color: var(--foreground); }
+.ib-draft-acts { display: inline-flex; flex: none; align-items: center; gap: 20px; white-space: nowrap; }
+@media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
+  .ib-draft-acts { gap: 24px; }
+}
 .ib-draft-saved { color: var(--muted-foreground); }
 .ib-draft-discard { position: relative; border: 0; background: transparent; padding: 0 2px; color: var(--muted-foreground); font: inherit; cursor: pointer; border-radius: 4px; }
 .ib-draft-discard::after { content: ''; position: absolute; inset: -8px -6px; }

@@ -11,7 +11,8 @@
  * draft_conflict`: another window saved, sent or discarded since) is never
  * written over: this window adopts the draft as the server holds it and keeps
  * its own words in the box as not saved (`conflict`), until the person picks
- * Keep mine (`keepMine`, saved over the newer draft) or Use theirs (`takeTheirs`). So a draft
+ * Keep mine (`keepMine`, saved over the newer draft) or Discard (`takeTheirs`:
+ * only this window's words go). So a draft
  * another window sent never comes back holding the words it sent.
  *
  * A Send claims the thread when it starts (`claim`): the words waiting are
@@ -36,7 +37,7 @@ export interface ReplyDraftState {
   /**
    * The words typed here that the server refused because another window
    * changed the draft since (null: none). They stay in the box, not saved,
-   * until the person picks Keep mine or Use theirs.
+   * until the person picks Keep mine or Discard.
    */
   conflict: string | null;
 }
@@ -69,6 +70,8 @@ export function useReplyDraft(threadId: string) {
   const claimed = useRef(new Set<string>());
   /** Per thread: the words a refused save carried, kept here (not saved). */
   const conflicts = useRef(new Map<string, string>());
+  /** Per thread: the words the server held as this window last saved or read them (null: no draft). */
+  const synced = useRef(new Map<string, string | null>());
   /** The words the last save queued here carries (or the draft read): the page's last save names them (`base_body`). */
   const lastWords = useRef<string | null>(null);
 
@@ -84,6 +87,12 @@ export function useReplyDraft(threadId: string) {
       conflicts.current.set(target, words);
       unsavedConflicts.add(conflictKey(target));
     }
+  };
+  /** The server holds this draft for the thread now: its base and words, as this window knows them. */
+  const adopt = (target: string, draft: InboxReplyDraft | null) => {
+    bases.current.set(target, draft?.updated_at ?? null);
+    synced.current.set(target, draft?.body ?? null);
+    if (target === current.current) lastWords.current = draft?.body ?? null;
   };
   const show = (target: string, draft: InboxReplyDraft | null) => {
     if (target === current.current) setState({ loadedFor: target, draft, conflict: conflicts.current.get(target) ?? null });
@@ -107,14 +116,15 @@ export function useReplyDraft(threadId: string) {
           // there, and keep these words here, not saved, for the person to choose.
           const latest = await readDraft(target);
           if (latest === undefined) return;
-          bases.current.set(target, latest?.updated_at ?? null);
-          if (generation === generationOf(target)) setConflict(target, text);
-          if (target === current.current) lastWords.current = latest?.body ?? null;
+          adopt(target, latest);
+          // A conflict only when both windows hold words: an empty box (or the same words) is not one,
+          // and never deletes the other window's draft.
+          if (generation === generationOf(target) && text.trim() !== '' && text !== (latest?.body ?? '')) setConflict(target, text);
           show(target, latest);
           return;
         }
         if (generation !== generationOf(target)) return;
-        bases.current.set(target, answer.draft?.updated_at ?? null);
+        adopt(target, answer.draft ?? null);
         show(target, answer.draft ?? null);
       } catch {
         // Kept in the box; the next pause in typing tries again.
@@ -142,8 +152,7 @@ export function useReplyDraft(threadId: string) {
         // An older Inbox answers 404 (caught below): no draft.
         const draft = (await inboxApi.replyDraft(threadId)).draft ?? null;
         if (!live) return;
-        bases.current.set(threadId, draft?.updated_at ?? null);
-        lastWords.current = draft?.body ?? null;
+        adopt(threadId, draft);
         setState({ loadedFor: threadId, draft, conflict: conflicts.current.get(threadId) ?? null });
       } catch {
         if (live) setState({ loadedFor: threadId, draft: null, conflict: conflicts.current.get(threadId) ?? null });
@@ -195,8 +204,12 @@ export function useReplyDraft(threadId: string) {
       const target = current.current;
       if (claimed.current.has(target)) return;
       if (conflicts.current.has(target)) {
-        // Still not saved: the person chooses (Keep mine / Use theirs).
-        setConflict(target, text);
+        // Emptied, or the same words the server holds: no conflict left. Otherwise still not
+        // saved: the person chooses (Keep mine / Discard).
+        if (text.trim() === '' || text === (synced.current.get(target) ?? '')) {
+          setConflict(target, null);
+          setState((s) => ({ ...s, conflict: null }));
+        } else setConflict(target, text);
         return;
       }
       pending.current = { threadId: target, text };
@@ -214,8 +227,7 @@ export function useReplyDraft(threadId: string) {
     const target = current.current;
     bump(target);
     setConflict(target, null);
-    lastWords.current = null;
-    bases.current.set(target, null);
+    adopt(target, null);
     setState({ loadedFor: target, draft: null, conflict: null });
     chain.current = chain.current.then(() => inboxApi.discardReplyDraft(target).then(() => undefined, () => undefined));
   }, []);
@@ -253,30 +265,58 @@ export function useReplyDraft(threadId: string) {
     pending.current = null;
     bump(target);
     claimed.current.delete(target);
-    setConflict(target, null);
-    lastWords.current = null;
-    bases.current.set(target, null);
+    // After a conflict the Send carried this window's words and cleared nothing: the other
+    // window's draft is still there, and the thread shows it.
+    if (conflicts.current.has(target)) {
+      setConflict(target, null);
+      setState((s) => ({ ...s, loadedFor: target, conflict: null }));
+      return;
+    }
+    adopt(target, null);
     setState({ loadedFor: target, draft: null, conflict: null });
   }, []);
 
   /**
-   * Read the thread's draft again (another window saved or discarded it, or the
-   * foot's Send wants the words as they are now). Leaves the words being typed
-   * here alone (and a conflict's words stay as they are). Answers the draft
-   * (null: none), or undefined when it was not read (a save waits, the thread
-   * changed, the read failed).
+   * Read the thread's draft again (`event: drafts`: another window, or a phone's
+   * Send, saved, sent or discarded it; or the foot's Send wants the words as they
+   * are now). `local` is the open box's words (null: the box is closed).
+   *
+   * Unchanged since this window's base: nothing moves. Changed, and the box has
+   * no edits since its last save or read (or is closed): the window takes the
+   * server's draft, and `replaceBox` tells the thread to put its words in the
+   * box (or close it when the draft is gone). Changed while the box HAS edits:
+   * the base does not move, so this window's save (made now) is refused and the
+   * conflict shows; neither window's words are lost.
+   *
+   * Answers undefined when it was not read (the thread changed, the read failed).
    */
-  const reload = useCallback(async (): Promise<InboxReplyDraft | null | undefined> => {
+  const reload = useCallback(async (local: string | null = null): Promise<{ draft: InboxReplyDraft | null; replaceBox: boolean } | undefined> => {
     const target = current.current;
     await chain.current;
-    if (target !== current.current || pending.current) return undefined;
+    if (target !== current.current) return undefined;
     const draft = await readDraft(target);
-    if (draft === undefined || target !== current.current || pending.current) return draft;
-    bases.current.set(target, draft?.updated_at ?? null);
-    lastWords.current = draft?.body ?? null;
+    if (draft === undefined || target !== current.current) return undefined;
+    if ((draft?.updated_at ?? null) === baseOf(target)) {
+      show(target, draft);
+      return { draft, replaceBox: false };
+    }
+    if (conflicts.current.has(target)) {
+      // The choice is already showing: it now names the newest draft.
+      adopt(target, draft);
+      show(target, draft);
+      return { draft, replaceBox: false };
+    }
+    const waitingHere = pending.current?.threadId === target;
+    const edits = local !== null && (waitingHere || local !== (synced.current.get(target) ?? ''));
+    if (edits) {
+      if (waitingHere) flush();
+      else write(target, local);
+      return { draft, replaceBox: false };
+    }
+    adopt(target, draft);
     show(target, draft);
-    return draft;
-  }, []);
+    return { draft, replaceBox: local !== null };
+  }, [flush, write]);
 
   /** After a conflict: these words go over the newer draft (or make one again). */
   const keepMine = useCallback(
@@ -289,7 +329,7 @@ export function useReplyDraft(threadId: string) {
     [write],
   );
 
-  /** After a conflict: this window's words go; the box takes the draft as the server holds it. Answers its words ('' for none). */
+  /** After a conflict, Discard: this window's words go (the server's draft stays); the box takes that draft's words ('' for none). */
   const takeTheirs = useCallback((): string => {
     const target = current.current;
     setConflict(target, null);

@@ -34,17 +34,25 @@ export function DraftLabel({ unsent }: { unsent: InboxRowUnsent }) {
   );
 }
 
-/**
- * A save another window's change refused: the words in the box are not saved.
- * `sentElsewhere`: the draft was sent or discarded there (the server holds none).
- */
-export interface DraftConflict {
-  sentElsewhere: boolean;
-  onKeepMine: () => void;
-  onTakeTheirs: () => void;
+/** The conflict line's words: both windows hold words for this reply. */
+export function conflictText(sentElsewhere: boolean): string {
+  return sentElsewhere ? 'Not saved: this reply was sent or discarded in another window.' : 'Not saved: this reply changed in another window.';
 }
 
-/** Above the open reply box: the pill, whom it goes to, when it was saved, and Discard (or, after a conflict, the choice). */
+/**
+ * Both windows hold words for this reply: this window's save was refused, and
+ * its words are in the box, not saved. Keep mine saves them over the other's;
+ * Discard drops only this window's words (the other's draft stays).
+ */
+export interface DraftConflict {
+  /** The line's id: the reply box names it in aria-describedby. */
+  id: string;
+  text: string;
+  onKeepMine: () => void;
+  onDiscard: () => void;
+}
+
+/** Above the open reply box: the pill, whom it goes to, when it was saved, and Discard (or, after a conflict, the line and its choice). */
 export function DraftHead({
   label,
   savedAt,
@@ -57,19 +65,21 @@ export function DraftHead({
   conflict?: DraftConflict | null;
 }) {
   if (conflict) {
+    // Not a live region: the thread's own region says it once when it appears.
     return (
       <div className="ib-reply-l ib-draft-head" data-draft-head="" data-draft-conflict="">
-        <span className="ib-draft-pill">Draft</span> <span className="ib-draft-for" dir="auto">{label}</span>
-        <span className="ib-sp" />
-        <span className="ib-draft-saved" role="status">
-          {conflict.sentElsewhere ? 'Not saved: sent or discarded in another window' : 'Not saved: changed in another window'}
+        <span className="ib-draft-pill">Draft</span>
+        <span className="ib-draft-saved" id={conflict.id}>
+          {conflict.text}
         </span>
-        <button type="button" className="ib-draft-discard" data-draft-keep-mine="" onClick={conflict.onKeepMine}>
-          Keep mine
-        </button>
-        <button type="button" className="ib-draft-discard" data-draft-take-theirs="" onClick={conflict.onTakeTheirs}>
-          {conflict.sentElsewhere ? 'Drop mine' : 'Use theirs'}
-        </button>
+        <span className="ib-draft-acts">
+          <button type="button" className="ib-draft-discard" data-draft-keep-mine="" onClick={conflict.onKeepMine}>
+            Keep mine
+          </button>
+          <button type="button" className="ib-draft-discard" data-draft-discard="" onClick={conflict.onDiscard}>
+            Discard
+          </button>
+        </span>
       </div>
     );
   }

@@ -17,6 +17,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync 
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { unsentReply } from './unsent';
 
 const hasDom = typeof document !== 'undefined';
 const { InboxApp } = (hasDom ? await import('./App') : {}) as typeof import('./App');
@@ -56,7 +57,7 @@ function loopback(path: string, method = 'GET', body?: string): Promise<{ status
   });
 }
 
-const TESTS = 13;
+const TESTS = 20;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -430,7 +431,7 @@ test.skipIf(!hasDom)('another window sent the words: this window\'s next save is
   // This window keeps typing: its save is refused, and it adopts the server's state.
   type(el, 'First words. And more.');
   await until(() => el.querySelector('[data-draft-conflict]') !== null, 'the conflict');
-  expect(el.querySelector('[data-draft-conflict] .ib-draft-saved')?.textContent).toBe('Not saved: sent or discarded in another window');
+  expect(el.querySelector('[data-draft-conflict] .ib-draft-saved')?.textContent).toBe('Not saved: this reply was sent or discarded in another window.');
   await settle(200);
   expect(await serverDraft(world.waiting)).toBeNull();
   // More typing stays here, not saved.
@@ -442,4 +443,139 @@ test.skipIf(!hasDom)('another window sent the words: this window\'s next save is
   act(() => (el.querySelector('[data-draft-keep-mine]') as HTMLButtonElement).click());
   await until(async () => (await serverDraft(world.waiting))?.body === 'First words. And more, still.', 'kept on purpose');
   expect(el.querySelector('[data-draft-conflict]')).toBeNull();
+});
+
+/** Open the waiting thread's box with words saved there; answers the draft as the server holds it. */
+async function openWithSaved(words: string) {
+  const el = await renderApp(`#thread=${world.waiting}`);
+  await until(() => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Reply'), 'the foot');
+  act(() => button(el, 'Reply').click());
+  await settle();
+  type(el, words);
+  await until(async () => (await serverDraft(world.waiting))?.body === words, 'the words saved');
+  await settle();
+  return { el, saved: (await serverDraft(world.waiting))! };
+}
+const box = (el: HTMLElement) => el.querySelector('textarea') as HTMLTextAreaElement | null;
+const liveText = (el: HTMLElement) => [...el.querySelectorAll('[aria-live]')].map((n) => n.textContent).join(' ');
+
+test.skipIf(!hasDom)('event: drafts, sent elsewhere: a box with no edits closes, and the sent words never come back', async () => {
+  const { el, saved } = await openWithSaved('First words.');
+  // Another window (or the phone, then the computer's window) sends them and clears the draft.
+  await loopback(`/api/inbox/messages/${world.waiting}/reply`, 'POST', JSON.stringify({ idempotency_key: 'elsewhere-1', words: 'First words.', clear_draft: saved.updated_at }));
+  await act(async () => emit('drafts', { thread_id: world.waiting }));
+  await until(() => box(el) === null, 'the box closed');
+  expect(liveText(el)).toContain('This reply was sent or discarded in another window.');
+  // Opening the box again and typing makes a new draft of new words only.
+  act(() => button(el, 'Reply').click());
+  await settle();
+  expect(box(el)!.value).toBe('');
+  await settle(200);
+  expect(await serverDraft(world.waiting)).toBeNull();
+});
+
+test.skipIf(!hasDom)('event: drafts, sent elsewhere while this box has edits: the save is refused, the conflict shows, nothing comes back', async () => {
+  const { el, saved } = await openWithSaved('First words.');
+  type(el, 'First words. And more.');
+  await loopback(`/api/inbox/messages/${world.waiting}/reply`, 'POST', JSON.stringify({ idempotency_key: 'elsewhere-2', words: 'First words.', clear_draft: saved.updated_at }));
+  await act(async () => emit('drafts', { thread_id: world.waiting }));
+  await until(() => el.querySelector('[data-draft-conflict]') !== null, 'the conflict');
+  await settle(200);
+  expect(await serverDraft(world.waiting)).toBeNull();
+  expect(box(el)!.value).toBe('First words. And more.');
+  // Announced in the thread's live region; the box names the line.
+  expect(liveText(el)).toContain('Not saved: this reply was sent or discarded in another window.');
+  const line = el.querySelector('[data-draft-conflict] .ib-draft-saved')!;
+  expect(line.getAttribute('role')).toBeNull();
+  expect(box(el)!.getAttribute('aria-describedby')).toContain(line.id);
+  // The restart guard asks while those words are not saved.
+  expect(unsentReply()).not.toBeNull();
+});
+
+test.skipIf(!hasDom)('event: drafts, the other window typed: a box with no edits takes its words', async () => {
+  const { el, saved } = await openWithSaved('Mine.');
+  await loopback(`/api/inbox/threads/${world.waiting}/draft`, 'POST', JSON.stringify({ body: 'Theirs.', base: saved.updated_at }));
+  await act(async () => emit('drafts', { thread_id: world.waiting }));
+  await until(() => box(el)?.value === 'Theirs.', 'their words in the box');
+  expect(el.querySelector('[data-draft-conflict]')).toBeNull();
+  // Typing on from there saves over it, as an edit of the newest words.
+  type(el, 'Theirs. And mine.');
+  await until(async () => (await serverDraft(world.waiting))?.body === 'Theirs. And mine.', 'saved on top');
+});
+
+test.skipIf(!hasDom)('event: drafts, the other window typed while this box has edits: neither window\'s words are lost; Discard drops only mine', async () => {
+  const { el, saved } = await openWithSaved('Mine.');
+  type(el, 'Mine, and more.');
+  await loopback(`/api/inbox/threads/${world.waiting}/draft`, 'POST', JSON.stringify({ body: 'Theirs.', base: saved.updated_at }));
+  await act(async () => emit('drafts', { thread_id: world.waiting }));
+  await until(() => el.querySelector('[data-draft-conflict]') !== null, 'the conflict');
+  expect(el.querySelector('[data-draft-conflict] .ib-draft-saved')?.textContent).toBe('Not saved: this reply changed in another window.');
+  await settle(200);
+  expect((await serverDraft(world.waiting))?.body).toBe('Theirs.');
+  expect(box(el)!.value).toBe('Mine, and more.');
+  // Two choices only, and their hit areas apart (the gap is wider than both ::after reaches).
+  const acts = el.querySelector('[data-draft-conflict] .ib-draft-acts')!;
+  expect([...acts.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Keep mine', 'Discard']);
+  act(() => (el.querySelector('[data-draft-conflict] [data-draft-discard]') as HTMLButtonElement).click());
+  await settle();
+  expect(box(el)!.value).toBe('Theirs.');
+  expect(document.activeElement).toBe(box(el));
+  expect((await serverDraft(world.waiting))?.body).toBe('Theirs.');
+  expect(el.querySelector('[data-draft-conflict]')).toBeNull();
+});
+
+test.skipIf(!hasDom)('an empty box refused by a newer draft shows nothing and never deletes it', async () => {
+  const { el, saved } = await openWithSaved('Mine.');
+  await loopback(`/api/inbox/threads/${world.waiting}/draft`, 'POST', JSON.stringify({ body: 'Theirs.', base: saved.updated_at }));
+  // This window empties its box (no event reached it): the delete is refused.
+  type(el, '');
+  await settle(200);
+  expect(el.querySelector('[data-draft-conflict]')).toBeNull();
+  expect((await serverDraft(world.waiting))?.body).toBe('Theirs.');
+});
+
+test.skipIf(!hasDom)('a Send after a conflict carries this window\'s words and then shows the other window\'s draft', async () => {
+  const { el, saved } = await openWithSaved('Mine.');
+  type(el, 'Mine, sent.');
+  await loopback(`/api/inbox/threads/${world.waiting}/draft`, 'POST', JSON.stringify({ body: 'Theirs.', base: saved.updated_at }));
+  await act(async () => emit('drafts', { thread_id: world.waiting }));
+  await until(() => el.querySelector('[data-draft-conflict]') !== null, 'the conflict');
+  act(() => button(el, 'Send').click());
+  await until(() => box(el) === null, 'the Send');
+  const reply = posted.filter((p) => p.path.endsWith('/reply')).at(-1)!;
+  expect(reply.body.words).toBe('Mine, sent.');
+  expect(reply.body.clear_draft).toBeUndefined();
+  expect((await serverDraft(world.waiting))?.body).toBe('Theirs.');
+  await until(() => el.querySelector('[data-draft-foot]') !== null, 'the foot shows the other window\'s draft');
+  act(() => button(el, 'Edit draft').click());
+  await settle();
+  expect(box(el)!.value).toBe('Theirs.');
+});
+
+test.skipIf(!hasDom)('a Send whose answer is lost after it went is treated as sent: the words never come back as a draft', async () => {
+  const { el } = await openWithSaved('Went, answer lost.');
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const answer = await real(input, init);
+    if ((init?.method ?? 'GET') === 'POST' && String(input).endsWith('/reply')) throw new TypeError('Failed to fetch');
+    return answer;
+  }) as typeof fetch;
+  act(() => button(el, 'Send').click());
+  await until(() => !!el.textContent?.includes('Your reply went, but its answer was lost.'), 'the error saying it went');
+  globalThis.fetch = real;
+  await settle(200);
+  // The draft is gone and nothing saves it again by itself; the box keeps the words for a replaying retry.
+  expect(await serverDraft(world.waiting)).toBeNull();
+  expect(box(el)!.value).toBe('Went, answer lost.');
+  expect(box(el)!.readOnly).toBe(false);
+  await settle(200);
+  expect(await serverDraft(world.waiting)).toBeNull();
+  // Send again: the same key, answered as the reply that went (not sent twice).
+  act(() => button(el, 'Send').click());
+  await until(() => box(el) === null, 'the retry');
+  const keys = posted.filter((p) => p.path.endsWith('/reply')).map((p) => p.body.idempotency_key);
+  expect(keys.at(-1)).toBe(keys.at(-2));
+  const model = JSON.parse((await loopback(`/api/inbox/threads/${world.waiting}`)).text) as { thread: { messages: { author: { kind: string }; body: string }[] } };
+  expect(model.thread.messages.filter((m) => m.author.kind === 'person' && m.body.startsWith('Went, answer lost.'))).toHaveLength(1);
+  expect(await serverDraft(world.waiting)).toBeNull();
 });
