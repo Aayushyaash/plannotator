@@ -34,7 +34,8 @@ function cleanTestHome() {
 
 async function runScript(script: string): Promise<string> {
   const proc = Bun.spawn(["bun", "-e", script], {
-    env: { ...process.env, HOME: TEST_HOME },
+    // Exercise the fake HOME rather than inheriting the parent test sandbox.
+    env: { ...process.env, HOME: TEST_HOME, USERPROFILE: TEST_HOME, PLANNOTATOR_DATA_DIR: "" },
     cwd: PROJECT_ROOT,
     stdout: "pipe",
     stderr: "pipe",
@@ -330,6 +331,28 @@ describe("prompts integration (config from disk)", () => {
     `);
 
     expect(result).toBe("LGTM");
+  });
+
+  test("annotate approved-with-notes reads override from config.json", async () => {
+    writeConfig({
+      prompts: {
+        annotate: {
+          approvedWithNotes: "APPROVED {{context}}\n\nNotes: {{feedback}}",
+        },
+      },
+    });
+
+    const result = await runScript(`
+      import { getAnnotateApprovedWithNotesPrompt } from "./packages/shared/prompts";
+      console.log(getAnnotateApprovedWithNotesPrompt("opencode", undefined, {
+        context: "File: src/app.ts",
+        feedback: "Keep the retry bounded.",
+      }));
+    `);
+
+    expect(result).toBe(
+      "APPROVED File: src/app.ts\n\nNotes: Keep the retry bounded.",
+    );
   });
 
   // ── Review denied suffix ─────────────────────────────────────────────

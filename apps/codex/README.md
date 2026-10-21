@@ -12,8 +12,9 @@ Plan review uses Codex's experimental `Stop` hook. This is a post-render review 
 curl -fsSL https://plannotator.ai/install.sh | bash
 ```
 
-The installer adds the `plannotator` binary and, when Codex is installed or `~/.codex` already exists, enables Codex
-Stop hooks automatically.
+The installer adds the `plannotator` binary and, when Codex is installed or the Codex home already exists, enables Codex
+Stop hooks automatically. The Codex home is `$CODEX_HOME` when set, falling back to `~/.codex` — both the installer and the
+`plannotator` binary (e.g. `plannotator last` reading Codex sessions) respect it ([docs](https://developers.openai.com/codex/config-advanced#config-and-state-locations)).
 
 **Windows PowerShell:**
 
@@ -21,8 +22,8 @@ Stop hooks automatically.
 irm https://plannotator.ai/install.ps1 | iex
 ```
 
-Codex hooks are currently disabled on Windows in the official Codex docs. The Windows installer does not enable them
-automatically; it only prints manual guidance for future/manual experimentation.
+Codex hooks on native Windows are experimental. The Windows installer does not enable them automatically; it prints
+the manual setup steps (`[features] hooks = true` plus the `Stop` hook) for users who want to try them.
 
 ## Enable Codex hooks
 
@@ -116,7 +117,7 @@ The message opens in the annotation UI where you can highlight text, add comment
 |----------|-------------|
 | `PLANNOTATOR_REMOTE` | Set to `1` / `true` for remote mode, `0` / `false` for local mode, or leave unset for SSH auto-detection. Uses a fixed port in remote mode; browser-opening behavior depends on the environment. |
 | `PLANNOTATOR_PORT` | Fixed port to use. Default: random locally, `19432` for remote sessions. |
-| `PLANNOTATOR_BROWSER` | Custom browser to open. macOS: app name or path. Linux/Windows: executable path. |
+| `PLANNOTATOR_BROWSER` | Custom browser to open. macOS: app name or path. Linux/Windows: executable path. `none` (also `false`, `0`, `off`, `no`, `true`, `1`, `:`) opens no browser at all; the session URL is always printed. |
 
 ## Links
 

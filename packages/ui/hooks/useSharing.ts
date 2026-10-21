@@ -8,7 +8,7 @@
  * - Tracking whether current session is from a shared link
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Annotation, type ImageAttachment } from '../types';
 import {
   type SharePayload,
@@ -64,7 +64,7 @@ interface UseSharingResult {
   refreshShareUrl: () => Promise<void>;
 
   /** Generate a short URL via the paste service (user must explicitly trigger this) */
-  generateShortUrl: () => Promise<void>;
+  generateShortUrl: () => Promise<string | null>;
 
   /** Import annotations from a teammate's share URL */
   importFromShareUrl: (url: string) => Promise<ImportResult>;
@@ -76,6 +76,12 @@ interface UseSharingResult {
   clearShareLoadError: () => void;
 }
 
+type ShortShareUrlLifecycle =
+  | { readonly _tag: 'none' }
+  | { readonly _tag: 'incoming-hydration' }
+  | { readonly _tag: 'generating'; readonly requestContext: object }
+  | { readonly _tag: 'associated'; readonly requestContext: object }
+  | { readonly _tag: 'failed'; readonly requestContext: object };
 
 // Share payloads are base64url-encoded deflate output: charset [A-Za-z0-9_-],
 // realistically >=30 chars, and virtually always mixed-case because deflate
@@ -100,8 +106,11 @@ export function useSharing(
   shareBaseUrl?: string,
   pasteApiUrl?: string,
   rawHtml?: string,
+  resolveRawHtmlForShare?: () => Promise<string | null>,
   setRawHtml?: (h: string) => void,
+  setShareHtml?: (h: string) => void,
   setRenderAs?: (m: 'markdown' | 'html') => void,
+  contentRevision = 0,
 ): UseSharingResult {
   const [isSharedSession, setIsSharedSession] = useState(false);
   const [isLoadingShared, setIsLoadingShared] = useState(true);
@@ -113,6 +122,24 @@ export function useSharing(
   const [pendingSharedAnnotations, setPendingSharedAnnotations] = useState<Annotation[] | null>(null);
   const [sharedGlobalAttachments, setSharedGlobalAttachments] = useState<ImageAttachment[] | null>(null);
   const [shareLoadError, setShareLoadError] = useState('');
+  // Identity token for in-flight share requests: a new token invalidates any
+  // response still on the wire. Content inputs only — resolveRawHtmlForShare
+  // is deliberately NOT a dependency: its identity changes when it caches the
+  // portable HTML mid-request (App memoizes it on shareHtml), and listing it
+  // would make the first short-link generation on an HTML session discard its
+  // own result. HTML refreshes invalidate through contentRevision instead.
+  const shareRequestContext = useMemo(() => ({}), [
+    markdown,
+    annotations,
+    globalAttachments,
+    shareBaseUrl,
+    pasteApiUrl,
+    rawHtml,
+    contentRevision,
+  ]);
+  const latestShareRequestContextRef = useRef(shareRequestContext);
+  latestShareRequestContextRef.current = shareRequestContext;
+  const shortShareUrlLifecycleRef = useRef<ShortShareUrlLifecycle>({ _tag: 'none' });
 
   const clearPendingSharedAnnotations = useCallback(() => {
     setPendingSharedAnnotations(null);
@@ -128,6 +155,11 @@ export function useSharing(
       const pathMatch = window.location.pathname.match(/^\/p\/([A-Za-z0-9]{6,16})$/);
       if (pathMatch) {
         const pasteId = pathMatch[1];
+        // Capture before the async fetch. Concurrent loads (including the
+        // development Strict Mode replay) can complete after an earlier load
+        // removes /p/<id> from history; every completion must preserve the
+        // original short URL.
+        const incomingShortUrl = window.location.href;
 
         // Extract key and optional paste origin from fragment: #key=<k>&paste=<base64url>
         const fragment = window.location.hash.slice(1);
@@ -141,26 +173,27 @@ export function useSharing(
         if (payload) {
           if (payload.h && payload.r === 'html') {
             setRawHtml?.(payload.h);
+            setShareHtml?.(payload.h);
             setRenderAs?.('html');
             setMarkdown('');
           } else {
             setMarkdown(payload.p);
             setRenderAs?.('markdown');
             setRawHtml?.('');
+            setShareHtml?.('');
           }
 
           const restoredAnnotations = fromShareable(payload.a, payload.d, payload.s);
           setAnnotations(restoredAnnotations);
 
-          if (payload.g?.length) {
-            const parsed = parseShareableImages(payload.g) ?? [];
-            setGlobalAttachments(parsed);
-            setSharedGlobalAttachments(parsed);
-          }
+          const parsedGlobalAttachments = parseShareableImages(payload.g) ?? [];
+          setGlobalAttachments(parsedGlobalAttachments);
+          setSharedGlobalAttachments(parsedGlobalAttachments.length ? parsedGlobalAttachments : null);
 
           setPendingSharedAnnotations(restoredAnnotations);
           setIsSharedSession(true);
-          setShortShareUrl(window.location.href);
+          shortShareUrlLifecycleRef.current = { _tag: 'incoming-hydration' };
+          setShortShareUrl(incomingShortUrl);
           onSharedLoad?.();
 
           // Remove the /p/<id> path from browser history so a refresh doesn't
@@ -188,24 +221,23 @@ export function useSharing(
       if (payload) {
         if (payload.h && payload.r === 'html') {
           setRawHtml?.(payload.h);
+          setShareHtml?.(payload.h);
           setRenderAs?.('html');
           setMarkdown('');
         } else {
           setMarkdown(payload.p);
           setRenderAs?.('markdown');
           setRawHtml?.('');
+          setShareHtml?.('');
         }
 
         // Convert shareable annotations to full annotations
         const restoredAnnotations = fromShareable(payload.a, payload.d, payload.s);
         setAnnotations(restoredAnnotations);
 
-        // Restore global attachments if present
-        if (payload.g?.length) {
-          const parsed = parseShareableImages(payload.g) ?? [];
-          setGlobalAttachments(parsed);
-          setSharedGlobalAttachments(parsed);
-        }
+        const parsedGlobalAttachments = parseShareableImages(payload.g) ?? [];
+        setGlobalAttachments(parsedGlobalAttachments);
+        setSharedGlobalAttachments(parsedGlobalAttachments.length ? parsedGlobalAttachments : null);
 
         // Store for later application to DOM
         setPendingSharedAnnotations(restoredAnnotations);
@@ -236,7 +268,7 @@ export function useSharing(
       setShareLoadError('Failed to load shared plan — an unexpected error occurred.');
       return false;
     }
-  }, [setMarkdown, setAnnotations, setGlobalAttachments, onSharedLoad, pasteApiUrl, setRawHtml, setRenderAs]);
+  }, [setMarkdown, setAnnotations, setGlobalAttachments, onSharedLoad, pasteApiUrl, setRawHtml, setShareHtml, setRenderAs]);
 
   // Load from hash on mount
   useEffect(() => {
@@ -256,32 +288,62 @@ export function useSharing(
 
   // Generate share URL when markdown or annotations change
   const refreshShareUrl = useCallback(async () => {
+    const requestContext = shareRequestContext;
     try {
       const url = await generateShareUrl(markdown, annotations, globalAttachments, shareBaseUrl, rawHtml);
+      if (latestShareRequestContextRef.current !== requestContext) return;
       setShareUrl(url ?? '');
       setShareUrlSize(url ? formatUrlSize(url) : '');
     } catch (e) {
+      if (latestShareRequestContextRef.current !== requestContext) return;
       console.error('Failed to generate share URL:', e);
       setShareUrl('');
       setShareUrlSize('');
     }
-  }, [markdown, annotations, globalAttachments, shareBaseUrl, rawHtml]);
+  }, [markdown, annotations, globalAttachments, shareBaseUrl, rawHtml, shareRequestContext]);
 
   // Auto-refresh share URL when dependencies change
   useEffect(() => {
     refreshShareUrl();
   }, [refreshShareUrl]);
 
-  // Clear stale short URL when content changes (does NOT auto-regenerate —
-  // the user must explicitly click "Create short link" again).
-  // Skip on shared session load — the incoming short URL must survive.
-  const isSharedRef = useRef(false);
+  // An incoming short URL becomes associated with the fully hydrated share
+  // context on its first committed render. From then on it follows the same
+  // lifecycle as a locally generated URL: any shareable-content change makes
+  // the immutable paste stale, so discard the URL without auto-uploading a
+  // replacement. Markdown users can still use the fresh hash URL; creating a
+  // new short link remains an explicit action.
   useEffect(() => {
-    if (isSharedSession) { isSharedRef.current = true; return; }
-    if (isSharedRef.current) { isSharedRef.current = false; return; }
+    const lifecycle = shortShareUrlLifecycleRef.current;
+    if (lifecycle._tag === 'incoming-hydration') {
+      if (!shortShareUrl) return;
+      // Hydration writes fresh annotation and attachment arrays, so this first
+      // committed request context represents the loaded snapshot. If those
+      // setters ever preserve identity, replace this consume-on-next-effect
+      // handoff with an explicit post-hydration signal.
+      shortShareUrlLifecycleRef.current = {
+        _tag: 'associated',
+        requestContext: shareRequestContext,
+      };
+      return;
+    }
+    if (
+      (
+        lifecycle._tag === 'generating'
+        || lifecycle._tag === 'associated'
+        || lifecycle._tag === 'failed'
+      )
+      && lifecycle.requestContext === shareRequestContext
+    ) {
+      return;
+    }
+    if (lifecycle._tag === 'none' && !shortShareUrl) return;
+
+    shortShareUrlLifecycleRef.current = { _tag: 'none' };
+    setIsGeneratingShortUrl(false);
     setShortShareUrl('');
     setShortUrlError('');
-  }, [markdown, annotations, rawHtml, isSharedSession]);
+  }, [shareRequestContext, shortShareUrl]);
 
   /**
    * Generate a short URL via the paste service.
@@ -289,34 +351,54 @@ export function useSharing(
    * Clears the short URL if the service is unavailable — the full
    * hash-based URL remains usable as a fallback.
    */
-  const generateShortUrl = useCallback(async () => {
-    if (!markdown && !rawHtml) return;
+  const generateShortUrl = useCallback(async (): Promise<string | null> => {
+    if (!markdown && !rawHtml) return null;
 
     setIsGeneratingShortUrl(true);
     setShortUrlError('');
+    const requestContext = shareRequestContext;
+    shortShareUrlLifecycleRef.current = {
+      _tag: 'generating',
+      requestContext,
+    };
 
     try {
+      const htmlForShare = rawHtml
+        ? (await resolveRawHtmlForShare?.()) ?? rawHtml
+        : undefined;
       const result = await createShortShareUrl(
         markdown,
         annotations,
         globalAttachments,
         { pasteApiUrl, shareBaseUrl },
-        rawHtml,
+        htmlForShare,
       );
 
+      if (latestShareRequestContextRef.current !== requestContext) return null;
+
       if (result) {
+        shortShareUrlLifecycleRef.current = {
+          _tag: 'associated',
+          requestContext,
+        };
         setShortShareUrl(result.shortUrl);
+        return result.shortUrl;
       } else {
+        shortShareUrlLifecycleRef.current = { _tag: 'failed', requestContext };
         setShortShareUrl('');
         setShortUrlError('Short URL service unavailable');
+        return null;
       }
-    } catch {
+    } catch (e) {
+      if (latestShareRequestContextRef.current !== requestContext) return null;
+      shortShareUrlLifecycleRef.current = { _tag: 'failed', requestContext };
       setShortShareUrl('');
-      setShortUrlError('Failed to generate short URL');
+      setShortUrlError(e instanceof Error ? e.message : 'Failed to generate short URL');
+      return null;
     } finally {
-      setIsGeneratingShortUrl(false);
+      if (latestShareRequestContextRef.current === requestContext) setIsGeneratingShortUrl(false);
     }
-  }, [markdown, annotations, globalAttachments, shareBaseUrl, pasteApiUrl, rawHtml]);
+  }, [markdown, annotations, globalAttachments, shareBaseUrl, pasteApiUrl, rawHtml, resolveRawHtmlForShare, shareRequestContext]);
 
   // Import annotations from a teammate's share URL (supports both hash-based and short /p/<id> URLs)
   const importFromShareUrl = useCallback(async (url: string): Promise<ImportResult> => {

@@ -2,9 +2,11 @@ import {
   type DiffType,
   type GitDiffOptions,
   type VcsProvider,
+  createGitButlerProvider,
   createGitProvider,
   createJjProvider,
   createVcsApi,
+  resolveAvailableDiffType,
   resolveInitialDiffType,
 } from "@plannotator/shared/vcs-core";
 import {
@@ -14,6 +16,7 @@ import {
   runP4Diff,
 } from "./p4";
 import { runtime as gitRuntime } from "./git";
+import { runtime as gitButlerRuntime } from "./gitbutler";
 import { runtime as jjRuntime } from "./jj";
 
 const p4Provider: VcsProvider = {
@@ -39,25 +42,32 @@ const p4Provider: VcsProvider = {
 };
 
 const api = createVcsApi([
-  createJjProvider(jjRuntime),
+  createJjProvider(jjRuntime, gitRuntime),
+  createGitButlerProvider(gitButlerRuntime),
   createGitProvider(gitRuntime),
   p4Provider,
 ]);
 
 export const {
   detectVcs,
+  detectManagedVcs,
+  vcsOwnsDiffType,
   getVcsContext,
   detectRemoteDefaultCompareTarget,
   prepareLocalReviewDiff,
   runVcsDiff,
   getVcsFileContentsForDiff,
+  getVcsFileBytesForDiff,
+  getVcsDiffFingerprint,
   canStageFiles,
   stageFile,
   unstageFile,
   resolveVcsCwd,
+  vcsSupportsSnapshot,
+  materializeVcsSnapshot,
 } = api;
 
-export { resolveInitialDiffType, gitRuntime };
+export { resolveAvailableDiffType, resolveInitialDiffType, gitRuntime };
 
 export type {
   DiffOption,
@@ -71,8 +81,11 @@ export type {
 
 export {
   JJ_TRUNK_REVSET,
+  jjCommitRevset,
   jjCompareTargetRevset,
   jjLineBaseRevset,
+  parseCommitDiffType,
+  parseJjCommitDiffType,
   parseRemoteBookmark,
   parseWorktreeDiffType,
   validateFilePath,

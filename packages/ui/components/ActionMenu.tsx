@@ -1,8 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
+import { useDismissablePopover } from '../hooks/useDismissablePopover';
 
 interface ActionMenuProps {
   className?: string;
   panelClassName?: string;
+  panelWidth?: 'default' | 'wide';
   renderTrigger: (props: {
     isOpen: boolean;
     toggleMenu: () => void;
@@ -13,34 +15,22 @@ interface ActionMenuProps {
 export const ActionMenu: React.FC<ActionMenuProps> = ({
   className,
   panelClassName,
+  panelWidth = 'default',
   renderTrigger,
   children,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!isOpen) return;
-
-    const handlePointerDown = (event: PointerEvent) => {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
-        setIsOpen(false);
-      }
-    };
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setIsOpen(false);
-      }
-    };
-
-    document.addEventListener('pointerdown', handlePointerDown);
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('pointerdown', handlePointerDown);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [isOpen]);
+  // Shared dismissal (outside pointerdown + Escape). The hook consumes the
+  // dismissing Escape, so closing an open Options menu no longer also runs
+  // the host app's own Escape ladder — one Escape, one rung.
+  const dismiss = useCallback(() => setIsOpen(false), []);
+  useDismissablePopover({
+    enabled: isOpen,
+    ref: menuRef,
+    onDismiss: dismiss,
+  });
 
   return (
     <div ref={menuRef} className={className ? `relative ${className}` : 'relative'}>
@@ -50,7 +40,10 @@ export const ActionMenu: React.FC<ActionMenuProps> = ({
       })}
 
       {isOpen && (
-        <div className={panelClassName ?? 'absolute top-full right-0 mt-1 w-56 rounded-lg border border-border bg-popover py-1 shadow-xl z-[70]'}>
+        <div
+          data-pn-dismissable-popover="true"
+          className={panelClassName ?? `absolute top-full right-0 mt-1 ${panelWidth === 'wide' ? 'w-64' : 'w-56'} rounded-lg border border-border bg-popover py-1 shadow-xl z-[70]`}
+        >
           {children({ closeMenu: () => setIsOpen(false) })}
         </div>
       )}
@@ -64,6 +57,13 @@ interface ActionMenuItemProps {
   label: string;
   subtitle?: string;
   badge?: React.ReactNode;
+  disabled?: boolean;
+  /** ARIA menu semantics for hosts that render a real `role="menu"` popover
+   *  (DecisionControl). Default undefined so existing consumers are unchanged. */
+  role?: 'menuitem';
+  /** Appended to the row's classes (e.g. a tone token). Default undefined so
+   *  existing consumers are byte-identical. */
+  className?: string;
 }
 
 export const ActionMenuItem: React.FC<ActionMenuItemProps> = ({
@@ -72,10 +72,17 @@ export const ActionMenuItem: React.FC<ActionMenuItemProps> = ({
   label,
   subtitle,
   badge,
+  disabled = false,
+  role,
+  className,
 }) => (
   <button
+    data-pn-touch-target
+    type="button"
     onClick={onClick}
-    className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-muted"
+    disabled={disabled}
+    role={role}
+    className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent${className ? ` ${className}` : ''}`}
   >
     <span className="text-muted-foreground">{icon}</span>
     {subtitle ? (

@@ -8,9 +8,10 @@
  * Inspired by textarea.my's approach.
  */
 
-import { Annotation, AnnotationType, type ImageAttachment } from '../types';
-import { compress, decompress } from '@plannotator/shared/compress';
-import { encrypt, decrypt } from '@plannotator/shared/crypto';
+import { AnnotationType, type Annotation, type DocumentRenderAs, type ImageAttachment } from '../types';
+import { isDiagramRenderKind } from '@plannotator/core/annotatable';
+import { compress, decompress } from '@plannotator/core/compress';
+import { encrypt, decrypt } from '@plannotator/core/crypto';
 
 // Image in shareable format: plain string (old) or [path, name] tuple (new)
 type ShareableImage = string | [string, string];
@@ -27,8 +28,34 @@ export interface SharePayload {
   g?: ShareableImage[];  // global attachments (path strings or [path, name] tuples)
   d?: (string | null)[];  // diffContext per annotation, parallel to `a`
   s?: (string | undefined)[];  // source per annotation (external tool identifier), parallel to `a`
-  h?: string;  // raw HTML content (render-html mode)
+  h?: string;  // raw HTML content (direct HTML rendering mode)
   r?: 'html';  // render mode flag (omitted = markdown)
+}
+
+/**
+ * The markdown a document ships as in a share payload's `p`.
+ *
+ * A whole-file diagram source (.mmd/.dot) has no fence of its own — the
+ * annotate session renders it as one diagram because the SERVER said so in
+ * `renderAs`, and a share link carries no server. So it travels as the fenced
+ * form, which the portal's ordinary markdown parse turns back into the same
+ * diagram block. This is deliberately smaller than adding a render-mode flag
+ * (`r: 'html'`'s sibling): the portal needs no change at all.
+ *
+ * Diagram comments themselves still degrade to text comments in a share link,
+ * exactly as they do today — `diagramAnchor` is dropped like `htmlAnchor`
+ * (see sharing.multiTarget.test.ts).
+ */
+export function shareableDocumentMarkdown(
+  markdown: string,
+  renderAs: DocumentRenderAs | undefined,
+): string {
+  if (!isDiagramRenderKind(renderAs) || markdown === '') return markdown;
+  const language = renderAs === 'graphviz' ? 'dot' : 'mermaid';
+  // A diagram source can itself contain a ``` run only in a comment/label;
+  // a four-backtick fence keeps such a body intact.
+  const fence = markdown.includes('```') ? '````' : '```';
+  return `${fence}${language}\n${markdown.replace(/\n+$/, '')}\n${fence}`;
 }
 
 /**
@@ -220,6 +247,13 @@ export function formatUrlSize(url: string): string {
 const DEFAULT_PASTE_API = 'https://plannotator-paste.plannotator.workers.dev';
 const DEFAULT_SHARE_BASE = 'https://share.plannotator.ai';
 
+export class ShortShareUrlError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ShortShareUrlError';
+  }
+}
+
 /**
  * Create a short share URL by posting compressed plan data to the paste service.
  *
@@ -269,6 +303,9 @@ export async function createShortShareUrl(
     });
 
     if (!response.ok) {
+      if (response.status === 413) {
+        throw new ShortShareUrlError(await readPasteError(response, 'Share payload is too large'));
+      }
       console.warn(`[sharing] Paste service returned ${response.status}`);
       return null;
     }
@@ -283,10 +320,21 @@ export async function createShortShareUrl(
 
     return { shortUrl, id: result.id };
   } catch (e) {
+    if (e instanceof ShortShareUrlError) {
+      throw e;
+    }
     // Service unavailable — expected for self-hosted setups without a paste backend.
     // The caller is responsible for falling back to hash-based sharing silently.
-    console.debug('[sharing] Short URL service unavailable, using hash-based sharing:', e);
     return null;
+  }
+}
+
+async function readPasteError(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = (await response.json()) as { error?: unknown };
+    return typeof body.error === 'string' && body.error.trim() ? body.error : fallback;
+  } catch {
+    return fallback;
   }
 }
 

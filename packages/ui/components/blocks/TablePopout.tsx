@@ -9,7 +9,8 @@ import {
   type ColumnDef,
   type SortingState,
 } from '@tanstack/react-table';
-import { Block } from '../../types';
+import type { Block } from '../../types';
+import { copyTextToClipboard } from '../../utils/clipboard';
 import { InlineMarkdown } from '../InlineMarkdown';
 import { PopoutDialog } from '../PopoutDialog';
 import { parseTableContent, buildCsvFromRows, buildMarkdownTable } from './TableBlock';
@@ -27,6 +28,7 @@ interface TablePopoutProps {
   imageBaseDir?: string;
   onImageClick?: (src: string, alt: string) => void;
   githubRepo?: string;
+  repoHost?: string;
 }
 
 type Row = Record<string, string>;
@@ -42,6 +44,7 @@ const TablePopoutImpl: React.FC<TablePopoutProps> = ({
   imageBaseDir,
   onImageClick,
   githubRepo,
+  repoHost,
 }) => {
   const { headers, rows } = useMemo(() => parseTableContent(block.content), [block.content]);
 
@@ -82,11 +85,12 @@ const TablePopoutImpl: React.FC<TablePopoutProps> = ({
             onOpenCodeFile={onOpenCodeFile}
             onNavigateAnchor={onNavigateAnchor}
             githubRepo={githubRepo}
+            repoHost={repoHost}
           />
         ),
       }),
     );
-  }, [columnIds, headers, imageBaseDir, onImageClick, onOpenLinkedDoc, onNavigateAnchor, githubRepo]);
+  }, [columnIds, headers, imageBaseDir, onImageClick, onOpenLinkedDoc, onNavigateAnchor, githubRepo, repoHost]);
 
   const [sorting, setSorting] = useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = useState('');
@@ -99,22 +103,20 @@ const TablePopoutImpl: React.FC<TablePopoutProps> = ({
     );
 
   const handleCopyMarkdown = async () => {
-    try {
-      await navigator.clipboard.writeText(buildMarkdownTable(headers, getVisibleRowsData()));
+    if (await copyTextToClipboard(buildMarkdownTable(headers, getVisibleRowsData()))) {
       setCopiedMd(true);
       setTimeout(() => setCopiedMd(false), 1500);
-    } catch (err) {
-      console.error('Failed to copy:', err);
+    } else {
+      console.error('Failed to copy');
     }
   };
 
   const handleCopyCsv = async () => {
-    try {
-      await navigator.clipboard.writeText(buildCsvFromRows(headers, getVisibleRowsData()));
+    if (await copyTextToClipboard(buildCsvFromRows(headers, getVisibleRowsData()))) {
       setCopiedCsv(true);
       setTimeout(() => setCopiedCsv(false), 1500);
-    } catch (err) {
-      console.error('Failed to copy:', err);
+    } else {
+      console.error('Failed to copy');
     }
   };
 
@@ -264,7 +266,8 @@ export const TablePopout = React.memo(
     prev.open === next.open &&
     prev.container === next.container &&
     prev.imageBaseDir === next.imageBaseDir &&
-    prev.githubRepo === next.githubRepo,
+    prev.githubRepo === next.githubRepo &&
+    prev.repoHost === next.repoHost,
 );
 
 const SortIndicator: React.FC<{ dir: false | 'asc' | 'desc' }> = ({ dir }) => {

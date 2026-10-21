@@ -6,6 +6,23 @@ sidebar:
 section: "Guides"
 ---
 
+## Installer fails with "Failed to fetch latest version"
+
+The installer queries the GitHub API (`api.github.com`) to resolve the latest release tag. Unauthenticated API requests are capped at **60 per hour per source IP** - not per user - so the install fails (with `Failed to fetch latest version` on macOS/Linux/WSL, `Failed to get latest version` on Windows) on shared egress IPs (corporate proxies, NAT/CGNAT, CI runners) or when retrying within the same hour.
+
+Provide a token and the installer attaches it to that API call automatically. A personal access token raises the limit to 5,000/hour; the built-in `GITHUB_TOKEN` in GitHub Actions gets 1,000/hour per repository. The repository is public, so a token with no scopes is sufficient - prefer a fine-grained or zero-scope token over a broad classic PAT. The installer reads, in order:
+
+1. `GITHUB_TOKEN` env var
+2. `GH_TOKEN` env var
+3. `gh auth token` for github.com (when the `gh` CLI is installed and authenticated; a GitHub Enterprise default host is never used for this call)
+
+```bash
+export GITHUB_TOKEN=ghp_xxx
+curl -fsSL https://plannotator.ai/install.sh | bash
+```
+
+Or run `gh auth login` once - no env var needed. To pin a specific version instead (which skips the API call entirely), pass `--version vX.Y.Z` on macOS/Linux (`curl -fsSL https://plannotator.ai/install.sh | bash -s -- --version vX.Y.Z`) or `-Version vX.Y.Z` with the PowerShell installer. Only the version-resolution call is authenticated; release downloads and `git clone` are unaffected. See [issue #1156](https://github.com/backnotprop/plannotator/issues/1156).
+
 ## Lost a Plannotator tab?
 
 If you accidentally close a Plannotator browser tab, the server is still running in the background. You can find and reopen it:
@@ -34,9 +51,17 @@ plannotator sessions --open 2     # reopens session #2
 
 Stale sessions from crashed processes are cleaned up automatically. You can also force cleanup with `plannotator sessions --clean`.
 
+Every session also prints its URL on one line to stderr when it starts, before it opens a browser:
+
+```
+  Plannotator session ready: http://localhost:54321
+```
+
+The format is stable (two spaces, the prefix, then the URL), so an agent or a script can find the line in the output it already captures. A remote session adds a line under it about forwarding the port, and a browser that could not be opened adds "Could not open a browser automatically". For a session whose output you no longer have, use `plannotator sessions`: it lists only the servers that are still running.
+
 ## Where does Plannotator store data?
 
-All local data lives under `~/.plannotator/`:
+Plannotator-managed files live under `~/.plannotator/` by default:
 
 | Directory | What's in it |
 |-----------|-------------|
@@ -45,7 +70,7 @@ All local data lives under `~/.plannotator/`:
 | `drafts/` | Auto-saved annotation drafts. If a server crashes mid-review, your in-progress annotations are recovered on the next session. |
 | `sessions/` | Temporary session files for active servers. Cleaned up automatically when a server exits. |
 
-Plan saving is enabled by default. You can change the save directory or disable it entirely in the Plannotator UI settings (gear icon).
+Plan saving is enabled by default. You can change the save directory or disable it entirely in the Plannotator UI settings (gear icon). Functional browser cookies store some UI preferences separately from this directory.
 
 ## Browser doesn't open
 
@@ -53,6 +78,7 @@ If the UI doesn't open automatically, check:
 
 - **Remote/SSH session?** Set `PLANNOTATOR_REMOTE=1` and `PLANNOTATOR_PORT` to a port you'll forward. See the [remote guide](/docs/guides/remote-and-devcontainers/).
 - **Wrong browser?** Set `PLANNOTATOR_BROWSER` to the app name or path, or use `--browser` for a one-off override.
+- **`Not opening a browser (PLANNOTATOR_BROWSER=none)`?** That is on purpose: `PLANNOTATOR_BROWSER` (or `--browser`) is set to `none`, `false`, `0`, `off`, `no`, `true`, `1` or `:`. Open the printed URL, or unset the variable. (`BROWSER=true` does not do this; only `PLANNOTATOR_BROWSER` does.)
 - **URL still works** — even if the browser didn't open, the server is running. Check `plannotator sessions` for the URL and open it manually.
 
 ## Hook doesn't fire
@@ -63,6 +89,16 @@ If `ExitPlanMode` doesn't trigger Plannotator:
 2. Restart Claude Code after installing (hooks load on startup)
 3. Verify `plannotator` is on your PATH: `which plannotator`
 4. Check that plan mode is enabled in your Claude Code session
+
+## Claude Code still waits for my review
+
+On Claude Code 2.1.287 or newer, the [Plannotator mod](/docs/guides/claude-code/#the-plannotator-mod) lets Claude keep going while you review. If Claude still waits:
+
+1. Update the plugin: `claude plugin marketplace update plannotator`, then `claude plugin update plannotator@plannotator`, then restart Claude Code. Refreshing the marketplace alone does not update the plugin.
+2. Update the `plannotator` binary by running the install script again. With an older binary, plan review falls back to the classic flow.
+3. Check that `PLANNOTATOR_CLAUDE_MOD` is not set to `0` and `~/.plannotator/config.json` has no `"claudeCodeMod": false`.
+4. The mod does not run in `claude -p` or SDK runs, or on Windows. Those always use the classic flow.
+5. To report a problem, start Claude Code with `PLANNOTATOR_MOD_DEBUG=1` and attach `~/.plannotator/claude-code-mod/debug.log`.
 
 ## Codex plan review doesn't open
 
@@ -75,6 +111,35 @@ If a Codex plan turn completes without opening Plannotator:
 3. Check `~/.codex/config.toml` contains `hooks = true` under `[features]`
 4. Check `~/.codex/hooks.json` has a `Stop` hook whose command points to `plannotator`
 5. Run `plannotator sessions` in case the browser failed to open but the session is running
+6. Check your Codex version: `codex --version`
+
+### Minimum Codex version
+
+The `Stop` hook Plannotator uses arrived in Codex **rust-v0.114.0**, so anything
+older has no Codex plan review at all. Three later changes matter:
+
+| Codex version | What changed |
+|---------------|--------------|
+| `rust-v0.114.0` | Hooks engine ships; the feature key is `codex_hooks` and it is off by default |
+| `rust-v0.117.0` (`0.116.0-alpha.12`) | The Stop payload starts carrying `turn_id` |
+| `rust-v0.124.0` (`0.124.0-alpha.3`) | Hooks become enabled by default |
+| `rust-v0.129.0` (`0.129.0-alpha.5`) | The feature key is renamed to `hooks`, with `codex_hooks` kept as a legacy alias |
+
+Step 3 above assumes `rust-v0.129.0` or newer, which is the version this
+installer targets. On `rust-v0.114.0`–`rust-v0.128.x` the key Codex reads is
+`codex_hooks = true`, so a config that says `hooks = true` alone has no effect
+there — write `codex_hooks = true` (both keys together are fine) and restart
+Codex.
+
+You do **not** need a Codex new enough to send `turn_id`. On `rust-v0.114.0`,
+`v0.115.0` and `v0.116.0` the Stop payload omits that field, and Plannotator
+resolves the turn from the session rollout instead, which is why plan review
+opens there as well. Requesting changes behaves the same there too: Codex
+records the feedback as a developer message rather than the `<hook_prompt>`
+item newer versions use, and Plannotator reads either shape, so a plan the
+model did not revise is not put back in front of you. When the fallback runs it
+prints one line to stderr naming the turn it used, so a hook run captured with
+stderr visible shows exactly what happened.
 
 Codex hooks are currently disabled on Windows in the official Codex docs, so the Windows installer prints manual guidance instead of changing Codex config automatically.
 

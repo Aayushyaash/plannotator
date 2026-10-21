@@ -1,5 +1,23 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { isNoOpBrowserSentinel, shouldTryRemoteBrowserFallback } from "./browser";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import os, { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+import {
+  isNoOpBrowserSentinel,
+  isPosixBrowserTarget,
+  openBrowser,
+  resolvePosixBrowserTarget,
+  shouldTryRemoteBrowserFallback,
+  tryVscodeIpc,
+} from "./browser";
+
+import { createTestEnvironment } from "../../tests/helpers/environment";
 
 const savedEnv: Record<string, string | undefined> = {};
 const envKeys = ["PLANNOTATOR_BROWSER", "BROWSER"];
@@ -50,10 +68,13 @@ describe("shouldTryRemoteBrowserFallback", () => {
     expect(shouldTryRemoteBrowserFallback(true)).toBe(true);
   });
 
-  test("true for remote sessions when PLANNOTATOR_BROWSER is a no-op sentinel", () => {
+  // PLANNOTATOR_BROWSER=none opens nothing at all, so not VS Code either
+  // (before, #756 read it as unset and the IPC fallback ran).
+  test("false for remote sessions when PLANNOTATOR_BROWSER says none", () => {
     clearEnv();
+    // no-browser-guard: sentinel under test (in process; nothing is launched)
     process.env.PLANNOTATOR_BROWSER = "none";
-    expect(shouldTryRemoteBrowserFallback(true)).toBe(true);
+    expect(shouldTryRemoteBrowserFallback(true)).toBe(false);
   });
 });
 
@@ -83,5 +104,189 @@ describe("isNoOpBrowserSentinel", () => {
     expect(isNoOpBrowserSentinel("Google Chrome")).toBe(false);
     expect(isNoOpBrowserSentinel("open")).toBe(false);
     expect(isNoOpBrowserSentinel("/usr/bin/true")).toBe(false);
+  });
+});
+
+describe("isPosixBrowserTarget", () => {
+  test("accepts POSIX paths and resolves bare names to their PATH location", () => {
+    expect(isPosixBrowserTarget("/usr/bin/fake-browser")).toBe(true);
+    expect(resolvePosixBrowserTarget("/usr/bin/fake-browser")).toBe("/usr/bin/fake-browser");
+    expect(resolvePosixBrowserTarget("./browser")).toBe("./browser");
+    expect(resolvePosixBrowserTarget("../browser")).toBe("../browser");
+    // A bare name is resolved against the Linux PATH at call time.
+    expect(resolvePosixBrowserTarget("sh")).toMatch(/\/sh$/);
+  });
+
+  test("rejects Windows targets that belong to cmd.exe", () => {
+    expect(resolvePosixBrowserTarget("chrome.exe")).toBeNull();
+    expect(resolvePosixBrowserTarget("C:\\Program Files\\Chrome\\chrome.exe")).toBeNull();
+    expect(resolvePosixBrowserTarget("/mnt/c/Program Files/Chrome/chrome.exe")).toBeNull();
+    expect(resolvePosixBrowserTarget("/mnt/c/Windows/System32/cmd.exe")).toBeNull();
+    expect(resolvePosixBrowserTarget("not-a-real-binary-1472")).toBeNull();
+  });
+});
+
+// --- WSL PLANNOTATOR_BROWSER routing (#1472) ---
+
+const realPlatform = process.platform;
+const realRelease = os.release;
+
+/** Pretend to run under WSL: isWSL() reads process.platform and os.release(). */
+function mockWsl() {
+  Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+  os.release = () => "5.15.90.1-microsoft-standard-WSL2";
+}
+
+function restoreHostPlatform() {
+  Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
+  os.release = realRelease;
+}
+
+function writeExecutable(dir: string, name: string, body: string): string {
+  const file = join(dir, name);
+  writeFileSync(file, `#!/bin/sh\n${body}\n`);
+  chmodSync(file, 0o755);
+  return file;
+}
+
+function makeTempDir(): string {
+  return mkdtempSync(join(tmpdir(), "plannotator-browser-"));
+}
+
+const URL = "http://127.0.0.1:19432/plan";
+
+describe("WSL configured browser launch", () => {
+  afterEach(() => {
+    restoreHostPlatform();
+  });
+
+  test("a POSIX path is executed directly with the URL", async () => {
+    const dir = makeTempDir();
+    const log = join(dir, "args.txt");
+    const script = writeExecutable(dir, "fake-browser", `printf '%s' "$1" > '${log}'`);
+    try {
+      clearEnv();
+      mockWsl();
+      process.env.PLANNOTATOR_BROWSER = script;
+
+      expect(await openBrowser(URL)).toBe(true);
+      expect(readFileSync(log, "utf8")).toBe(URL);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // openBrowser spawns the RESOLVED absolute path, not the bare name: Bun
+  // 1.3's `$` resolves bare command names against the PATH captured at
+  // startup, so a runtime-prepended PATH entry would be invisible to it.
+  test("a bare Linux PATH executable name is executed directly", async () => {
+    const dir = makeTempDir();
+    const log = join(dir, "args.txt");
+    writeExecutable(dir, "fake-browser-wsl1472", `printf '%s' "$1" > '${log}'`);
+    const originalPath = process.env.PATH;
+    try {
+      process.env.PATH = `${dir}${delimiter}${originalPath ?? ""}`;
+      clearEnv();
+      mockWsl();
+      process.env.PLANNOTATOR_BROWSER = "fake-browser-wsl1472";
+
+      expect(await openBrowser(URL)).toBe(true);
+      expect(readFileSync(log, "utf8")).toBe(URL);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The cmd.exe route itself cannot be execution-tested through Bun's `$` on
+  // a non-Windows host (see the note on the bare-name test above): a bare
+  // cmd.exe shim on a mutated PATH is invisible to Bun 1.3's shell. The Pi
+  // mirror pins it end-to-end in apps/pi-extension/server/network.test.ts
+  // (node:child_process spawn honors a mutated PATH on every Bun version),
+  // and the classifier tests above pin the routing decision.
+
+  test("a failing configured browser warns on stderr and still falls back", async () => {
+    const dir = makeTempDir();
+    const script = writeExecutable(dir, "broken-browser", "exit 3");
+    const originalWrite = process.stderr.write;
+    const chunks: string[] = [];
+    (process.stderr as { write: unknown }).write = (chunk: string) => {
+      chunks.push(String(chunk));
+      return true;
+    };
+    try {
+      clearEnv();
+      mockWsl();
+      process.env.PLANNOTATOR_BROWSER = script;
+
+      expect(await openBrowser(URL)).toBe(false);
+      const warning = chunks.join("");
+      expect(warning).toContain(script);
+      expect(warning).toContain("PLANNOTATOR_BROWSER");
+    } finally {
+      (process.stderr as { write: unknown }).write = originalWrite;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("tryVscodeIpc, module imported before PLANNOTATOR_DATA_DIR is set (#1502)", () => {
+  const dataDirEnv = createTestEnvironment(["PLANNOTATOR_DATA_DIR"], "plannotator-browser-ipc-");
+
+  type IpcServer = { port: number; openedUrls: string[] };
+
+  /** Runs `run` against a stand-in for the VS Code extension's IPC listener. */
+  async function withIpcServer<T>(run: (ipc: IpcServer) => Promise<T>): Promise<T> {
+    const openedUrls: string[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req) {
+        const requestUrl = new globalThis.URL(req.url);
+        if (requestUrl.pathname !== "/open") return new Response("not found", { status: 404 });
+        openedUrls.push(requestUrl.searchParams.get("url") ?? "");
+        return new Response("ok");
+      },
+    });
+    try {
+      return await run({ port: server.port, openedUrls });
+    } finally {
+      await server.stop(true);
+    }
+  }
+
+  /** A data dir whose registry routes the current workspace to `port`. */
+  function makeDataDirWithRegistry(port: number): string {
+    const dir = dataDirEnv.makeTempDir();
+    writeFileSync(join(dir, "vscode-ipc.json"), JSON.stringify({ [process.cwd()]: port }));
+    return dir;
+  }
+
+  beforeEach(() => dataDirEnv.reset());
+
+  afterEach(() => dataDirEnv.restore());
+
+  test("reads the registry from a PLANNOTATOR_DATA_DIR set after import", async () => {
+    await withIpcServer(async (ipc) => {
+      process.env.PLANNOTATOR_DATA_DIR = makeDataDirWithRegistry(ipc.port);
+
+      expect(await tryVscodeIpc(URL)).toBe(true);
+      expect(ipc.openedUrls).toEqual([URL]);
+    });
+  });
+
+  test("follows a later change to PLANNOTATOR_DATA_DIR", async () => {
+    await withIpcServer(async (first) => {
+      await withIpcServer(async (second) => {
+        process.env.PLANNOTATOR_DATA_DIR = makeDataDirWithRegistry(first.port);
+        await tryVscodeIpc("http://127.0.0.1:19432/first");
+
+        process.env.PLANNOTATOR_DATA_DIR = makeDataDirWithRegistry(second.port);
+
+        expect(await tryVscodeIpc("http://127.0.0.1:19432/second")).toBe(true);
+        expect(second.openedUrls).toEqual(["http://127.0.0.1:19432/second"]);
+      });
+    });
   });
 });

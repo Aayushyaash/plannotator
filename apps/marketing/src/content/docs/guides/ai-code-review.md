@@ -65,7 +65,17 @@ Cleaned up when the session ends. Use `--no-local` to review in remote-only mode
 
 ## Transparency
 
-Agents are read-only. They cannot modify code, access the network, or post comments. All AI communication goes directly to your provider (Anthropic or OpenAI). No code passes through Plannotator servers. Prompts and commands are visible in the review UI.
+Review-agent permissions depend on the engine:
+
+- **Claude** gets Read, Glob, Grep, Agent, and command patterns intended for inspection through `git`, `gh`, `glab`, `jj`, and `wc`. Direct file-writing tools, WebFetch, WebSearch, general-purpose shells, curl, and wget are denied. Some allowed patterns, including `glab api` and `git -C`, are broader than a strict subcommand-by-subcommand read-only list.
+- **GitHub Copilot CLI** has its write tool denied. Plannotator also denies specific high-risk Git operations and outward-facing GitHub and GitLab writes, allows the `git`, `gh`, `glab`, `jj`, and `wc` command families, and relies on Copilot's non-interactive mode to deny other shell tools.
+- **Codex** runs with `--approve-for-me`, which uses Codex's workspace-write sandbox and automatic approval review. It is not a read-only file sandbox.
+- **Claude** jobs load no MCP servers (`--strict-mcp-config`) and are told to run one simple command at a time, because `dontAsk` refuses compound commands. If your Claude Code settings enable its sandbox and it cannot start (for example Linux without `bubblewrap`), `PLANNOTATOR_CLAUDE_SANDBOX=0` turns the sandbox off for these jobs only. Their commands then run without OS containment; the allowlist above still limits what they can run but is not a containment boundary.
+- **Cursor** runs in ask mode with its sandbox enabled by default. `PLANNOTATOR_CURSOR_SANDBOX=0` removes the explicit sandbox flag and defers to the user's Cursor configuration.
+- **OpenCode** runs its plan agent, but Plannotator does not add a shell restriction flag. Its permissions come from the user's OpenCode configuration.
+- **Pi** excludes the direct edit and write tools, but retains Bash and its other inspection paths under Pi's runtime controls.
+
+Plannotator's prompts tell every engine not to modify files or post comments. That instruction is visible in the review UI, but it is not structural enforcement for Codex, Cursor, OpenCode, or Pi. Claude and Copilot add structural restrictions, but those restrictions should be understood as the exact rules above rather than a blanket read-only sandbox. PR and MR reviews normally run in disposable worktrees; local working-tree reviews do not. The selected AI provider receives the prompt and repository or diff context needed for the review. No code is routed through a Plannotator-operated model server. Provider retention and account controls come from the CLI and provider you configured.
 
 Below are the exact prompts, commands, and schemas used.
 
@@ -187,10 +197,14 @@ claude -p \
   --verbose \
   --json-schema '{"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string","enum":["important","nit","pre_existing"]},"file":{"type":"string"},"line":{"type":"integer"},"end_line":{"type":"integer"},"description":{"type":"string"},"reasoning":{"type":"string"}},"required":["severity","file","line","end_line","description","reasoning"],"additionalProperties":false}},"summary":{"type":"object","properties":{"important":{"type":"integer"},"nit":{"type":"integer"},"pre_existing":{"type":"integer"}},"required":["important","nit","pre_existing"],"additionalProperties":false}},"required":["findings","summary"],"additionalProperties":false}' \
   --no-session-persistence \
-  --model sonnet \
+  --model opus \
   --tools Agent,Bash,Read,Glob,Grep \
-  --allowedTools Agent,Read,Glob,Grep,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh api repos/*/*/pulls/*),Bash(gh api repos/*/*/pulls/*/files*),Bash(gh api repos/*/*/pulls/*/comments*),Bash(gh api repos/*/*/issues/*/comments*),Bash(glab mr view:*),Bash(glab mr diff:*),Bash(glab mr list:*),Bash(glab api:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(git branch:*),Bash(git grep:*),Bash(git ls-remote:*),Bash(git ls-tree:*),Bash(git merge-base:*),Bash(git remote:*),Bash(git rev-parse:*),Bash(git show-ref:*),Bash(jj status:*),Bash(jj diff:*),Bash(jj log:*),Bash(jj show:*),Bash(jj file show:*),Bash(jj cat:*),Bash(jj bookmark list:*),Bash(wc:*) \
-  --disallowedTools Edit,Write,NotebookEdit,WebFetch,WebSearch,Bash(python:*),Bash(python3:*),Bash(node:*),Bash(npx:*),Bash(bun:*),Bash(bunx:*),Bash(sh:*),Bash(bash:*),Bash(zsh:*),Bash(curl:*),Bash(wget:*)
+  --allowedTools 'Agent,Read,Glob,Grep,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(git merge-base:*),Bash(git rev-parse:*),Bash(git ls-files:*),Bash(git ls-tree:*),Bash(git branch),Bash(git branch --show-current),Bash(git remote),Bash(git remote -v),Bash(git remote get-url:*),Bash(jj status:*),Bash(jj diff:*),Bash(jj log:*),Bash(jj show:*),Bash(jj file show:*),Bash(jj cat:*),Bash(jj bookmark list:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(glab mr view:*),Bash(glab mr diff:*),Bash(glab issue view:*),Bash(wc:*)' \
+  --disallowedTools 'Edit,Write,NotebookEdit,WebFetch,WebSearch,Bash(python:*),Bash(python3:*),Bash(node:*),Bash(npx:*),Bash(bun:*),Bash(bunx:*),Bash(sh:*),Bash(bash:*),Bash(zsh:*),Bash(curl:*),Bash(wget:*),Bash(git * --out*),Bash(git -c *),Bash(git --config-env*),Bash(git * --config-env*),Bash(git grep *),Bash(git ls-remote *),Bash(gh api *),Bash(glab api *),Bash(jj --config*),Bash(jj * --config*),Bash(jj * --tool*)' \
+  --setting-sources user \
+  --strict-mcp-config \
+  --append-system-prompt '<run one simple command at a time: no &&, pipes, $(...) or variables>'
+  # with PLANNOTATOR_CLAUDE_SANDBOX=0 also: --settings '{"sandbox":{"enabled":false}}'
 ```
 
 Prompt is written to stdin.
@@ -259,7 +273,7 @@ At the end, output an overall correctness verdict.
 codex exec \
   --output-schema ~/.plannotator/codex-review-schema.json \
   -o /tmp/plannotator-codex-<uuid>.json \
-  --full-auto \
+  --approve-for-me \
   --ephemeral \
   -C <working-directory> \
   "<system-prompt>\n\n---\n\n<user-message>"
@@ -320,3 +334,7 @@ Add `CLAUDE.md` or `REVIEW.md` to your repo root or any subdirectory. The Claude
 ```
 
 Both files are additive. REVIEW.md extends CLAUDE.md for review-specific guidance.
+
+### Skills as reviews
+
+When a skill you enabled as a review (Agents tab, **Add a review**) runs on Claude Code, it runs with the same command rules shown above. The job can only run that read-only command allowlist, so any other command the skill tells it to run (running tests, a build, a linter) is refused.

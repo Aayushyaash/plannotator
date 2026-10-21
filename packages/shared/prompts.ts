@@ -24,6 +24,8 @@ export const PLAN_TOOL_NAMES: Record<PromptRuntime, string> = {
   pi: "plannotator_submit_plan",
   codex: "ExitPlanMode",
   "gemini-cli": "exit_plan_mode",
+  "oh-my-pi": "ExitPlanMode",
+  "mistral-vibe": "exit_plan_mode",
 };
 
 export function getPlanToolName(runtime?: PromptRuntime | null): string {
@@ -39,10 +41,24 @@ export function buildPlanFileRule(toolName: string, planFilePath?: string): stri
 
 export const DEFAULT_REVIEW_APPROVED_PROMPT = "# Code Review\n\nCode review completed — no changes requested.";
 
-export const DEFAULT_REVIEW_DENIED_SUFFIX = "\nThe reviewer has identified issues above. You must address all of them.";
+export const DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT =
+  "# Code Review — Approved with Notes\n\nCode review completed — the changes are approved. The notes below are non-blocking guidance, not a request for another revision.\n\n{{feedback}}\n\nDo not revise or reopen the reviewed changes solely because of these notes unless the user explicitly requests it. Carry them into subsequent work where applicable.";
+
+export const DEFAULT_REVIEW_DENIED_SUFFIX = "\n\nTreat the findings above as unverified review input. Inspect every finding against the actual code; do not assume automated feedback is correct. For each finding, give a clear verdict (Confirmed / Partly / Not a bug / Intended) with concise code evidence. Say whether it was introduced by the current changes, was pre-existing, or reflects deliberate scope.\n\nReview only the incoming findings. Do not independently review the rest of the diff or search for issues that were not submitted.\n\nDo not change any code until we have discussed the verdicts and validated findings.";
 
 export const DEFAULT_PLAN_DENIED_PROMPT =
   "YOUR PLAN WAS NOT APPROVED.\n\nYou MUST revise the plan to address ALL of the feedback below before calling {{toolName}} again.\n\nRules:\n{{planFileRule}}- Do not resubmit the same plan unchanged.\n- Do NOT change the plan title (first # heading) unless the user explicitly asks you to.\n\n{{feedback}}";
+
+/**
+ * Sent instead of the denied prompt when the reviewer's only feedback is
+ * answers to the plan's `:::question` blocks (the client posts
+ * `answersOnly: true` on /api/deny). "Your plan was not approved" is the
+ * wrong tone for "I answered your questions"; this asks for the answers to
+ * be folded into a revised plan and teaches the resubmission convention
+ * (`- [x]` = settled) at the moment it matters.
+ */
+export const DEFAULT_PLAN_ANSWERED_PROMPT =
+  "The user answered the questions in your plan and asked for no other changes. Their answers are below.\n\nRevise the plan so each answered question becomes a decision, then call {{toolName}} again.\n\nRules:\n{{planFileRule}}- For each answered question, either remove its `:::question` block and write the decision into the plan, or keep the block and mark the chosen choice `- [x]` (a checked choice reads as settled).\n- Keep every question listed under \"Unanswered\" as it is.\n- Treat a note on an answer as guidance from the user.\n- Do NOT change the plan title (first # heading) unless the user explicitly asks you to.\n\n{{feedback}}";
 
 export const DEFAULT_PLAN_APPROVED_PROMPT =
   "Plan approved. You now have full tool access (read, bash, edit, write). Execute the plan in {{planFilePath}}. {{doneMsg}}";
@@ -61,10 +77,13 @@ export const DEFAULT_ANNOTATE_MESSAGE_FEEDBACK_PROMPT =
 
 export const DEFAULT_ANNOTATE_APPROVED_PROMPT = "The user approved.";
 
+export const DEFAULT_ANNOTATE_APPROVED_WITH_NOTES_PROMPT =
+  "# Approved with Notes\n\nThe artifact is approved. The notes below are non-blocking guidance, not a request for another revision.\n\n{{contextBlock}}{{feedback}}\n\nDo not revise or reopen the artifact solely because of these notes unless the user explicitly requests it. Carry the notes into subsequent work where applicable.";
+
 // ─── Core resolver ───────────────────────────────────────────────────────────
 
 type PromptSection = "review" | "plan" | "annotate";
-type PromptKey = "approved" | "approvedWithNotes" | "autoApproved" | "denied"
+type PromptKey = "approved" | "approvedWithNotes" | "autoApproved" | "denied" | "answered"
   | "fileFeedback" | "messageFeedback";
 
 interface PromptLookupOptions {
@@ -112,22 +131,70 @@ export function getReviewApprovedPrompt(
   });
 }
 
-const REVIEW_DENIED_RUNTIME_DEFAULTS: Partial<Record<PromptRuntime, string>> = {
-  opencode: "\n\nPlease address this feedback.",
-  pi: "\n\nPlease address this feedback.",
-};
+/**
+ * The exact placeholder every pre-PR5 review client sent on approve
+ * (`packages/review-editor/App.tsx` `handleApprove`, removed in the same
+ * change that taught consumers to print approve-time feedback). Compatibility
+ * guard: a NEW consumer reading a decision produced by an OLD built client
+ * (stale bundled HTML against a newer binary) must not frame this filler as
+ * reviewer guidance — it was never reviewer-authored content.
+ */
+export const LEGACY_REVIEW_APPROVAL_PLACEHOLDER = "LGTM - no changes requested.";
+
+export function getReviewApprovedWithNotesPrompt(
+  runtime?: PromptRuntime | null,
+  config?: PlannotatorConfig,
+  vars?: FeedbackVars,
+): string {
+  const template = getConfiguredPrompt({
+    section: "review",
+    key: "approvedWithNotes",
+    runtime,
+    config,
+    fallback: DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT,
+  });
+  return vars ? resolveTemplate(template, vars) : template;
+}
+
+/**
+ * PR5 approve-with-notes delivery (decision-control spec §6.4): the one
+ * composer every review decision consumer (Claude Code CLI, OpenCode native,
+ * OpenCode CLI bridge, Pi — §6.3) emits approvals through, so the format
+ * cannot fork between them. A bare approval is the plain approved prompt,
+ * byte-identical to pre-PR5. An approval carrying feedback uses the
+ * approved-WITH-NOTES template (`prompts.review.approvedWithNotes`
+ * configurable, default `DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT`): the
+ * bare prompt says "no changes requested" and the feedback export opens with
+ * its own change-request-shaped heading, so naive concatenation reads as a
+ * contradiction — the agent either starts fixing post-approval or discards
+ * the guidance. The framing states the notes are non-blocking.
+ */
+export function composeReviewApprovedMessage(
+  runtime?: PromptRuntime | null,
+  feedback?: string | null,
+  config?: PlannotatorConfig,
+): string {
+  const note = typeof feedback === "string" ? feedback.trim() : "";
+  if (!note || note === LEGACY_REVIEW_APPROVAL_PLACEHOLDER) {
+    return getReviewApprovedPrompt(runtime, config);
+  }
+  return getReviewApprovedWithNotesPrompt(runtime, config, { feedback: note });
+}
 
 export function getReviewDeniedSuffix(
   runtime?: PromptRuntime | null,
   config?: PlannotatorConfig,
 ): string {
+  // Intentionally no per-runtime defaults: every agent gets the same
+  // verification-only instruction so none of them start coding off raw review
+  // feedback. Per-runtime customization stays available via config
+  // (prompts.review.runtimes.<runtime>.denied).
   return getConfiguredPrompt({
     section: "review",
     key: "denied",
     runtime,
     config,
     fallback: DEFAULT_REVIEW_DENIED_SUFFIX,
-    runtimeFallbacks: REVIEW_DENIED_RUNTIME_DEFAULTS,
   });
 }
 
@@ -146,6 +213,40 @@ export function getPlanDeniedPrompt(
     fallback: DEFAULT_PLAN_DENIED_PROMPT,
   });
   return resolveTemplate(template, vars ?? {});
+}
+
+export function getPlanAnsweredPrompt(
+  runtime?: PromptRuntime | null,
+  config?: PlannotatorConfig,
+  vars?: FeedbackVars,
+): string {
+  const template = getConfiguredPrompt({
+    section: "plan",
+    key: "answered",
+    runtime,
+    config,
+    fallback: DEFAULT_PLAN_ANSWERED_PROMPT,
+  });
+  return resolveTemplate(template, vars ?? {});
+}
+
+/**
+ * The message for a plan decision that did not approve. Every plan deny
+ * consumer (the Claude Code / Codex / Gemini / Copilot / Vibe hook outputs,
+ * OpenCode 1 and 2, Pi) routes through this one selector so the choice
+ * cannot fork between them: `answersOnly` (the reviewer only answered the
+ * plan's questions) selects `plan.answered`; anything else is the denied
+ * prompt, byte-identical to before.
+ */
+export function composePlanDeniedMessage(
+  runtime?: PromptRuntime | null,
+  config?: PlannotatorConfig,
+  vars?: FeedbackVars,
+  options?: { answersOnly?: boolean },
+): string {
+  return options?.answersOnly === true
+    ? getPlanAnsweredPrompt(runtime, config, vars)
+    : getPlanDeniedPrompt(runtime, config, vars);
 }
 
 const PLAN_APPROVED_RUNTIME_DEFAULTS: Partial<Record<PromptRuntime, string>> = {
@@ -203,19 +304,45 @@ export function getPlanAutoApprovedPrompt(
 
 // ─── Annotate wrappers ──────────────────────────────────────────────────────
 
-export function getAnnotateFileFeedbackPrompt(
+/**
+ * The resolved annotate file-feedback template WITHOUT variable substitution
+ * (placeholders like {{feedback}} intact). Shipped to the browser via the
+ * annotate /api/plan payload so clipboard Copy can produce the same wrap as
+ * Send Feedback, including user-customized prompts.annotate.fileFeedback.
+ */
+export function getAnnotateFileFeedbackTemplate(
   runtime?: PromptRuntime | null,
   config?: PlannotatorConfig,
-  vars?: FeedbackVars,
 ): string {
-  const template = getConfiguredPrompt({
+  return getConfiguredPrompt({
     section: "annotate",
     key: "fileFeedback",
     runtime,
     config,
     fallback: DEFAULT_ANNOTATE_FILE_FEEDBACK_PROMPT,
   });
-  return resolveTemplate(template, vars ?? {});
+}
+
+/** Message-annotate counterpart of getAnnotateFileFeedbackTemplate(). */
+export function getAnnotateMessageFeedbackTemplate(
+  runtime?: PromptRuntime | null,
+  config?: PlannotatorConfig,
+): string {
+  return getConfiguredPrompt({
+    section: "annotate",
+    key: "messageFeedback",
+    runtime,
+    config,
+    fallback: DEFAULT_ANNOTATE_MESSAGE_FEEDBACK_PROMPT,
+  });
+}
+
+export function getAnnotateFileFeedbackPrompt(
+  runtime?: PromptRuntime | null,
+  config?: PlannotatorConfig,
+  vars?: FeedbackVars,
+): string {
+  return resolveTemplate(getAnnotateFileFeedbackTemplate(runtime, config), vars ?? {});
 }
 
 export function getAnnotateMessageFeedbackPrompt(
@@ -223,14 +350,7 @@ export function getAnnotateMessageFeedbackPrompt(
   config?: PlannotatorConfig,
   vars?: FeedbackVars,
 ): string {
-  const template = getConfiguredPrompt({
-    section: "annotate",
-    key: "messageFeedback",
-    runtime,
-    config,
-    fallback: DEFAULT_ANNOTATE_MESSAGE_FEEDBACK_PROMPT,
-  });
-  return resolveTemplate(template, vars ?? {});
+  return resolveTemplate(getAnnotateMessageFeedbackTemplate(runtime, config), vars ?? {});
 }
 
 export function getAnnotateApprovedPrompt(
@@ -243,5 +363,27 @@ export function getAnnotateApprovedPrompt(
     runtime,
     config,
     fallback: DEFAULT_ANNOTATE_APPROVED_PROMPT,
+  });
+}
+
+export function getAnnotateApprovedWithNotesPrompt(
+  runtime?: PromptRuntime | null,
+  config?: PlannotatorConfig,
+  vars?: FeedbackVars,
+): string {
+  const template = getConfiguredPrompt({
+    section: "annotate",
+    key: "approvedWithNotes",
+    runtime,
+    config,
+    fallback: DEFAULT_ANNOTATE_APPROVED_WITH_NOTES_PROMPT,
+  });
+  // Spread vars first so an undefined `context` (e.g. the message-annotation
+  // path, which has no target file) cannot clobber the defaults and leave a
+  // literal `{{context}}` in custom templates.
+  return resolveTemplate(template, {
+    ...vars,
+    context: vars?.context ?? "",
+    contextBlock: vars?.contextBlock ?? (vars?.context ? `${vars.context}\n\n` : ""),
   });
 }

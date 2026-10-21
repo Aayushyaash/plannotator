@@ -1,10 +1,17 @@
+import type { DiffType } from "./vcs";
+import { getPRPlatformCapabilities, type PRMetadata } from "./pr";
+import type { WorkspaceReviewPromptContext } from "@plannotator/shared/review-workspace";
 import {
-  JJ_TRUNK_REVSET,
-  jjLineBaseRevset,
-  parseWorktreeDiffType,
-  type DiffType,
-} from "./vcs";
-import type { PRMetadata } from "./pr";
+  buildWorkspacePromptContextLines,
+  getLocalDiffInstruction,
+} from "@plannotator/shared/review-prompt";
+
+export type { WorkspaceReviewPromptContext } from "@plannotator/shared/review-workspace";
+
+// Moved to @plannotator/core/review-prompt (browser-safe); re-exported so
+// every existing importer of this module keeps working unchanged.
+export { buildWorkspacePromptContextLines, getLocalDiffInstruction };
+export type { LocalDiffInstruction } from "@plannotator/shared/review-prompt";
 
 export interface AgentReviewUserMessageOptions {
   defaultBranch?: string;
@@ -12,25 +19,65 @@ export interface AgentReviewUserMessageOptions {
   prDiffScope?: string;
 }
 
-export interface LocalDiffInstruction {
-  target: string;
-  inspect: string;
+export type AgentReviewTarget =
+  | {
+      kind: "local";
+      patch: string;
+      diffType: DiffType;
+      options?: AgentReviewUserMessageOptions;
+    }
+  | {
+      kind: "pr";
+      patch: string;
+      diffType: DiffType;
+      options?: AgentReviewUserMessageOptions;
+      prMetadata: PRMetadata;
+    }
+  | {
+      kind: "workspace";
+      patch: string;
+      workspace: WorkspaceReviewPromptContext;
+    };
+
+export function buildAgentReviewUserMessageForTarget(
+  target: AgentReviewTarget,
+  contextOnly = false,
+): string {
+  if (target.kind === "workspace") {
+    return buildWorkspaceReviewUserMessage(target.patch, target.workspace, contextOnly);
+  }
+  return buildAgentReviewUserMessage(
+    target.patch,
+    target.diffType,
+    target.options,
+    target.kind === "pr" ? target.prMetadata : undefined,
+    contextOnly,
+  );
 }
 
-/** Build the dynamic user message shared by local Claude and Codex review jobs. */
+/**
+ * Build the dynamic user message shared by local Claude and Codex review jobs.
+ *
+ * `contextOnly` strips the "Review… / provide findings" framing prose and keeps
+ * only the git/PR context the agent needs to locate the changes. Used by custom
+ * review skills, which carry their own instructions and must not inherit the
+ * default review's framing. With `contextOnly` off the output is byte-identical
+ * to today's prompt.
+ */
 export function buildAgentReviewUserMessage(
   patch: string,
   diffType: DiffType,
   options?: AgentReviewUserMessageOptions,
   prMetadata?: PRMetadata,
+  contextOnly = false,
 ): string {
   if (prMetadata) {
     if (options?.prDiffScope === "full-stack") {
       return [
-        `Full-stack review of ${prMetadata.url}`,
+        contextOnly ? prMetadata.url : `Full-stack review of ${prMetadata.url}`,
         "",
         "This is a stacked PR. The diff below shows ALL accumulated changes from the repository default branch through this PR's head (not just this PR's own layer).",
-        "Review the complete diff for issues that span the stack.",
+        ...(contextOnly ? [] : ["Review the complete diff for issues that span the stack."]),
         "",
         "```diff",
         patch,
@@ -38,6 +85,9 @@ export function buildAgentReviewUserMessage(
       ].join("\n");
     }
     if (options?.hasLocalAccess) {
+      // Pure context already (where the checkout is, how to diff against the
+      // base) — no "Review… / provide findings" framing to strip, so this is
+      // identical for default and custom reviews regardless of contextOnly.
       return [
         prMetadata.url,
         "",
@@ -46,16 +96,46 @@ export function buildAgentReviewUserMessage(
         "Do NOT diff against the local `main` branch; it may be stale. Always use origin/.",
       ].join("\n");
     }
-    return prMetadata.url;
+    // No confirmed local checkout yet. A worktree at the PR head is being
+    // prepared and pulls the PR files on demand — tell the agent to verify the
+    // files exist before relying on them, give it the same diff command, and
+    // fall back to the PR URL if the checkout isn't ready.
+    if (!getPRPlatformCapabilities(prMetadata).agentCliAccess) {
+      // No CLI the job may run can read this platform's PR (Bitbucket), so
+      // the URL alone is not enough: carry the diff inline.
+      return [
+        prMetadata.url,
+        "",
+        "You are reviewing this PR. A local worktree checked out at the PR head may still be warming up; verify the PR files exist before relying on them.",
+        ...(contextOnly ? [] : ["The PR diff is below; review it for issues."]),
+        "",
+        "```diff",
+        patch,
+        "```",
+      ].join("\n");
+    }
+    return [
+      prMetadata.url,
+      "",
+      "You are reviewing this PR. A local worktree checked out at the PR head is being prepared; it may still be warming up, so verify the PR files exist before relying on them.",
+      `Once they do, see the PR changes by diffing against the remote base branch: git diff origin/${prMetadata.baseBranch}...HEAD`,
+      "Do NOT diff against the local `main` branch; it may be stale. Always use origin/. If the files are not yet available, use the PR URL above for context.",
+    ].join("\n");
   }
 
   const instruction = getLocalDiffInstruction(diffType, options?.defaultBranch);
   if (instruction) {
+    if (contextOnly) {
+      return `Changeset: ${instruction.target}.\n${instruction.inspect}`;
+    }
     return `Review ${instruction.target}. ${instruction.inspect} Provide prioritized, actionable findings.`;
   }
 
+  const gitButlerContext = diffType.startsWith("gitbutler:")
+    ? `${contextOnly ? "GitButler changes" : "Review these GitButler changes and provide prioritized findings"}: the inline diff is authoritative. The checked-out workspace may include other stacks or later branch layers, so do not replace this patch with an ordinary \`git diff\`.`
+    : null;
   return [
-    "Review the following code changes and provide prioritized findings.",
+    gitButlerContext ?? (contextOnly ? "Code changes:" : "Review the following code changes and provide prioritized findings."),
     "",
     "```diff",
     patch,
@@ -63,92 +143,19 @@ export function buildAgentReviewUserMessage(
   ].join("\n");
 }
 
-export function getLocalDiffInstruction(
-  diffType: DiffType,
-  defaultBranch?: string,
-): LocalDiffInstruction | null {
-  const effectiveDiffType = normalizeLocalDiffType(diffType);
-
-  switch (effectiveDiffType) {
-    case "uncommitted":
-      return {
-        target: "the current code changes (staged, unstaged, and untracked files)",
-        inspect: "Inspect the working tree changes locally.",
-      };
-    case "staged":
-      return {
-        target: "the currently staged code changes",
-        inspect: "Run `git diff --staged` to inspect the changes.",
-      };
-    case "unstaged":
-      return {
-        target: "the unstaged code changes (tracked modifications and untracked files)",
-        inspect: "Inspect the unstaged working tree changes locally.",
-      };
-    case "last-commit":
-      return {
-        target: "the code changes introduced in the last commit",
-        inspect: "Run `git diff HEAD~1..HEAD` to inspect the changes.",
-      };
-    case "branch": {
-      const base = defaultBranch || "main";
-      return {
-        target: `the code changes against the base branch '${base}'`,
-        inspect: `Run \`git diff ${base}..HEAD\` to inspect the changes.`,
-      };
-    }
-    case "merge-base": {
-      const base = defaultBranch || "main";
-      return {
-        target: `the PR-style diff against base '${base}'`,
-        inspect: `First find the common ancestor with \`git merge-base ${base} HEAD\`, then run \`git diff <merge-base>..HEAD\` using that commit to inspect only the changes introduced on this branch (matches GitHub's PR view).`,
-      };
-    }
-    case "all":
-      return {
-        target: "every file in the repository",
-        inspect: "All files are shown as additions, diffed against an empty tree.",
-      };
-    case "jj-current":
-      return {
-        target: "the current JJ change",
-        inspect: "Run `jj diff --git -r @` to inspect the changes.",
-      };
-    case "jj-last":
-      return {
-        target: "the previous JJ change",
-        inspect: "Run `jj diff --git -r @-` to inspect the changes.",
-      };
-    case "jj-line": {
-      const base = defaultBranch || JJ_TRUNK_REVSET;
-      const baseRevset = jjLineBaseRevset(base);
-      return {
-        target: `the JJ line of work against \`${base}\``,
-        inspect: `Run \`jj diff --git --from ${shellQuote(baseRevset)} --to @\` to inspect the changes.`,
-      };
-    }
-    case "jj-evolog": {
-      const fromRev = defaultBranch || "<previous-evolog-commit>";
-      return {
-        target: "what changed between two evolutions of the current JJ change",
-        inspect: `Run \`jj diff --git --from ${shellQuote(fromRev)} --to @\` to inspect the changes (shows what was amended since the selected prior evolution).`,
-      };
-    }
-    case "jj-all":
-      return {
-        target: "all files in the JJ workspace",
-        inspect: "Run `jj diff --git --from 'root()' --to @` to inspect the changes.",
-      };
-    default:
-      return null;
-  }
-}
-
-function normalizeLocalDiffType(diffType: DiffType): string {
-  const worktree = parseWorktreeDiffType(diffType);
-  return worktree?.subType ?? diffType;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
+function buildWorkspaceReviewUserMessage(
+  patch: string,
+  workspace: WorkspaceReviewPromptContext,
+  contextOnly = false,
+): string {
+  return [
+    ...(contextOnly
+      ? []
+      : ["Review the local workspace changes across multiple nested VCS repositories.", ""]),
+    ...buildWorkspacePromptContextLines(workspace, { includeReportingInstruction: true }),
+    "",
+    "```diff",
+    patch,
+    "```",
+  ].join("\n");
 }

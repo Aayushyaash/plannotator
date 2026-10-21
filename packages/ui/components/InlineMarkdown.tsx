@@ -1,12 +1,54 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
-import hljs from "highlight.js";
-import { isCodeFilePath, isCodeFilePathStrict, CODE_PATH_BARE_REGEX, parseCodePath } from "@plannotator/shared/code-file";
+import { isCodeFilePath, isCodeFilePathStrict, CODE_PATH_BARE_REGEX, parseCodePath } from "@plannotator/core/code-file";
+import { forgeRefLinks } from "@plannotator/core/forge-refs";
+import { ensureHighlight, highlightToHtml } from "../utils/codeHighlight";
+import { useFenceTheme } from "../hooks/useFenceTheme";
 import { transformPlainText } from "../utils/inlineTransforms";
+import { hasLinkedDocExtension } from "../utils/markdownExtensions";
 import { getImageSrc } from "./ImageThumbnail";
+import { UNAVAILABLE_IMAGE_CLASS, useImageResolver } from "./ImageResolverContext";
 import { useCodePathValidation, type CodePathValidationContextValue } from "./CodePathValidationContext";
+import { isLocalLinkTarget, isNewTabClick, useLocalLinkResolver } from "./LocalLinkContext";
 import type { ValidationEntry } from "../hooks/useValidatedCodePaths";
 import { CodeFilePicker } from "./CodeFilePicker";
+import { normalizeMathTex, renderMathToHtml } from "../utils/math";
+import { useMathRenderer } from "../hooks/useMathRenderer";
+import { HostTitle } from "./HostTitle";
+
+export interface DocPreviewResult {
+  contents?: string;
+  filepath?: string;
+}
+export type DocPreviewFetcher = (path: string, base?: string) => Promise<DocPreviewResult | null>;
+
+/**
+ * Default code-file hover-preview fetcher — Plannotator's `/api/doc` behavior, verbatim.
+ */
+const defaultDocPreviewFetcher: DocPreviewFetcher = async (path, base) => {
+  const params = new URLSearchParams({ path });
+  if (base) params.set('base', base);
+  const res = await fetch(`/api/doc?${params}`);
+  return await res.json();
+};
+
+// Module-level fetcher, stable identity. Defaults to Plannotator's `/api/doc`.
+// A host (e.g. Workspaces) calls setDocPreviewFetcher once at startup to load
+// hover previews from its own backend.
+let docPreviewFetcher: DocPreviewFetcher = defaultDocPreviewFetcher;
+
+/** Override how code-file hover previews are fetched. Call once at app startup. */
+export const setDocPreviewFetcher = (fetcher: DocPreviewFetcher): void => {
+  docPreviewFetcher = fetcher;
+};
+
+/** Reset to the default (Plannotator `/api/doc`) fetcher. Mainly for tests. */
+export const resetDocPreviewFetcher = (): void => {
+  docPreviewFetcher = defaultDocPreviewFetcher;
+};
+
+/** Read the active fetcher at call time (so a late override is honored). */
+export const getDocPreviewFetcher = (): DocPreviewFetcher => docPreviewFetcher;
 
 /**
  * Decide how a candidate code-file path should render based on validation state:
@@ -61,18 +103,34 @@ const CodeSnippetPreview: React.FC<{
   const end = Math.min(allLines.length, (lineEnd ?? line));
   const snippet = allLines.slice(start, end).join('\n');
 
-  const highlightedLines = useMemo(() => {
-    const lang = extToLanguage(filepath);
-    const lines = snippet.split('\n');
-    return lines.map(line => {
-      try {
-        if (lang) return hljs.highlight(line, { language: lang }).value;
-        return hljs.highlightAuto(line).value;
-      } catch {
-        return line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      }
+  const fenceTheme = useFenceTheme();
+  // Bumped once the grammar is attached, to re-run the memo below with the
+  // highlighter warm. Until then the snippet renders as plain text — no
+  // auto-detection, and an unknown extension simply stays plain.
+  const [highlighterGeneration, setHighlighterGeneration] = useState(0);
+  const lang = extToLanguage(filepath);
+
+  useEffect(() => {
+    if (!lang) return;
+    let cancelled = false;
+    void ensureHighlight(lang, fenceTheme).then((ok) => {
+      if (ok && !cancelled) setHighlighterGeneration((n) => n + 1);
     });
-  }, [snippet, filepath]);
+    return () => { cancelled = true; };
+  }, [lang, fenceTheme]);
+
+  const highlightedLines = useMemo(() => {
+    // Highlight the snippet as one unit so multi-line constructs (block
+    // comments, template literals) tokenise correctly, then split back into
+    // rows: the highlighter joins lines with "\n" and never emits one inside a
+    // span, so the split is exact.
+    const html = lang ? highlightToHtml(snippet, lang, fenceTheme) : null;
+    if (html !== null) return html.split('\n');
+    return snippet.split('\n').map(line =>
+      line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+    // highlighterGeneration is the "grammar just became available" signal.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snippet, lang, fenceTheme, highlighterGeneration]);
 
   if (!anchorEl) return null;
 
@@ -94,7 +152,7 @@ const CodeSnippetPreview: React.FC<{
         <span>{filepath.split('/').pop()}</span>
         <span className="opacity-60">{lineEnd && lineEnd !== line ? `lines ${line}–${lineEnd}` : `line ${line}`}</span>
       </div>
-      <div className="hljs overflow-auto text-[12px] leading-5 min-h-0" style={{ padding: 0, background: 'var(--color-muted, #1e293b)' }}>
+      <div className="code-snippet-preview overflow-auto text-[12px] leading-5 min-h-0" style={{ padding: 0, background: 'var(--code-bg, #1e293b)' }}>
         <table className="border-collapse w-full">
           <tbody>
             {snippet.split('\n').map((_, i) => (
@@ -149,11 +207,8 @@ const CodeFileLink: React.FC<{
     if (hoverPreviewRef.current) return;
     showTimerRef.current = setTimeout(async () => {
       try {
-        const params = new URLSearchParams({ path: candidate });
-        if (baseDir) params.set('base', baseDir);
-        const res = await fetch(`/api/doc?${params}`);
-        const data = await res.json();
-        if (data.contents) setHoverPreview({ contents: data.contents, filepath: data.filepath ?? candidate });
+        const data = await docPreviewFetcher(candidate, baseDir);
+        if (data?.contents) setHoverPreview({ contents: data.contents, filepath: data.filepath ?? candidate });
       } catch {}
     }, 150);
   }, [candidate, hasLineRef, gate.render, cancelHide, baseDir]);
@@ -259,6 +314,48 @@ const CodeFileIcon = () => (
     <path strokeLinecap="round" strokeLinejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
   </svg>
 );
+
+const InlineMath: React.FC<{ tex: string }> = ({ tex }) => {
+  const normalizedTex = normalizeMathTex(tex);
+  const renderer = useMathRenderer();
+  const html = useMemo(() => renderMathToHtml(normalizedTex, false, renderer), [normalizedTex, renderer]);
+
+  // Same wrapper in both branches (see MathBlock): the placeholder carries the
+  // attributes annotation restore keys on, with the TeX as a text child.
+  if (html === null) {
+    return (
+      <span
+        className="math-inline math-annotatable text-foreground"
+        data-math-tex={normalizedTex}
+        data-math-display="false"
+        aria-label={normalizedTex}
+      >
+        {normalizedTex}
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className="math-inline math-annotatable text-foreground"
+      data-math-tex={normalizedTex}
+      data-math-display="false"
+      aria-label={normalizedTex}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+};
+
+function canRenderSpacedDollarMath(tex: string): boolean {
+  const trimmed = normalizeMathTex(tex);
+  if (!trimmed) return false;
+  if (!/^\s|\s$/.test(tex)) return true;
+  return (
+    /\\[a-zA-Z]+/.test(trimmed) ||
+    /[=^_{}+\-*/<>|]/.test(trimmed) ||
+    /^[a-zA-Z]$/.test(trimmed)
+  );
+}
 
 // Trim trailing sentence punctuation from a bare URL, but keep closing
 // brackets when they balance an opener inside the URL (Wikipedia-style
@@ -377,24 +474,75 @@ function emitPlainTextWithBareUrls(
   }
 }
 
+/** An image a host resolver chose; a load failure shows the placeholder. */
+const HostResolvedImage: React.FC<{
+  src: string;
+  alt: string;
+  onImageClick?: (src: string, alt: string) => void;
+}> = ({ src, alt, onImageClick }) => {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  if (failedSrc === src) {
+    return (
+      <span className={UNAVAILABLE_IMAGE_CLASS} title="Image could not be loaded" data-image-unavailable="">
+        {alt || 'Image'}
+      </span>
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt={alt}
+      className="max-w-full rounded my-2 cursor-zoom-in"
+      loading="lazy"
+      onError={() => setFailedSrc(src)}
+      onClick={(e) => {
+        e.stopPropagation();
+        onImageClick?.(src, alt);
+      }}
+    />
+  );
+};
+
 /**
  * Scanner that walks a text string and emits React nodes for inline markdown:
  * emphasis (**bold**, *italic*, _italic_, ***both***), `code`, ~~strikethrough~~,
  * [label](url) / ![alt](src) / <autolink>, bare https:// URLs, [[wiki-links]],
- * hex color swatches (#fff / #123abc), @mentions, #issue-refs, and backslash
+ * inline math ($...$), hex color swatches (#fff / #123abc), @mentions, #issue-refs, and backslash
  * escapes. Plain-text chunks outside these patterns pass through
  * `transformPlainText` for emoji shortcodes + smart punctuation.
  */
 export const InlineMarkdown: React.FC<{
   text: string;
   onOpenLinkedDoc?: (path: string) => void;
+  /**
+   * SYNCHRONOUS wiki-link resolution (host-backed, e.g. an in-memory cache).
+   * Called with the RAW stored target of a `[[target]]` / `[[target|label]]`
+   * wiki-link — before any path normalization (no `.md` appended), so opaque
+   * ids like `doc_01XYZ` arrive verbatim.
+   *
+   * Absent, or returning null/undefined → exactly today's rendering (stored
+   * label, live link). `label` → displayed instead of the stored label (the
+   * stored label is the fallback, the target the last resort). `status:
+   * 'deleted'` → a muted, non-interactive span (no anchor, no link icon,
+   * `onOpenLinkedDoc` is NOT wired) titled "Document deleted".
+   *
+   * Deliberately sync-only: no async variant, no loading states. Back it
+   * with a cache you keep hydrated.
+   */
+  resolveLinkedDoc?: (target: string) => { label?: string; status?: 'active' | 'deleted' } | null;
   onOpenCodeFile?: (path: string) => void;
   onNavigateAnchor?: (hash: string) => void;
   imageBaseDir?: string;
   onImageClick?: (src: string, alt: string) => void;
+  /** Repo path (`owner/repo`, `group/sub/project`) bare `#123` / `@user` refs link into. */
   githubRepo?: string;
-}> = ({ text, onOpenLinkedDoc, onOpenCodeFile, onNavigateAnchor, imageBaseDir, onImageClick, githubRepo }) => {
+  /** Host of that repo's git remote; picks the forge refs link to. Absent means github.com. */
+  repoHost?: string;
+}> = ({ text, onOpenLinkedDoc, resolveLinkedDoc, onOpenCodeFile, onNavigateAnchor, imageBaseDir, onImageClick, githubRepo, repoHost }) => {
   const validation = useCodePathValidation();
+  const resolveLocalLink = useLocalLinkResolver();
+  const resolveImage = useImageResolver();
+  const refLinks = forgeRefLinks({ display: githubRepo, host: repoHost });
   const parts: React.ReactNode[] = [];
   let remaining = text;
   let key = 0;
@@ -412,13 +560,65 @@ export const InlineMarkdown: React.FC<{
       continue;
     }
 
-    // Backslash escaping: \. \* \_ \` \[ \~ etc. — emit literal char, hide backslash
-    match = remaining.match(/^\\([\\*_`\[\]~!.()\-#>+|{}&])/);
+    // Inline math: \( ... \) or $...$ — require non-space content and avoid
+    // display fences.
+    if (remaining.startsWith('\\(')) {
+      let end = -1;
+      for (let i = 2; i < remaining.length - 1; i++) {
+        if (remaining[i] === '\\' && remaining[i + 1] === ')') {
+          if (i > 0 && remaining[i - 1] === '\\') continue;
+          end = i;
+          break;
+        }
+      }
+      if (end > 1) {
+        const tex = remaining.slice(2, end);
+        if (tex.trim()) {
+          parts.push(<InlineMath key={key++} tex={tex} />);
+          remaining = remaining.slice(end + 2);
+          previousChar = ')';
+          continue;
+        }
+      }
+    }
+
+    // Backslash escaping: \. \* \_ \` \[ \~ \$ etc. — emit literal char, hide backslash
+    match = remaining.match(/^\\([\\*_`\[\]~!.()\-#>+|{}&$])/);
     if (match) {
       parts.push(match[1]);
       remaining = remaining.slice(2);
       previousChar = match[1];
       continue;
+    }
+
+    // Inline math: $...$ — require non-space content and avoid $$ display fences.
+    if (remaining.startsWith('$') && previousChar !== '$' && !remaining.startsWith('$$')) {
+      let end = -1;
+      for (let i = 1; i < remaining.length; i++) {
+        if (remaining[i] === '\\') {
+          i++;
+          continue;
+        }
+        if (remaining[i] === '$') {
+          end = i;
+          break;
+        }
+      }
+      if (end > 1) {
+        const tex = remaining.slice(1, end);
+        // Money guard: `$A$B` where a digit immediately follows the closing `$`
+        // is almost always two currency amounts ("$5-$10", "$50,000-$100,000",
+        // "$5/mo and tier B is $10/mo"), not inline math — real inline math never
+        // abuts a digit across the closing delimiter. Leave such text literal.
+        const afterClose = remaining[end + 1];
+        const looksLikeMoney = /^\s*\d/.test(tex) && afterClose !== undefined && /\d/.test(afterClose);
+        if (!looksLikeMoney && canRenderSpacedDollarMath(tex)) {
+          parts.push(<InlineMath key={key++} tex={tex} />);
+          remaining = remaining.slice(end + 1);
+          previousChar = '$';
+          continue;
+        }
+      }
     }
 
     // Bare URL autolink: https://… preceded by word boundary.
@@ -486,6 +686,17 @@ export const InlineMarkdown: React.FC<{
       continue;
     }
 
+    // Keep custom autolinks literal; their contents should not
+    // recurse into markdown parsing.
+    match = remaining.match(/^<([A-Za-z][A-Za-z0-9.+-]{0,31}:[^\s<>]*)>/);
+    if (match) {
+      const content = match[1];
+      parts.push(<span key={key++}>{`<${content}>`}</span>);
+      remaining = remaining.slice(match[0].length);
+      previousChar = ">";
+      continue;
+    }
+
     // Strikethrough: ~~text~~
     match = remaining.match(/^~~([\s\S]+?)~~/);
     if (match) {
@@ -496,9 +707,11 @@ export const InlineMarkdown: React.FC<{
             onImageClick={onImageClick}
             text={match[1]}
             onOpenLinkedDoc={onOpenLinkedDoc}
+            resolveLinkedDoc={resolveLinkedDoc}
             onOpenCodeFile={onOpenCodeFile}
             onNavigateAnchor={onNavigateAnchor}
             githubRepo={githubRepo}
+            repoHost={repoHost}
           />
         </del>,
       );
@@ -518,9 +731,11 @@ export const InlineMarkdown: React.FC<{
               onImageClick={onImageClick}
               text={match[1]}
               onOpenLinkedDoc={onOpenLinkedDoc}
+              resolveLinkedDoc={resolveLinkedDoc}
               onOpenCodeFile={onOpenCodeFile}
               onNavigateAnchor={onNavigateAnchor}
               githubRepo={githubRepo}
+              repoHost={repoHost}
             />
           </em>
         </strong>,
@@ -540,9 +755,11 @@ export const InlineMarkdown: React.FC<{
             onImageClick={onImageClick}
             text={match[1]}
             onOpenLinkedDoc={onOpenLinkedDoc}
+            resolveLinkedDoc={resolveLinkedDoc}
             onOpenCodeFile={onOpenCodeFile}
             onNavigateAnchor={onNavigateAnchor}
             githubRepo={githubRepo}
+            repoHost={repoHost}
           />
         </strong>,
       );
@@ -561,9 +778,11 @@ export const InlineMarkdown: React.FC<{
             onImageClick={onImageClick}
             text={match[1]}
             onOpenLinkedDoc={onOpenLinkedDoc}
+            resolveLinkedDoc={resolveLinkedDoc}
             onOpenCodeFile={onOpenCodeFile}
             onNavigateAnchor={onNavigateAnchor}
             githubRepo={githubRepo}
+            repoHost={repoHost}
           />
         </em>,
       );
@@ -583,9 +802,11 @@ export const InlineMarkdown: React.FC<{
             onImageClick={onImageClick}
             text={match[1]}
             onOpenLinkedDoc={onOpenLinkedDoc}
+            resolveLinkedDoc={resolveLinkedDoc}
             onOpenCodeFile={onOpenCodeFile}
             onNavigateAnchor={onNavigateAnchor}
             githubRepo={githubRepo}
+            repoHost={repoHost}
           />
         </em>,
       );
@@ -657,9 +878,7 @@ export const InlineMarkdown: React.FC<{
       match = remaining.match(/^#(\d+)(?!\w)/);
       if (match) {
         const num = match[1];
-        const href = githubRepo && githubRepo.includes('/')
-          ? `https://github.com/${githubRepo}/issues/${num}`
-          : null;
+        const href = refLinks?.issue(num) ?? null;
         const label = `#${num}`;
         parts.push(
           href ? (
@@ -687,9 +906,7 @@ export const InlineMarkdown: React.FC<{
       match = remaining.match(/^@([a-zA-Z][a-zA-Z0-9_-]{0,38})(?!\w)/);
       if (match) {
         const handle = match[1];
-        const href = githubRepo && githubRepo.includes('/')
-          ? `https://github.com/${handle}`
-          : null;
+        const href = refLinks?.user(handle) ?? null;
         const label = `@${handle}`;
         parts.push(
           href ? (
@@ -716,12 +933,28 @@ export const InlineMarkdown: React.FC<{
     match = remaining.match(/^\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/);
     if (match) {
       const target = match[1].trim();
-      const display = match[2]?.trim() || target;
-      const targetPath = /\.(mdx?|html?)$/i.test(target)
+      const storedLabel = match[2]?.trim();
+      // Host resolution gets the RAW target (pre-`.md` normalization): host
+      // targets are opaque doc ids, not paths. null → today's rendering.
+      const resolution = resolveLinkedDoc?.(target) ?? null;
+      const display = resolution?.label || storedLabel || target;
+      const targetPath = hasLinkedDocExtension(target)
         ? target
         : `${target}.md`;
 
-      if (onOpenLinkedDoc) {
+      if (resolution?.status === 'deleted') {
+        // Deleted doc: muted NON-link — no anchor, no pointer, no link icon —
+        // even when onOpenLinkedDoc is present.
+        parts.push(
+          <span
+            key={key++}
+            className="text-muted-foreground line-through decoration-muted-foreground/60"
+            title="Document deleted"
+          >
+            {display}
+          </span>,
+        );
+      } else if (onOpenLinkedDoc) {
         parts.push(
           <a
             key={key++}
@@ -767,21 +1000,47 @@ export const InlineMarkdown: React.FC<{
     if (match) {
       const alt = match[1];
       const src = match[2];
-      const imgSrc = /^(https?:\/\/|data:|blob:)/i.test(src)
-        ? src
-        : getImageSrc(src, imageBaseDir);
+      // A host's resolver (RenderedMarkdown `resolveImage`) decides first;
+      // null from it, or no resolver, keeps the default resolution.
+      const resolvedImage = resolveImage ? resolveImage(src) : null;
+      if (resolvedImage?.kind === 'unavailable') {
+        parts.push(
+          <span
+            key={key++}
+            className={UNAVAILABLE_IMAGE_CLASS}
+            title={resolvedImage.title}
+            data-image-unavailable=""
+          >
+            {alt || 'Image'}
+          </span>,
+        );
+        remaining = remaining.slice(match[0].length);
+        previousChar = match[0][match[0].length - 1] || previousChar;
+        continue;
+      }
+      const imgSrc = resolvedImage?.kind === 'src'
+        ? resolvedImage.src
+        : /^(https?:\/\/|data:|blob:)/i.test(src)
+          ? src
+          : getImageSrc(src, imageBaseDir);
       parts.push(
-        <img
-          key={key++}
-          src={imgSrc}
-          alt={alt}
-          className="max-w-full rounded my-2 cursor-zoom-in"
-          loading="lazy"
-          onClick={(e) => {
-            e.stopPropagation();
-            onImageClick?.(imgSrc, alt);
-          }}
-        />,
+        resolveImage ? (
+          // With a host resolver, an image that fails to load becomes the
+          // same placeholder instead of a broken-image icon.
+          <HostResolvedImage key={key++} src={imgSrc} alt={alt} onImageClick={onImageClick} />
+        ) : (
+          <img
+            key={key++}
+            src={imgSrc}
+            alt={alt}
+            className="max-w-full rounded my-2 cursor-zoom-in"
+            loading="lazy"
+            onClick={(e) => {
+              e.stopPropagation();
+              onImageClick?.(imgSrc, alt);
+            }}
+          />
+        ),
       );
       remaining = remaining.slice(match[0].length);
       previousChar = match[0][match[0].length - 1] || previousChar;
@@ -833,19 +1092,67 @@ export const InlineMarkdown: React.FC<{
         continue;
       }
 
-      // Local doc: .md / .mdx / .html / .htm, optionally with #fragment.
+      // Local doc: .md / .mdx / .txt / .html / .htm, optionally with #fragment.
       // Fragment is stripped before handing to onOpenLinkedDoc (overlay has
       // no anchor-scroll support today).
       const isLocalDoc =
-        /\.(mdx?|html?)(#.*)?$/i.test(linkUrl) &&
+        hasLinkedDocExtension(linkUrl, { allowFragment: true }) &&
         !linkUrl.startsWith("http://") &&
         !linkUrl.startsWith("https://");
       const isCodeFile = !isLocalDoc && isCodeFilePath(linkUrl);
       const linkedDocPath = isLocalDoc ? linkUrl.replace(/#.*$/, '') : linkUrl;
       const codeFilePath = isCodeFile ? linkUrl.replace(/#.*$/, '') : linkUrl;
       const isInPageAnchor = safeLinkUrl.startsWith('#');
+      // A host's resolver (Viewer `resolveLocalLink`) decides local paths
+      // first; null from it, or no resolver, keeps the branches below.
+      const localLink = resolveLocalLink && isLocalLinkTarget(linkUrl) ? resolveLocalLink(linkUrl) : null;
 
-      if (isInPageAnchor) {
+      if (localLink?.kind === 'open') {
+        const openLink = localLink.open;
+        const hostHref = localLink.href;
+        parts.push(
+          <HostTitle key={key++} title={localLink.title}>
+          <a
+            href={hostHref ?? safeLinkUrl}
+            onClick={(e) => {
+              // With the host's own address, a new-tab click goes there.
+              if (hostHref && isNewTabClick(e)) return;
+              e.preventDefault();
+              e.stopPropagation();
+              openLink();
+            }}
+            // Without it, a middle click would open the path on the host's own origin.
+            onAuxClick={hostHref ? undefined : (e) => e.preventDefault()}
+            className="text-primary underline underline-offset-2 hover:text-primary/80 inline-flex items-center gap-1 cursor-pointer"
+            data-local-link="open"
+          >
+            {linkText}
+            <svg
+              className="w-3 h-3 opacity-50 flex-shrink-0"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+              aria-hidden="true"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"
+              />
+            </svg>
+          </a>
+          </HostTitle>,
+        );
+      } else if (localLink?.kind === 'unavailable') {
+        parts.push(
+          <HostTitle key={key++} title={localLink.title}>
+            <span className="text-muted-foreground underline decoration-dotted underline-offset-2" data-local-link="unavailable">
+              {linkText}
+            </span>
+          </HostTitle>,
+        );
+      } else if (isInPageAnchor) {
         parts.push(
           <a
             key={key++}
@@ -943,9 +1250,11 @@ export const InlineMarkdown: React.FC<{
             key={key++}
             text={before}
             onOpenLinkedDoc={onOpenLinkedDoc}
+            resolveLinkedDoc={resolveLinkedDoc}
             onOpenCodeFile={onOpenCodeFile}
             onNavigateAnchor={onNavigateAnchor}
             githubRepo={githubRepo}
+            repoHost={repoHost}
             imageBaseDir={imageBaseDir}
             onImageClick={onImageClick}
           />,
@@ -962,7 +1271,7 @@ export const InlineMarkdown: React.FC<{
     // `h` mid-word (e.g. ":heart:", "hello"), and splitting on it breaks
     // multi-char patterns like emoji shortcodes. Bare URLs are instead
     // detected inline via emitPlainTextWithBareUrls() below.
-    const nextSpecial = remaining.slice(1).search(/[\*_`\[!~\\<#@]/);
+    const nextSpecial = remaining.slice(1).search(/[\*_`\[!~\\<#@$]/);
     const plainText = nextSpecial === -1 ? remaining : remaining.slice(0, nextSpecial + 1);
     emitPlainTextWithBareUrls(plainText, previousChar, parts, () => key++, onOpenCodeFile, validation, imageBaseDir);
     previousChar = plainText[plainText.length - 1] || previousChar;

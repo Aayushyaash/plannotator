@@ -1,7 +1,8 @@
 import type { PluginAPI, PluginCommandContext, ThreadMessage } from "@ampcode/plugin";
 import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, posix, resolve, win32 } from "node:path";
+import { fileURLToPath as nodeFileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
 const CATEGORY = "Plannotator";
@@ -15,6 +16,10 @@ const DEFAULT_ANNOTATE_FILE_FEEDBACK_PROMPT =
   "# Markdown Annotations\n\n{{fileHeader}}: {{filePath}}\n\n{{feedback}}\n\nPlease address the annotation feedback above.";
 const DEFAULT_ANNOTATE_MESSAGE_FEEDBACK_PROMPT =
   "# Message Annotations\n\n{{feedback}}\n\nPlease address the annotation feedback above.";
+// Mirrors DEFAULT_ANNOTATE_APPROVED_WITH_NOTES_PROMPT in packages/shared/prompts.ts,
+// which this self-contained plugin cannot import. Keep the two in sync.
+const DEFAULT_ANNOTATE_APPROVED_WITH_NOTES_PROMPT =
+  "# Approved with Notes\n\nThe artifact is approved. The notes below are non-blocking guidance, not a request for another revision.\n\n{{contextBlock}}{{feedback}}\n\nDo not revise or reopen the artifact solely because of these notes unless the user explicitly requests it. Carry the notes into subsequent work where applicable.";
 
 type CommandContext = PluginCommandContext;
 type ReadyResult = "ready" | "exited" | "timeout";
@@ -26,9 +31,17 @@ interface RunResult {
   error?: string;
 }
 
+interface ReviewDecision {
+  decision: "approved" | "dismissed" | "annotated";
+  message: string;
+}
+
 interface AnnotateDecision {
   decision: "approved" | "dismissed" | "annotated";
   feedback?: string;
+  /** A Done with nothing to send (#1701): `feedback` is the zero-state
+   *  sentence and nothing is delivered. Absent from an older CLI. */
+  nothingToSend?: boolean;
 }
 
 interface ExitState {
@@ -58,7 +71,7 @@ export default function plannotatorAmpPlugin(amp: PluginAPI) {
       description: "Open Plannotator code review for the current workspace changes.",
     },
     async (ctx) => {
-      const result = await runPlannotator(amp, ctx, ["review"]);
+      const result = await runPlannotator(amp, ctx, ["review", "--json"]);
       await handleReviewResult(ctx, result);
     },
   );
@@ -68,19 +81,19 @@ export default function plannotatorAmpPlugin(amp: PluginAPI) {
     {
       title: "Review changes or PR",
       category: CATEGORY,
-      description: "Open Plannotator code review for local changes, a PR/MR URL, or review arguments.",
+      description: "Open Plannotator code review for local changes, another directory, or a PR/MR URL.",
     },
     async (ctx) => {
       const target = await ctx.ui.input({
         title: "Review changes or PR",
-        helpText: "Leave blank for local git changes, or enter a GitHub PR/GitLab MR URL or review arguments such as --git.",
+        helpText: "Leave blank for local git changes, or enter one directory (quote paths with spaces), a PR/MR URL, or review arguments such as --git or --base <ref> (open against a specific base, session-only).",
         submitButtonText: "Review",
       });
 
       const reviewArgs = parseReviewTargetInput(target);
       if (!reviewArgs) return;
 
-      const result = await runPlannotator(amp, ctx, ["review", ...reviewArgs]);
+      const result = await runPlannotator(amp, ctx, ["review", ...reviewArgs, "--json"]);
       await handleReviewResult(ctx, result);
     },
   );
@@ -169,21 +182,41 @@ export function extractTextFromThreadMessage(message: ThreadMessage): string {
     .trim();
 }
 
-export function parseAnnotateDecision(raw: string): AnnotateDecision | null {
-  const trimmed = raw.trim();
-  if (!trimmed) return { decision: "dismissed" };
-
+function parseReviewDecision(raw: string): ReviewDecision | null {
   try {
-    const parsed = JSON.parse(trimmed) as Partial<AnnotateDecision>;
+    const parsed = JSON.parse(raw) as Partial<ReviewDecision> | null;
     if (
       parsed &&
+      typeof parsed === "object" &&
       (parsed.decision === "approved" ||
         parsed.decision === "dismissed" ||
-        parsed.decision === "annotated")
+        parsed.decision === "annotated") &&
+      typeof parsed.message === "string"
+    ) {
+      return { decision: parsed.decision, message: parsed.message };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function parseAnnotateDecision(raw: string): AnnotateDecision | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<AnnotateDecision> | null;
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      (parsed.decision === "approved" ||
+        parsed.decision === "dismissed" ||
+        parsed.decision === "annotated") &&
+      (parsed.feedback === undefined || typeof parsed.feedback === "string")
     ) {
       return {
         decision: parsed.decision,
-        feedback: typeof parsed.feedback === "string" ? parsed.feedback : undefined,
+        feedback: parsed.feedback,
+        ...(parsed.nothingToSend === true && { nothingToSend: true }),
       };
     }
   } catch {
@@ -197,12 +230,32 @@ export function formatAnnotationFeedback(
   decision: AnnotateDecision,
   options: { kind: "file"; filePath: string } | { kind: "message" },
 ): string | null {
-  if (decision.decision !== "annotated") return null;
+  // Approved-with-notes carries reviewer guidance in `feedback` (#1092); only
+  // dismissed decisions and note-less approvals have nothing to surface.
+  if (decision.decision !== "annotated" && decision.decision !== "approved") return null;
+  // A Done with nothing to send carries the zero-state sentence as feedback;
+  // there is nothing for the agent (#1701).
+  if (decision.decision === "annotated" && decision.nothingToSend === true) return null;
 
   const feedback = decision.feedback?.trim();
-  if (!feedback || isNoActionFeedback(feedback)) return null;
+  if (!feedback) return null;
 
   const config = loadPlannotatorConfig();
+
+  if (decision.decision === "approved") {
+    const template = getConfiguredPrompt(
+      config,
+      "approvedWithNotes",
+      DEFAULT_ANNOTATE_APPROVED_WITH_NOTES_PROMPT,
+    );
+    const context = options.kind === "file" ? `File: ${options.filePath}` : "";
+    return resolveTemplate(template, {
+      context,
+      contextBlock: context ? `${context}\n\n` : "",
+      feedback,
+    });
+  }
+
   if (options.kind === "file") {
     const template = getConfiguredPrompt(config, "fileFeedback", DEFAULT_ANNOTATE_FILE_FEEDBACK_PROMPT);
     return resolveTemplate(template, {
@@ -216,17 +269,6 @@ export function formatAnnotationFeedback(
   return resolveTemplate(template, { feedback });
 }
 
-export function isNoActionFeedback(output: string): boolean {
-  const normalized = output.trim().toLowerCase();
-  return (
-    normalized === "" ||
-    normalized === "review session closed without feedback." ||
-    normalized === "annotation session closed." ||
-    normalized === "approved." ||
-    normalized === "the user approved." ||
-    normalized.includes("has no feedback")
-  );
-}
 
 export function splitCommandArgs(input: string): string[] {
   const args: string[] = [];
@@ -322,13 +364,17 @@ async function getLatestAssistantText(ctx: CommandContext): Promise<string | nul
 async function handleReviewResult(ctx: CommandContext, result: RunResult): Promise<void> {
   if (await notifyFailure(ctx, result, "review")) return;
 
-  const output = result.stdout.trim();
-  if (isNoActionFeedback(output)) {
-    await ctx.ui.notify(output || "Review session closed without feedback.");
+  const decision = parseReviewDecision(result.stdout);
+  if (!decision) {
+    await notifyInvalidStructuredOutput(ctx, result, "review");
+    return;
+  }
+  if (decision.decision === "dismissed") {
+    await ctx.ui.notify(decision.message);
     return;
   }
 
-  await appendFeedback(ctx, output);
+  await appendFeedback(ctx, decision.message);
 }
 
 async function handleAnnotateResult(
@@ -339,20 +385,29 @@ async function handleAnnotateResult(
   if (await notifyFailure(ctx, result, "annotate")) return;
 
   const decision = parseAnnotateDecision(result.stdout);
-  if (decision?.decision === "approved") {
-    await ctx.ui.notify("Approved.");
+  if (!decision) {
+    await notifyInvalidStructuredOutput(ctx, result, "annotate");
     return;
   }
-  if (decision?.decision === "dismissed") {
+  if (decision.decision === "approved") {
+    // Approve-with-Notes (#1092): surface the reviewer's notes instead of
+    // silently dropping them. A note-less approval keeps the old behavior.
+    const feedback = formatAnnotationFeedback(decision, options);
+    if (feedback) {
+      await appendFeedback(ctx, feedback);
+    } else {
+      await ctx.ui.notify("Approved.");
+    }
+    return;
+  }
+  if (decision.decision === "dismissed") {
     await ctx.ui.notify("Annotation session closed.");
     return;
   }
 
-  const feedback = decision
-    ? formatAnnotationFeedback(decision, options)
-    : result.stdout.trim();
+  const feedback = formatAnnotationFeedback(decision, options);
 
-  if (!feedback || isNoActionFeedback(feedback)) {
+  if (!feedback) {
     await ctx.ui.notify("Annotation session closed without feedback.");
     return;
   }
@@ -389,6 +444,17 @@ async function notifyFailure(
 
   await ctx.ui.notify(`Plannotator ${mode} failed.${details ? `\n\n${details}` : ""}${installHint}`);
   return true;
+}
+
+async function notifyInvalidStructuredOutput(
+  ctx: CommandContext,
+  result: RunResult,
+  mode: "review" | "annotate",
+): Promise<void> {
+  const stderr = result.stderr ? `\n\nCLI stderr:\n${result.stderr}` : "";
+  await ctx.ui.notify(
+    `Plannotator ${mode} returned invalid structured output. Update the Plannotator CLI and reload the Amp plugin: ${INSTALL_URL}\n\nNo decision was delivered to the thread. Captured output is included below so you can recover any feedback manually.\n\nCLI stdout:\n${result.stdout || "(empty stdout)"}${stderr}`,
+  );
 }
 
 async function runPlannotator(
@@ -529,11 +595,7 @@ function normalizeWorkspaceRoot(value: unknown): string | null {
 function fileUrlToPath(value: string): string {
   const url = new URL(value);
   if (url.protocol !== "file:") throw new Error(`Unsupported URL protocol: ${url.protocol}`);
-
-  const pathname = decodeURIComponent(url.pathname);
-  return process.platform === "win32" && /^\/[A-Za-z]:/.test(pathname)
-    ? pathname.slice(1)
-    : pathname;
+  return nodeFileURLToPath(url);
 }
 
 export function buildPlannotatorEnv(cwd: string, readyFile: string | null): Record<string, string> {
@@ -549,7 +611,7 @@ function normalizeDirectory(value: string | undefined): string | null {
   if (!candidate || candidate === "undefined" || candidate === "null") return null;
 
   try {
-    return statSync(candidate).isDirectory() ? candidate : null;
+    return statSync(candidate).isDirectory() ? resolve(candidate) : null;
   } catch {
     return null;
   }
@@ -710,8 +772,9 @@ export function getPlannotatorCommandCandidates(
   } = {},
 ): string[][] {
   const env = options.env ?? process.env;
-  const homes = getHomeDirectoryCandidates(env, options.home, options.pluginDir ?? import.meta.dir);
   const platform = options.platform ?? process.platform;
+  const homes = getHomeDirectoryCandidates(env, options.home, options.pluginDir ?? import.meta.dir, platform);
+  const pathJoin = joinForPlatform(platform);
   const candidates: string[][] = [];
 
   const explicitBin = normalizeExecutablePath(env.PLANNOTATOR_BIN);
@@ -719,14 +782,14 @@ export function getPlannotatorCommandCandidates(
 
   if (platform === "win32") {
     const localAppData = normalizeExecutablePath(env.LOCALAPPDATA);
-    if (localAppData) candidates.push([join(localAppData, "plannotator", "plannotator.exe")]);
+    if (localAppData) candidates.push([pathJoin(localAppData, "plannotator", "plannotator.exe")]);
 
     for (const home of homes) {
-      candidates.push([join(home, ".local", "bin", "plannotator.exe")]);
+      candidates.push([pathJoin(home, ".local", "bin", "plannotator.exe")]);
     }
   } else {
     for (const home of homes) {
-      candidates.push([join(home, ".local", "bin", "plannotator")]);
+      candidates.push([pathJoin(home, ".local", "bin", "plannotator")]);
     }
   }
 
@@ -744,30 +807,40 @@ function getHomeDirectoryCandidates(
   env: Record<string, string | undefined>,
   explicitHome: string | undefined,
   pluginDir: string,
+  platform: string,
 ): string[] {
   return dedupeStrings([
     normalizeExecutablePath(explicitHome),
     normalizeExecutablePath(env.HOME),
     normalizeExecutablePath(env.USERPROFILE),
-    deriveHomeFromAmpPluginDir(pluginDir),
+    deriveHomeFromAmpPluginDir(pluginDir, platform),
     explicitHome === undefined ? normalizeExecutablePath(homedir()) : null,
   ]);
 }
 
-function deriveHomeFromAmpPluginDir(pluginDir: string): string | null {
-  const pluginsDir = resolve(pluginDir);
-  const ampDir = dirname(pluginsDir);
-  const configDir = dirname(ampDir);
+function deriveHomeFromAmpPluginDir(pluginDir: string, platform: string): string | null {
+  const pathApi = pathApiForPlatform(platform);
+  const pluginsDir = pathApi.resolve(pluginDir);
+  const ampDir = pathApi.dirname(pluginsDir);
+  const configDir = pathApi.dirname(ampDir);
 
   if (
-    basename(pluginsDir) === "plugins" &&
-    basename(ampDir) === "amp" &&
-    basename(configDir) === ".config"
+    pathApi.basename(pluginsDir) === "plugins" &&
+    pathApi.basename(ampDir) === "amp" &&
+    pathApi.basename(configDir) === ".config"
   ) {
-    return dirname(configDir);
+    return pathApi.dirname(configDir);
   }
 
   return null;
+}
+
+function pathApiForPlatform(platform: string): typeof posix | typeof win32 {
+  return platform === "win32" ? win32 : posix;
+}
+
+function joinForPlatform(platform: string): typeof posix.join {
+  return pathApiForPlatform(platform).join;
 }
 
 function getAmpCacheDir(): string {
@@ -882,9 +955,11 @@ type PromptConfig = {
     annotate?: {
       fileFeedback?: unknown;
       messageFeedback?: unknown;
+      approvedWithNotes?: unknown;
       runtimes?: Partial<Record<typeof RUNTIME, {
         fileFeedback?: unknown;
         messageFeedback?: unknown;
+        approvedWithNotes?: unknown;
       }>>;
     };
   };
@@ -903,21 +978,34 @@ function loadPlannotatorConfig(): PromptConfig {
 }
 
 export function getPlannotatorDataDir(): string {
-  const value = process.env.PLANNOTATOR_DATA_DIR?.trim();
-  if (!value) return join(homedir(), ".plannotator");
-
   const home = homedir();
-  if (value === "~") return home;
-  if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return join(home, value.slice(2));
+
+  const value = process.env.PLANNOTATOR_DATA_DIR?.trim();
+  if (value) {
+    if (value === "~") return home;
+    if (value.startsWith("~/") || value.startsWith("~\\")) {
+      return join(home, value.slice(2));
+    }
+    return resolve(value);
   }
 
-  return resolve(value);
+  // Legacy-first: an existing ~/.plannotator always wins so current
+  // installs never move. Only when it is absent AND XDG_DATA_HOME is
+  // explicitly set to an absolute path does the XDG location apply.
+  const legacyDir = join(home, ".plannotator");
+  if (existsSync(legacyDir)) return legacyDir;
+
+  const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
+  if (xdgDataHome && isAbsolute(xdgDataHome)) {
+    return join(xdgDataHome, "plannotator");
+  }
+
+  return legacyDir;
 }
 
 function getConfiguredPrompt(
   config: PromptConfig,
-  key: "fileFeedback" | "messageFeedback",
+  key: "fileFeedback" | "messageFeedback" | "approvedWithNotes",
   fallback: string,
 ): string {
   const annotate = config.prompts?.annotate;

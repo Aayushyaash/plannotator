@@ -8,10 +8,26 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
-import { saveDraft, loadDraft, deleteDraft } from "../generated/draft.js";
-import { FAVICON_SVG } from "../generated/favicon.js";
+import { saveDraft, loadDraft, deleteDraft, getDraftGeneration } from "../generated/draft.ts";
+import { type createReviewDraftSession, type ReviewDraftKeys } from "../generated/review-draft.ts";
+import { CLASSIC_FAVICON_SVG, FAVICON_PNG_BYTES } from "../generated/favicon.ts";
+import { getServerConfig } from "../generated/config.ts";
+import { listReferenceSkills, readReferenceSkillContent } from "../generated/review-skill-loader.ts";
 
-import { json, parseBody, send, toWebRequest } from "./helpers";
+import { crossOriginRefusalBody } from "../generated/request-origin.ts";
+import { checkServerSession, serverSessionMismatchBody } from "../generated/server-session.ts";
+import { localImageContentType, localImageResponseHeaders } from "../generated/local-image.ts";
+import { json, parseBody, send, toWebRequest } from "./helpers.ts";
+import { isSameOriginRequest } from "./request-origin-guard.ts";
+import {
+	type BearConfig,
+	type IntegrationResult,
+	type ObsidianConfig,
+	type OctarineConfig,
+	saveToBear,
+	saveToObsidian,
+	saveToOctarine,
+} from "./integrations.ts";
 
 type Res = import("node:http").ServerResponse;
 
@@ -28,20 +44,6 @@ const ALLOWED_IMAGE_EXTENSIONS = new Set([
 	"tif",
 	"avif",
 ]);
-
-const IMAGE_CONTENT_TYPES: Record<string, string> = {
-	png: "image/png",
-	jpg: "image/jpeg",
-	jpeg: "image/jpeg",
-	gif: "image/gif",
-	webp: "image/webp",
-	svg: "image/svg+xml",
-	bmp: "image/bmp",
-	ico: "image/x-icon",
-	tiff: "image/tiff",
-	tif: "image/tiff",
-	avif: "image/avif",
-};
 
 const UPLOAD_DIR = join(tmpdir(), "plannotator");
 
@@ -87,16 +89,15 @@ function validateUploadExtension(fileName: string): {
 	return { valid: true, ext };
 }
 
-function getImageContentType(filePath: string): string {
-	return (
-		IMAGE_CONTENT_TYPES[getExtension(filePath)] || "application/octet-stream"
-	);
-}
+// Every /api/image answer carries the sandbox CSP, nosniff and CORP (see
+// generated/local-image.ts): an SVG opened directly must not run script on the
+// session origin.
+const TEXT_HEADERS = localImageResponseHeaders("text/plain; charset=utf-8");
 
 export function handleImageRequest(res: Res, url: URL): void {
 	const imagePath = url.searchParams.get("path");
 	if (!imagePath) {
-		send(res, "Missing path parameter", 400, { "Content-Type": "text/plain" });
+		send(res, "Missing path parameter", 400, TEXT_HEADERS);
 		return;
 	}
 
@@ -106,9 +107,12 @@ export function handleImageRequest(res: Res, url: URL): void {
 		try {
 			if (!existsSync(validation.resolved)) return false;
 			const data = readFileSync(validation.resolved);
-			send(res, data, 200, {
-				"Content-Type": getImageContentType(validation.resolved),
-			});
+			send(
+				res,
+				data,
+				200,
+				localImageResponseHeaders(localImageContentType(validation.resolved)),
+			);
 			return true;
 		} catch {
 			return false;
@@ -128,13 +132,11 @@ export function handleImageRequest(res: Res, url: URL): void {
 
 	const validation = validateImagePath(imagePath);
 	if (!validation.valid) {
-		send(res, validation.error || "Invalid image path", 403, {
-			"Content-Type": "text/plain",
-		});
+		send(res, validation.error || "Invalid image path", 403, TEXT_HEADERS);
 		return;
 	}
 
-	send(res, "File not found", 404, { "Content-Type": "text/plain" });
+	send(res, "File not found", 404, TEXT_HEADERS);
 }
 
 export async function handleUploadRequest(
@@ -190,21 +192,199 @@ export function handleDraftRequest(
 				json(res, { error: message }, 500);
 			});
 	} else if (req.method === "DELETE") {
-		deleteDraft(draftKey);
+		deleteDraft(draftKey, readDraftGenerationFromUrl(req));
 		json(res, { ok: true });
 	} else {
 		const draft = loadDraft(draftKey);
 		if (!draft) {
-			json(res, { found: false }, 404);
+			const draftGeneration = getDraftGeneration(draftKey);
+			json(res, { found: false, ...(draftGeneration !== null ? { draftGeneration } : {}) }, 404);
 			return;
 		}
 		json(res, draft);
 	}
 }
 
+/**
+ * Code-review /api/draft (#1590). Mirrors the Bun review route: outside PR
+ * mode the keys carry only the patch hash and every call degrades to the
+ * plain draft functions, byte-identical to handleDraftRequest.
+ */
+export function handleReviewDraftRequest(
+	req: IncomingMessage,
+	res: Res,
+	keys: ReviewDraftKeys,
+	drafts: ReturnType<typeof createReviewDraftSession>,
+): Promise<void> | void {
+	if (req.method === "POST") {
+		return parseBody(req)
+			.then((body) => {
+				const saved = drafts.save(keys, body);
+				// PR mode reports a rejected (stale-generation) save; local
+				// reviews keep the historical always-ok response.
+				if (!saved && keys.targetKey) {
+					json(res, { ok: false, error: "stale draft generation", ...drafts.state(keys) }, 409);
+					return;
+				}
+				json(res, { ok: true });
+			})
+			.catch((err: unknown) => {
+				const message = err instanceof Error ? err.message : "Failed to save draft";
+				console.error(`[draft] save failed: ${message}`);
+				json(res, { error: message }, 500);
+			});
+	} else if (req.method === "DELETE") {
+		drafts.remove(keys, readDraftGenerationFromUrl(req));
+		json(res, { ok: true });
+	} else {
+		const loaded = drafts.load(keys);
+		if (loaded.found) {
+			json(res, loaded.draft);
+			return;
+		}
+		json(
+			res,
+			{ found: false, ...(loaded.draftGeneration !== null ? { draftGeneration: loaded.draftGeneration } : {}) },
+			404,
+		);
+	}
+}
+
+function readDraftGenerationFromUrl(req: IncomingMessage): number | undefined {
+	const url = new URL(req.url ?? "/", "http://localhost");
+	const raw = url.searchParams.get("generation") ?? url.searchParams.get("draftGeneration");
+	if (raw === null) return undefined;
+	const value = Number(raw);
+	return Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+export function readDraftGenerationFromBody(body: unknown): number | undefined {
+	if (!body || typeof body !== "object") return undefined;
+	const value = (body as { draftGeneration?: unknown }).draftGeneration;
+	return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+export { readDraftGenerationFromUrl };
+
+/**
+ * Serve the app favicon. Mirrors packages/server/shared-handlers.ts
+ * handleFavicon() exactly: the persisted style decides the payload, the response
+ * declares its real type, and it is not cached because one URL now has two
+ * possible bodies. See that file for the full reasoning.
+ */
 export function handleFavicon(res: Res): void {
-	send(res, FAVICON_SVG, 200, {
-		"Content-Type": "image/svg+xml",
-		"Cache-Control": "public, max-age=86400",
+	if (getServerConfig(null).favicon === "classic") {
+		send(res, Buffer.from(CLASSIC_FAVICON_SVG, "utf-8"), 200, {
+			"Content-Type": "image/svg+xml",
+			"Cache-Control": "no-cache",
+		});
+		return;
+	}
+	send(res, Buffer.from(FAVICON_PNG_BYTES), 200, {
+		"Content-Type": "image/png",
+		"Cache-Control": "no-cache",
 	});
+}
+
+/**
+ * List global agent skills for comment skill references. Used by plan +
+ * annotate servers. Takes no client input (fixed roots only) and degrades to an
+ * empty catalog on any failure so the composer never breaks.
+ */
+export function handleReferenceSkillsRequest(res: Res): void {
+	try {
+		json(res, { skills: listReferenceSkills() });
+	} catch (err) {
+		console.error(
+			`[plannotator] Skill catalog failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		json(res, { skills: [] });
+	}
+}
+
+/**
+ * Serve a referenced skill's SKILL.md contents for feedback injection
+ * (`?name=<skill>`). Used by plan + annotate servers. The name is matched
+ * against discovered skills only — it is never used as a path — so traversal
+ * and absolute-path inputs answer 404, never a file outside the skill roots.
+ */
+export function handleReferenceSkillContentRequest(res: Res, url: URL): void {
+	try {
+		const name = url.searchParams.get("name") ?? "";
+		const skill = readReferenceSkillContent(name);
+		if (!skill) {
+			json(res, { error: "Skill not found" }, 404);
+			return;
+		}
+		json(res, { skill });
+	} catch (err) {
+		console.error(
+			`[plannotator] Skill content failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		json(res, { error: "Skill content failed" }, 500);
+	}
+}
+
+/**
+ * Save to external note apps (Obsidian, Bear, Octarine). Used by plan + annotate servers.
+ * Mirrors packages/server/shared-handlers.ts handleSaveNotes: another site's
+ * page is refused (403) and a stale tab's `serverSession` (409) before
+ * anything is written or opened.
+ */
+export async function handleSaveNotesRequest(
+	req: IncomingMessage,
+	res: Res,
+	options: { serverSession?: string } = {},
+): Promise<void> {
+	if (!isSameOriginRequest(req)) {
+		json(res, crossOriginRefusalBody(), 403);
+		return;
+	}
+	const results: {
+		obsidian?: IntegrationResult;
+		bear?: IntegrationResult;
+		octarine?: IntegrationResult;
+	} = {};
+	try {
+		const body = await parseBody(req);
+		if (options.serverSession !== undefined && checkServerSession(body, options.serverSession) === "mismatch") {
+			json(res, serverSessionMismatchBody(), 409);
+			return;
+		}
+		const promises: Promise<void>[] = [];
+		const obsConfig = body.obsidian as ObsidianConfig | undefined;
+		const bearConfig = body.bear as BearConfig | undefined;
+		const octConfig = body.octarine as OctarineConfig | undefined;
+		if (obsConfig?.vaultPath && obsConfig?.plan) {
+			promises.push(
+				saveToObsidian(obsConfig).then((r) => {
+					results.obsidian = r;
+				}),
+			);
+		}
+		if (bearConfig?.plan) {
+			promises.push(
+				saveToBear(bearConfig).then((r) => {
+					results.bear = r;
+				}),
+			);
+		}
+		if (octConfig?.plan && octConfig?.workspace) {
+			promises.push(
+				saveToOctarine(octConfig).then((r) => {
+					results.octarine = r;
+				}),
+			);
+		}
+		await Promise.allSettled(promises);
+		for (const [name, result] of Object.entries(results)) {
+			if (!result?.success && result)
+				console.error(`[${name}] Save failed: ${result.error}`);
+		}
+	} catch (err) {
+		console.error(`[Save Notes] Error:`, err);
+		json(res, { error: "Save failed" }, 500);
+		return;
+	}
+	json(res, { ok: true, results });
 }

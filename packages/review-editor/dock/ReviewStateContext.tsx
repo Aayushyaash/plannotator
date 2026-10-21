@@ -1,12 +1,27 @@
 import React, { createContext, useContext } from 'react';
-import type { CodeAnnotation, CodeAnnotationType, SelectedLineRange, TokenAnnotationMeta, ConventionalLabel, ConventionalDecoration } from '@plannotator/ui/types';
+import type { CallFlowAnnotationTarget, CodeAnnotation, CodeAnnotationType, SelectedLineRange, TokenAnnotationMeta, ConventionalLabel, ConventionalDecoration, Annotation, CommentAnnotation, ArtifactAnnotationMeta, ImageAttachment, MarkdownPreviewAnchor } from '@plannotator/ui/types';
+import type { MarkdownPreviewController } from '../hooks/useMarkdownPreview';
+import type { CommentAskAIHandler } from '@plannotator/ui/components/CommentPopover';
 import type { AgentJobInfo } from '@plannotator/ui/types';
-import type { DiffFile } from '../types';
+import type { DiffFile, AnnotationScrollTarget } from '../types';
 import type { AIChatEntry } from '../hooks/useAIChat';
 import type { ReviewSearchMatch } from '../utils/reviewSearch';
 import type { PRMetadata, PRContext } from '@plannotator/shared/pr-types';
+import type { PRArtifact } from '../utils/prArtifacts';
 import type { PRDiffScope } from '@plannotator/shared/pr-stack';
 import type { FeedbackDiffContext } from '../utils/exportFeedback';
+import type { SuggestionHunk } from '../edit/deriveSuggestions';
+import type { EditSelectionComment } from '../edit/useEditSession';
+import type { CallFlowAnalysisState } from '../hooks/useCallFlowAnalysis';
+import type { CallFlowInstallController } from '../hooks/useCallFlowInstall';
+import type { CallFlowAdvert, CallFlowNode } from '@plannotator/shared/call-flow-types';
+
+/** One-shot request to open the native code-annotation composer on a source range. */
+export interface LineAnnotationComposeRequest {
+  readonly id: number;
+  readonly filePath: string;
+  readonly range: SelectedLineRange;
+}
 
 /**
  * Shared review state consumed by dockview panel wrappers.
@@ -18,14 +33,20 @@ import type { FeedbackDiffContext } from '../utils/exportFeedback';
 export interface ReviewState {
   // Files & diff
   files: DiffFile[];
+  rawPatch: string;
   focusedFileIndex: number;
   focusedFilePath: string | null;
   diffStyle: 'split' | 'unified';
+  /** Compact touch shells use a session-only style so desktop preferences stay untouched. */
+  onDiffStyleChange: (style: 'split' | 'unified') => void;
+  /** True only for coarse-pointer phone/tablet layouts, never narrow desktop windows. */
+  isCompactTouchLayout: boolean;
   diffOverflow?: 'scroll' | 'wrap';
   diffIndicators?: 'bars' | 'classic' | 'none';
   lineDiffType?: 'word-alt' | 'word' | 'char' | 'none';
   disableLineNumbers?: boolean;
   disableBackground?: boolean;
+  expandUnchanged?: boolean;
   fontFamily?: string;
   fontSize?: string;
   /** User-selected base branch; feeds the `base` query param on file-content fetches. */
@@ -40,28 +61,141 @@ export interface ReviewState {
   /** PR/MR review scope label, e.g. "Layer diff" or "Full stack diff". */
   prReviewScope?: string;
   prDiffScope?: PRDiffScope;
+  /** Agent working directory — base for resolving repo-relative diff paths to
+   *  absolute (e.g. for the Open-in-app control). */
+  agentCwd?: string | null;
+  /** Whether live-working-tree actions match the snapshot currently shown. */
+  canUseLiveWorkspaceActions?: boolean;
+  /** False when hunk-context expansion has no source to expand from — a static
+   *  patch review has no working tree, so `/api/file-content` answers 400 and
+   *  the diff views must not ask. Absent means available (every VCS session). */
+  contextExpansionAvailable?: boolean;
+  /** True when the server advertised `imagePreviewSupported`: changed images
+   *  render as Before/After previews through `/api/review-image`. Absent or
+   *  false keeps the plain binary notice and issues no image requests. */
+  imagePreviewAvailable?: boolean;
+  /** The snapshot the server is serving (every mode, PR included); image
+   *  preview requests are bound to it. */
+  snapshotId?: string;
+  /** Markdown file views (Source / Changes / Read, one menu per Markdown
+   *  file). Absent when the server did not advertise
+   *  `markdownPreviewSupported` or has no full contents (static patch): no
+   *  preview UI renders anywhere. */
+  markdownPreview?: MarkdownPreviewController;
+  /** Commit a comment made by selecting text in a previewed Markdown file
+   *  (file-scoped, carries the quote). */
+  onAddMarkdownPreviewComment?: (
+    filePath: string,
+    comment: { id: string; text: string; anchor: MarkdownPreviewAnchor; images?: ImageAttachment[] },
+  ) => void;
+  /** Ask AI about a selection in a previewed Markdown file; absent without AI. */
+  onAskAIForMarkdownPreview?: CommentAskAIHandler;
 
   // Annotations
   allAnnotations: CodeAnnotation[];
   externalAnnotations: CodeAnnotation[];
   selectedAnnotationId: string | null;
+  /** Sidebar-initiated scroll-to-comment signal; the token re-fires per click.
+   *  Selecting a comment in the diff does NOT set this, so it never scrolls. */
+  scrollTargetAnnotation: AnnotationScrollTarget | null;
   pendingSelection: SelectedLineRange | null;
   onLineSelection: (range: SelectedLineRange | null) => void;
+  /** Resolve a source path and open the native line-annotation composer. */
+  onRequestLineAnnotation: (filePath: string, range: SelectedLineRange) => void;
+  /** Commit one Call Flow comment with a primary inline anchor and related targets. */
+  onAddCallFlowAnnotation: (
+    targets: readonly CallFlowAnnotationTarget[],
+    text: string,
+  ) => boolean;
   onAddAnnotation: (type: CodeAnnotationType, text?: string, suggestedCode?: string, originalCode?: string, conventionalLabel?: ConventionalLabel, decorations?: ConventionalDecoration[], tokenMeta?: TokenAnnotationMeta) => void;
   onAddAnnotationForFile: (filePath: string, type: CodeAnnotationType, text?: string, suggestedCode?: string, originalCode?: string, conventionalLabel?: ConventionalLabel, decorations?: ConventionalDecoration[], tokenMeta?: TokenAnnotationMeta) => void;
+  /** EXPERIMENTAL edit-to-suggestion flag (cookie setting, default OFF). Only
+   * the plain all-files panel consumes it — Guided Review surfaces stay off. */
+  editSuggestionsEnabled: boolean;
+  /** Sink for suggestions derived from a completed edit session (one hunk per
+   * contiguous changed region; becomes normal suggestion annotations). */
+  onAddSuggestionsForFile: (filePath: string, hunks: SuggestionHunk[]) => void;
+  /** Sink for a comment authored through the edit session's Selection Action
+   * ("Make annotation"): line-scoped comment on pristine new-side lines. */
+  onAddEditorCommentForFile: (filePath: string, comment: EditSelectionComment) => void;
   onAddFileComment: (text: string) => void;
   onAddFileCommentForFile: (filePath: string, text: string) => void;
   onEditAnnotation: (id: string, text?: string, suggestedCode?: string, originalCode?: string, conventionalLabel?: ConventionalLabel | null, decorations?: ConventionalDecoration[]) => void;
+  /** Highlight a comment without moving the viewport (in-diff click). */
   onSelectAnnotation: (id: string | null) => void;
+  /** Select AND scroll the diff to a comment (sidebar / findings-list click). */
+  onNavigateToAnnotation: (id: string | null) => void;
   onDeleteAnnotation: (id: string) => void;
+
+  // PR description prose annotations (comment-only; text-anchored Annotation[],
+  // kept separate from the diff CodeAnnotation[] above).
+  descriptionAnnotations: Annotation[];
+  selectedDescriptionAnnotationId: string | null;
+  onAddDescriptionAnnotation: (ann: Annotation) => void;
+  onSelectDescriptionAnnotation: (id: string | null) => void;
+  onDeleteDescriptionAnnotation: (id: string) => void;
+  /** Ask AI about a selection in the PR description (file-less scope ask). */
+  onAskAIForDescription?: CommentAskAIHandler;
+
+  // PR comment annotations (notes attached to a whole comment/review/thread).
+  commentAnnotations: CommentAnnotation[];
+  selectedCommentAnnotationId: string | null;
+  onAddCommentAnnotation: (
+    commentId: string,
+    commentAuthor: string,
+    commentBody: string,
+    text: string,
+    options?: { id?: string; artifact?: ArtifactAnnotationMeta },
+  ) => void;
+  onSelectCommentAnnotation: (id: string | null) => void;
+  onDeleteCommentAnnotation: (id: string) => void;
+  /** Ask AI about a PR comment (file-less scope ask, comment body as text). */
+  onAskAIForComment?: CommentAskAIHandler;
+  /** Sidebar-initiated "reveal this comment" signal (token bumps per click). */
+  commentScrollTarget: { commentId: string; token: number } | null;
 
   // Viewed / staged
   viewedFiles: Set<string>;
   onToggleViewed: (filePath: string) => void;
+  // Generated files (#1317): paths marked `linguist-generated` in
+  // `.gitattributes` (server sidecar). Collapsed by default on the all-files
+  // surface; headers show a "generated" tag. Presentation-only view state.
+  generatedFiles: Set<string>;
+  /** Generated files the user explicitly expanded — session-local, survives
+   *  panel remounts. */
+  expandedGeneratedFiles: Set<string>;
+  onGeneratedFileCollapsedChange: (filePath: string, collapsed: boolean) => void;
+  /** Cookie-only chrome preference (#1277): hide the Viewed controls everywhere
+   *  they render. Shortcuts and viewed state itself are unaffected. */
+  showViewedControls: boolean;
+  /** Same preference for the Git-add (stage) controls. */
+  showStageControls: boolean;
   stagedFiles: Set<string>;
   stagingFile: string | null;
   onStage: (filePath: string) => void;
   canStageFiles: boolean;
+  /** Per-file staging gate — false for committed files in since-base mode. */
+  canStagePath?: (filePath: string) => boolean;
+  /** Worktree path parsed from the live diffType when it's a
+   *  `worktree:<path>:<subType>` string; null for the main tree and PR mode.
+   *  Feeds jobMatchesReviewContext's third argument so guide/tour context
+   *  matching is worktree-aware (populated from App.tsx's
+   *  activeWorktreePath memo — the same parse that drives the sections/tree
+   *  UI, so context matching aligns with what's on screen). */
+  currentWorktreePath?: string | null;
+  /** Guide-mode reveal channel: set (with a fresh token) when a jump —
+   *  sidebar annotation click, AI line citation, or a chapter file chip —
+   *  targets a file while the guide takeover is open. The containing chapter
+   *  card opens and its section CodeView expands + scrolls to the virtualized
+   *  file item. Cleared when the guide closes so a reopen doesn't replay the
+   *  last reveal. */
+  guideRevealFile?: { path: string; token: number } | null;
+  /** Sets guideRevealFile with a fresh token. Entry point for jumps that
+   *  originate INSIDE the guide (section file chips) so they get the same
+   *  expand-focus-scroll treatment as the sidebar paths above — a direct
+   *  scrollIntoView would land on a bare header when the target diff is
+   *  collapsed (marked viewed). */
+  onGuideRevealFile?: (filePath: string) => void;
   stageError: string | null;
 
   // Search
@@ -71,15 +205,25 @@ export interface ReviewState {
   activeFileSearchMatches: ReviewSearchMatch[];
   activeSearchMatchId: string | null;
   activeSearchMatch: ReviewSearchMatch | null;
+  // All-files (CodeView) search surface: the full match set + the unfiltered
+  // active match (activeSearchMatch above is filtered to the single-file panel).
+  searchMatches: ReviewSearchMatch[];
+  allFilesActiveSearchMatch: ReviewSearchMatch | null;
 
   // AI
   aiAvailable: boolean;
   aiMessages: AIChatEntry[];
   onAskAI: (question: string) => void;
+  /** File-aware Ask AI for the all-files surface. onAskAI above resolves the
+   *  file from the single-file panel's focus index, which is wrong when the
+   *  selection lives in the all-files CodeView. */
+  onAskAIForFile: (filePath: string, question: string) => void;
   isAILoading: boolean;
   onViewAIResponse: (questionId?: string) => void;
   onClickAIMarker: (questionId: string) => void;
   aiHistoryForSelection: AIChatEntry[];
+  /** File-aware variant of aiHistoryForSelection (same single-file caveat). */
+  getAIHistoryForFile: (filePath: string) => AIChatEntry[];
 
   // Agent jobs
   agentJobs: AgentJobInfo[];
@@ -87,6 +231,8 @@ export interface ReviewState {
   // PR
   prMetadata: PRMetadata | null;
   prContext: PRContext | null;
+  /** Viewable attachments harvested from the current hosted PR/MR context. */
+  prArtifacts: readonly PRArtifact[];
   isPRContextLoading: boolean;
   prContextError: string | null;
   fetchPRContext: () => void;
@@ -94,17 +240,70 @@ export interface ReviewState {
 
   // Diff navigation
   openDiffFile: (filePath: string) => void;
-  onAllFilesVisibleFileChange: (filePath: string | null) => void;
+  onAllFilesVisibleFileChange: (filePath: string | null, info?: { collapsed: boolean }) => void;
+  /** Auto-mark-viewed: the reader moved on from this file (see useAutoViewed). */
+  onAllFilesFileScrolledPast: (filePath: string) => void;
   isAllFilesActive: boolean;
+  // Which left panel drives the all-files item order ('list' = sections order).
+  allFilesOrder: import('../components/AllFilesCodeView').AllFilesOrder;
+  // All-files collapse-all toggle — the AllFilesCodeView registers its handler
+  // here; the dock header's button (ReviewDockRightActions) invokes it.
+  allFilesAllCollapsed: boolean;
+  onToggleAllFilesCollapsed: () => void;
+  registerAllFilesCollapseToggle: (toggle: (() => void) | null) => void;
+  onAllFilesCollapsedChange: (collapsed: boolean) => void;
+  // Commit metadata when a commit:<sha> diff is active — heads the all-files
+  // view (description card) and seeds its files collapsed.
+  commitInfo: import('@plannotator/shared/types').CommitDiffInfo | null;
+  semanticDiffAvailable: boolean;
+  isSemanticDiffActive: boolean;
+  onSemanticDiffUnavailable: () => void;
+  onSemanticDiffLoadError: () => boolean;
+  onSemanticDiffLoadSuccess: () => void;
+  callFlowAvailable: boolean;
+  callFlowAdvert: CallFlowAdvert;
+  callFlowAnalysis: CallFlowAnalysisState;
+  retryCallFlowAnalysis: () => void;
+  /** Whether the complete node range exists in the currently reviewed patch. */
+  isCallFlowNodeInPatch: (node: CallFlowNode) => boolean;
+  isCallFlowActive: boolean;
+  openCallFlowPanel: () => void;
+  /** Opt-in runtime install controller backing the Dock's install funnel. */
+  callFlowInstall: CallFlowInstallController;
 
   // Tour
   openTourPanel: (jobId: string) => void;
 
+  // Guide — optional because not every host wires a guide takeover surface.
+  openGuide?: (jobId: string) => void;
+
   // Code navigation
   onCodeNavRequest?: (request: import('@plannotator/shared/code-nav').CodeNavRequest) => void;
+  /** Token hover cards. Undefined whenever the gate or the setting is off. */
+  onTokenHoverEnter?: (
+    props: import('@pierre/diffs').DiffTokenEventBaseProps,
+    filePath: string,
+  ) => void;
+  onTokenHoverLeave?: () => void;
   codeNavResult: import('@plannotator/shared/code-nav').CodeNavResponse | null;
   codeNavIsLoading: boolean;
   codeNavActiveSymbol: string | null;
+}
+
+type ContextualAIHandlers = Pick<
+  ReviewState,
+  "onAskAIForDescription" | "onAskAIForComment"
+>;
+
+/**
+ * Contextual PR popovers render Ask AI from handler presence, so omit both
+ * handlers until the server reports an available AI provider.
+ */
+export function buildContextualAIHandlers(
+  aiAvailable: boolean,
+  handlers: Required<ContextualAIHandlers>,
+): ContextualAIHandlers {
+  return aiAvailable ? handlers : {};
 }
 
 const ReviewStateContext = createContext<ReviewState | null>(null);
@@ -127,4 +326,9 @@ export function useReviewState(): ReviewState {
   const ctx = useContext(ReviewStateContext);
   if (!ctx) throw new Error('useReviewState must be used within ReviewStateProvider');
   return ctx;
+}
+
+/** Like useReviewState but returns null instead of throwing — for components that may render outside the provider. */
+export function useReviewStateOptional(): ReviewState | null {
+  return useContext(ReviewStateContext);
 }

@@ -1,10 +1,11 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AIChatEntry, PendingPermission } from '../../hooks/useAIChat';
-import type { AIProviderOption } from '../../utils/aiProvider';
+import { hasNonInterruptibleSession, type AIProviderOption } from '../../utils/aiProvider';
 import { formatRelativeTime, renderChatMarkdown } from '../../utils/aiChatFormat';
 import { OverlayScrollArea } from '../OverlayScrollArea';
 import { SparklesIcon } from '../SparklesIcon';
 import { AIProviderBar } from './AIProviderBar';
+import { SessionAskActions, SessionAskNote, SessionAskStatus, sessionAskErrorTone, type SessionAskAction } from './SessionAskNotice';
 import { submitHint } from '../../utils/platform';
 
 interface DocumentAIChatPanelProps {
@@ -12,11 +13,17 @@ interface DocumentAIChatPanelProps {
   isCreatingSession: boolean;
   isStreaming: boolean;
   onAskGeneral?: (question: string) => void;
+  /** Stop the in-flight answer. When provided, the input shows a Stop button while streaming. */
+  onStop?: () => void;
   permissionRequests?: PendingPermission[];
   onRespondToPermission?: (requestId: string, allow: boolean) => void;
   aiProviders?: AIProviderOption[];
   aiConfig?: { providerId: string | null; model: string | null; reasoningEffort?: string | null };
   onAIConfigChange?: (config: { providerId?: string | null; model?: string | null; reasoningEffort?: string | null }) => void;
+  /** "Ask this session": the reviewer's choice on a busy answer. */
+  onSessionAskAction?: (questionId: string, action: SessionAskAction) => void;
+  /** Optional note under the provider bar on how to get "Ask this session" (askSessionSetupHint). */
+  askSessionSetupHint?: string | null;
 }
 
 function truncate(text: string, max = 180): string {
@@ -56,12 +63,17 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
   isCreatingSession,
   isStreaming,
   onAskGeneral,
+  onStop,
   permissionRequests = [],
   onRespondToPermission,
   aiProviders = [],
   aiConfig,
   onAIConfigChange,
+  onSessionAskAction,
+  askSessionSetupHint,
 }) => {
+  // A session that is never interrupted (T3 Code): Stop only stops listening.
+  const listenOnly = hasNonInterruptibleSession(aiProviders);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [generalInput, setGeneralInput] = useState('');
   const latestMessage = messages[messages.length - 1];
@@ -81,7 +93,7 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
   }, [generalInput, onAskGeneral]);
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col flex-1 min-h-0">
       <OverlayScrollArea className="flex-1 min-h-0">
         <div ref={scrollRef} className="p-2 space-y-3">
           {messages.length === 0 && !isCreatingSession && (
@@ -105,6 +117,21 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
             </div>
           )}
 
+          {messages.map(entry => (
+            <DocumentQAPair
+              key={entry.question.id}
+              entry={entry}
+              canInterrupt={!listenOnly}
+              onSessionAskAction={onSessionAskAction}
+            />
+          ))}
+        </div>
+      </OverlayScrollArea>
+
+      {/* Pending permission requests — pinned just above the input/model bar so
+          the user sees them right where they act, not buried at the top. */}
+      {permissionRequests.filter(p => !p.decided).length > 0 && (
+        <div className="border-t border-border/50 p-2 space-y-2">
           {permissionRequests.filter(p => !p.decided).map(permission => (
             <PermissionCard
               key={permission.requestId}
@@ -112,12 +139,8 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
               onRespond={onRespondToPermission ?? (() => {})}
             />
           ))}
-
-          {messages.map(entry => (
-            <DocumentQAPair key={entry.question.id} entry={entry} />
-          ))}
         </div>
-      </OverlayScrollArea>
+      )}
 
       <AIProviderBar
         providers={aiProviders}
@@ -127,6 +150,7 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
         onProviderChange={(providerId) => onAIConfigChange?.({ providerId })}
         onModelChange={(model) => onAIConfigChange?.({ model })}
         onReasoningEffortChange={(reasoningEffort) => onAIConfigChange?.({ reasoningEffort })}
+        setupHint={askSessionSetupHint}
       />
 
       {onAskGeneral && (
@@ -135,13 +159,20 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
           onChange={setGeneralInput}
           onSubmit={handleGeneralSubmit}
           disabled={isStreaming}
+          isStreaming={isStreaming}
+          onStop={onStop}
+          observationOnly={listenOnly}
         />
       )}
     </div>
   );
 };
 
-const DocumentQAPair = memo<{ entry: AIChatEntry }>(({ entry }) => {
+const DocumentQAPair = memo<{
+  entry: AIChatEntry;
+  onSessionAskAction?: (questionId: string, action: SessionAskAction) => void;
+  canInterrupt?: boolean;
+}>(({ entry, onSessionAskAction, canInterrupt }) => {
   const { question, response } = entry;
   const renderedResponse = useMemo(
     () => response.text ? renderChatMarkdown(response.text) : null,
@@ -179,17 +210,27 @@ const DocumentQAPair = memo<{ entry: AIChatEntry }>(({ entry }) => {
 
       <div className="group relative p-2.5 rounded-lg border border-border/50 bg-popover/50 hover:bg-muted/30 transition-colors">
         {response.error ? (
-          <p className="text-xs text-destructive">{response.error}</p>
+          <>
+            <p className={`text-xs ${sessionAskErrorTone(response)}`}>{response.error}</p>
+            <SessionAskActions
+              response={response}
+              canInterrupt={canInterrupt}
+              onAction={onSessionAskAction ? (action) => onSessionAskAction(question.id, action) : undefined}
+            />
+          </>
         ) : response.text ? (
           <div className="text-xs">
             {renderedResponse}
             {response.isStreaming && <span className="ai-streaming-cursor inline-block ml-0.5" />}
           </div>
+        ) : response.status ? (
+          <SessionAskStatus response={response} />
         ) : response.isStreaming ? (
           <span className="text-xs text-muted-foreground">
             <span className="ai-streaming-cursor" /> Thinking...
           </span>
         ) : null}
+        {!response.error && <SessionAskNote response={response} />}
       </div>
     </div>
   );
@@ -241,7 +282,10 @@ const GeneralInput: React.FC<{
   onChange: (value: string) => void;
   onSubmit: () => void;
   disabled?: boolean;
-}> = ({ value, onChange, onSubmit, disabled }) => {
+  isStreaming?: boolean;
+  onStop?: () => void;
+  observationOnly?: boolean;
+}> = ({ value, onChange, onSubmit, disabled, isStreaming, onStop, observationOnly = false }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -255,6 +299,7 @@ const GeneralInput: React.FC<{
     <div className="border-t border-border/50 p-2">
       <div className="flex items-end gap-1.5">
         <textarea
+          data-pn-mobile-editable="true"
           ref={textareaRef}
           value={value}
           onChange={(event) => onChange(event.target.value)}
@@ -270,17 +315,31 @@ const GeneralInput: React.FC<{
             }
           }}
         />
-        <button
-          onClick={onSubmit}
-          disabled={disabled || !value.trim()}
-          className="p-1.5 mb-px rounded-md text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0"
-          title={`Send (${submitHint})`}
-          aria-label="Send AI question"
-        >
-          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
-          </svg>
-        </button>
+        {isStreaming && onStop ? (
+          <button
+            onClick={onStop}
+            className="p-1.5 mb-px rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors flex-shrink-0"
+            title={observationOnly ? 'Stop listening; the question keeps running in the session' : 'Stop generating'}
+            aria-label={observationOnly ? 'Stop listening' : 'Stop generating'}
+          >
+            {observationOnly && <span className="text-[10px] mr-1">Stop listening</span>}
+            <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+              <rect x="6" y="6" width="12" height="12" rx="2" />
+            </svg>
+          </button>
+        ) : (
+          <button
+            onClick={onSubmit}
+            disabled={disabled || !value.trim()}
+            className="p-1.5 mb-px rounded-md text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+            title={`Send (${submitHint})`}
+            aria-label="Send AI question"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+            </svg>
+          </button>
+        )}
       </div>
     </div>
   );

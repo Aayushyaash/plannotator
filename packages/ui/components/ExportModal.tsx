@@ -11,7 +11,35 @@ import { getObsidianSettings, getEffectiveVaultPath } from '../utils/obsidian';
 import { getBearSettings } from '../utils/bear';
 import { getOctarineSettings } from '../utils/octarine';
 import { wrapFeedbackForAgent } from '../utils/parser';
+import { copyTextToClipboard } from '../utils/clipboard';
+import { noteServerSessionMismatch, withServerSession } from '../utils/serverSession';
 import { OverlayScrollArea } from './OverlayScrollArea';
+
+/** POST body shape sent to the notes endpoint (mirrors what the Notes tab builds today). */
+interface SaveToNotesPayload {
+  obsidian?: object;
+  bear?: object;
+  octarine?: object;
+}
+
+/** Parsed response from the notes endpoint. */
+interface SaveToNotesResult {
+  results?: Record<string, { success?: boolean; error?: string }>;
+}
+
+/** Default save-to-notes wire: today's literal POST to /api/save-notes. */
+async function defaultSaveToNotes(body: SaveToNotesPayload): Promise<SaveToNotesResult> {
+  const res = await fetch('/api/save-notes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    // The stale-tab guard (a no-op for a host that never adopted a session).
+    body: JSON.stringify(withServerSession(body)),
+  });
+  if (await noteServerSessionMismatch(res)) {
+    return { results: Object.fromEntries(Object.keys(body).map((k) => [k, { success: false, error: 'This review was replaced. Reload the page.' }])) };
+  }
+  return res.json();
+}
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -25,7 +53,7 @@ interface ExportModalProps {
   /** Error from the last short URL generation attempt (empty string = no error) */
   shortUrlError?: string;
   /** Generate a short URL on demand (user clicks "Create short link") */
-  onGenerateShortUrl?: () => void;
+  onGenerateShortUrl?: () => void | Promise<unknown>;
   annotationsOutput: string;
   annotationCount: number;
   taterSprite?: React.ReactNode;
@@ -33,6 +61,15 @@ interface ExportModalProps {
   markdown?: string;
   isApiMode?: boolean;
   initialTab?: Tab;
+  /** Override the save-to-notes wire. Default: POST /api/save-notes (today's behavior). */
+  onSaveToNotes?: (payload: SaveToNotesPayload) => Promise<SaveToNotesResult>;
+  /**
+   * Wrap the annotations output for the clipboard Copy button. Annotate
+   * sessions pass a mode-aware wrapper so Copy matches Send Feedback instead
+   * of the plan-deny framing (#1107). Default: plan-deny wrap (today's
+   * plan-review behavior).
+   */
+  wrapCopiedAnnotations?: (feedback: string) => string;
 }
 
 type Tab = 'share' | 'annotations' | 'notes';
@@ -56,6 +93,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   markdown,
   isApiMode = false,
   initialTab,
+  onSaveToNotes = defaultSaveToNotes,
+  wrapCopiedAnnotations = wrapFeedbackForAgent,
 }) => {
   const defaultTab = initialTab || (sharingEnabled ? 'share' : 'annotations');
   const [activeTab, setActiveTab] = useState<Tab>(defaultTab);
@@ -90,20 +129,19 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const isOctarineReady = octarineSettings.enabled && octarineSettings.workspace.trim().length > 0;
 
   const handleCopy = async (text: string, which: 'short' | 'full' | 'annotations') => {
-    try {
-      await navigator.clipboard.writeText(text);
+    if (await copyTextToClipboard(text)) {
       setCopied(which);
       setTimeout(() => setCopied(false), 2000);
-    } catch (e) {
-      console.error('Failed to copy:', e);
+    } else {
+      console.error('Failed to copy');
     }
   };
 
   const handleCopyAnnotations = async () => {
-    await handleCopy(wrapFeedbackForAgent(annotationsOutput), 'annotations');
+    await handleCopy(wrapCopiedAnnotations(annotationsOutput), 'annotations');
   };
 
-  // Whether the hash URL is large enough to warrant a short URL option
+  // Warn when the hash URL may be too long for messaging apps
   const urlIsLarge = shareUrl.length > 2048;
   // Hash-based sharing unavailable (e.g. HTML render mode) — show only short link
   const hashUnavailable = !shareUrl && !!onGenerateShortUrl;
@@ -147,12 +185,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     }
 
     try {
-      const res = await fetch('/api/save-notes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
+      const data = await onSaveToNotes(body);
       const result = data.results?.[target];
 
       if (result?.success) {
@@ -289,7 +322,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                     </button>
                   </div>
                   <p className="text-[10px] text-muted-foreground mt-1">
-                    Encrypted short link. Your plan is end-to-end encrypted before it leaves your browser — not even the server can read it.
+                    Encrypted short link. The browser uploads AES-256-GCM ciphertext; the decryption key stays in the URL fragment.
                   </p>
                 </div>
               ) : isGeneratingShortUrl ? (
@@ -299,9 +332,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   </svg>
                   Generating short link...
                 </div>
-              ) : (urlIsLarge || hashUnavailable) && onGenerateShortUrl ? (
-                <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
-                  {!hashUnavailable && (
+              ) : onGenerateShortUrl ? (
+                <div className={`p-3 rounded-lg border ${
+                  urlIsLarge
+                    ? 'bg-amber-500/10 border-amber-500/20'
+                    : 'bg-muted/50 border-border'
+                }`}>
+                  {urlIsLarge && (
                     <p className="text-xs text-amber-600 dark:text-amber-400 mb-2">
                       This URL may be too long for some messaging apps.
                     </p>
@@ -356,13 +393,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 </div>
                 {!shortShareUrl && !isGeneratingShortUrl && !urlIsLarge && (
                   <p className="text-[10px] text-muted-foreground mt-1">
-                    Your plan is encoded entirely in the URL — it never touches a server.
+                    Shared content is compressed, not encrypted, in the URL fragment. The portal request does not include that fragment.
                   </p>
                 )}
               </div>}
 
               <p className="text-xs text-muted-foreground">
-                Only someone with this exact link can view your plan. Short links are end-to-end encrypted — the decryption key is in the URL and never sent to the server.
+                Anyone with the full link can view the shared content, including services used to send the link. Hosted short-link ciphertext expires after 7 days.
               </p>
             </div>
           ) : activeTab === 'notes' && showNotesTab ? (

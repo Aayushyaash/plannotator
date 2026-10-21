@@ -1,19 +1,41 @@
-import React, { useRef, useState, useEffect, useMemo, forwardRef, useImperativeHandle, useCallback } from 'react';
+import { generateId } from '../utils/generateId';
+import React, { useRef, useState, useEffect, useLayoutEffect, useMemo, forwardRef, useImperativeHandle, useCallback, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
-import hljs from 'highlight.js';
-import { Block, Annotation, AnnotationType, EditorMode, type InputMethod, type ImageAttachment, type ActionsLabelMode } from '../types';
-import { Frontmatter, computeListIndices } from '../utils/parser';
+import { collectDocumentImages, ImageLightbox, type LightboxImage } from './ImageLightbox';
+import { AnnotationType, type Block, type Annotation, type EditorMode, type InputMethod, type ImageAttachment, type ActionsLabelMode, type HostDraft } from '../types';
+import { applyHighlight, codeBlockClassName, onCodeHighlightSwap } from '../utils/codeHighlight';
+import { paintCodeBlockMark } from '../utils/codeBlockMark';
+import { useFenceTheme } from '../hooks/useFenceTheme';
+import { computeListIndices, groupBlocks, selectionSourceLines, type Frontmatter, type FrontmatterValue } from '../utils/parser';
 import { buildHeadingSlugMap } from '../utils/slugify';
+import { copyTextToClipboard } from '../utils/clipboard';
 import { BlockRenderer } from './BlockRenderer';
+import { indexQuestionBlocks, type IndexedQuestion, type ParsedQuestion, type QuestionAnswer } from '@plannotator/core/question-block';
+import type { QuestionBlockProps } from './blocks/QuestionBlock';
+import { resolveQuestionAnswers } from '../utils/questionAnswers';
 import { CodeBlock } from './blocks/CodeBlock';
 import { TableBlock } from './blocks/TableBlock';
 import { TableToolbar } from './blocks/TableToolbar';
 import { TablePopout } from './blocks/TablePopout';
 import { CodePathValidationContext } from './CodePathValidationContext';
+import { LocalLinkContext, type LocalLinkResolver } from './LocalLinkContext';
 import { useValidatedCodePaths } from '../hooks/useValidatedCodePaths';
-import { ListMarker } from './ListMarker';
 import { AnnotationToolbar } from './AnnotationToolbar';
 import { FloatingQuickLabelPicker } from './FloatingQuickLabelPicker';
+
+/**
+ * The diagram engine — the renderer slot, the canvas, the comment overlay,
+ * the popout, and (through the viewer) CodeMirror — is loaded by the first
+ * diagram fence in the document and by nothing else. A markdown document
+ * with no diagram never reaches for it; a chunked host that statically
+ * imports this Viewer pays none of it on a plain document read.
+ *
+ * The Suspense fallback is the SAME pending state the block itself shows
+ * while its engine loads (`DiagramPending`), inside the same boxes, so the
+ * source fence paints once and the two waits read as one.
+ */
+const MermaidBlock = lazy(async () => ({ default: (await import('./MermaidBlock')).MermaidBlock }));
+const GraphvizBlock = lazy(async () => ({ default: (await import('./GraphvizBlock')).GraphvizBlock }));
 
 // Debug error boundary to catch silent toolbar crashes
 class ToolbarErrorBoundary extends React.Component<
@@ -33,24 +55,71 @@ class ToolbarErrorBoundary extends React.Component<
   }
 }
 
-import { CommentPopover, type CommentAskAIContext } from './CommentPopover';
+import { CommentPopover, type CommentAskAIHandler } from './CommentPopover';
 import { TaterSpriteSitting } from './TaterSpriteSitting';
 import { AttachmentsButton } from './AttachmentsButton';
 import { MessagesIcon } from './icons/MessagesIcon';
-import { GraphvizBlock } from './GraphvizBlock';
-import { MermaidBlock } from './MermaidBlock';
-import { getImageSrc } from './ImageThumbnail';
+import { DiagramAnchorClaims, DiagramAnchorClaimsContext } from './diagram/anchorClaims';
+import { DiagramBlockPending } from './diagram/DiagramPending';
 import { isGraphvizLanguage, isMermaidLanguage } from './diagramLanguages';
 import { getIdentity } from '../utils/identity';
 import { type QuickLabel } from '../utils/quickLabels';
-import { DocBadges } from './DocBadges';
+import type { SelectionAction } from '../utils/selectionActions';
+import type { MentionSource } from '../utils/mentions';
+import { DocBadges, type DocBadgesProps, type LinkedDocBadgeInfo } from './DocBadges';
 import { PinpointOverlay } from './PinpointOverlay';
 import { usePinpoint } from '../hooks/usePinpoint';
-import { useAnnotationHighlighter } from '../hooks/useAnnotationHighlighter';
-import { useScrollViewport } from '../hooks/useScrollViewport';
+import { useAnnotationHighlighter, type AnnotationRestoreReport } from '../hooks/useAnnotationHighlighter';
+import { useVimSelection } from '../hooks/useVimSelection';
+import {
+  getScrollViewportIntersectionRoot,
+  getScrollViewportRect,
+  getScrollViewportTop,
+  scrollViewportTo,
+  useScrollViewport,
+} from '../hooks/useScrollViewport';
 import { decodeAnchorHash } from '../utils/anchors';
+import { VimModeOverlay } from './VimModeOverlay';
+import { AnnotationToolstrip } from './AnnotationToolstrip';
+import {
+  resolveCompactHeaderGeometry,
+  snapCompactHeaderWidth,
+} from './compactHeaderLayout';
 
-interface ViewerProps {
+/** Typed controls required for Viewer's opt-in, in-flow annotation header. */
+export interface ViewerAnnotationHeaderConfig {
+  /** Persist and apply a Select or Pinpoint input-method change. */
+  readonly onInputMethodChange: (method: InputMethod) => void;
+  /** Persist and apply an annotation-mode change. */
+  readonly onModeChange: (mode: EditorMode) => void;
+  /** Omit Quick Label without changing or coercing the current mode. */
+  readonly hideQuickLabel?: boolean;
+}
+
+/** Public properties for the Markdown document Viewer. */
+export interface ViewerProps {
+  /**
+   * Opt-in host capability, passed straight through to the selection
+   * toolbars: the host's own commands for the current selection, rendered as
+   * one wand button that opens the package's dropdown. Absent → unchanged.
+   */
+  selectionActions?: SelectionAction[];
+  /** Opt-in host capability: the glyph on the `selectionActions` button on
+   *  both toolbars. Absent → the package's own wand. */
+  selectionActionsIcon?: React.ReactNode;
+  /**
+   * Whether the package's quick labels are offered on the selection toolbars
+   * (default true). `false` hides the Zap picker and the Alt+digit label
+   * shortcuts; the 👍 button is unaffected.
+   */
+  quickLabels?: boolean;
+  /**
+   * Opt-in host capability, forwarded to BOTH comment composers this viewer
+   * mounts (the text-selection composer and the global / code-block one): the
+   * `@` mention source for the composer's picker. The picked ids ride onto the
+   * created annotation as `Annotation.mentions`. Absent → unchanged.
+   */
+  mentionSource?: MentionSource;
   blocks: Block[];
   markdown: string;
   frontmatter?: Frontmatter | null;
@@ -65,20 +134,64 @@ interface ViewerProps {
   onAddGlobalAttachment?: (image: ImageAttachment) => void;
   onRemoveGlobalAttachment?: (path: string) => void;
   repoInfo?: { display: string; branch?: string; host?: string } | null;
+  /**
+   * The repository bare `#123` / `@user` refs link into, WITHOUT the repo
+   * badge `repoInfo` also draws (a host that renders many small documents,
+   * such as the Inbox's messages). Wins over `repoInfo` for links only;
+   * `null` and absent both fall back to `repoInfo`, as before.
+   */
+  refRepo?: { display: string; host?: string } | null;
   stickyActions?: boolean;
+  /**
+   * Render compact annotation controls and the existing document actions in
+   * one measured, in-flow header owned by Viewer. The header reserves its
+   * responsive height before document content and follows `stickyActions`.
+   * Omit this prop to retain the legacy floating action bar exactly. Read-only
+   * viewers suppress the annotation header rather than expose dead controls.
+   */
+  annotationHeader?: ViewerAnnotationHeaderConfig;
+  /** Render the plan as a floating card on a grid background (shadow/border/padding). Default false. */
+  gridEnabled?: boolean;
   onOpenLinkedDoc?: (path: string) => void;
   onOpenCodeFile?: (path: string) => void;
+  /**
+   * Opt-in host capability: decide what a link to a local path does
+   * (`[the mock](mock.html)`, markdown and raw-HTML `<a href>` alike; never
+   * `#anchors`, `//host` or a URL with a scheme). Return `{ kind: 'open' }`
+   * to open it yourself, `{ kind: 'unavailable', title }` to draw it as
+   * inert text, or null for the default. Absent → unchanged.
+   */
+  resolveLocalLink?: LocalLinkResolver;
   imageBaseDir?: string;
+  /**
+   * A click on an image in the document. Given: the host handles it (the
+   * Inbox opens a message's image in its own viewer) and no lightbox opens.
+   * Absent: the lightbox, as always.
+   */
+  onImageClick?: (src: string, alt: string) => void;
+  /**
+   * The lightbox steps through every image the document shows (← →, the
+   * peek; approval "inbox-image-viewer": plan review and annotate's light
+   * version). Absent or false: the single image overlay, as always.
+   */
+  imageLightboxStepping?: boolean;
   /** Directory the active document lives in — used by the code-path validator
    *  so out-of-tree relative references (e.g. `../foo.ts` in a linked doc)
    *  resolve against the doc's own directory rather than only cwd. */
   codePathBaseDir?: string;
-  linkedDocInfo?: { filepath: string; onBack: () => void; label?: string; backLabel?: string } | null;
+  /** Opt out of `/api/doc/exists` code-path validation (host without that
+   *  endpoint). Default undefined for Plannotator => validation stays on. */
+  disableCodePathValidation?: boolean;
+  linkedDocInfo?: LinkedDocBadgeInfo | null;
   // Plan diff props
   planDiffStats?: { additions: number; deletions: number; modifications: number } | null;
   isPlanDiffActive?: boolean;
   onPlanDiffToggle?: () => void;
   hasPreviousVersion?: boolean;
+  /** Baseline suffix + tooltip for the plan-diff badge (see DocBadges) —
+   *  annotate/folder sessions pass "since last review"; plan review omits. */
+  planDiffBaselineLabel?: string;
+  planDiffBaselineTooltip?: string;
   /** Show amber "Demo" badge (portal mode, no shared content loaded) */
   showDemoBadge?: boolean;
   /** Max width in px for the plan card; null removes the cap entirely. */
@@ -94,6 +207,8 @@ interface ViewerProps {
   archiveInfo?: { status: 'approved' | 'denied' | 'unknown'; timestamp: string; title: string } | null;
   /** Source attribution for HTML/URL annotations (e.g. URL or filename) */
   sourceInfo?: string;
+  /** Absolute path of the annotated source file for the Open-in-app control. */
+  openInAppPath?: string | null;
   /**
    * Message picker affordance — annotate-last mode only. Shown as a button in
    * the sticky-top action bar so the user can switch to a different recent
@@ -104,14 +219,243 @@ interface ViewerProps {
   // Checkbox toggle props
   onToggleCheckbox?: (blockId: string, checked: boolean) => void;
   checkboxOverrides?: Map<string, boolean>;
-  onAskAI?: (question: string, context: CommentAskAIContext) => void;
+  /** Answer handler for `:::question` blocks. The Viewer draws each answer
+   *  from the `annotations` row carrying `questionAnswer` for that question's
+   *  key; a change calls this with the next answer, or null when it became
+   *  empty, and the host upserts or removes that annotation (see
+   *  `upsertQuestionAnswerAnnotation` in `utils/questionAnswers`). Absent (or
+   *  `readOnly`), question blocks render read-only. */
+  onAnswerQuestion?: (blockId: string, answer: QuestionAnswer | null, key: string) => void;
+  /** Host-kept answers, keyed by the question's (de-duplicated) key from
+   *  `indexQuestionBlocks` / `findQuestionBlocks`. When given, the cards read
+   *  their answers from here and never from `annotations`; entries that fail
+   *  `parseQuestionAnswer` are ignored. Absent: answers come from the
+   *  annotations carrying `questionAnswer` (Plannotator's own path). */
+  questionAnswers?: ReadonlyMap<string, QuestionAnswer> | Readonly<Record<string, QuestionAnswer>>;
+  /** Explicit save mode for question cards: edits stay a draft in the card,
+   *  which shows Save answer and Cancel (and no Skip); Save calls this with
+   *  the question's key and the answer, or null when the draft is empty. Return
+   *  a promise to keep the draft until it settles (a rejection keeps it for a
+   *  retry). Takes precedence over `onAnswerQuestion`. Ignored when
+   *  `readOnly`. */
+  onSaveQuestionAnswer?: (key: string, answer: QuestionAnswer | null) => void | Promise<unknown>;
+  /** Label of the explicit-save-mode Save button, or a function of the
+   *  question returning it. Default "Save answer"; never derived from
+   *  `decisionOnAnswer` (only the host knows whether saving records one). */
+  saveQuestionAnswerLabel?: string | ((question: ParsedQuestion) => string);
+  /** Host actions at the right of a question card's footer (e.g. "Mark as
+   *  decision"), given the indexed question and its saved answer. Rendered in
+   *  read-only cards too; return null for none. */
+  renderQuestionFooter?: (question: IndexedQuestion, answer: QuestionAnswer | undefined) => React.ReactNode;
+  /** Whether answering a question records a decision, per question. On a
+   *  `Decision: when answered` question: false draws its "Records a
+   *  decision" tag dimmed with a dotted outline and hides the "Answering this
+   *  records a decision" row; true or undefined keeps today's card. On a
+   *  question with no decision line it is ignored unless
+   *  `questionDecisionScope` is `'any'`; then a boolean adds the tag in that
+   *  state (true also shows the row) and undefined adds nothing. Has no
+   *  effect on a question whose decision is already recorded. */
+  questionDecisionRecording?: (question: IndexedQuestion) => boolean | undefined;
+  /** Which questions can carry the "Records a decision" tag (ui 0.52.1).
+   *  `'when-answered'` (default, the 0.52.0 behaviour): only questions with
+   *  `Decision: when answered`. `'any'`: also a question with no decision
+   *  line, when `questionDecisionRecording` returns a boolean for it. */
+  questionDecisionScope?: 'when-answered' | 'any';
+  /** Whether `:::question` cards read `Decision:` lines (default true). False
+   *  (a host that records no decisions, such as the Plannotator Inbox): a
+   *  `Decision:` line is shown as context and no question carries a decision
+   *  tag or row from it. The prompt, key and numbering are unchanged. */
+  questionDecisionLines?: boolean;
+  /** Makes a question's "Records a decision" tag a toggle button
+   *  (`aria-pressed`); a click calls this with the question's key and the
+   *  next state, which the host stores and returns from
+   *  `questionDecisionRecording`. Ignored when `readOnly`. */
+  onToggleQuestionDecisionRecording?: (key: string, next: boolean) => void;
+  /** Opens the host's decision card (ui 0.52.1): the tag splits into a
+   *  diamond switch (the toggle above) and the words "Records a decision" as
+   *  a button that calls this with the question's key and the words' element
+   *  (anchor your popover to it). Offered on and off. Ignored when
+   *  `readOnly`. */
+  onOpenQuestionDecision?: (key: string, anchor: HTMLElement) => void;
+  /** Per question, true draws its decision tag as a plain tag: no switch and
+   *  no opener, as under `readOnly`, while the other questions keep theirs
+   *  (a host whose message holds one sent and one open question). Absent:
+   *  every question follows `readOnly`. */
+  questionDecisionLocked?: (question: IndexedQuestion) => boolean;
+  /** Per question, true draws that card read-only, as under `readOnly` (no
+   *  picks, no Other, no note, no Skip, no Accept recommended, and its
+   *  decision tag a plain tag), while the other questions stay answerable (a
+   *  host whose message holds one sent and one open question). Absent: every
+   *  question follows `readOnly`. */
+  questionReadOnly?: (question: IndexedQuestion) => boolean;
+  /** `'none'` hides each question card's own status tag (Open / Answered /
+   *  Settled / Skipped) so the host can draw its own; the decision tags stay.
+   *  Default `'card'`. */
+  questionStatusTag?: 'card' | 'none';
+  /** The host's own words for a question's status tag (ui seam, see
+   *  `QuestionBlock` `statusLabel`): the Plannotator Inbox says "Not sent" for
+   *  a saved, unsent pick. Absent: the card's own tags. */
+  questionStatusLabel?: QuestionBlockProps['statusLabel'];
+  /** A host's own card in place of a question's (ui seam for a question the
+   *  host no longer lets anyone answer, such as the Plannotator Inbox's
+   *  replaced questions). Called per question; a returned node is drawn
+   *  instead of the answer card, inside a wrapper carrying the block's
+   *  `data-block-id`; `undefined` keeps the answer card. Absent: every
+   *  question draws its answer card (today's behaviour). */
+  renderQuestionCard?: (question: IndexedQuestion, answer: QuestionAnswer | undefined) => React.ReactNode | undefined;
+  /** Host content right under a question card's prompt, per question (e.g.
+   *  "Replaces <an earlier question>"); null for none. Absent: nothing there. */
+  renderQuestionBelowPrompt?: (question: IndexedQuestion) => React.ReactNode;
+  onAskAI?: CommentAskAIHandler;
+  /** Whether comment popovers offer image attachments. Hosts without an
+   *  uploadTransport pass false so the attach affordance never dead-ends.
+   *  Default true — today's behavior. */
+  allowImages?: boolean;
+  /** View-only mode: suppresses every annotation-creation entry point
+   *  (selection toolbar, comment popovers, quick labels, pinpoint, global
+   *  comment, attachments, checkbox toggles). Existing annotations still
+   *  render and remain selectable. Default false — today's behavior. */
+  readOnly?: boolean;
+  /**
+   * Opt-in host capability: the document is read, not annotated. Every
+   * annotation affordance is off exactly as under `readOnly` (selection and
+   * code-block toolbars, comment composers, pinpoint, the annotation header,
+   * global comment and attachments, Vim), the document actions (Global
+   * comment, Copy) are not drawn, but question cards and checkboxes keep their
+   * handlers. For a host that shows a message with answerable `:::question`
+   * blocks and no comments on its text. Absent → unchanged.
+   */
+  answerOnly?: boolean;
+  /**
+   * Opt-in host capability, with `answerOnly`: the reader may comment on the
+   * text. A text selection opens the selection toolbar, comment-only
+   * (Comment and the one-click 👍; no Delete, no label picker), and its
+   * comment composer; `annotations` are drawn as highlights. Question cards
+   * are left out of selection (their text is not commented on), and nothing
+   * else of authoring comes back (no pinpoint, code-block toolbar, Global
+   * comment or Copy, no Vim). For a host that shows a message whose words
+   * can be commented on (the Plannotator Inbox's agent messages). Ignored
+   * without `answerOnly` and under `readOnly`. Absent → unchanged.
+   */
+  textComments?: boolean;
+  /** Opt-in Vim-style keyboard selection. Default false for compatibility. */
+  vimModeEnabled?: boolean;
+  /** Replace the compact Vim badge with the live video-style key HUD. */
+  vimHudEnabled?: boolean;
+  /** Show the bottom-right key panel without affecting the HUD reticle. */
+  vimHudKeyPanelEnabled?: boolean;
+  /** Persist a user request to hide the bottom-right key panel. */
+  onVimHudKeyPanelChange?: (enabled: boolean) => void;
+  /** Fires once per highlight-restore pass with what it tried and what it could
+   *  not anchor, so a host can mark the leftovers in its annotation panel. */
+  onRestoreReport?: (report: AnnotationRestoreReport) => void;
+  /**
+   * Opt-in host capability: the composer handed to the host (see
+   * `HostDraft`). A selection settling, a pinpoint tap or Comment mode reports
+   * a draft here instead of opening the toolbar or a composer (a pinpoint tap
+   * reports `intent: 'compose'`), and null when it closes. The document
+   * actions (Global comment, Copy) and the code-block and table hover
+   * toolbars are not drawn, and a pinpoint tap on a code block does nothing.
+   * The host saves the comment and draws it through `annotations` /
+   * `applySharedAnnotations`. Ignored when authoring is off. Absent →
+   * unchanged.
+   */
+  onHostDraft?: (draft: HostDraft | null) => void;
 }
 
 export interface ViewerHandle {
   removeHighlight: (id: string) => void;
   clearAllHighlights: () => void;
   applySharedAnnotations: (annotations: Annotation[]) => void;
+  /** `HtmlViewer` only: move a pinned draft to the element around it
+   *  (`'parent'`) or back in (`'child'`), for a host that composes
+   *  (`onHostDraft`). The markdown `Viewer` does not implement it. */
+  stepPin?: (direction: 'parent' | 'child') => void;
+  /** `HtmlViewer` only: scroll the pinned draft into the middle of the
+   *  frame, for a host whose panel covers part of it. */
+  revealPin?: () => void;
+  /** Markdown `Viewer` only, for a host that composes (`onHostDraft`) on a
+   *  touch screen: make the page's text selection a draft now (the host's own
+   *  Comment action), reported through `onHostDraft` as `'selection'`.
+   *  Returns false when nothing in the document is selected. */
+  takeSelection?: () => boolean;
 }
+
+interface CodeBlockToolbarTarget {
+  readonly block: Block;
+  readonly element: HTMLElement;
+  readonly activation: 'pointer' | 'keyboard';
+}
+
+// Named type guard so both taken and fallthrough branches narrow.
+function isFrontmatterMap(value: FrontmatterValue): value is { [key: string]: FrontmatterValue } {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Renders a single frontmatter field or recursive sub-structure.
+ */
+const FrontmatterRow: React.FC<{ field: string; value: FrontmatterValue }> = ({ field, value }) => {
+  if (isFrontmatterMap(value)) {
+    const subEntries = Object.entries(value);
+    return (
+      <div className="flex flex-col gap-1.5">
+        <span className="font-medium text-muted-foreground">{field}:</span>
+        <div className="pl-4 grid gap-1.5">
+          {subEntries.map(([k, v]) => (
+            <FrontmatterRow key={k} field={k} value={v} />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (Array.isArray(value)) {
+    const isArrayOfMaps = value.some((v) => typeof v === 'object' && v !== null);
+    if (isArrayOfMaps) {
+      return (
+        <div className="flex flex-col gap-1.5">
+          <span className="font-medium text-muted-foreground">{field}:</span>
+          <div className="pl-4 grid gap-2">
+            {value.map((item, i) => (
+              <div key={i} className="p-2 bg-muted/40 border border-border/40 rounded grid gap-1.5">
+                {isFrontmatterMap(item) ? (
+                  Object.entries(item).map(([k, v]) => (
+                    <FrontmatterRow key={k} field={k} value={v} />
+                  ))
+                ) : (
+                  <span className="text-foreground">{typeof item === 'string' ? item : String(item)}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex gap-2">
+        <span className="font-medium text-muted-foreground min-w-[80px]">{field}:</span>
+        <span className="text-foreground">
+          <span className="flex flex-wrap gap-1">
+            {value.map((v, i) => (
+              <span key={i} className="px-1.5 py-0.5 bg-primary/10 text-primary rounded text-xs">
+                {typeof v === 'string' ? v : String(v)}
+              </span>
+            ))}
+          </span>
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex gap-2">
+      <span className="font-medium text-muted-foreground min-w-[80px]">{field}:</span>
+      <span className="text-foreground">{value}</span>
+    </div>
+  );
+};
 
 /**
  * Renders YAML frontmatter as a styled metadata card.
@@ -124,28 +468,212 @@ const FrontmatterCard: React.FC<{ frontmatter: Frontmatter }> = ({ frontmatter }
     <div className="mt-4 mb-6 p-4 bg-muted/30 border border-border/50 rounded-lg">
       <div className="grid gap-2 text-sm">
         {entries.map(([key, value]) => (
-          <div key={key} className="flex gap-2">
-            <span className="font-medium text-muted-foreground min-w-[80px]">{key}:</span>
-            <span className="text-foreground">
-              {Array.isArray(value) ? (
-                <span className="flex flex-wrap gap-1">
-                  {value.map((v, i) => (
-                    <span key={i} className="px-1.5 py-0.5 bg-primary/10 text-primary rounded text-xs">
-                      {v}
-                    </span>
-                  ))}
-                </span>
-              ) : (
-                value
-              )}
-            </span>
-          </div>
+          <FrontmatterRow key={key} field={key} value={value} />
         ))}
       </div>
     </div>
   );
 };
 
+/** Viewport offset (px) the legacy action cluster pins to while stuck (`top-3`). */
+const STICKY_ACTIONS_TOP_PX = 12;
+
+interface StickyActionsBox {
+  readonly width: number;
+  readonly height: number;
+  readonly marginTop: number;
+  readonly marginRight: number;
+}
+
+/**
+ * Legacy top-right action cluster, pinned while the document scrolls.
+ *
+ * The cluster must not be a sticky float: when float-avoiding siblings (the
+ * `overflow-x-auto` table and code wrappers) reflow, Firefox lays them out
+ * around the float's *stuck* position, so annotating a long table while
+ * scrolled squeezed it to a sliver. A static float spacer reserves the title's
+ * wrap space instead, and the cluster sticks inside a zero-height lane. Both
+ * copy the cluster's measured box and margins, so host CSS that restyles
+ * `[data-sticky-actions]` keeps its effect.
+ */
+const StickyActionsLane: React.FC<{ className: string; children: React.ReactNode }> = ({ className, children }) => {
+  const actionsRef = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState<StickyActionsBox | null>(null);
+
+  useLayoutEffect(() => {
+    const el = actionsRef.current;
+    if (!el) return;
+    const measure = () => {
+      const style = window.getComputedStyle(el);
+      const next: StickyActionsBox = {
+        width: el.offsetWidth,
+        height: el.offsetHeight,
+        marginTop: Number.parseFloat(style.marginTop) || 0,
+        marginRight: Number.parseFloat(style.marginRight) || 0,
+      };
+      setBox((prev) =>
+        prev
+        && prev.width === next.width
+        && prev.height === next.height
+        && prev.marginTop === next.marginTop
+        && prev.marginRight === next.marginRight
+          ? prev
+          : next);
+    };
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(el);
+    // Breakpoint-only margin changes (lg/xl) don't resize the cluster.
+    window.addEventListener('resize', measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, []);
+
+  return (
+    <>
+      <div
+        data-print-hide
+        data-sticky-actions-lane
+        className="sticky z-30 flex h-0 items-start justify-end"
+        // The lane carries no margin, so offset it by the cluster's own top
+        // margin to pin the cluster's border box exactly where the float did.
+        style={{ top: STICKY_ACTIONS_TOP_PX - (box?.marginTop ?? 0) }}
+      >
+        <div ref={actionsRef} data-print-hide data-sticky-actions className={className}>
+          {children}
+        </div>
+      </div>
+      {/* After the lane: the lane is a flex box, so a float placed before it would narrow it. */}
+      <div
+        data-print-hide
+        aria-hidden="true"
+        className="float-right"
+        style={box ? { width: box.width, height: box.height, marginTop: box.marginTop, marginRight: box.marginRight } : undefined}
+      />
+    </>
+  );
+};
+
+interface ViewerDocumentHeaderProps {
+  readonly config: ViewerAnnotationHeaderConfig;
+  readonly inputMethod: InputMethod;
+  readonly mode: EditorMode;
+  readonly taterMode: boolean;
+  readonly sticky: boolean;
+  readonly stuck: boolean;
+  readonly sentinelRef: React.RefObject<HTMLDivElement | null>;
+  readonly badges: Omit<DocBadgesProps, 'layout'>;
+  readonly actions: React.ReactNode;
+}
+
+/** Viewer-owned header that keeps leading controls and trailing actions in one flow. */
+const ViewerDocumentHeader: React.FC<ViewerDocumentHeaderProps> = ({
+  config,
+  inputMethod,
+  mode,
+  taterMode,
+  sticky,
+  stuck,
+  sentinelRef,
+  badges,
+  actions,
+}) => {
+  const headerRef = useRef<HTMLDivElement>(null);
+  const actionsRef = useRef<HTMLDivElement>(null);
+  const [headerWidth, setHeaderWidth] = useState(0);
+  const [actionsWidth, setActionsWidth] = useState(0);
+
+  useEffect(() => {
+    const header = headerRef.current;
+    if (!header) return;
+    const observer = new ResizeObserver(([entry]) => {
+      const next = snapCompactHeaderWidth(entry.contentRect.width);
+      setHeaderWidth((current) => current === next ? current : next);
+    });
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const actionCluster = actionsRef.current;
+    if (!actionCluster) return;
+    const observer = new ResizeObserver(([entry]) => {
+      const next = snapCompactHeaderWidth(entry.contentRect.width);
+      setActionsWidth((current) => current === next ? current : next);
+    });
+    observer.observe(actionCluster);
+    return () => observer.disconnect();
+  }, []);
+
+  const geometry = resolveCompactHeaderGeometry({
+    containerWidth: headerWidth,
+    trailingWidth: actionsWidth,
+    leadingInset: 0,
+  });
+  const narrow = geometry.layout === 'narrow';
+  const iconOnly = geometry.layout !== 'wide';
+
+  return (
+    <>
+      {sticky && <div ref={sentinelRef} className="h-0 w-0" aria-hidden="true" />}
+      <div
+        ref={headerRef}
+        data-annotation-exclude
+        data-print-hide
+        data-viewer-document-header
+        data-header-layout={geometry.layout}
+        className={`annotation-exclude ${sticky ? 'sticky top-3' : 'relative'} z-40 mb-3 md:mb-4 rounded-lg transition-colors duration-150 ${
+          stuck ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''
+        }`}
+      >
+        <div className={`flex min-w-0 ${
+          narrow
+            ? 'flex-col items-stretch gap-2'
+            : 'flex-row items-start justify-between gap-4'
+        }`}>
+          <div
+            data-viewer-annotation-controls
+            className={`inline-flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 py-1 md:py-2 ${
+              narrow ? 'w-full' : 'flex-1'
+            }`}
+          >
+            <div className="flex-shrink-0">
+              <AnnotationToolstrip
+                inputMethod={inputMethod}
+                onInputMethodChange={config.onInputMethodChange}
+                mode={mode}
+                onModeChange={config.onModeChange}
+                taterMode={taterMode}
+                hideQuickLabel={config.hideQuickLabel}
+                compact
+                iconOnly={iconOnly}
+              />
+            </div>
+            <DocBadges layout="header" {...badges} />
+          </div>
+          <div
+            ref={actionsRef}
+            data-sticky-actions
+            className={`flex flex-shrink-0 items-start gap-1 rounded-lg p-1 md:gap-2 md:p-2 ${
+              narrow ? 'self-end' : ''
+            }`}
+          >
+            {actions}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+};
+
+/**
+ * Render and annotate a parsed Markdown document.
+ *
+ * Pointer and opt-in keyboard annotations share the same highlight callbacks;
+ * the imperative handle mutates only highlights owned by this viewer.
+ */
 export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   blocks,
   markdown,
@@ -157,56 +685,165 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   mode,
   inputMethod = 'drag',
   taterMode,
+  selectionActions,
+  selectionActionsIcon,
+  quickLabels,
+  mentionSource,
   globalAttachments = [],
   onAddGlobalAttachment,
   onRemoveGlobalAttachment,
   repoInfo,
+  refRepo,
   stickyActions = true,
+  annotationHeader,
+  gridEnabled = false,
   planDiffStats,
   isPlanDiffActive,
   onPlanDiffToggle,
   hasPreviousVersion,
+  planDiffBaselineLabel,
+  planDiffBaselineTooltip,
   showDemoBadge,
   maxWidth,
   onOpenLinkedDoc,
   onOpenCodeFile,
+  resolveLocalLink,
   linkedDocInfo,
   imageBaseDir,
+  onImageClick: hostImageClick,
+  imageLightboxStepping = false,
   codePathBaseDir,
+  disableCodePathValidation,
+  onRestoreReport,
   copyLabel,
   actionsLabelMode = 'full',
   archiveInfo,
   sourceInfo,
+  openInAppPath,
   messagePickerInfo,
   onToggleCheckbox,
   checkboxOverrides,
+  onAnswerQuestion,
+  questionAnswers: hostQuestionAnswers,
+  onSaveQuestionAnswer,
+  saveQuestionAnswerLabel,
+  renderQuestionFooter,
+  questionDecisionRecording,
+  questionDecisionScope,
+  questionDecisionLines = true,
+  onToggleQuestionDecisionRecording,
+  onOpenQuestionDecision,
+  questionDecisionLocked,
+  questionReadOnly,
+  questionStatusTag,
+  questionStatusLabel,
+  renderQuestionCard,
+  renderQuestionBelowPrompt,
   onAskAI,
+  allowImages = true,
+  readOnly = false,
+  answerOnly = false,
+  textComments = false,
+  vimModeEnabled = false,
+  vimHudEnabled = false,
+  vimHudKeyPanelEnabled = true,
+  onVimHudKeyPanelChange,
+  onHostDraft,
 }, ref) => {
+  // Annotation authoring is off when read-only, and when the host only wants
+  // answers (`answerOnly`); question cards and checkboxes follow `readOnly`.
+  const authoringOff = readOnly || answerOnly;
+  // `textComments`: an answer-only document whose words still take comments
+  // (the selection toolbar, comment-only, and its composer); everything else
+  // of authoring stays off. Without it this is exactly `!authoringOff`.
+  const textCommentsOnly = answerOnly && textComments && !readOnly;
+  const selectionCommentsOn = !authoringOff || textCommentsOnly;
+  const hostComposes = onHostDraft !== undefined && !authoringOff;
+  const viewerAnnotationHeader = authoringOff ? undefined : annotationHeader;
+  const hasViewerAnnotationHeader = viewerAnnotationHeader !== undefined;
+  // Where `#123` / `@user` link: `refRepo` when the host gave one, else `repoInfo`.
+  const linkRepo = refRepo ?? repoInfo;
   const [copied, setCopied] = useState(false);
-  const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
+  const [lightbox, setLightboxState] = useState<{ src: string; alt: string; images?: LightboxImage[] } | null>(null);
+  // A host that handles image clicks (the Inbox) gets them; otherwise the lightbox opens, stepping through
+  // the document's images when the host asked for it.
+  const setLightbox = (image: { src: string; alt: string }) => {
+    if (hostImageClick) {
+      hostImageClick(image.src, image.alt);
+      return;
+    }
+    setLightboxState(imageLightboxStepping ? { ...image, images: collectDocumentImages(containerRef.current) } : image);
+  };
   const [locationHash, setLocationHash] = useState(() => window.location.hash);
   const globalCommentButtonRef = useRef<HTMLButtonElement>(null);
+  // Read through a ref: only the imperative removeHighlight path below needs
+  // it, and CodeBlock re-highlights itself on palette change.
+  const fenceTheme = useFenceTheme();
+  const fenceThemeRef = useRef(fenceTheme);
+  fenceThemeRef.current = fenceTheme;
 
   const handleCopyPlan = async () => {
-    try {
-      await navigator.clipboard.writeText(markdown);
+    if (await copyTextToClipboard(markdown)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch (e) {
-      console.error('Failed to copy:', e);
+    } else {
+      console.error('Failed to copy');
     }
   };
   const containerRef = useRef<HTMLDivElement>(null);
+  // The element that actually scrolls; shared by the Vim scroll math, the
+  // sticky-header observer, and the reticle geometry.
+  const scrollViewport = useScrollViewport();
+  // The badge cluster (repo chips / diff badge) is absolutely positioned in the
+  // card's top padding. One row fits; a second row (diff badge) or mobile
+  // wrapping outgrows the padding and lands on the document's first heading.
+  // Measure the cluster and insert exactly the clearance it needs (0 when it fits).
+  const docBadgesRef = useRef<HTMLDivElement | null>(null);
+  const [badgeClearance, setBadgeClearance] = useState(0);
+  useEffect(() => {
+    if (hasViewerAnnotationHeader) {
+      setBadgeClearance(0);
+      return;
+    }
+    const el = docBadgesRef.current;
+    const article = containerRef.current;
+    if (!el || !article) { setBadgeClearance(0); return; }
+    const measure = () => {
+      const pad = parseFloat(getComputedStyle(article).paddingTop) || 0;
+      const overflow = el.offsetTop + el.offsetHeight - pad;
+      setBadgeClearance(overflow > 1 ? overflow + 4 : 0);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    window.addEventListener('resize', measure);
+    return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
+  }, [hasViewerAnnotationHeader, repoInfo, hasPreviousVersion, showDemoBadge, linkedDocInfo, archiveInfo, sourceInfo, planDiffStats, openInAppPath]);
+
   // Per-doc heading slug map with dedup — computed once per blocks array so
   // anchor ids stay stable across re-renders and duplicate heading texts get
   // `-1`/`-2`/... suffixes rather than colliding on the same id.
   const headingSlugMap = useMemo(() => buildHeadingSlugMap(blocks), [blocks]);
+  // `:::question` blocks: numbered in document order, answers drawn from the
+  // annotations that carry `questionAnswer` (matched by question key, so an
+  // answer follows its question across re-parses).
+  const questionIndex = useMemo(() => {
+    const list = indexQuestionBlocks(blocks, { decisionLines: questionDecisionLines });
+    return { byBlock: new Map(list.map((q) => [q.blockId, q])), total: list.length };
+  }, [blocks, questionDecisionLines]);
+  // A host that keeps answers itself (`questionAnswers`) replaces the
+  // annotation-derived map; each entry is validated like any other reader.
+  const answersByKey = useMemo(
+    () => resolveQuestionAnswers(annotations, hostQuestionAnswers),
+    [annotations, hostQuestionAnswers],
+  );
   const isTouchDevice = useMemo(() => window.matchMedia('(pointer: coarse)').matches, []);
-  const [hoveredCodeBlock, setHoveredCodeBlock] = useState<{ block: Block; element: HTMLElement } | null>(null);
+  const [codeBlockToolbar, setCodeBlockToolbar] =
+    useState<CodeBlockToolbarTarget | null>(null);
   const [isCodeBlockToolbarExiting, setIsCodeBlockToolbarExiting] = useState(false);
   const [hoveredTable, setHoveredTable] = useState<{ block: Block; element: HTMLElement } | null>(null);
   const [isTableToolbarExiting, setIsTableToolbarExiting] = useState(false);
-  const tableHoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const tableHoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [popoutTable, setPopoutTable] = useState<Block | null>(null);
   // Viewer-specific comment popover state (global comments + code blocks)
   const [viewerCommentPopover, setViewerCommentPopover] = useState<{
@@ -222,14 +859,24 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     anchorEl: HTMLElement;
     codeBlock: { block: Block; element: HTMLElement };
   } | null>(null);
-  const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const readOnlyRef = useRef(authoringOff);
+  readOnlyRef.current = authoringOff;
   const stickySentinelRef = useRef<HTMLDivElement>(null);
   const lastAutoScrolledHashRef = useRef<string | null>(null);
   const [isStuck, setIsStuck] = useState(false);
 
+  // Reported only when the text-search rescue could not re-anchor either, so
+  // the annotation is listed in the panel with no highlight in the document.
+  const handleRestoreMismatch = useCallback((annotation: Annotation, restoredText: string) => {
+    console.warn(
+      `Annotation ${annotation.id} could not be re-anchored: stored positions resolved onto ` +
+      `"${restoredText.slice(0, 50)}" and its text "${annotation.originalText.slice(0, 50)}" is no longer in the document.`,
+    );
+  }, []);
+
   // Shared annotation infrastructure via hook
   const {
-    highlighterRef,
     toolbarState,
     commentPopover: hookCommentPopover,
     quickLabelPicker: hookQuickLabelPicker,
@@ -241,9 +888,12 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     handleCommentClose: hookCommentClose,
     handleFloatingQuickLabel: hookFloatingQuickLabel,
     handleQuickLabelPickerDismiss: hookQuickLabelPickerDismiss,
+    highlightRange,
+    highlightMathElement,
     removeHighlight: hookRemoveHighlight,
     clearAllHighlights,
     applyAnnotations,
+    takeSelection,
   } = useAnnotationHighlighter({
     containerRef,
     annotations,
@@ -251,6 +901,19 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     onSelectAnnotation,
     selectedAnnotationId,
     mode,
+    enabled: selectionCommentsOn,
+    // Markdown documents drift between the moment a draft/share is written and
+    // the moment it is restored (a plan revision, a re-rendered block, a
+    // renderer change that adds or drops elements — #1509 hoisted an alert's
+    // bold first line onto the icon row, which renumbers every later
+    // `parentIndex`). web-highlighter's stored metas are positional, so a
+    // drifted anchor resolves onto the WRONG text and paints silently. Verify
+    // the painted text against the annotation's own quote so a bad resolve is
+    // dropped and the text-search rescue runs instead of a wrong highlight.
+    verifyRestoredContent: true,
+    onRestoreMismatch: handleRestoreMismatch,
+    onRestoreReport,
+    onHostDraft: hostComposes ? onHostDraft : undefined,
   });
 
   // Refs for code block annotation path
@@ -259,17 +922,116 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   const modeRef = useRef<EditorMode>(mode);
   useEffect(() => { modeRef.current = mode; }, [mode]);
 
+  const applyCodeBlockAnnotation = useCallback((
+    blockId: string,
+    codeEl: Element,
+    type: AnnotationType,
+    text?: string,
+    images?: ImageAttachment[],
+    isQuickLabel?: boolean,
+    quickLabelTip?: string,
+    mentions?: readonly string[],
+  ) => {
+    if (readOnlyRef.current) return;
+
+    const id = `codeblock-${Date.now()}`;
+    const codeText = codeEl.textContent || '';
+
+    paintCodeBlockMark(codeEl, id, type);
+
+    const newAnnotation: Annotation = {
+      id,
+      blockId,
+      startOffset: 0,
+      endOffset: codeText.length,
+      type,
+      text,
+      originalText: codeText,
+      createdA: Date.now(),
+      author: getIdentity(),
+      images,
+      // Host capability: present only when a mentionSource was supplied AND a
+      // token survived, so a code-block comment without one is unchanged.
+      ...(mentions && mentions.length > 0 ? { mentions } : {}),
+      ...(isQuickLabel ? { isQuickLabel: true } : {}),
+      ...(quickLabelTip ? { quickLabelTip } : {}),
+    };
+
+    onAddAnnotationRef.current(newAnnotation);
+    window.getSelection()?.removeAllRanges();
+  }, []);
+
+  // Live annotation list for the imperative DOM paths below, which run outside
+  // React's render (highlight swaps, the imperative handle).
+  const annotationsRef = useRef(annotations);
+  annotationsRef.current = annotations;
+
+  // `removeHighlight` runs BEFORE the host drops the annotation from state and
+  // re-highlights the block on the way out, so for one tick `annotationsRef`
+  // still lists an annotation whose mark is deliberately gone. Remember those
+  // ids so the swap listener below never paints a removed annotation back in,
+  // whichever tick that block's re-highlight lands in.
+  const removedAnnotationIdsRef = useRef<Set<string>>(new Set());
+  // Retire a tombstone as soon as the host's list agrees the annotation is
+  // gone: the window it guards is only the tick between removeHighlight and
+  // the state update, and keeping it would block a later restore that brings
+  // the same annotation (same id) back from a draft.
+  for (const id of removedAnnotationIdsRef.current) {
+    if (!annotations.some((a) => a.id === id)) removedAnnotationIdsRef.current.delete(id);
+  }
+
+  // A highlight swap replaces a `<code>` element's children — that is how the
+  // palette/mode change repaints tokens, and how the first async grammar
+  // attach lands after load. It also destroys any annotation mark inside the
+  // fence. Re-paint it here, SYNCHRONOUSLY after the write, so the block ends
+  // up with both the new theme's tokens and its mark.
+  //
+  // Being driven by the swap is also what makes the restore race safe without
+  // timing: a share/draft restore that painted before the swap is
+  // re-established in the same task the swap ran in, and one that runs after
+  // it finds the mark already present and leaves it alone.
+  useEffect(() => onCodeHighlightSwap((codeEl) => {
+    const container = containerRef.current;
+    if (!container || !container.contains(codeEl)) return;
+    // The swap always clears the element, so a surviving mark means this write
+    // was not the one that owns this block's contents.
+    if (codeEl.querySelector('[data-bind-id]')) return;
+
+    const codeText = codeEl.textContent ?? '';
+    if (!codeText) return;
+    const blockId = codeEl.closest('[data-block-id]')?.getAttribute('data-block-id') ?? '';
+
+    // Fenced code is annotated all-or-nothing, so this block's annotations are
+    // exactly the ones whose originalText is its full text. Share-restored
+    // annotations arrive with an empty blockId (it is filled in during restore),
+    // so an unset blockId still counts. The last one wins, matching what
+    // annotating the same block twice does.
+    const owner = annotationsRef.current.filter((a) =>
+      a.type !== AnnotationType.GLOBAL_COMMENT
+      && !a.diffContext
+      && a.originalText === codeText
+      && (a.blockId === blockId || !a.blockId)
+      && !removedAnnotationIdsRef.current.has(a.id)
+      && !container.querySelector(`[data-bind-id="${a.id}"], [data-highlight-id="${a.id}"]`)
+    ).at(-1);
+
+    if (owner) paintCodeBlockMark(codeEl, owner.id, owner.type);
+  }), []);
+
   // Pinpoint mode: hover + click to select elements
   const handlePinpointCodeBlockClick = useCallback((blockId: string, element: HTMLElement) => {
+    if (readOnlyRef.current) return;
+
+    const block = blocks.find((candidate) => candidate.id === blockId);
     const codeEl = element.querySelector('code');
-    if (!codeEl) return;
+    if (!block || !codeEl) return;
     // In pinpoint mode, apply code block annotation based on current editor mode
     if (modeRef.current === 'redline') {
       applyCodeBlockAnnotation(blockId, codeEl, AnnotationType.DELETION);
     } else if (modeRef.current === 'quickLabel') {
       setCodeBlockQuickLabelPicker({
         anchorEl: element,
-        codeBlock: { block: blocks.find(b => b.id === blockId)!, element },
+        codeBlock: { block, element },
       });
     } else {
       // Show comment popover anchored to the code block
@@ -278,18 +1040,130 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         contextText: (codeEl.textContent || '').slice(0, 80),
         selectedText: codeEl.textContent || '',
         isGlobal: false,
-        codeBlock: { block: blocks.find(b => b.id === blockId)!, element },
+        codeBlock: { block, element },
       });
     }
-  }, [blocks]);
+  }, [applyCodeBlockAnnotation, blocks]);
 
-  const { hoverTarget } = usePinpoint({
+  const handleKeyboardCodeBlockAction = useCallback((
+    blockId: string,
+    element: HTMLElement,
+    modeOverride?: EditorMode,
+  ) => {
+    if (readOnlyRef.current) return;
+
+    const block = blocks.find((candidate) => candidate.id === blockId);
+    const codeEl = element.querySelector('code');
+    if (!block || !codeEl) return;
+
+    const effectiveMode = modeOverride ?? modeRef.current;
+    if (effectiveMode === 'redline') {
+      applyCodeBlockAnnotation(blockId, codeEl, AnnotationType.DELETION);
+      return;
+    }
+    if (effectiveMode === 'quickLabel') {
+      setCodeBlockQuickLabelPicker({
+        anchorEl: element,
+        codeBlock: { block, element },
+      });
+      return;
+    }
+    if (effectiveMode === 'selection') {
+      if (hoverTimeoutRef.current) {
+        clearTimeout(hoverTimeoutRef.current);
+        hoverTimeoutRef.current = null;
+      }
+      setCodeBlockToolbar({ block, element, activation: 'keyboard' });
+      return;
+    }
+    setViewerCommentPopover({
+      anchorEl: element,
+      contextText: (codeEl.textContent || '').slice(0, 80),
+      selectedText: codeEl.textContent || '',
+      isGlobal: false,
+      codeBlock: { block, element },
+    });
+  }, [applyCodeBlockAnnotation, blocks]);
+
+  const vimModeActive = vimModeEnabled && !authoringOff;
+  const keyboardCodeBlockToolbarOpen = codeBlockToolbar?.activation === 'keyboard';
+  const vimBlocked = !!toolbarState
+    || !!hookCommentPopover
+    || !!viewerCommentPopover
+    || !!hookQuickLabelPicker
+    || !!codeBlockQuickLabelPicker
+    || keyboardCodeBlockToolbarOpen
+    || !!isPlanDiffActive
+    || !!popoutTable
+    || !!lightbox;
+  const clearPinpointHoverRef = useRef<() => void>(() => {});
+  const handleVimCommand = useCallback(() => {
+    clearPinpointHoverRef.current();
+  }, []);
+  const vim = useVimSelection({
     containerRef,
-    highlighterRef,
-    inputMethod,
-    enabled: !toolbarState && !hookCommentPopover && !viewerCommentPopover && !hookQuickLabelPicker && !codeBlockQuickLabelPicker && !(isPlanDiffActive ?? false),
-    onCodeBlockClick: handlePinpointCodeBlockClick,
+    scrollViewport,
+    enabled: vimModeActive,
+    hudEnabled: vimHudEnabled,
+    blocked: vimBlocked,
+    activeMode: mode,
+    contentVersion: blocks,
+    onHighlightRange: highlightRange,
+    onCodeBlockAction: handleKeyboardCodeBlockAction,
+    onMathAction: highlightMathElement,
+    onHandledCommand: handleVimCommand,
   });
+
+  // With the composer handed to the host, a pinpoint tap opens it at once.
+  const hostPinpointRange = useCallback((range: Range) => highlightRange(range, 'comment'), [highlightRange]);
+  const noHostCodeBlockClick = useCallback(() => {}, []);
+  const { hoverTarget, clearHover: clearPinpointHover } = usePinpoint({
+    containerRef,
+    inputMethod,
+    // A host composer's draft stays open while the host composes; the next tap replaces it.
+    enabled: !authoringOff && (hostComposes || (!toolbarState && !hookCommentPopover)) && !viewerCommentPopover && !hookQuickLabelPicker && !codeBlockQuickLabelPicker && !(isPlanDiffActive ?? false) && !vim.helpOpen,
+    onSelectRange: hostComposes ? hostPinpointRange : highlightRange,
+    onCodeBlockClick: hostComposes ? noHostCodeBlockClick : handlePinpointCodeBlockClick,
+  });
+  clearPinpointHoverRef.current = clearPinpointHover;
+  const vimOwnsHudTarget = vimHudEnabled
+    && vim.state.phase !== 'inactive'
+    && (vim.focused || vim.state.phase === 'action');
+  const vimOwnsDocumentNavigation = vimModeActive
+    && vim.focused
+    && vim.state.phase !== 'inactive'
+    && vim.state.phase !== 'action';
+  const legacyVimTarget = !vimHudEnabled
+    && (vim.focused || vim.state.phase === 'action')
+    ? vim.activeTarget
+    : null;
+  const pinpointOverlayTarget = vimOwnsHudTarget
+    ? null
+    : (inputMethod === 'pinpoint' ? hoverTarget : null) ?? legacyVimTarget;
+
+  useEffect(() => {
+    if (!authoringOff) return;
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+      hoverTimeoutRef.current = null;
+    }
+    setCodeBlockToolbar(null);
+    setIsCodeBlockToolbarExiting(false);
+    setViewerCommentPopover(null);
+    setCodeBlockQuickLabelPicker(null);
+  }, [authoringOff]);
+
+  useEffect(() => {
+    if (!vimOwnsDocumentNavigation) return;
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+      hoverTimeoutRef.current = null;
+    }
+    setCodeBlockToolbar((current) => (
+      current?.activation === 'pointer' ? null : current
+    ));
+    setIsCodeBlockToolbarExiting(false);
+  }, [vimOwnsDocumentNavigation]);
 
   // Suppress native context menu on touch devices (prevents cut/copy/paste overlay on mobile)
   useEffect(() => {
@@ -307,16 +1181,19 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   // Detect when sticky action bar is "stuck" to show card background.
   // The IntersectionObserver root must be the actual scroll element — the
   // OverlayScrollArea viewport — not the <main> host, which doesn't scroll.
-  const stickyScrollViewport = useScrollViewport();
   useEffect(() => {
-    if (!stickyActions || !stickySentinelRef.current || !stickyScrollViewport) return;
+    if (!stickyActions) {
+      setIsStuck(false);
+      return;
+    }
+    if (!stickySentinelRef.current || !scrollViewport) return;
     const observer = new IntersectionObserver(
       ([entry]) => setIsStuck(!entry.isIntersecting),
-      { root: stickyScrollViewport, threshold: 0 }
+      { root: getScrollViewportIntersectionRoot(scrollViewport), threshold: 0 }
     );
     observer.observe(stickySentinelRef.current);
     return () => observer.disconnect();
-  }, [stickyActions, stickyScrollViewport]);
+  }, [hasViewerAnnotationHeader, stickyActions, scrollViewport]);
 
   useEffect(() => {
     const handleHashChange = () => {
@@ -333,39 +1210,45 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     if (!anchor) return false;
 
     const container = containerRef.current;
-    if (!container || !stickyScrollViewport) return false;
+    if (!container || !scrollViewport) return false;
 
     const target = document.getElementById(anchor);
     if (!target || !container.contains(target)) return false;
 
-    const stickyActionsEl = container.querySelector<HTMLElement>('[data-sticky-actions]');
-    const stickyTop = stickyActionsEl
-      ? Number.parseFloat(window.getComputedStyle(stickyActionsEl).top || '0') || 0
+    const documentHeader = stickyActions
+      ? container.querySelector<HTMLElement>('[data-viewer-document-header]')
+        ?? container.querySelector<HTMLElement>('[data-sticky-actions]')
+      : null;
+    // The legacy cluster sticks via its lane, so its own `top` is `auto`.
+    const stickyTop = documentHeader
+      ? documentHeader.hasAttribute('data-viewer-document-header')
+        ? Number.parseFloat(window.getComputedStyle(documentHeader).top || '0') || 0
+        : STICKY_ACTIONS_TOP_PX
       : 0;
-    const headerOffset = stickyActionsEl
-      ? stickyActionsEl.getBoundingClientRect().height + stickyTop
+    const headerOffset = documentHeader
+      ? documentHeader.getBoundingClientRect().height + stickyTop
       : 0;
-    const containerRect = stickyScrollViewport.getBoundingClientRect();
+    const containerRect = getScrollViewportRect(scrollViewport);
     const targetRect = target.getBoundingClientRect();
     const relativeTop = targetRect.top - containerRect.top;
-    const offsetPosition = stickyScrollViewport.scrollTop + relativeTop - headerOffset;
+    const offsetPosition = getScrollViewportTop(scrollViewport) + relativeTop - headerOffset;
 
-    stickyScrollViewport.scrollTo({
+    scrollViewportTo(scrollViewport, {
       top: Math.max(0, offsetPosition),
       behavior: 'smooth',
     });
     return true;
-  }, [stickyScrollViewport]);
+  }, [scrollViewport, stickyActions]);
 
   useEffect(() => {
-    if (!stickyScrollViewport || !locationHash || lastAutoScrolledHashRef.current === locationHash) return;
+    if (!scrollViewport || !locationHash || lastAutoScrolledHashRef.current === locationHash) return;
     const timer = window.setTimeout(() => {
       if (scrollToAnchor(locationHash)) {
         lastAutoScrolledHashRef.current = locationHash;
       }
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [blocks, locationHash, scrollToAnchor, stickyScrollViewport]);
+  }, [blocks, locationHash, scrollToAnchor, scrollViewport]);
 
   // Use the native copy event so clipboard writes are synchronous (Safari
   // rejects the async navigator.clipboard API outside the user-gesture window).
@@ -389,6 +1272,10 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   // Imperative handle — delegates to hook, extends removeHighlight for code blocks
   useImperativeHandle(ref, () => ({
     removeHighlight: (id: string) => {
+      // The re-highlight below notifies the swap listener, which would happily
+      // paint this annotation's mark straight back in — the host has not
+      // dropped it from state yet. Tombstone the id first.
+      removedAnnotationIdsRef.current.add(id);
       // Code block annotations need syntax re-highlighting after removal.
       // Must run BEFORE hookRemoveHighlight, which removes the <mark> elements.
       const manualHighlights = containerRef.current?.querySelectorAll(`[data-bind-id="${id}"]`);
@@ -400,9 +1287,9 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
           el.remove();
           codeEl.textContent = plainText;
           const block = blocks.find(b => b.id === codeEl.closest('[data-block-id]')?.getAttribute('data-block-id'));
-          codeEl.removeAttribute('data-highlighted');
-          codeEl.className = `hljs font-mono${block?.language ? ` language-${block.language}` : ''}`;
-          hljs.highlightElement(codeEl);
+          codeEl.className = codeBlockClassName(block?.language);
+          // Language-less fences stay plain (#1212) — applyHighlight never guesses.
+          applyHighlight(codeEl, plainText, block?.language, fenceThemeRef.current);
         }
       });
 
@@ -410,94 +1297,63 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     },
     clearAllHighlights,
     applySharedAnnotations: applyAnnotations,
-  }), [hookRemoveHighlight, clearAllHighlights, applyAnnotations, blocks]);
+    takeSelection,
+  }), [hookRemoveHighlight, clearAllHighlights, applyAnnotations, blocks, takeSelection]);
 
   // --- Viewer-specific: code block annotation ---
 
-  const applyCodeBlockAnnotation = (
-    blockId: string,
-    codeEl: Element,
-    type: AnnotationType,
-    text?: string,
-    images?: ImageAttachment[],
-    isQuickLabel?: boolean,
-    quickLabelTip?: string,
-  ) => {
-    const id = `codeblock-${Date.now()}`;
-    const codeText = codeEl.textContent || '';
-
-    const wrapper = document.createElement('mark');
-    wrapper.className = `annotation-highlight ${type === AnnotationType.DELETION ? 'deletion' : type === AnnotationType.COMMENT ? 'comment' : ''}`.trim();
-    wrapper.dataset.bindId = id;
-    wrapper.textContent = codeText;
-
-    codeEl.innerHTML = '';
-    codeEl.appendChild(wrapper);
-
-    const newAnnotation: Annotation = {
-      id,
-      blockId,
-      startOffset: 0,
-      endOffset: codeText.length,
-      type,
-      text,
-      originalText: codeText,
-      createdA: Date.now(),
-      author: getIdentity(),
-      images,
-      ...(isQuickLabel ? { isQuickLabel: true } : {}),
-      ...(quickLabelTip ? { quickLabelTip } : {}),
-    };
-
-    onAddAnnotationRef.current(newAnnotation);
-    window.getSelection()?.removeAllRanges();
-  };
-
   const handleCodeBlockAnnotate = (type: AnnotationType) => {
-    if (!hoveredCodeBlock) return;
-    const codeEl = hoveredCodeBlock.element.querySelector('code');
+    if (readOnlyRef.current || !codeBlockToolbar) return;
+    const codeEl = codeBlockToolbar.element.querySelector('code');
     if (!codeEl) return;
-    applyCodeBlockAnnotation(hoveredCodeBlock.block.id, codeEl, type);
-    setHoveredCodeBlock(null);
+    applyCodeBlockAnnotation(codeBlockToolbar.block.id, codeEl, type);
+    setCodeBlockToolbar(null);
   };
 
   const handleCodeBlockQuickLabel = (label: QuickLabel) => {
-    if (!hoveredCodeBlock) return;
-    const codeEl = hoveredCodeBlock.element.querySelector('code');
+    if (readOnlyRef.current || !codeBlockToolbar) return;
+    const codeEl = codeBlockToolbar.element.querySelector('code');
     if (!codeEl) return;
     applyCodeBlockAnnotation(
-      hoveredCodeBlock.block.id, codeEl, AnnotationType.COMMENT,
+      codeBlockToolbar.block.id, codeEl, AnnotationType.COMMENT,
       `${label.emoji} ${label.text}`, undefined, true, label.tip
     );
-    setHoveredCodeBlock(null);
+    setCodeBlockToolbar(null);
   };
 
   const handleCodeBlockToolbarClose = () => {
-    setHoveredCodeBlock(null);
+    setCodeBlockToolbar(null);
   };
 
   // Viewer-specific comment popover handlers (code blocks + global comments)
 
   const handleCodeBlockRequestComment = (initialChar?: string) => {
-    if (!hoveredCodeBlock) return;
-    const codeText = hoveredCodeBlock.element.querySelector('code')?.textContent || '';
+    if (readOnlyRef.current || !codeBlockToolbar) return;
+    const codeText = codeBlockToolbar.element.querySelector('code')?.textContent || '';
     setViewerCommentPopover({
-      anchorEl: hoveredCodeBlock.element,
+      anchorEl: codeBlockToolbar.element,
       contextText: codeText.slice(0, 80),
       selectedText: codeText,
       initialText: initialChar,
       isGlobal: false,
-      codeBlock: hoveredCodeBlock,
+      codeBlock: codeBlockToolbar,
     });
-    setHoveredCodeBlock(null);
+    setCodeBlockToolbar(null);
   };
 
-  const handleViewerCommentSubmit = (text: string, images?: ImageAttachment[]) => {
-    if (!viewerCommentPopover) return;
+  const handleViewerCommentSubmit = (
+    text: string,
+    images?: ImageAttachment[],
+    mentions?: readonly string[],
+  ) => {
+    if (readOnlyRef.current || !viewerCommentPopover) return;
 
     if (viewerCommentPopover.isGlobal) {
       const newAnnotation: Annotation = {
-        id: `global-${Date.now()}`,
+        // randomUUID, not Date.now(): two comments minted in the same
+        // millisecond (paste + submit, or a concurrent external write)
+        // would collide on a timestamp id.
+        id: generateId('global'),
         blockId: '',
         startOffset: 0,
         endOffset: 0,
@@ -507,12 +1363,22 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         createdA: Date.now(),
         author: getIdentity(),
         images,
+        ...(mentions && mentions.length > 0 ? { mentions } : {}),
       };
       onAddAnnotation(newAnnotation);
     } else if (viewerCommentPopover.codeBlock) {
       const codeEl = viewerCommentPopover.codeBlock.element.querySelector('code');
       if (codeEl) {
-        applyCodeBlockAnnotation(viewerCommentPopover.codeBlock.block.id, codeEl, AnnotationType.COMMENT, text, images);
+        applyCodeBlockAnnotation(
+          viewerCommentPopover.codeBlock.block.id,
+          codeEl,
+          AnnotationType.COMMENT,
+          text,
+          images,
+          undefined,
+          undefined,
+          mentions,
+        );
       }
     }
 
@@ -523,21 +1389,135 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     setViewerCommentPopover(null);
   }, []);
 
-  const codePathValidation = useValidatedCodePaths(markdown, codePathBaseDir);
+  const commentDraftScope = linkedDocInfo?.filepath ?? sourceInfo ?? markdown.slice(0, 120);
+
+  const codePathValidation = useValidatedCodePaths(markdown, codePathBaseDir, disableCodePathValidation);
+
+  const documentActions = (
+    <>
+      {messagePickerInfo && (
+        <button
+          onClick={messagePickerInfo.onOpen}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
+          title="Pick a different message to annotate"
+        >
+          <MessagesIcon />
+          {actionsLabelMode === 'full' && (
+            <span>Message {messagePickerInfo.current} of {messagePickerInfo.total}</span>
+          )}
+          {actionsLabelMode === 'short' && (
+            <span>{messagePickerInfo.current}/{messagePickerInfo.total}</span>
+          )}
+        </button>
+      )}
+
+      {!authoringOff && onAddGlobalAttachment && onRemoveGlobalAttachment && (
+        <AttachmentsButton
+          images={globalAttachments}
+          onAdd={onAddGlobalAttachment}
+          onRemove={onRemoveGlobalAttachment}
+          variant="toolbar"
+          hideLabel={actionsLabelMode === 'icon'}
+        />
+      )}
+
+      {!authoringOff && (
+        <button
+          ref={globalCommentButtonRef}
+          onClick={() => {
+            const anchorEl = globalCommentButtonRef.current;
+            if (!anchorEl) return;
+            setViewerCommentPopover({
+              anchorEl,
+              contextText: '',
+              isGlobal: true,
+            });
+          }}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
+          title="Add global comment"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+          </svg>
+          {actionsLabelMode === 'full' && <span>Global comment</span>}
+          {actionsLabelMode === 'short' && <span>Comment</span>}
+        </button>
+      )}
+
+      <button
+        onClick={handleCopyPlan}
+        className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
+        title={copied ? 'Copied!' : copyLabel || (linkedDocInfo ? 'Copy file' : 'Copy plan')}
+      >
+        {copied ? (
+          <>
+            <svg className="w-3.5 h-3.5 text-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+            Copied!
+          </>
+        ) : (
+          <>
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+            </svg>
+            {actionsLabelMode === 'full' && <span>{copyLabel || (linkedDocInfo ? 'Copy file' : 'Copy plan')}</span>}
+            {actionsLabelMode === 'short' && <span>Copy</span>}
+          </>
+        )}
+      </button>
+    </>
+  );
+
+  // The document's diagram blocks, in order: a diagram comment that names
+  // none of them (an external POST, a deleted fence) is resolved by anchor
+  // against each, first resolver wins (see diagram/anchorClaims).
+  const diagramBlockKey = blocks
+    .filter((b) => b.type === 'code' && (isMermaidLanguage(b.language) || isGraphvizLanguage(b.language)))
+    .map((b) => b.id)
+    .join('\n');
+  const diagramClaims = useMemo(
+    () => new DiagramAnchorClaims(diagramBlockKey === '' ? [] : diagramBlockKey.split('\n')),
+    [diagramBlockKey],
+  );
+  // With no diagram in the document nobody can resolve a diagram comment:
+  // it is unanchored, and the highlighter (which skips it) will not say so.
+  useEffect(() => {
+    if (diagramBlockKey !== '' || onRestoreReport === undefined) return;
+    // `!= null`, not `!== undefined`: a nullish anchor is no anchor at all —
+    // the highlighter restores such a row by text, so it must not be counted
+    // here as a diagram comment nothing could resolve.
+    const ids = annotations.filter((ann) => ann.diagramAnchor != null).map((ann) => ann.id);
+    if (ids.length > 0) onRestoreReport({ attempted: ids, unanchored: ids });
+  }, [annotations, diagramBlockKey, onRestoreReport]);
 
   return (
     <CodePathValidationContext.Provider value={codePathValidation}>
+    <LocalLinkContext.Provider value={resolveLocalLink ?? null}>
+    <DiagramAnchorClaimsContext.Provider value={diagramClaims}>
     <div className="relative z-50 w-full" style={maxWidth === null ? undefined : { maxWidth: maxWidth ?? 832 }}>
       {taterMode && <TaterSpriteSitting />}
       <article
         ref={containerRef}
         data-print-region="article"
-        className={`w-full bg-card rounded-xl shadow-xl p-5 md:p-8 lg:p-10 xl:p-12 relative border border-border/50 ${inputMethod === 'pinpoint' ? 'cursor-crosshair' : ''}`}
-        style={{ WebkitTouchCallout: 'none' } as React.CSSProperties}
+        data-vim-mode={vimModeActive ? 'enabled' : undefined}
+        data-vim-phase={vimModeActive ? vim.state.phase : undefined}
+        data-vim-focused={vimModeActive ? String(vim.focused) : undefined}
+        data-vim-blocked={vimModeActive ? String(vimBlocked) : undefined}
+        data-vim-target-key={vimModeActive ? vim.activeTarget?.key : undefined}
+        tabIndex={vimModeActive ? 0 : undefined}
+        onFocus={vim.onFocus}
+        onBlur={vim.onBlur}
+        onMouseDown={vim.onMouseDown}
+        className={`w-full bg-card rounded-xl py-5 md:py-8 lg:py-10 xl:py-12 relative ${gridEnabled ? 'px-5 md:px-8 lg:px-10 xl:px-12 shadow-xl border border-border/50' : ''} ${inputMethod === 'pinpoint' ? 'cursor-pointer' : ''}`}
+        style={{
+          WebkitTouchCallout: 'none',
+          ...(vimModeActive ? { outline: 'none' } : {}),
+        } as React.CSSProperties}
       >
-        {/* Repo info + plan diff badge + demo badge + linked doc badge + archive badge - top left */}
-        {(repoInfo || hasPreviousVersion || showDemoBadge || linkedDocInfo || archiveInfo || sourceInfo) && (
-          <div data-print-hide className="absolute top-3 left-3 md:top-4 md:left-5">
+        {/* Legacy badge placement remains byte-for-byte opt-out behavior. */}
+        {!viewerAnnotationHeader && (repoInfo || hasPreviousVersion || showDemoBadge || linkedDocInfo || archiveInfo || sourceInfo || openInAppPath) && (
+          <div ref={docBadgesRef} data-print-hide className={`absolute top-3 md:top-4 ${gridEnabled ? 'left-3 md:left-5' : 'left-0'}`}>
             <DocBadges
               layout="column"
               repoInfo={repoInfo}
@@ -545,90 +1525,57 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               isPlanDiffActive={isPlanDiffActive}
               hasPreviousVersion={hasPreviousVersion}
               onPlanDiffToggle={onPlanDiffToggle}
+              planDiffBaselineLabel={planDiffBaselineLabel}
+              planDiffBaselineTooltip={planDiffBaselineTooltip}
               showDemoBadge={showDemoBadge}
               archiveInfo={archiveInfo}
               linkedDocInfo={linkedDocInfo}
               sourceInfo={sourceInfo}
+              openInAppPath={openInAppPath}
             />
           </div>
         )}
 
-        {/* Sentinel for sticky detection */}
-        {stickyActions && <div ref={stickySentinelRef} className="h-0 w-0 float-right" aria-hidden="true" />}
-
-        {/* Header buttons - top right */}
-        <div data-print-hide data-sticky-actions className={`${stickyActions ? 'sticky top-3' : ''} z-30 float-right flex items-start gap-1 md:gap-2 rounded-lg p-1 md:p-2 transition-colors duration-150 ${isStuck ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''} -mr-3 mt-6 md:-mr-5 md:-mt-5 lg:-mr-7 lg:-mt-7 xl:-mr-9 xl:-mt-9`}>
-          {messagePickerInfo && (
-            <button
-              onClick={messagePickerInfo.onOpen}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
-              title="Pick a different message to annotate"
-            >
-              <MessagesIcon />
-              {actionsLabelMode === 'full' && (
-                <span>Message {messagePickerInfo.current} of {messagePickerInfo.total}</span>
-              )}
-              {actionsLabelMode === 'short' && (
-                <span>{messagePickerInfo.current}/{messagePickerInfo.total}</span>
-              )}
-            </button>
-          )}
-
-          {/* Attachments button */}
-          {onAddGlobalAttachment && onRemoveGlobalAttachment && (
-            <AttachmentsButton
-              images={globalAttachments}
-              onAdd={onAddGlobalAttachment}
-              onRemove={onRemoveGlobalAttachment}
-              variant="toolbar"
-              hideLabel={actionsLabelMode === 'icon'}
-            />
-          )}
-
-          {/* <span className="md:hidden">Comment</span><span className="hidden md:inline">Global comment</span> button */}
-          <button
-            ref={globalCommentButtonRef}
-            onClick={() => {
-              setViewerCommentPopover({
-                anchorEl: globalCommentButtonRef.current!,
-                contextText: '',
-                isGlobal: true,
-              });
+        {viewerAnnotationHeader ? (
+          <ViewerDocumentHeader
+            config={viewerAnnotationHeader}
+            inputMethod={inputMethod}
+            mode={mode}
+            taterMode={taterMode}
+            sticky={stickyActions}
+            stuck={isStuck}
+            sentinelRef={stickySentinelRef}
+            badges={{
+              repoInfo,
+              planDiffStats,
+              isPlanDiffActive,
+              hasPreviousVersion,
+              onPlanDiffToggle,
+              planDiffBaselineLabel,
+              planDiffBaselineTooltip,
+              showDemoBadge,
+              archiveInfo,
+              linkedDocInfo,
+              sourceInfo,
+              openInAppPath,
             }}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
-            title="Add global comment"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
-            </svg>
-            {actionsLabelMode === 'full' && <span>Global comment</span>}
-            {actionsLabelMode === 'short' && <span>Comment</span>}
-          </button>
-
-          {/* Copy plan/file button */}
-          <button
-            onClick={handleCopyPlan}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
-            title={copied ? 'Copied!' : copyLabel || (linkedDocInfo ? 'Copy file' : 'Copy plan')}
-          >
-            {copied ? (
-              <>
-                <svg className="w-3.5 h-3.5 text-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                </svg>
-                Copied!
-              </>
+            actions={documentActions}
+          />
+        ) : (
+          <>
+            {badgeClearance > 0 && <div data-print-hide style={{ height: badgeClearance }} aria-hidden="true" />}
+            {stickyActions && <div ref={stickySentinelRef} className="h-0 w-0 float-right" aria-hidden="true" />}
+            {answerOnly || hostComposes ? null : stickyActions ? (
+              <StickyActionsLane className={`flex items-start gap-1 md:gap-2 rounded-lg p-1 md:p-2 transition-colors duration-150 ${isStuck ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''} ${gridEnabled ? '-mr-3 md:-mr-5 lg:-mr-7 xl:-mr-9' : '-mr-1 md:-mr-2'} mt-6 md:-mt-5 lg:-mt-7 xl:-mt-9`}>
+                {documentActions}
+              </StickyActionsLane>
             ) : (
-              <>
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                </svg>
-                {actionsLabelMode === 'full' && <span>{copyLabel || (linkedDocInfo ? 'Copy file' : 'Copy plan')}</span>}
-                {actionsLabelMode === 'short' && <span>Copy</span>}
-              </>
+              <div data-print-hide data-sticky-actions className={`z-30 float-right flex items-start gap-1 md:gap-2 rounded-lg p-1 md:p-2 transition-colors duration-150 ${gridEnabled ? '-mr-3 md:-mr-5 lg:-mr-7 xl:-mr-9' : '-mr-1 md:-mr-2'} mt-6 md:-mt-5 lg:-mt-7 xl:-mt-9`}>
+                {documentActions}
+              </div>
             )}
-          </button>
-        </div>
+          </>
+        )}
         {frontmatter && <><div className="clear-right md:hidden" /><FrontmatterCard frontmatter={frontmatter} /></>}
         {!frontmatter && blocks.length > 0 && blocks[0].type !== 'heading' && <div className="mt-4" />}
         {groupBlocks(blocks).map(group =>
@@ -646,9 +1593,10 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                       orderedIndex={indices[i]}
                       onOpenLinkedDoc={onOpenLinkedDoc}
                       onOpenCodeFile={onOpenCodeFile}
-                      onToggleCheckbox={onToggleCheckbox}
+                      onToggleCheckbox={readOnly ? undefined : onToggleCheckbox}
                       checkboxOverrides={checkboxOverrides}
-                      githubRepo={repoInfo?.display}
+                      githubRepo={linkRepo?.display}
+                      repoHost={linkRepo?.host}
                       headingAnchorId={headingSlugMap.get(block.id)}
                       onNavigateAnchor={scrollToAnchor}
                     />
@@ -657,9 +1605,33 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               );
             })()
           ) : group.block.type === 'code' && isMermaidLanguage(group.block.language) ? (
-            <MermaidBlock key={group.block.id} block={group.block} />
+            <Suspense key={group.block.id} fallback={<DiagramBlockPending block={group.block} kind="mermaid" />}>
+              <MermaidBlock
+                block={group.block}
+                annotations={annotations}
+                selectedAnnotationId={selectedAnnotationId}
+                onSelectAnnotation={onSelectAnnotation}
+                onAddAnnotation={authoringOff ? undefined : onAddAnnotation}
+                readOnly={authoringOff}
+                onRestoreReport={onRestoreReport}
+                onAskAI={authoringOff ? undefined : onAskAI}
+                askAISourcePath={linkedDocInfo?.filepath ?? sourceInfo}
+              />
+            </Suspense>
           ) : group.block.type === 'code' && isGraphvizLanguage(group.block.language) ? (
-            <GraphvizBlock key={group.block.id} block={group.block} />
+            <Suspense key={group.block.id} fallback={<DiagramBlockPending block={group.block} kind="graphviz" />}>
+              <GraphvizBlock
+                block={group.block}
+                annotations={annotations}
+                selectedAnnotationId={selectedAnnotationId}
+                onSelectAnnotation={onSelectAnnotation}
+                onAddAnnotation={authoringOff ? undefined : onAddAnnotation}
+                readOnly={authoringOff}
+                onRestoreReport={onRestoreReport}
+                onAskAI={authoringOff ? undefined : onAskAI}
+                askAISourcePath={linkedDocInfo?.filepath ?? sourceInfo}
+              />
+            </Suspense>
           ) : group.block.type === 'table' ? (
             <TableBlock
               key={group.block.id}
@@ -668,7 +1640,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               onImageClick={(src, alt) => setLightbox({ src, alt })}
               onOpenLinkedDoc={onOpenLinkedDoc}
               onOpenCodeFile={onOpenCodeFile}
-              githubRepo={repoInfo?.display}
+              githubRepo={linkRepo?.display}
+              repoHost={linkRepo?.host}
               onNavigateAnchor={scrollToAnchor}
               onHover={(element) => {
                 if (tableHoverTimeoutRef.current) {
@@ -676,7 +1649,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                   tableHoverTimeoutRef.current = null;
                 }
                 setIsTableToolbarExiting(false);
-                if (!toolbarState) {
+                if (!toolbarState && !hostComposes) {
                   setHoveredTable({ block: group.block, element });
                 }
               }}
@@ -694,7 +1667,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             <CodeBlock
               key={group.block.id}
               block={group.block}
-              onHover={inputMethod === 'pinpoint' ? () => {} : (element) => {
+              onHover={authoringOff || hostComposes || inputMethod === 'pinpoint' ? undefined : (element) => {
                 // Clear any pending leave timeout
                 if (hoverTimeoutRef.current) {
                   clearTimeout(hoverTimeoutRef.current);
@@ -703,38 +1676,109 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 // Cancel exit animation if re-entering
                 setIsCodeBlockToolbarExiting(false);
                 // Only show hover toolbar if no selection toolbar is active
-                if (!toolbarState) {
-                  setHoveredCodeBlock({ block: group.block, element });
+                if (
+                  !toolbarState
+                  && !vimOwnsDocumentNavigation
+                  && !keyboardCodeBlockToolbarOpen
+                ) {
+                  setCodeBlockToolbar({
+                    block: group.block,
+                    element,
+                    activation: 'pointer',
+                  });
                 }
               }}
-              onLeave={inputMethod === 'pinpoint' ? () => {} : () => {
+              onLeave={authoringOff || hostComposes || inputMethod === 'pinpoint' ? undefined : () => {
+                if (keyboardCodeBlockToolbarOpen) return;
                 // Delay then start exit animation
                 hoverTimeoutRef.current = setTimeout(() => {
                   setIsCodeBlockToolbarExiting(true);
                   // After exit animation, unmount
                   setTimeout(() => {
-                    setHoveredCodeBlock(null);
+                    setCodeBlockToolbar(null);
                     setIsCodeBlockToolbarExiting(false);
                   }, 150);
                 }, 100);
               }}
-              isHovered={inputMethod !== 'pinpoint' && hoveredCodeBlock?.block.id === group.block.id}
+              isHovered={
+                !authoringOff
+                && inputMethod !== 'pinpoint'
+                && !vimOwnsDocumentNavigation
+                && codeBlockToolbar?.block.id === group.block.id
+              }
             />
           ) : (
-            <BlockRenderer imageBaseDir={imageBaseDir} onImageClick={(src, alt) => setLightbox({ src, alt })} key={group.block.id} block={group.block} onOpenLinkedDoc={onOpenLinkedDoc} onOpenCodeFile={onOpenCodeFile} onNavigateAnchor={scrollToAnchor} onToggleCheckbox={onToggleCheckbox} checkboxOverrides={checkboxOverrides} githubRepo={repoInfo?.display} headingAnchorId={headingSlugMap.get(group.block.id)} />
+            (() => {
+              const question = questionIndex.byBlock.get(group.block.id);
+              const hostCard = question && renderQuestionCard
+                ? renderQuestionCard(question, answersByKey.get(question.question.key))
+                : undefined;
+              if (hostCard !== undefined) {
+                return (
+                  <div key={group.block.id} data-block-id={group.block.id} data-block-type="directive" className={textCommentsOnly ? 'annotation-exclude' : undefined}>
+                    {hostCard}
+                  </div>
+                );
+              }
+              const rendered = (
+                <BlockRenderer
+                  imageBaseDir={imageBaseDir}
+                  onImageClick={(src, alt) => setLightbox({ src, alt })}
+                  key={group.block.id}
+                  block={group.block}
+                  onOpenLinkedDoc={onOpenLinkedDoc}
+                  onOpenCodeFile={onOpenCodeFile}
+                  onNavigateAnchor={scrollToAnchor}
+                  onToggleCheckbox={readOnly ? undefined : onToggleCheckbox}
+                  checkboxOverrides={checkboxOverrides}
+                  githubRepo={linkRepo?.display}
+                  repoHost={linkRepo?.host}
+                  headingAnchorId={headingSlugMap.get(group.block.id)}
+                  question={question}
+                  questionTotal={questionIndex.total}
+                  questionAnswer={question ? answersByKey.get(question.question.key) : undefined}
+                  onAnswerQuestion={readOnly || (question && questionReadOnly?.(question)) ? undefined : onAnswerQuestion}
+                  onSaveQuestionAnswer={readOnly || (question && questionReadOnly?.(question)) ? undefined : onSaveQuestionAnswer}
+                  saveQuestionAnswerLabel={saveQuestionAnswerLabel}
+                  renderQuestionFooter={renderQuestionFooter}
+                  questionDecisionRecording={question ? questionDecisionRecording?.(question) : undefined}
+                  questionDecisionScope={questionDecisionScope}
+                  onToggleQuestionDecisionRecording={readOnly || (question && (questionDecisionLocked?.(question) || questionReadOnly?.(question))) ? undefined : onToggleQuestionDecisionRecording}
+                  onOpenQuestionDecision={readOnly || (question && (questionDecisionLocked?.(question) || questionReadOnly?.(question))) ? undefined : onOpenQuestionDecision}
+                  questionStatusTag={questionStatusTag}
+                  questionStatusLabel={questionStatusLabel}
+                  renderQuestionBelowPrompt={renderQuestionBelowPrompt}
+                />
+              );
+              // `textComments`: a question card's words are not commented on
+              // (its own controls already are excluded); a box-less wrapper
+              // keeps its layout.
+              if (question && textCommentsOnly) {
+                return (
+                  <div key={group.block.id} className="annotation-exclude" style={{ display: 'contents' }}>
+                    {rendered}
+                  </div>
+                );
+              }
+              return rendered;
+            })()
           )
         )}
 
         {/* Text selection toolbar */}
-        {toolbarState && (
+        {selectionCommentsOn && !hostComposes && toolbarState && (
           <ToolbarErrorBoundary>
             <AnnotationToolbar
               element={toolbarState.element}
               positionMode="center-above"
+              commentOnly={textCommentsOnly || undefined}
               onAnnotate={handleAnnotate}
               onClose={handleToolbarClose}
               onRequestComment={handleRequestComment}
               onQuickLabel={handleQuickLabel}
+              selectionActions={selectionActions}
+              selectionActionsIcon={selectionActionsIcon}
+              quickLabels={quickLabels}
               copyText={toolbarState.selectionText}
               hideCopyButton={!isTouchDevice}
               closeOnScrollOut
@@ -777,35 +1821,43 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         )}
 
         {/* Code block hover toolbar */}
-        {hoveredCodeBlock && !toolbarState && (
-          <ToolbarErrorBoundary>
-          <AnnotationToolbar
-            element={hoveredCodeBlock.element}
-            positionMode="top-right"
-            onAnnotate={handleCodeBlockAnnotate}
-            onClose={handleCodeBlockToolbarClose}
-            onRequestComment={handleCodeBlockRequestComment}
-            onQuickLabel={handleCodeBlockQuickLabel}
-            isExiting={isCodeBlockToolbarExiting}
-            onMouseEnter={() => {
-              if (hoverTimeoutRef.current) {
-                clearTimeout(hoverTimeoutRef.current);
-                hoverTimeoutRef.current = null;
-              }
-              setIsCodeBlockToolbarExiting(false);
-            }}
-            onMouseLeave={() => {
-              hoverTimeoutRef.current = setTimeout(() => {
-                setIsCodeBlockToolbarExiting(true);
-                setTimeout(() => {
-                  setHoveredCodeBlock(null);
+        {!authoringOff
+          && codeBlockToolbar
+          && !toolbarState
+          && !(vimOwnsDocumentNavigation && codeBlockToolbar.activation === 'pointer')
+          && (
+            <ToolbarErrorBoundary>
+              <AnnotationToolbar
+                element={codeBlockToolbar.element}
+                positionMode="top-right"
+                onAnnotate={handleCodeBlockAnnotate}
+                onClose={handleCodeBlockToolbarClose}
+                onRequestComment={handleCodeBlockRequestComment}
+                onQuickLabel={handleCodeBlockQuickLabel}
+                selectionActions={selectionActions}
+                selectionActionsIcon={selectionActionsIcon}
+                quickLabels={quickLabels}
+                isExiting={isCodeBlockToolbarExiting}
+                onMouseEnter={() => {
+                  if (hoverTimeoutRef.current) {
+                    clearTimeout(hoverTimeoutRef.current);
+                    hoverTimeoutRef.current = null;
+                  }
                   setIsCodeBlockToolbarExiting(false);
-                }, 150);
-              }, 100);
-            }}
-          />
-          </ToolbarErrorBoundary>
-        )}
+                }}
+                onMouseLeave={() => {
+                  if (codeBlockToolbar.activation === 'keyboard') return;
+                  hoverTimeoutRef.current = setTimeout(() => {
+                    setIsCodeBlockToolbarExiting(true);
+                    setTimeout(() => {
+                      setCodeBlockToolbar(null);
+                      setIsCodeBlockToolbarExiting(false);
+                    }, 150);
+                  }, 100);
+                }}
+              />
+            </ToolbarErrorBoundary>
+          )}
 
         {/* Table popout dialog — portaled into containerRef so annotations */}
         {/* can walk into its text nodes the same way they do the inline table. */}
@@ -819,54 +1871,94 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             onImageClick={(src, alt) => setLightbox({ src, alt })}
             onOpenLinkedDoc={onOpenLinkedDoc}
             onOpenCodeFile={onOpenCodeFile}
-            githubRepo={repoInfo?.display}
+            githubRepo={linkRepo?.display}
+            repoHost={linkRepo?.host}
             onNavigateAnchor={scrollToAnchor}
           />
         )}
 
         {/* Pinpoint hover overlay */}
-        {inputMethod === 'pinpoint' && (
-          <PinpointOverlay target={hoverTarget} containerRef={containerRef} />
+        {(inputMethod === 'pinpoint' || vim.activeTarget) && (
+          <PinpointOverlay
+            target={pinpointOverlayTarget}
+            containerRef={containerRef}
+          />
+        )}
+        {vimModeActive && (
+          <VimModeOverlay
+            containerRef={containerRef}
+            inputMethod={inputMethod}
+            state={vim.state}
+            focused={vim.focused}
+            hudEnabled={vimHudEnabled}
+            keyPanelEnabled={vimHudKeyPanelEnabled}
+            hudCommand={vim.hudCommand}
+            activeTarget={vim.activeTarget}
+            helpOpen={vim.helpOpen}
+            onHelpOpenChange={vim.onHelpOpenChange}
+            onKeyPanelHide={
+              onVimHudKeyPanelChange
+                ? () => onVimHudKeyPanelChange(false)
+                : undefined
+            }
+            onHudFocusLeave={vim.onHudFocusLeave}
+          />
         )}
 
         {/* Comment popover — hook handles text selection, Viewer handles global + code block */}
-        {hookCommentPopover && (
+        {selectionCommentsOn && !hostComposes && hookCommentPopover && (
             <CommentPopover
               anchorEl={hookCommentPopover.anchorEl}
               contextText={hookCommentPopover.contextText}
               isGlobal={false}
               initialText={hookCommentPopover.initialText}
+              draftKey={`plan:${commentDraftScope}:${hookCommentPopover.draftKey}`}
               onSubmit={hookCommentSubmit}
               onClose={hookCommentClose}
+              mentionSource={mentionSource}
+              allowImages={allowImages}
+              skillReferences
               onAskAI={onAskAI}
               askAIContext={{
                 kind: 'selection',
                 label: 'Selected text',
                 text: hookCommentPopover.selectedText ?? hookCommentPopover.contextText,
                 sourcePath: linkedDocInfo?.filepath ?? sourceInfo,
+                ...selectionSourceLines(blocks, hookCommentPopover.blockIds ?? []),
               }}
             />
           )}
-        {viewerCommentPopover && (
+        {!authoringOff && viewerCommentPopover && (
           <CommentPopover
             anchorEl={viewerCommentPopover.anchorEl}
             contextText={viewerCommentPopover.contextText}
             isGlobal={viewerCommentPopover.isGlobal}
             initialText={viewerCommentPopover.initialText}
+            draftKey={`plan:${commentDraftScope}:${
+              viewerCommentPopover.isGlobal
+                ? 'global'
+                : `code-block:${viewerCommentPopover.codeBlock?.block.id ?? viewerCommentPopover.contextText}`
+            }`}
             onSubmit={handleViewerCommentSubmit}
             onClose={handleViewerCommentClose}
+            mentionSource={mentionSource}
+            allowImages={allowImages}
+            skillReferences
             onAskAI={onAskAI}
             askAIContext={{
               kind: viewerCommentPopover.isGlobal ? 'general' : 'selection',
               label: viewerCommentPopover.isGlobal ? 'Document' : 'Code block',
               text: viewerCommentPopover.selectedText,
               sourcePath: linkedDocInfo?.filepath ?? sourceInfo,
+              ...(!viewerCommentPopover.isGlobal && viewerCommentPopover.codeBlock
+                ? selectionSourceLines(blocks, [viewerCommentPopover.codeBlock.block.id])
+                : null),
             }}
           />
         )}
 
         {/* Quick Label floating picker — hook handles text selection, Viewer handles code blocks */}
-        {hookQuickLabelPicker && (
+        {selectionCommentsOn && !hostComposes && hookQuickLabelPicker && (
           <FloatingQuickLabelPicker
             anchorEl={hookQuickLabelPicker.anchorEl}
             cursorHint={hookQuickLabelPicker.cursorHint}
@@ -874,7 +1966,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             onDismiss={hookQuickLabelPickerDismiss}
           />
         )}
-        {codeBlockQuickLabelPicker && (
+        {!authoringOff && codeBlockQuickLabelPicker && (
           <FloatingQuickLabelPicker
             anchorEl={codeBlockQuickLabelPicker.anchorEl}
             onSelect={(label: QuickLabel) => {
@@ -898,67 +1990,12 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
 
       {/* Image lightbox */}
       {lightbox && createPortal(
-        <ImageLightbox src={lightbox.src} alt={lightbox.alt} onClose={() => setLightbox(null)} />,
+        <ImageLightbox src={lightbox.src} alt={lightbox.alt} images={lightbox.images} onClose={() => setLightboxState(null)} />,
         document.body
       )}
     </div>
+    </DiagramAnchorClaimsContext.Provider>
+    </LocalLinkContext.Provider>
     </CodePathValidationContext.Provider>
   );
 });
-
-/** Simple lightbox overlay for enlarged image viewing. */
-const ImageLightbox: React.FC<{ src: string; alt: string; onClose: () => void }> = ({ src, alt, onClose }) => {
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
-
-  return (
-    <div
-      className="fixed inset-0 z-[200] flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm cursor-zoom-out"
-      onClick={onClose}
-    >
-      <img
-        src={src}
-        alt={alt}
-        className="max-w-[90vw] max-h-[85vh] object-contain rounded-lg shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      />
-      {alt && (
-        <div className="mt-3 text-sm text-white/70 max-w-[90vw] text-center truncate">{alt}</div>
-      )}
-    </div>
-  );
-};
-
-
-
-
-
-/** Groups consecutive list-item blocks so they can share a pinpoint hover wrapper. */
-type RenderGroup =
-  | { type: 'single'; block: Block }
-  | { type: 'list-group'; blocks: Block[]; key: string };
-
-function groupBlocks(blocks: Block[]): RenderGroup[] {
-  const groups: RenderGroup[] = [];
-  let i = 0;
-  while (i < blocks.length) {
-    if (blocks[i].type === 'list-item') {
-      const listBlocks: Block[] = [];
-      while (i < blocks.length && blocks[i].type === 'list-item') {
-        listBlocks.push(blocks[i]);
-        i++;
-      }
-      groups.push({ type: 'list-group', blocks: listBlocks, key: `list-${listBlocks[0].id}` });
-    } else {
-      groups.push({ type: 'single', block: blocks[i] });
-      i++;
-    }
-  }
-  return groups;
-}
-

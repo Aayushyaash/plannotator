@@ -6,6 +6,7 @@ import { useTheme } from './ThemeProvider';
 import { CommentPopover } from './CommentPopover';
 import { ImageThumbnail } from './ImageThumbnail';
 import type { CodeAnnotation, ImageAttachment } from '../types';
+import { copyTextToClipboard } from '../utils/clipboard';
 
 export interface CodeFileAnnotationInput {
   filePath: string;
@@ -91,7 +92,7 @@ function buildPierreCSS(mode: 'dark' | 'light', bg: string, fg: string): string 
     pre, code { background-color: ${bg} !important; }
     [data-column-number] { background-color: ${bg} !important; }
     [data-file] { height: 100% !important; }
-    [data-code] { height: 100% !important; overflow-y: auto !important; }
+    [data-code] { height: 100% !important; overflow-y: auto !important; align-content: start; }
     [data-line] { cursor: pointer; }
   `;
 }
@@ -179,7 +180,7 @@ const CodeInlineAnnotation: React.FC<{
         <span className="rounded bg-muted px-1.5 py-0.5 font-mono normal-case text-foreground">
           {lineLabel(annotation.lineStart, annotation.lineEnd)}
         </span>
-        {annotation.author && <span className="truncate normal-case">by {annotation.author}</span>}
+        {annotation.author && <span className="truncate normal-case">by <bdi>{annotation.author}</bdi></span>}
         <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
           {onEdit && !isEditing && (
             <button
@@ -282,21 +283,46 @@ const CodeInlineAnnotation: React.FC<{
   );
 };
 
-export const CodeFilePopout: React.FC<CodeFilePopoutProps> = ({
-  open,
-  onClose,
+export interface CodeFileViewProps {
+  filepath: string;
+  contents: string;
+  prerenderedHTML?: string;
+  annotations?: CodeAnnotation[];
+  selectedAnnotationId?: string | null;
+  onAddAnnotation?: (annotation: CodeFileAnnotationInput) => void;
+  onEditAnnotation?: (id: string, updates: Partial<CodeAnnotation>) => void;
+  onDeleteAnnotation?: (id: string) => void;
+  onSelectAnnotation?: (id: string | null) => void;
+  /** Whether the comment composer offers image attachments. Default true (the popout's behavior). */
+  allowImages?: boolean;
+  /** The file area's class. Default: fills the rest of a flex column. */
+  className?: string;
+  /** The highlighting language, instead of Pierre's inference from the name (`'text'`: no highlighting, for a very large file). */
+  lang?: string;
+  /** Long lines: `'scroll'` sideways (the default) or `'wrap'` onto the next row, for a minified file. */
+  overflow?: 'scroll' | 'wrap';
+}
+
+/**
+ * One code file drawn by Pierre's `File`, with line and range comments: the
+ * gutter `+`, a click on a line, a dragged range or a text selection opens
+ * the comment composer, and saved comments render inline under their lines.
+ * The body of `CodeFilePopout`, usable on its own (the Inbox's file pane).
+ */
+export const CodeFileView: React.FC<CodeFileViewProps> = ({
   filepath,
   contents,
   prerenderedHTML,
-  error,
-  requestedPath,
   annotations = [],
   selectedAnnotationId,
   onAddAnnotation,
   onEditAnnotation,
   onDeleteAnnotation,
   onSelectAnnotation,
-  container,
+  allowImages = true,
+  className = 'flex-1 min-h-0',
+  lang,
+  overflow = 'scroll',
 }) => {
   const { resolvedMode } = useTheme();
   const mode = resolvedMode ?? 'dark';
@@ -305,7 +331,6 @@ export const CodeFilePopout: React.FC<CodeFilePopoutProps> = ({
     type: mode as 'dark' | 'light',
     css: buildPierreCSS(mode, colors.bg, colors.fg),
   }));
-  const [copied, setCopied] = useState(false);
   const [pendingComment, setPendingComment] = useState<PendingComment | null>(null);
   const fileAreaRef = useRef<HTMLDivElement>(null);
   const lastPointerRectRef = useRef<DOMRect | null>(null);
@@ -327,7 +352,6 @@ export const CodeFilePopout: React.FC<CodeFilePopoutProps> = ({
 
   const displayName = filepath.split('/').pop() || filepath;
   const relativePath = filepath.replace(/.*\/(?=.*\/)/, '');
-  const lineCount = useMemo(() => contents.split('\n').length, [contents]);
   const selectedCodeAnnotation = useMemo(
     () => annotations.find((ann) => ann.id === selectedAnnotationId),
     [annotations, selectedAnnotationId],
@@ -456,13 +480,100 @@ export const CodeFilePopout: React.FC<CodeFilePopoutProps> = ({
     );
   }, [onAddAnnotation, openCommentForRange]);
 
+  return (
+    <>
+      <div
+        ref={fileAreaRef}
+        className={className}
+        onPointerMove={(e) => {
+          lastPointerRectRef.current = new DOMRect(e.clientX, e.clientY, 0, 0);
+        }}
+        onMouseUp={() => {
+          requestAnimationFrame(openCommentForBrowserSelection);
+        }}
+      >
+        <File
+          key={filepath}
+          file={lang ? { name: displayName, contents, lang } : { name: displayName, contents }}
+          prerenderedHTML={effectivePrerenderedHTML}
+          className="h-full"
+          lineAnnotations={lineAnnotations}
+          selectedLines={selectedLines}
+          renderAnnotation={renderAnnotation}
+          renderGutterUtility={renderGutterUtility}
+          style={{
+            '--diffs-dark-bg': colors.bg,
+            '--diffs-light-bg': colors.bg,
+            '--diffs-dark': colors.fg,
+            '--diffs-light': colors.fg,
+          } as React.CSSProperties}
+          options={{
+            themeType: pierreTheme.type,
+            unsafeCSS: pierreTheme.css,
+            overflow,
+            disableFileHeader: true,
+            enableLineSelection: true,
+            enableGutterUtility: !!onAddAnnotation,
+            lineHoverHighlight: onAddAnnotation ? 'line' : 'disabled',
+            onLineClick: handleLineClick,
+            onLineSelectionEnd: handleLineSelectionEnd,
+          }}
+        />
+      </div>
+      {pendingComment && onAddAnnotation && (
+        <CommentPopover
+          anchorEl={pendingComment.anchorEl}
+          anchorRect={pendingComment.anchorRect}
+          contextText={pendingComment.contextText}
+          isGlobal={false}
+          skillReferences
+          allowImages={allowImages}
+          onSubmit={(text, images) => {
+            onAddAnnotation({
+              filePath: filepath,
+              lineStart: pendingComment.range.start,
+              lineEnd: pendingComment.range.end,
+              text,
+              images,
+              originalCode: pendingComment.originalCode,
+            });
+            setPendingComment(null);
+          }}
+          onClose={() => setPendingComment(null)}
+        />
+      )}
+    </>
+  );
+};
+
+export const CodeFilePopout: React.FC<CodeFilePopoutProps> = ({
+  open,
+  onClose,
+  filepath,
+  contents,
+  prerenderedHTML,
+  error,
+  requestedPath,
+  annotations = [],
+  selectedAnnotationId,
+  onAddAnnotation,
+  onEditAnnotation,
+  onDeleteAnnotation,
+  onSelectAnnotation,
+  container,
+}) => {
+  const [copied, setCopied] = useState(false);
+
+  const displayName = filepath.split('/').pop() || filepath;
+  const relativePath = filepath.replace(/.*\/(?=.*\/)/, '');
+  const lineCount = useMemo(() => contents.split('\n').length, [contents]);
+
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(contents);
+    if (await copyTextToClipboard(contents)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
-    } catch (err) {
-      console.error('Failed to copy:', err);
+    } else {
+      console.error('Failed to copy');
     }
   };
 
@@ -539,64 +650,17 @@ export const CodeFilePopout: React.FC<CodeFilePopoutProps> = ({
       </div>
 
       <div className="border-t border-border/30" />
-      <div
-        ref={fileAreaRef}
-        className="flex-1 min-h-0"
-        onPointerMove={(e) => {
-          lastPointerRectRef.current = new DOMRect(e.clientX, e.clientY, 0, 0);
-        }}
-        onMouseUp={() => {
-          requestAnimationFrame(openCommentForBrowserSelection);
-        }}
-      >
-        <File
-          key={filepath}
-          file={{ name: displayName, contents }}
-          prerenderedHTML={effectivePrerenderedHTML}
-          className="h-full"
-          lineAnnotations={lineAnnotations}
-          selectedLines={selectedLines}
-          renderAnnotation={renderAnnotation}
-          renderGutterUtility={renderGutterUtility}
-          style={{
-            '--diffs-dark-bg': colors.bg,
-            '--diffs-light-bg': colors.bg,
-            '--diffs-dark': colors.fg,
-            '--diffs-light': colors.fg,
-          } as React.CSSProperties}
-          options={{
-            themeType: pierreTheme.type,
-            unsafeCSS: pierreTheme.css,
-            overflow: 'scroll',
-            disableFileHeader: true,
-            enableLineSelection: true,
-            enableGutterUtility: !!onAddAnnotation,
-            lineHoverHighlight: onAddAnnotation ? 'line' : 'disabled',
-            onLineClick: handleLineClick,
-            onLineSelectionEnd: handleLineSelectionEnd,
-          }}
-        />
-      </div>
-      {pendingComment && onAddAnnotation && (
-        <CommentPopover
-          anchorEl={pendingComment.anchorEl}
-          anchorRect={pendingComment.anchorRect}
-          contextText={pendingComment.contextText}
-          isGlobal={false}
-          onSubmit={(text, images) => {
-            onAddAnnotation({
-              filePath: filepath,
-              lineStart: pendingComment.range.start,
-              lineEnd: pendingComment.range.end,
-              text,
-              images,
-              originalCode: pendingComment.originalCode,
-            });
-            setPendingComment(null);
-          }}
-          onClose={() => setPendingComment(null)}
-        />
-      )}
+      <CodeFileView
+        filepath={filepath}
+        contents={contents}
+        prerenderedHTML={prerenderedHTML}
+        annotations={annotations}
+        selectedAnnotationId={selectedAnnotationId}
+        onAddAnnotation={onAddAnnotation}
+        onEditAnnotation={onEditAnnotation}
+        onDeleteAnnotation={onDeleteAnnotation}
+        onSelectAnnotation={onSelectAnnotation}
+      />
     </PopoutDialog>
   );
 };

@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { parseAnnotateArgs } from "./annotate-args";
+import { annotateTargetWords, parseAnnotateArgs } from "./annotate-args";
 
 describe("parseAnnotateArgs", () => {
   test("path only", () => {
@@ -10,6 +10,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -21,6 +25,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -32,6 +40,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -43,6 +55,10 @@ describe("parseAnnotateArgs", () => {
       json: true,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -54,6 +70,10 @@ describe("parseAnnotateArgs", () => {
       json: true,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -65,6 +85,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -82,6 +106,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -93,6 +121,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -104,6 +136,10 @@ describe("parseAnnotateArgs", () => {
       json: true,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -115,6 +151,40 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
+    });
+  });
+
+  test("--no-jina is stripped from URL args", () => {
+    expect(parseAnnotateArgs("https://example.com/docs --no-jina --gate")).toEqual({
+      filePath: "https://example.com/docs",
+      rawFilePath: "https://example.com/docs",
+      gate: true,
+      json: false,
+      hook: false,
+      renderHtml: false,
+      renderMarkdown: false,
+      noJina: true,
+      app: false,
+      static: false,
+    });
+  });
+
+  test("--no-jina before path is stripped", () => {
+    expect(parseAnnotateArgs("--no-jina https://example.com/docs")).toEqual({
+      filePath: "https://example.com/docs",
+      rawFilePath: "https://example.com/docs",
+      gate: false,
+      json: false,
+      hook: false,
+      renderHtml: false,
+      renderMarkdown: false,
+      noJina: true,
+      app: false,
+      static: false,
     });
   });
 
@@ -126,6 +196,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -137,6 +211,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -148,6 +226,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -159,6 +241,10 @@ describe("parseAnnotateArgs", () => {
       json: true,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -176,6 +262,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -187,6 +277,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -198,6 +292,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -209,6 +307,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -225,6 +327,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -236,6 +342,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -247,6 +357,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -258,6 +372,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -274,6 +392,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: true,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -285,6 +407,10 @@ describe("parseAnnotateArgs", () => {
       json: true,
       hook: true,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -296,6 +422,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: true,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -307,6 +437,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: true,
       renderHtml: false,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -318,6 +452,10 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: true,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
   });
 
@@ -329,6 +467,89 @@ describe("parseAnnotateArgs", () => {
       json: false,
       hook: false,
       renderHtml: true,
+      renderMarkdown: false,
+      noJina: false,
+      app: false,
+      static: false,
     });
+  });
+
+  test("--markdown with HTML file", () => {
+    expect(parseAnnotateArgs("plan.html --markdown")).toEqual({
+      filePath: "plan.html",
+      rawFilePath: "plan.html",
+      gate: false,
+      json: false,
+      hook: false,
+      renderHtml: false,
+      renderMarkdown: true,
+      noJina: false,
+      app: false,
+      static: false,
+    });
+  });
+
+  test("--markdown and legacy --render-html both parse", () => {
+    expect(parseAnnotateArgs("plan.html --render-html --markdown")).toEqual({
+      filePath: "plan.html",
+      rawFilePath: "plan.html",
+      gate: false,
+      json: false,
+      hook: false,
+      renderHtml: true,
+      renderMarkdown: true,
+      noJina: false,
+      app: false,
+      static: false,
+    });
+  });
+});
+
+describe("parseAnnotateArgs: live flags (--app / --static)", () => {
+  test("recognized only when the host opts in via liveFlags", () => {
+    const parsed = parseAnnotateArgs("http://localhost:5173 --app", { liveFlags: true });
+    expect(parsed.filePath).toBe("http://localhost:5173");
+    expect(parsed.app).toBe(true);
+    expect(parsed.static).toBe(false);
+
+    const staticParsed = parseAnnotateArgs("--static http://localhost:5173", { liveFlags: true });
+    expect(staticParsed.filePath).toBe("http://localhost:5173");
+    expect(staticParsed.static).toBe(true);
+    expect(staticParsed.app).toBe(false);
+  });
+
+  test("without liveFlags the tokens stay in the path (honest unsupported-flag error downstream)", () => {
+    // A host that cannot act on --app must not silently strip it: leaving the
+    // token in the path preserves the legacy "File not found: --app ..."
+    // failure instead of quietly ignoring the user's flag.
+    const parsed = parseAnnotateArgs("http://localhost:5173 --app");
+    expect(parsed.filePath).toBe("http://localhost:5173 --app");
+    expect(parsed.app).toBe(false);
+    expect(parsed.static).toBe(false);
+  });
+});
+
+describe("annotateTargetWords", () => {
+  // Failure caught: a slash command's words reaching the CLI as one path
+  // (". notes.md"), a quoted path with spaces split apart, or a flag word
+  // passed on as a target.
+  test("splits like a shell, quotes group, known flags are dropped", () => {
+    expect(annotateTargetWords(". notes.md --gate")).toEqual([".", "notes.md"]);
+    expect(annotateTargetWords('"my notes.md" \'b c.md\' --markdown')).toEqual(["my notes.md", "b c.md"]);
+  });
+
+  // Failure caught: an apostrophe in prose swallowing the rest of the line
+  // into one word, or a Windows path losing its separators.
+  test("an unterminated quote is prose, and backslashes are kept", () => {
+    expect(annotateTargetWords("notes.md it's the spec")).toEqual(["notes.md", "it's", "the", "spec"]);
+    // Two apostrophes once grouped "s notes.md don" into one word, hiding the file.
+    expect(annotateTargetWords("it's notes.md don't touch it")).toEqual(["it's", "notes.md", "don't", "touch", "it"]);
+    expect(annotateTargetWords("'my notes.md' it's fine")).toEqual(["my notes.md", "it's", "fine"]);
+    expect(annotateTargetWords("C:\\docs\\a.md please")).toEqual(["C:\\docs\\a.md", "please"]);
+  });
+
+  test("live flags are dropped only where the host recognizes them", () => {
+    expect(annotateTargetWords("--app http://localhost:3000")).toEqual(["--app", "http://localhost:3000"]);
+    expect(annotateTargetWords("--app http://localhost:3000", { liveFlags: true })).toEqual(["http://localhost:3000"]);
   });
 });

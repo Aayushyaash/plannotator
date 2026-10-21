@@ -37,6 +37,7 @@ These are sent when you approve or deny a plan in the review UI.
 | Key | When it's used | Available variables |
 |-----|---------------|-------------------|
 | `denied` | You deny a plan (with or without annotations) | `{{toolName}}`, `{{feedback}}`, `{{planFileRule}}` |
+| `answered` | You click **Send answers**: your only feedback is answers to the plan's [questions](/docs/guides/questions/) | `{{toolName}}`, `{{feedback}}`, `{{planFileRule}}` |
 | `approved` | You approve a plan without notes | `{{planFilePath}}`, `{{doneMsg}}` |
 | `approvedWithNotes` | You approve but include annotation notes | `{{planFilePath}}`, `{{doneMsg}}`, `{{feedback}}` |
 | `autoApproved` | Plan is auto-approved in non-interactive mode | none |
@@ -49,6 +50,9 @@ These are sent when you annotate a file (`/plannotator-annotate`) or the last as
 |-----|---------------|-------------------|
 | `fileFeedback` | You annotate a file or folder | `{{fileHeader}}`, `{{filePath}}`, `{{feedback}}` |
 | `messageFeedback` | You annotate the last assistant message | `{{feedback}}` |
+| `approvedWithNotes` | You approve a capable annotation gate with notes | `{{contextBlock}}`, `{{context}}`, `{{feedback}}` |
+
+`approvedWithNotes` is separate from ordinary annotation feedback so approval notes remain non-blocking. For file and folder annotations, `{{context}}` contains the target label and path (for example, `File: src/app.ts`); for message annotations it is empty. `{{contextBlock}}` is the same value followed by a blank line, or nothing at all when there is no context — the built-in default uses it so message annotations don't get a stray blank line.
 
 ### Review feedback
 
@@ -58,6 +62,8 @@ These are sent during code review (`/plannotator-review`).
 |-----|---------------|-------------------|
 | `approved` | You approve a code review with no feedback | none |
 | `denied` | Appended after your review feedback | none |
+
+The built-in `review.denied` suffix asks the receiving agent to verify only the submitted findings against the code, give each one a verdict with evidence, and discuss the validated findings before changing code. It explicitly tells the agent not to review the rest of the diff or search for additional issues. An override replaces this entire suffix.
 
 ## Template variables
 
@@ -72,6 +78,8 @@ Templates use `{{variable}}` placeholders. Here's what each one contains:
 | `{{doneMsg}}` | Optional checklist instruction or save-path info, depending on the runtime. |
 | `{{fileHeader}}` | Either `"File"` or `"Folder"`, depending on what was annotated. |
 | `{{filePath}}` | Path to the annotated file or folder. |
+| `{{context}}` | Optional approval-note target context (`File: …` or `Folder: …`); empty for message annotations. |
+| `{{contextBlock}}` | `{{context}}` followed by a blank line, or empty when there is no context. Used by the built-in `annotate.approvedWithNotes` default so it can sit directly in front of `{{feedback}}`. |
 
 If you use a `{{variable}}` that doesn't exist for that message type, it stays in the output as-is. This means you can include literal `{{text}}` in your templates without worrying about it being stripped.
 
@@ -123,7 +131,8 @@ Here's a config that customizes several messages at once:
     },
     "annotate": {
       "fileFeedback": "# Annotations for {{filePath}}\n\n{{feedback}}\n\nPlease address these.",
-      "messageFeedback": "{{feedback}}\n\nRevise your response based on these notes."
+      "messageFeedback": "{{feedback}}\n\nRevise your response based on these notes.",
+      "approvedWithNotes": "The artifact is approved. These notes are not a request for another revision:\n\n{{context}}\n\n{{feedback}}\n\nDo not revise or reopen solely because of them unless explicitly requested. Carry them into subsequent work where applicable."
     },
     "review": {
       "approved": "Code review passed. No changes needed."
@@ -152,6 +161,28 @@ Rules:
 {{feedback}}
 ```
 
+**Plan answered (default):** sent instead of the denied message when your only feedback is answers to the plan's questions. A custom `denied` message does not replace it; set `answered` as well if you want both changed.
+
+```
+The user answered the questions in your plan and asked for no
+other changes. Their answers are below.
+
+Revise the plan so each answered question becomes a decision,
+then call {{toolName}} again.
+
+Rules:
+{{planFileRule}}- For each answered question, either remove its
+  `:::question` block and write the decision into the plan, or
+  keep the block and mark the chosen choice `- [x]` (a checked
+  choice reads as settled).
+- Keep every question listed under "Unanswered" as it is.
+- Treat a note on an answer as guidance from the user.
+- Do NOT change the plan title (first # heading) unless the
+  user explicitly asks you to.
+
+{{feedback}}
+```
+
 **Plan approved (default, Pi runtime):**
 
 ```
@@ -169,6 +200,41 @@ write). Execute the plan in {{planFilePath}}. {{doneMsg}}
 {{feedback}}
 
 Please address the annotation feedback above.
+```
+
+**Annotate approved with notes (default):**
+
+```
+# Approved with Notes
+
+The artifact is approved. The notes below are non-blocking guidance,
+not a request for another revision.
+
+{{contextBlock}}{{feedback}}
+
+Do not revise or reopen the artifact solely because of these notes
+unless the user explicitly requests it. Carry the notes into
+subsequent work where applicable.
+```
+
+The default uses `{{contextBlock}}` rather than `{{context}}` so message
+annotations — which have no target file — don't leave a stray blank line
+where the context would have been.
+
+**Review feedback suffix (default):**
+
+```
+Treat the findings above as unverified review input. Inspect every finding
+against the actual code; do not assume automated feedback is correct. For each
+finding, give a clear verdict (Confirmed / Partly / Not a bug / Intended) with
+concise code evidence. Say whether it was introduced by the current changes,
+was pre-existing, or reflects deliberate scope.
+
+Review only the incoming findings. Do not independently review the rest of the
+diff or search for issues that were not submitted.
+
+Do not change any code until we have discussed the verdicts and validated
+findings.
 ```
 
 ## Example: context anchoring with a Decisions Log

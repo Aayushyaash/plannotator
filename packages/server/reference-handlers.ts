@@ -6,189 +6,333 @@
  */
 
 import { existsSync, statSync } from "fs";
-import { resolve } from "path";
-import { buildFileTree, FILE_BROWSER_EXCLUDED } from "@plannotator/shared/reference-common";
-import { parseCodePath } from "@plannotator/shared/code-file";
+import { readdir } from "fs/promises";
+import { join, relative, resolve } from "path";
+import { buildFileTree, isFileBrowserExcludedPath } from "@plannotator/shared/reference-common";
+import {
+	filterWorkspaceStatusForDirectory,
+	getWorkspaceStatusForDirectory,
+	getWorkspaceStatusRelativePaths,
+	type WorkspaceFileChange,
+} from "@plannotator/shared/workspace-status";
+import { parseCodePath, type ParsedCodePath } from "@plannotator/shared/code-file";
 import { detectObsidianVaults } from "./integrations";
 import {
-	isAbsoluteUserPath,
-	isCodeFilePath,
-	resolveCodeFile,
-	resolveMarkdownFile,
 	resolveUserPath,
-	isWithinProjectRoot,
+	getFileBrowserMaxFiles,
 	warmFileListCache,
+	getAnnotatableDocRegex,
+	MAX_ANNOTATABLE_FILE_BYTES,
+	isAnnotatableTextPath,
 } from "@plannotator/shared/resolve-file";
+import { diagramRenderKindForPath, isDiagramRenderKind } from "@plannotator/shared/annotatable";
+import {
+	DOC_ACCESS_DENIED,
+	DOC_TOO_LARGE,
+	docResolutionError,
+	getAllowedRootPaths,
+	getTrustedBaseDir,
+	isPathAllowed,
+	isPlanDirBase,
+	relativizeToAllowedRoots,
+	resolveAllowedDocPath,
+	resolvePlanLinkedDoc,
+	resolveCodeFileInRoots,
+	resolveDocTarget,
+	type PlanFile,
+	type DocErrorPayload,
+	type ResolveAllowedDocPathResult,
+} from "@plannotator/shared/doc-resolve";
 import { htmlToMarkdown } from "@plannotator/shared/html-to-markdown";
+import { disabledSourceSave, type SourceFileSnapshot, type SourceSaveCapability } from "@plannotator/shared/source-save";
+import {
+	createBundleSourceSaveCapability,
+	createSourceSaveCapability,
+	createSourceSaveCapabilityFromSnapshot,
+	readSourceFileSnapshot,
+	resolveExistingSourceSaveFile,
+} from "@plannotator/shared/source-save-node";
+import type { AnnotateHistoryResult } from "@plannotator/shared/annotate-history";
 import { preloadFile } from "@pierre/diffs/ssr";
+
+/**
+ * Subset of AnnotateHistoryResult the folder /api/doc path actually needs.
+ * `diffCurrent` is omitted: it always equals the request's own `content` and
+ * the client never reads it off this response (the single-file /api/plan
+ * payload still returns the full AnnotateHistoryResult, `diffCurrent`
+ * included, for legacy shape parity — see annotate.ts).
+ */
+export type FolderAnnotateHistory = Omit<AnnotateHistoryResult, "diffCurrent">;
 
 // --- Route handlers ---
 
+// History eligibility for folder /api/doc documents is `isAnnotatableTextPath`
+// (ANNOTATABLE_TEXT_REGEX in @plannotator/core/annotatable) — the exact set the
+// single-file pipeline snapshots (.md/.mdx/.txt plus the plain-text config
+// formats; no HTML, no .env). Reusing the canonical predicate keeps cross-mode
+// slug continuity: a .yaml with single-file history must diff when opened via
+// its folder too.
+
+export interface HandleDocOptions {
+	rewriteHtml?: (html: string, filepath: string) => string;
+	sourceSaveFilePath?: string;
+	sourceSaveFolderPath?: string;
+	/** A review of several files: the real paths of its own files that source save may write
+	 *  (`resolveBundleSourceSavePaths`). Every other document stays read-only. */
+	sourceSaveBundlePaths?: ReadonlySet<string>;
+	onSourceDocumentServed?: (path: string) => void;
+	rootPaths?: string[];
+	/** Plan review: the plan file on disk, whose directory serves the documents the plan links. */
+	planFile?: PlanFile | null;
+	/**
+	 * When set, /api/doc runs annotate's per-file version-history pipeline for
+	 * eligible markdown-branch documents (local file under an allowed root,
+	 * any annotatable plain-text extension per `isAnnotatableTextPath`, not
+	 * HTML, not a converted doc, under the annotatable size cap already
+	 * enforced above) and merges `previousPlan`/`versionInfo` into the
+	 * response — the same field names the single-file /api/plan payload uses
+	 * (which additionally returns `diffCurrent`; the folder path omits it
+	 * since it always equals the document's own content and the client never
+	 * reads it). `compute` is expected to memoize per resolved path itself
+	 * (the annotate server keys its cache by path in its own closure); this
+	 * module only decides *whether* to call it.
+	 */
+	annotateHistory?: {
+		compute: (resolvedFilePath: string, content: string) => FolderAnnotateHistory | null;
+	};
+	/**
+	 * Single-file rendered-HTML sessions: when /api/doc serves the session's
+	 * ROOT document (`path` equals the resolved root path) as raw HTML, merge
+	 * the version-diff fields `compute` derives from the bytes just read
+	 * (`previousPlan`/`versionInfo`/`diffHtml`, the same names /api/plan
+	 * uses) into the response. This is what lets the in-app Refresh keep the
+	 * version diff. Every other document is untouched.
+	 */
+	rootHtmlVersionDiff?: {
+		path: string;
+		compute: (currentHtml: string) => Record<string, unknown>;
+	};
+}
+
+interface HandleDocExistsOptions {
+	rootPath?: string;
+	rootPaths?: string[];
+}
+
+// Re-exported for the annotate version endpoints, which import it from here.
+export { resolveAllowedDocPath, type ResolveAllowedDocPathResult };
+
+function errorResponse(payload: DocErrorPayload): Response {
+	return Response.json(payload.body, { status: payload.status });
+}
+
+type DocOptionsResult<T> = T & {
+	sourceSave?: SourceSaveCapability;
+	previousPlan?: string | null;
+	versionInfo?: AnnotateHistoryResult["versionInfo"];
+};
+
+function applyDocOptions<T extends Record<string, unknown>>(
+	data: T,
+	options: HandleDocOptions = {},
+	sourceSnapshot?: SourceFileSnapshot,
+): DocOptionsResult<T> {
+	const next: Record<string, unknown> = { ...data };
+	// Root-document version diff (see HandleDocOptions.rootHtmlVersionDiff):
+	// computed on the raw bytes, before the asset rewrite below, because the
+	// diff renderer rewrites its own output the same way.
+	if (
+		options.rootHtmlVersionDiff &&
+		data.renderAs === "html" &&
+		typeof data.rawHtml === "string" &&
+		data.filepath === options.rootHtmlVersionDiff.path
+	) {
+		Object.assign(next, options.rootHtmlVersionDiff.compute(data.rawHtml));
+	}
+	if (
+		typeof next.rawHtml === "string" &&
+		typeof next.filepath === "string" &&
+		options.rewriteHtml
+	) {
+		next.rawHtml = options.rewriteHtml(next.rawHtml, next.filepath);
+	}
+	// Annotate version history (folder mode only — see HandleDocOptions.annotateHistory).
+	// Independent of the sourceSave branching below: only markdown-branch
+	// documents (not HTML, not converted) with an annotatable plain-text
+	// extension are eligible — the same set the single-file pipeline
+	// snapshots. The 2MB annotatable-file size cap is already enforced by the
+	// caller before any of these responses are built, so no separate check is
+	// needed here.
+	if (
+		options.annotateHistory &&
+		typeof data.filepath === "string" &&
+		// Diagram sources (.mmd/.dot) take the markdown branch's raw text, so
+		// they keep per-file version history exactly like a .txt.
+		(data.renderAs === "markdown" || isDiagramRenderKind(data.renderAs)) &&
+		data.isConverted !== true &&
+		typeof data.markdown === "string" &&
+		isAnnotatableTextPath(data.filepath)
+	) {
+		const history = options.annotateHistory.compute(data.filepath, data.markdown);
+		if (history) {
+			next.previousPlan = history.previousPlan;
+			next.versionInfo = history.versionInfo;
+		}
+	}
+	if (typeof data.filepath !== "string") {
+		return (options.sourceSaveFolderPath || options.sourceSaveFilePath || options.sourceSaveBundlePaths
+			? { ...next, sourceSave: disabledSourceSave("not-local-file") }
+			: next) as DocOptionsResult<T>;
+	}
+	if (data.renderAs === "html") {
+		return { ...next, sourceSave: disabledSourceSave("html-render") } as DocOptionsResult<T>;
+	}
+	if (data.isConverted === true) {
+		return { ...next, sourceSave: disabledSourceSave("converted-source") } as DocOptionsResult<T>;
+	}
+	if (options.sourceSaveFilePath) {
+		const sourcePath = resolveExistingSourceSaveFile("single-file", options.sourceSaveFilePath);
+		const doc = sourceSnapshot
+			? createSourceSaveCapabilityFromSnapshot("single-file", data.filepath, sourceSnapshot)
+			: createSourceSaveCapability("single-file", data.filepath);
+		if (sourcePath && doc.enabled && sourcePath === doc.path) {
+			options.onSourceDocumentServed?.(doc.path);
+			return { ...next, sourceSave: doc } as DocOptionsResult<T>;
+		}
+	}
+	if (options.sourceSaveBundlePaths) {
+		const doc = createBundleSourceSaveCapability(data.filepath, options.sourceSaveBundlePaths, sourceSnapshot);
+		if (doc?.enabled) {
+			options.onSourceDocumentServed?.(doc.path);
+			return { ...next, sourceSave: doc } as DocOptionsResult<T>;
+		}
+	}
+	if (!options.sourceSaveFolderPath) return next as DocOptionsResult<T>;
+	const sourceSave = sourceSnapshot
+		? createSourceSaveCapabilityFromSnapshot("folder-file", data.filepath, sourceSnapshot, options.sourceSaveFolderPath)
+		: createSourceSaveCapability("folder-file", data.filepath, options.sourceSaveFolderPath);
+	if (sourceSave.enabled) options.onSourceDocumentServed?.(sourceSave.path);
+	return {
+		...next,
+		sourceSave,
+	} as DocOptionsResult<T>;
+}
+
+function docJson(data: Record<string, unknown>, options?: HandleDocOptions, sourceSnapshot?: SourceFileSnapshot): Response {
+	return Response.json(applyDocOptions(data, options, sourceSnapshot));
+}
+
+/** The render decision is a pure function of resolved path plus `?convert=1`. */
+async function readDocument(path: string, convert: boolean, options: HandleDocOptions): Promise<Response> {
+	if (Bun.file(path).size > MAX_ANNOTATABLE_FILE_BYTES) {
+		return errorResponse(DOC_TOO_LARGE);
+	}
+	try {
+		const snapshot = readSourceFileSnapshot(path);
+		if (/\.html?$/i.test(path)) {
+			return convert
+				? docJson({ markdown: htmlToMarkdown(snapshot.text), filepath: path, isConverted: true, renderAs: "markdown" }, options)
+				: docJson({ rawHtml: snapshot.text, renderAs: "html", filepath: path }, options);
+		}
+		// A diagram source is served as its raw text with the engine named in
+		// `renderAs`; the editor renders it through the same DiagramBlock a
+		// ```mermaid fence uses instead of the markdown pipeline.
+		const diagramKind = diagramRenderKindForPath(path);
+		return docJson(
+			{ markdown: snapshot.text, filepath: path, renderAs: diagramKind ?? "markdown" },
+			options,
+			snapshot,
+		);
+	} catch {
+		return Response.json({ error: "Failed to read file" }, { status: 500 });
+	}
+}
+
+async function readCodeFile(path: string, input: string, parsed: ParsedCodePath): Promise<Response> {
+	try {
+		const file = Bun.file(path);
+		if (file.size > MAX_ANNOTATABLE_FILE_BYTES) {
+			return errorResponse(DOC_TOO_LARGE);
+		}
+		const contents = await file.text();
+		const displayName = path.split("/").pop() || path;
+		let prerenderedHTML: string | undefined;
+		try {
+			const result = await preloadFile({
+				file: { name: displayName, contents },
+				options: { disableFileHeader: true },
+			});
+			prerenderedHTML = result.prerenderedHTML;
+		} catch {
+			// Fall back to client-side rendering
+		}
+		return Response.json({ codeFile: true, contents, filepath: path, prerenderedHTML, line: parsed.line, lineEnd: parsed.lineEnd });
+	} catch {
+		return Response.json({ error: `File not found: ${input}` }, { status: 404 });
+	}
+}
+
 /** Serve a linked markdown document. Resolves absolute, relative, or bare filename paths. */
-export async function handleDoc(req: Request): Promise<Response> {
+export async function handleDoc(req: Request, options: HandleDocOptions = {}): Promise<Response> {
 	const url = new URL(req.url);
 	const requestedPath = url.searchParams.get("path");
 	if (!requestedPath) {
 		return Response.json({ error: "Missing path parameter" }, { status: 400 });
 	}
 
+	const allowedRoots = getAllowedRootPaths(options);
 	// Side-channel: kick off a code-file walk for the project root so that any
 	// /api/doc/exists POST issued by the rendered linked-doc lands on warm cache.
-	void warmFileListCache(process.cwd(), "code");
+	for (const root of allowedRoots) {
+		void warmFileListCache(root, "code");
+	}
 
-	// If a base directory is provided, try resolving relative to it first
-	// (used by annotate mode to resolve paths relative to the source file).
-	// No isWithinProjectRoot check here — intentional, matches pre-existing
-	// markdown behavior. The base param is set server-side by the annotate
-	// server (see annotate.ts /api/doc route). The standalone HTML block
-	// below (no base) retains its cwd-based containment check.
 	const base = url.searchParams.get("base");
-	const resolvedBase = base ? resolveUserPath(base) : null;
-	if (
-		resolvedBase &&
-		!isAbsoluteUserPath(requestedPath) &&
-		/\.(mdx?|html?)$/i.test(requestedPath)
-	) {
-		const fromBase = resolveUserPath(requestedPath, resolvedBase);
-		try {
-			const file = Bun.file(fromBase);
-			if (await file.exists()) {
-				const raw = await file.text();
-				const isHtml = /\.html?$/i.test(requestedPath);
-				const markdown = isHtml ? htmlToMarkdown(raw) : raw;
-				return Response.json({ markdown, filepath: fromBase, isConverted: isHtml });
-			}
-		} catch {
-			/* fall through to standard resolution */
-		}
+	// A base is only honored when it is itself inside an allowed root. The plan
+	// directory base is for the plan's own links (below): root resolution runs
+	// without it, so a plan stored inside the project keeps the project-root
+	// fallback, HTML links included.
+	const resolvedBase = isPlanDirBase(base, options.planFile) ? null : getTrustedBaseDir(base, allowedRoots);
+	// HTML renders raw by default; `?convert=1` (set by the frontend when the session's
+	// --markdown preference is on) forces Turndown conversion instead.
+	const convert = url.searchParams.get("convert") === "1";
+	// `?doc=1` (set by the file browser) forces annotatable plain-text rendering
+	// for extensions that overlap CODE_FILE_REGEX (.yaml, .json, .toml, .ini,
+	// .xml). Without it, those paths keep the syntax-highlighted code-file
+	// popout response, so code-file links inside documents are unaffected.
+	const forceDoc = url.searchParams.get("doc") === "1";
+
+	// The plan's own directory is usually outside every root, so a document it
+	// links is served here rather than through root resolution. A linked file
+	// beside the plan shadows a project document of the same relative name.
+	const planDoc = resolvePlanLinkedDoc(requestedPath, base, options.planFile);
+	if (planDoc) return readDocument(planDoc, convert, options);
+
+	const resolution = await resolveDocTarget(requestedPath, {
+		base: resolvedBase,
+		forceDoc,
+		roots: allowedRoots,
+	});
+	// The one authorization site. A named path is gated whether or not it
+	// exists, so an escaping name is denied rather than reported absent.
+	const named = resolution.kind === "file" || resolution.kind === "not_found" ? resolution.path : undefined;
+	if (named !== undefined && !isPathAllowed(named, allowedRoots)) {
+		return errorResponse(DOC_ACCESS_DENIED);
 	}
-
-	// HTML files: resolve directly (not via resolveMarkdownFile which only handles .md/.mdx)
-	const projectRoot = process.cwd();
-	if (/\.html?$/i.test(requestedPath)) {
-		const resolvedHtml = resolveUserPath(requestedPath, resolvedBase || projectRoot);
-		if (!isWithinProjectRoot(resolvedHtml, projectRoot)) {
-			return Response.json({ error: "Access denied: path is outside project root" }, { status: 403 });
-		}
-		try {
-			const file = Bun.file(resolvedHtml);
-			if (await file.exists()) {
-				const html = await file.text();
-				const markdown = htmlToMarkdown(html);
-				return Response.json({ markdown, filepath: resolvedHtml, isConverted: true });
-			}
-		} catch { /* fall through */ }
-		return Response.json({ error: `File not found: ${requestedPath}` }, { status: 404 });
+	if (resolution.kind !== "file") {
+		return errorResponse(docResolutionError(resolution, allowedRoots));
 	}
-
-	// Code files: try literal resolve first; on miss, fall back to the smart
-	// resolver which walks the project for case-insensitive / suffix matches.
-	if (isCodeFilePath(requestedPath)) {
-		const parsed = parseCodePath(requestedPath);
-		const cleanPath = parsed.filePath;
-		const literalPath = resolveUserPath(cleanPath, resolvedBase || projectRoot);
-		const literalAllowed = resolvedBase || isWithinProjectRoot(literalPath, projectRoot);
-
-		let resolvedCode: string | null = null;
-		if (literalAllowed) {
-			try {
-				const file = Bun.file(literalPath);
-				if (await file.exists()) resolvedCode = literalPath;
-			} catch { /* fall through */ }
-		}
-
-		if (!resolvedCode) {
-			const result = await resolveCodeFile(cleanPath, projectRoot);
-			if (result.kind === "found") {
-				resolvedCode = result.path;
-			} else if (result.kind === "ambiguous") {
-				const prefix = `${projectRoot}/`;
-				const relative = result.matches.map((m) =>
-					m.startsWith(prefix) ? m.slice(prefix.length) : m,
-				);
-				return Response.json(
-					{ error: `Ambiguous path '${requestedPath}'`, matches: relative },
-					{ status: 400 },
-				);
-			} else if (result.kind === "unavailable") {
-				return Response.json({ error: `Cannot scan project: ${requestedPath}` }, { status: 404 });
-			} else {
-				return Response.json({ error: `File not found: ${requestedPath}` }, { status: 404 });
-			}
-			if (!isWithinProjectRoot(resolvedCode, projectRoot)) {
-				return Response.json({ error: "Access denied: path is outside project root" }, { status: 403 });
-			}
-		}
-
-		try {
-			const file = Bun.file(resolvedCode);
-			if (file.size > 2 * 1024 * 1024) {
-				return Response.json({ error: "File too large (max 2MB)" }, { status: 413 });
-			}
-			const contents = await file.text();
-			const displayName = resolvedCode.split("/").pop() || resolvedCode;
-			let prerenderedHTML: string | undefined;
-			try {
-				const result = await preloadFile({
-					file: { name: displayName, contents },
-					options: { disableFileHeader: true },
-				});
-				prerenderedHTML = result.prerenderedHTML;
-			} catch {
-				// Fall back to client-side rendering
-			}
-			return Response.json({ codeFile: true, contents, filepath: resolvedCode, prerenderedHTML, line: parsed.line, lineEnd: parsed.lineEnd });
-		} catch {
-			return Response.json({ error: `File not found: ${requestedPath}` }, { status: 404 });
-		}
-	}
-
-	const result = resolveMarkdownFile(requestedPath, projectRoot);
-
-	if (result.kind === "ambiguous") {
-		return Response.json(
-			{
-				error: `Ambiguous filename '${result.input}': found ${result.matches.length} matches`,
-				matches: result.matches,
-			},
-			{ status: 400 },
-		);
-	}
-
-	if (result.kind === "not_found" || result.kind === "unavailable") {
-		return Response.json(
-			{ error: `File not found: ${result.input}` },
-			{ status: 404 },
-		);
-	}
-
-	try {
-		const markdown = await Bun.file(result.path).text();
-		return Response.json({ markdown, filepath: result.path });
-	} catch {
-		return Response.json({ error: "Failed to read file" }, { status: 500 });
-	}
+	return resolution.render === "code"
+		? readCodeFile(resolution.path, requestedPath, resolution.code)
+		: readDocument(resolution.path, convert, options);
 }
 
 /**
  * Batch existence check for code-file paths the renderer wants to linkify.
  * POST /api/doc/exists with { paths: string[] } returns { results: { [path]: ValidationEntry } }.
  * Reads from the warm file-list cache populated at plan/annotate load.
- *
- * TODO(security): two related leaks of arbitrary file existence:
- *   1. Absolute paths in `paths[]` are probed verbatim — `resolveCodeFile`
- *      returns `{ kind: 'found', path: abs }` for any existing absolute file
- *      with no project-root containment check. A malicious shared plan with
- *      backtick-wrapped absolute paths (e.g. `/Users/x/.aws/…`) leaks file
- *      existence + canonical path back to the caller.
- *   2. The `base` field is honored verbatim — a hostile sender can supply
- *      `base=/Users/x/.aws` + `paths=["credentials.json"]` and the resolver
- *      will check `<base>/<path>` existence with no containment check.
- * Mitigation: reject absolute inputs and `isWithinProjectRoot`-filter the
- * resolved base before passing it to `resolveCodeFile` (or filter `r.path`
- * before recording a found result). Mirror in apps/pi-extension/server/reference.ts.
  */
-export async function handleDocExists(req: Request): Promise<Response> {
+export async function handleDocExists(req: Request, options?: HandleDocExistsOptions): Promise<Response> {
 	let body: unknown;
 	try {
 		body = await req.json();
@@ -202,12 +346,11 @@ export async function handleDocExists(req: Request): Promise<Response> {
 	if (paths.length > 500) {
 		return Response.json({ error: "Too many paths (max 500)" }, { status: 400 });
 	}
+	const allowedRoots = getAllowedRootPaths(options);
 	const baseRaw = (body as { base?: unknown })?.base;
 	const baseDir = typeof baseRaw === "string" && baseRaw.length > 0
-		? resolveUserPath(baseRaw)
-		: undefined;
-
-	const projectRoot = process.cwd();
+		? getTrustedBaseDir(baseRaw, allowedRoots)
+		: null;
 	const results: Record<
 		string,
 		| { status: "found"; resolved: string }
@@ -218,15 +361,15 @@ export async function handleDocExists(req: Request): Promise<Response> {
 
 	await Promise.all(
 		(paths as string[]).map(async (p) => {
-			const cleanP = parseCodePath(p).filePath;
-			const r = await resolveCodeFile(cleanP, projectRoot, baseDir);
+			const r = await resolveCodeFileInRoots(parseCodePath(p).filePath, allowedRoots, baseDir);
 			if (r.kind === "found") {
-				results[p] = { status: "found", resolved: r.path };
+				results[p] = isPathAllowed(r.path, allowedRoots)
+					? { status: "found", resolved: r.path }
+					: { status: "missing" };
 			} else if (r.kind === "ambiguous") {
-				const prefix = `${projectRoot}/`;
 				results[p] = {
 					status: "ambiguous",
-					matches: r.matches.map((m) => (m.startsWith(prefix) ? m.slice(prefix.length) : m)),
+					matches: r.matches.map((m) => relativizeToAllowedRoots(m, allowedRoots)),
 				};
 			} else if (r.kind === "unavailable") {
 				results[p] = { status: "unavailable" };
@@ -356,6 +499,51 @@ export async function handleObsidianDoc(req: Request): Promise<Response> {
 
 // --- File Browser ---
 
+// Resolved per call, not captured at module load: the accepted set includes
+// the user's configured extra markdown extensions (#1307), which the shared
+// resolver reads from config.json on first use.
+function includeWorkspaceFile(relativePath: string, _change: WorkspaceFileChange): boolean {
+	return getAnnotatableDocRegex().test(relativePath) && !isFileBrowserExcludedPath(relativePath);
+}
+
+type FileBrowserWalkState = {
+	files: Set<string>;
+	limit: number;
+	truncated: boolean;
+};
+
+function addFileBrowserFile(state: FileBrowserWalkState, relativePath: string): void {
+	if (state.files.has(relativePath)) return;
+	if (state.files.size >= state.limit) {
+		state.truncated = true;
+		return;
+	}
+	state.files.add(relativePath);
+}
+
+async function walkFileBrowserFiles(dir: string, root: string, state: FileBrowserWalkState): Promise<void> {
+	if (state.truncated) return;
+	let entries;
+	try {
+		entries = await readdir(dir, { withFileTypes: true });
+	} catch {
+		return;
+	}
+
+	for (const entry of entries) {
+		if (state.truncated) return;
+		const fullPath = join(dir, entry.name);
+		const relativePath = relative(root, fullPath).replace(/\\/g, "/");
+		if (entry.isDirectory()) {
+			if (isFileBrowserExcludedPath(relativePath)) continue;
+			await walkFileBrowserFiles(fullPath, root, state);
+		} else if (entry.isFile() && getAnnotatableDocRegex().test(entry.name)) {
+			if (isFileBrowserExcludedPath(relativePath)) continue;
+			addFileBrowserFile(state, relativePath);
+		}
+	}
+}
+
 /** List markdown files in a directory as a nested tree. */
 export async function handleFileBrowserFiles(req: Request): Promise<Response> {
 	const url = new URL(req.url);
@@ -373,19 +561,30 @@ export async function handleFileBrowserFiles(req: Request): Promise<Response> {
 	}
 
 	try {
-		const glob = new Bun.Glob("**/*.{md,mdx,html,htm}");
-		const files: string[] = [];
-		for await (const match of glob.scan({
-			cwd: resolvedDir,
-			onlyFiles: true,
-		})) {
-			if (FILE_BROWSER_EXCLUDED.some((dir) => match.includes(dir))) continue;
-			files.push(match);
+		const state: FileBrowserWalkState = {
+			files: new Set<string>(),
+			limit: getFileBrowserMaxFiles(),
+			truncated: false,
+		};
+		// Seed the user's own modified/untracked files BEFORE the bulk walk: the
+		// walk fills the cap in raw readdir order and addFileBrowserFile drops
+		// everything once the cap latches — the one set of files that must never
+		// silently vanish from the browser is the ones the user just touched.
+		const workspaceStatus = filterWorkspaceStatusForDirectory(await getWorkspaceStatusForDirectory(resolvedDir), resolvedDir, includeWorkspaceFile);
+		for (const match of getWorkspaceStatusRelativePaths(workspaceStatus, resolvedDir, includeWorkspaceFile)) {
+			addFileBrowserFile(state, match);
+			if (state.truncated) break;
 		}
-		files.sort();
+		await walkFileBrowserFiles(resolvedDir, resolvedDir, state);
+		const sortedFiles = [...state.files].sort();
 
-		const tree = buildFileTree(files);
-		return Response.json({ tree });
+		const tree = buildFileTree(sortedFiles);
+		return Response.json({
+			tree,
+			workspaceStatus,
+			truncated: state.truncated,
+			fileLimit: state.limit,
+		});
 	} catch {
 		return Response.json(
 			{ error: "Failed to list directory files" },

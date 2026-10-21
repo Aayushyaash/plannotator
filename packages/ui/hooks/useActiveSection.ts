@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
+import { getScrollViewportIntersectionRoot } from './useScrollViewport';
 
 /**
  * Track which heading section is currently visible in the viewport
@@ -16,11 +17,13 @@ export function useActiveSection(
   const observerRef = useRef<IntersectionObserver | null>(null);
 
   useEffect(() => {
-    const container = scrollElement ?? containerRef.current;
-    if (!container) return;
+    const contentContainer = containerRef.current ?? scrollElement;
+    const viewport = scrollElement ?? contentContainer;
+    if (!contentContainer || !viewport) return;
     
-    // Find all heading elements with data-block-id
-    const headings = container.querySelectorAll('[data-block-type="heading"]');
+    // Only document headings: a heading inside a question card's context has
+    // no block id and is not a TOC section.
+    const headings = contentContainer.querySelectorAll('[data-block-type="heading"][data-block-id]');
     if (headings.length === 0) return;
     
     // Track which headings are currently intersecting
@@ -57,7 +60,7 @@ export function useActiveSection(
         }
       },
       {
-        root: container,
+        root: getScrollViewportIntersectionRoot(viewport),
         rootMargin: '-80px 0px -80% 0px', // Activate when heading is near top
         threshold: [0, 0.1, 0.5, 1.0],
       }

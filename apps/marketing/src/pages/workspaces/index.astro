@@ -23,7 +23,7 @@ const teamSizes = [
 ---
 <Base
   title="Plannotator Workspaces · Get notified"
-  description="Plannotator Workspaces is the hosted team layer for collaborating on agent plans, specs, code reviews, and verification standards. Plannotator core stays free and open source."
+  description="Plannotator Workspaces is the coordination layer for agent planning and review: shared documents, decisions and Git history. Join the private beta."
 >
   <Fragment slot="head">
     <!-- Page-scoped theme tokens. The page is now system-responsive: it
@@ -109,59 +109,47 @@ const teamSizes = [
     <main class="ws-main">
       <div class="ws-col-left">
         <header class="ws-hero">
-          <p class="ws-eyebrow">Plannotator Workspaces · Waitlist</p>
-          <h1 class="ws-page-title">From review surfaces to standards your agents learn from.</h1>
+          <p class="ws-eyebrow">Plannotator Workspaces · Private beta</p>
+          <h1 class="ws-page-title">The coordination layer for agent planning and review.</h1>
+          <p class="ws-hero-copy">
+            In the agentic software factory era, agents do more of the
+            building. Workspaces is the shared place where your team plans
+            the work, reviews it, shapes it and decides, so people stay in
+            the loop.
+          </p>
+          <div class="ws-link-row" aria-label="Related Plannotator surfaces">
+            <a href="/" class="ws-text-link">Plan review</a>
+            <a href="/code-review/" class="ws-text-link">Code review</a>
+          </div>
         </header>
 
         <section class="ws-info">
-          <div class="ws-phases">
-          <div class="ws-phase">
-            <span class="ws-when">Today</span>
-            <span class="ws-what">You review agent artifacts (docs/specs) and code.</span>
-          </div>
-          <div class="ws-phase">
-            <span class="ws-when">Next</span>
-            <span class="ws-what">Artifacts and reviews become facts, requirements, and testable standards. Versioned and accessible to your agents and teammates.</span>
-          </div>
-          <div class="ws-phase">
-            <span class="ws-when">Compound</span>
-            <span class="ws-what">Those standards get checked before and after code lands. Additionally, Workspaces will offer enhanced gating for PRs and releases; achieving higher quality and faster verification.</span>
-          </div>
-        </div>
-
-        <p class="ws-intro">Plannotator Workspaces will offer:</p>
-
         <ul class="ws-points">
           <li>
-            <strong>Collaborative knowledge base for agent artifacts.</strong>
-            Share plans, specs, explainers, and reviews with your team
-            (and agents) in markdown or HTML, before and after agents
-            code.
+            <strong>Plan in shared documents.</strong>
+            Plans, specs and notes live as Markdown and HTML files in a
+            workspace. People and agents write them together, live.
           </li>
           <li>
-            <strong>Artifacts and annotations become standards.</strong>
-            Capture team artifacts and review comments as reusable
-            expectations for future agent work.
-          </li>
-          <li class="ws-points-feat">
-            <strong>
-              Manage golden standards.<span class="ws-star">✱</span>
-            </strong>
-            Workspaces extracts verification facts (simple, sourced claims
-            about your system) from specs and reviews, and accumulates
-            them into a golden set of rules your agents can rely on.
+            <strong>Review before it becomes code.</strong>
+            Comment on the exact passage and discuss it where the plan lives.
+            Agents read the comments and reply in the same thread.
           </li>
           <li>
-            <strong>Feed standards back into agents.</strong>
-            Send accumulated team knowledge into planning and review
-            agents. Access rules from your own agents, or run them as
-            CI/CD-gated agents inside Workspaces.
+            <strong>Shape the work.</strong>
+            Record each decision beside the plan and move the workspace from
+            planning to implementation to review. Scope stays written down.
           </li>
           <li>
-            <strong>Connect to CI/CD.</strong>
-            PR explainers with attached plans and review context, plus
-            verification against your team's standards.
-            </li>
+            <strong>Keep people in the loop.</strong>
+            Agents do more of the work, but people set the direction and sign
+            off. The agent gets the approved plan, not a pile of chat threads.
+          </li>
+          <li>
+            <strong>Built on Git, open to agents.</strong>
+            Every change is a save point you can link to, compare and restore.
+            Agents connect through the API, the CLI and MCP.
+          </li>
           </ul>
         </section>
       </div>
@@ -211,7 +199,7 @@ const teamSizes = [
               </label>
               <textarea
                 name="note"
-                placeholder="Wishes, blockers, or how you'd like to use Workspaces."
+                placeholder="What breaks today when your team reviews plans, code, or agent work?"
                 maxlength="1000"
               ></textarea>
             </div>
@@ -280,7 +268,7 @@ const teamSizes = [
             </p>
             <p id="ok-contrib-note">
               Contributing meaningful PRs to the OSS core qualifies you for
-              lifetime free access on Teams.
+              lifetime free access to the Workspaces Organization plan.
             </p>
             <div class="ws-receipt" id="receipt"></div>
           </div>
@@ -291,7 +279,7 @@ const teamSizes = [
             <span class="ws-commit-tag">[ open source ]</span>
             <p class="ws-commit-msg">
               Plannotator core stays <em>free and open source</em>, always.
-              Workspaces is the hosted layer for teams and power users.
+              Workspaces is the hosted app for teams, built on it.
             </p>
           </div>
 
@@ -620,9 +608,7 @@ const teamSizes = [
       min-width: 0;
       display: flex;
       flex-direction: column;
-      /* Breathing room between the hero (eyebrow + h1) and the first
-         "Today" row of the phases list — without this the title's
-         descenders run into the dashed grid above "Today". */
+      /* Breathing room between the hero and the sections list below it. */
       gap: 32px;
     }
     .ws-col-right {
@@ -680,56 +666,49 @@ const teamSizes = [
     }
     .ws-page-title {
       font-family: 'Instrument Sans', system-ui, sans-serif;
-      font-size: clamp(20px, 2.4vw, 26px);
+      font-size: 2.75rem;
       font-weight: 600;
-      line-height: 1.18;
-      letter-spacing: -0.012em;
+      line-height: 1.08;
+      letter-spacing: 0;
       color: var(--foreground);
       margin: 0;
     }
-
-    /* ── Phases (Today / Next / Compound) ── */
-    .ws-phases {
-      display: grid;
-      grid-template-columns: 110px 1fr;
-      max-width: 560px;
-      margin-bottom: 4px;
-    }
-    .ws-phase { display: contents; }
-    .ws-phase .ws-when,
-    .ws-phase .ws-what {
-      padding: 12px 0;
-      border-top: 1px dashed oklch(from var(--border) l c h / 0.5);
-    }
-    .ws-phase:first-child .ws-when,
-    .ws-phase:first-child .ws-what { border-top: none; padding-top: 2px; }
-    .ws-when {
-      font-family: 'Instrument Sans', system-ui, sans-serif;
-      font-size: 0.9375rem;
-      font-weight: 600;
-      color: var(--secondary);
-      letter-spacing: -0.005em;
-      padding-left: 14px;
-    }
-    .ws-what {
-      font-size: 0.875rem;
-      line-height: 1.55;
-      color: oklch(from var(--foreground) l c h / 0.85);
-    }
-    @media (max-width: 700px) {
-      .ws-phases { grid-template-columns: 92px 1fr; }
-      .ws-when { padding-left: 8px; }
-    }
-
-    /* ── Intro lead ── */
-    .ws-intro {
-      font-family: 'Instrument Sans', system-ui, sans-serif;
-      margin: 24px 0 14px;
-      color: var(--foreground);
-      font-weight: 600;
+    .ws-hero-copy {
+      max-width: 660px;
+      margin: 22px 0 0;
+      color: oklch(from var(--foreground) l c h / 0.78);
       font-size: 1.0625rem;
-      letter-spacing: -0.008em;
-      max-width: 540px;
+      line-height: 1.65;
+    }
+    .ws-link-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+    .ws-text-link {
+      display: inline-flex;
+      align-items: center;
+      min-height: 36px;
+      padding: 0 14px;
+      border: 1px solid var(--border);
+      border-radius: 9999px;
+      color: var(--foreground);
+      font-size: 0.875rem;
+      text-decoration: none;
+      transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+    }
+    .ws-text-link:hover {
+      border-color: oklch(from var(--primary) l c h / 0.6);
+      color: var(--primary);
+      background: oklch(from var(--primary) l c h / 0.08);
+    }
+    @media (max-width: 980px) {
+      .ws-page-title { font-size: 2.5rem; }
+    }
+    @media (max-width: 600px) {
+      .ws-page-title { font-size: 2.125rem; }
+      .ws-hero-copy { font-size: 1rem; }
     }
 
     /* ── Offering points ── */
@@ -764,33 +743,9 @@ const teamSizes = [
       color: var(--foreground);
       font-weight: 600;
       font-size: 0.9375rem;
-      letter-spacing: -0.005em;
+      letter-spacing: 0;
       margin-bottom: 2px;
     }
-    .ws-points-feat {
-      background: oklch(from var(--primary) l c h / 0.08);
-      margin-left: -14px;
-      padding-left: 28px !important;
-      padding-right: 14px;
-      border-bottom: none !important;
-    }
-    /* Restore the next sibling's top edge so dropping the feat's bottom
-       border doesn't leave it visually merged with the following item. */
-    .ws-points-feat + li {
-      border-top: 1px solid oklch(from var(--border) l c h / 0.3);
-    }
-    /* No bullet/bar on the highlighted item — the tinted background is
-       enough on its own. */
-    .ws-points-feat::before { display: none !important; }
-    .ws-star {
-      color: var(--primary);
-      font-family: var(--font-mono);
-      font-size: 0.6875rem;
-      font-weight: 500;
-      margin-left: 6px;
-      vertical-align: 1px;
-    }
-
     /* ── OSS contributors card ──
        Wears the "branded stamp" treatment (was on commit-card): primary
        background, primary-foreground text, offset-stack shadow. */

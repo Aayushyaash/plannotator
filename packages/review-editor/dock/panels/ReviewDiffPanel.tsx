@@ -3,6 +3,8 @@ import type { IDockviewPanelProps } from 'dockview-react';
 import { DiffViewer } from '../../components/DiffViewer';
 import { useReviewState } from '../ReviewStateContext';
 import { getReviewDiffPanelFilePath, type ReviewDiffPanelParams } from '../reviewPanelTypes';
+import { annotationMatchesPrScope } from '../../utils/annotationScope';
+import { fileKind } from '@plannotator/core/file-kind';
 
 /**
  * Thin adapter between dockview's panel API and the existing DiffViewer.
@@ -27,8 +29,7 @@ export const ReviewDiffPanel: React.FC<IDockviewPanelProps> = (props) => {
       const currentDiffScope = state.prDiffScope;
       return state.allAnnotations.filter((a) =>
         a.filePath === file.path &&
-        (!a.prUrl || !currentPrUrl || a.prUrl === currentPrUrl) &&
-        (!a.diffScope || !currentDiffScope || a.diffScope === currentDiffScope)
+        annotationMatchesPrScope(a, currentPrUrl, currentDiffScope)
       );
     },
     [state.allAnnotations, file, state.prMetadata, state.prDiffScope]
@@ -42,6 +43,11 @@ export const ReviewDiffPanel: React.FC<IDockviewPanelProps> = (props) => {
           )
         : [],
     [state.aiMessages, file]
+  );
+
+  const reviewFilePaths = useMemo(
+    () => new Set(state.files.map((candidate) => candidate.path)),
+    [state.files]
   );
 
   const searchMatchesForFile = useMemo(
@@ -65,12 +71,17 @@ export const ReviewDiffPanel: React.FC<IDockviewPanelProps> = (props) => {
   // patch, and Pierre briefly reconciles old-patch + new-content → "trailing
   // context mismatch" warnings in the console.
   return (
-    <div key={`${file.path}:${state.reviewBase ?? ''}:${state.activeDiffBase ?? ''}`} className="h-full relative">
+    <div key={`${file.path}:${state.reviewBase ?? ''}:${state.activeDiffBase ?? ''}:${state.feedbackDiffContext?.snapshotId ?? ''}`} className="h-full relative">
       <DiffViewer
         patch={file.patch}
         filePath={file.path}
         oldPath={file.oldPath}
+        status={file.status}
         reviewBase={state.reviewBase}
+        reviewSnapshotId={state.feedbackDiffContext?.snapshotId}
+        imagePreviewAvailable={state.imagePreviewAvailable}
+        imageSnapshotId={state.snapshotId}
+        contextExpansionAvailable={state.contextExpansionAvailable}
         prUrl={state.prMetadata?.url}
         prDiffScope={state.prDiffScope}
         isFocused={isFocusedFile}
@@ -80,11 +91,14 @@ export const ReviewDiffPanel: React.FC<IDockviewPanelProps> = (props) => {
         lineDiffType={state.lineDiffType}
         disableLineNumbers={state.disableLineNumbers}
         disableBackground={state.disableBackground}
+        expandUnchanged={state.expandUnchanged}
         fontFamily={state.fontFamily}
         fontSize={state.fontSize}
         annotations={fileAnnotations}
         selectedAnnotationId={state.selectedAnnotationId}
+        scrollTargetAnnotation={state.scrollTargetAnnotation}
         pendingSelection={state.pendingSelection}
+        compactTouchLayout={state.isCompactTouchLayout}
         onLineSelection={state.onLineSelection}
         onAddAnnotation={state.onAddAnnotation}
         onAddFileComment={state.onAddFileComment}
@@ -92,11 +106,19 @@ export const ReviewDiffPanel: React.FC<IDockviewPanelProps> = (props) => {
         onSelectAnnotation={state.onSelectAnnotation}
         onDeleteAnnotation={state.onDeleteAnnotation}
         isViewed={state.viewedFiles.has(file.path)}
+        isGenerated={state.generatedFiles.has(file.path)}
+        isTest={fileKind(file.path, state.generatedFiles) === 'test'}
         onToggleViewed={() => state.onToggleViewed(file.path)}
+        showViewedControls={state.showViewedControls}
         isStaged={state.stagedFiles.has(file.path)}
         isStaging={state.stagingFile === file.path}
         onStage={() => state.onStage(file.path)}
-        canStage={state.canStageFiles}
+        // Per-path gate (falls back to the mode-level flag): in since-base the
+        // single-file header lists committed files too — mode-level canStageFiles
+        // alone would offer a no-op Git Add on them that flips local state.
+        // Mirrors the `a` shortcut and the all-files header.
+        canStage={state.canStagePath ? state.canStagePath(file.path) : state.canStageFiles}
+        showStageControls={state.showStageControls}
         stageError={state.stageError}
         searchQuery={state.isSearchPending ? '' : state.debouncedSearchQuery}
         searchMatches={searchMatchesForFile}
@@ -114,6 +136,16 @@ export const ReviewDiffPanel: React.FC<IDockviewPanelProps> = (props) => {
         onClickAIMarker={state.onClickAIMarker}
         aiHistoryMessages={isFocusedFile ? state.aiHistoryForSelection : []}
         onCodeNavRequest={state.onCodeNavRequest}
+        onTokenHoverEnter={state.onTokenHoverEnter}
+        onTokenHoverLeave={state.onTokenHoverLeave}
+        reviewFilePaths={reviewFilePaths}
+        onOpenReviewFile={state.openDiffFile}
+        markdownPreviewSupported={!!state.markdownPreview}
+        markdownView={state.markdownPreview ? state.markdownPreview.viewOf(file.path) : 'source'}
+        markdownViewDisabledReason={state.markdownPreview?.lockReason(file.path) ?? null}
+        onMarkdownViewChange={state.markdownPreview
+          ? (view, how) => (how === 'chosen' ? state.markdownPreview!.choose : state.markdownPreview!.show)(file.path, view)
+          : undefined}
       />
     </div>
   );

@@ -1,6 +1,10 @@
 import { describe, test, expect } from "bun:test";
-import { parseMarkdownToBlocks, computeListIndices, extractFrontmatter, exportAnnotations } from "./parser";
+import { parseMarkdownToBlocks, computeListIndices, extractFrontmatter, exportAnnotations, exportAnnotationEntry, elementContextExportBlock, resolveReferenceLinks } from "./parser";
+import { shouldStripFrontmatter } from "@plannotator/core/annotatable";
+import { parseHtmlElementContext as coreParseHtmlElementContext } from "@plannotator/core/html-anchor";
+import { parseHtmlElementContext as uiParseHtmlElementContext } from "../components/html-viewer/useHtmlAnnotation";
 import type { Block } from "../types";
+import { AnnotationType } from "../types";
 
 /** Tiny factory for list-item blocks used by computeListIndices tests. */
 const li = (level: number, ordered: boolean, orderedStart?: number): Block => ({
@@ -12,6 +16,324 @@ const li = (level: number, ordered: boolean, orderedStart?: number): Block => ({
   orderedStart,
   order: 0,
   startLine: 1,
+});
+
+describe("resolveReferenceLinks (#923)", () => {
+  test("resolves full, collapsed, and shortcut references to inline links", () => {
+    expect(resolveReferenceLinks("[text][id]\n\n[id]: https://e.com")).toBe(
+      "[text](https://e.com)\n\n",
+    );
+    expect(resolveReferenceLinks("[text][]\n\n[text]: https://e.com")).toBe(
+      "[text](https://e.com)\n\n",
+    );
+    expect(resolveReferenceLinks("[text]\n\n[text]: https://e.com")).toBe(
+      "[text](https://e.com)\n\n",
+    );
+  });
+
+  test("matches labels case-insensitively and collapses internal whitespace", () => {
+    expect(resolveReferenceLinks("[Text][My  Ref]\n\n[my ref]: https://e.com")).toBe(
+      "[Text](https://e.com)\n\n",
+    );
+  });
+
+  test("supports the angle-bracket destination form and reference images", () => {
+    expect(resolveReferenceLinks("[x][id]\n\n[id]: <https://e.com>")).toBe(
+      "[x](https://e.com)\n\n",
+    );
+    expect(resolveReferenceLinks("![alt][id]\n\n[id]: /img.png")).toBe(
+      "![alt](/img.png)\n\n",
+    );
+  });
+
+  test("uses the first definition when a label is defined more than once", () => {
+    expect(
+      resolveReferenceLinks("[id]: https://one.com\n[id]: https://two.com\n\n[x][id]"),
+    ).toBe("\n\n\n[x](https://one.com)");
+  });
+
+  test("leaves unknown references and non-reference brackets untouched", () => {
+    expect(resolveReferenceLinks("[text][missing].")).toBe("[text][missing].");
+    // No definitions at all: fast path returns the input unchanged.
+    expect(resolveReferenceLinks("array [0] and [TODO] here")).toBe(
+      "array [0] and [TODO] here",
+    );
+    // A shortcut that does not name a definition stays literal even when other
+    // definitions exist. The definition itself is never consumed by anything
+    // in this document, so it stays visible too (PR #1168: unused definitions
+    // are not blanked).
+    expect(resolveReferenceLinks("[TODO] and [0]\n\n[id]: https://e.com")).toBe(
+      "[TODO] and [0]\n\n[id]: https://e.com",
+    );
+  });
+
+  test("does not double-link an inline link whose text matches a definition", () => {
+    // The inline link uses its own explicit URL and never consumes the
+    // definition, so the definition stays visible (PR #1168).
+    expect(
+      resolveReferenceLinks("[text](https://real.com)\n\n[text]: https://def.com"),
+    ).toBe("[text](https://real.com)\n\n[text]: https://def.com");
+  });
+
+  test("never rewrites references inside fenced code blocks or inline code spans", () => {
+    // Both definitions are only ever "referenced" from inside a protected
+    // region (a fence, an inline code span), so neither reference resolves
+    // and neither definition is consumed — both stay visible verbatim
+    // (PR #1168).
+    expect(resolveReferenceLinks("```\n[a][b]\n```\n\n[b]: https://e.com")).toBe(
+      "```\n[a][b]\n```\n\n[b]: https://e.com",
+    );
+    expect(resolveReferenceLinks("use `[a][b]` here\n\n[b]: https://e.com")).toBe(
+      "use `[a][b]` here\n\n[b]: https://e.com",
+    );
+  });
+
+  test("does not collect a definition that sits inside a fenced code block", () => {
+    // The only `[id]:` is inside code, so `[id]` outside stays a literal shortcut.
+    expect(
+      resolveReferenceLinks("```\n[id]: https://code.com\n```\n\n[id]"),
+    ).toBe("```\n[id]: https://code.com\n```\n\n[id]");
+  });
+
+  test("does not treat prose with an invalid title as a definition", () => {
+    expect(
+      resolveReferenceLinks("[Reminder]: call the bank tomorrow\n\n[Reminder]"),
+    ).toBe("[Reminder]: call the bank tomorrow\n\n[Reminder]");
+  });
+
+  test("does not corrupt bare space-delimited numbers on a resolved line", () => {
+    expect(resolveReferenceLinks("value is 0 and 1 and [x][id]\n\n[id]: https://e.com")).toBe(
+      "value is 0 and 1 and [x](https://e.com)\n\n",
+    );
+  });
+
+  test("blanks definition lines in place so block start-lines stay accurate", () => {
+    const blocks = parseMarkdownToBlocks("[id]: https://e.com\n\n# Heading\n\ntext [x][id]");
+    // The definition line renders nothing; the heading and paragraph keep their
+    // original source line numbers.
+    const heading = blocks.find((b) => b.type === "heading");
+    const paragraph = blocks.find((b) => b.type === "paragraph");
+    expect(heading?.startLine).toBe(3);
+    expect(paragraph?.startLine).toBe(5);
+    expect(paragraph?.content).toBe("text [x](https://e.com)");
+    expect(blocks.some((b) => b.content.includes("[id]: https://e.com"))).toBe(false);
+  });
+
+  test("does not delete a definition-shaped line that continues a paragraph", () => {
+    // CommonMark: a definition cannot interrupt a paragraph. The second line
+    // must survive as content, not be silently blanked.
+    expect(resolveReferenceLinks("The config keys are:\n[timeout]: 30")).toBe(
+      "The config keys are:\n[timeout]: 30",
+    );
+    expect(resolveReferenceLinks("text before\n[id]: url\nmore [x][id]")).toBe(
+      "text before\n[id]: url\nmore [x][id]",
+    );
+  });
+
+  test("collects a definition after a blank line, a code fence, or another definition", () => {
+    expect(resolveReferenceLinks("[a]: https://one.com\n[b]: https://two.com\n\n[x][a] [y][b]")).toBe(
+      "\n\n\n[x](https://one.com) [y](https://two.com)",
+    );
+    expect(resolveReferenceLinks("```\ncode\n```\n[id]: https://e.com\n\n[x][id]")).toBe(
+      "```\ncode\n```\n\n\n[x](https://e.com)",
+    );
+  });
+
+  test("does not clobber a checked task-list item when an [x] definition exists", () => {
+    // The checkbox guard means the task-list `[x]` never resolves as a
+    // reference, so the "x" definition is never consumed and stays visible
+    // (PR #1168).
+    expect(resolveReferenceLinks("- [x] done task\n- [ ] todo\n\n[x]: https://e.com")).toBe(
+      "- [x] done task\n- [ ] todo\n\n[x]: https://e.com",
+    );
+    expect(resolveReferenceLinks("1. [x] done\n\n[x]: https://e.com")).toBe(
+      "1. [x] done\n\n[x]: https://e.com",
+    );
+  });
+
+  test("resolves the shortcut image form", () => {
+    expect(resolveReferenceLinks("![id]\n\n[id]: /img.png")).toBe("![id](/img.png)\n\n");
+  });
+});
+
+describe("resolveReferenceLinks — owner review fixups (PR #1168)", () => {
+  test("does not rewrite a reference inside a fence indented 4+ spaces (block parser still treats it as code)", () => {
+    // The block parser detects a fence via `trimmed.startsWith('```')` after a
+    // full `.trim()` — ANY indentation still opens a code block. The resolver
+    // must recognize the exact same fence, not just fences within 3 spaces.
+    const md = "    ```\n    [a][b]\n    ```\n\n[b]: https://e.com";
+    // The code content must survive verbatim, and since "b" is never consumed
+    // outside the code fence, the definition itself must remain visible too —
+    // as its own trailing paragraph, not silently dropped.
+    expect(parseMarkdownToBlocks(md).map((b) => b.type)).toEqual(["code", "paragraph"]);
+    expect(resolveReferenceLinks(md)).toBe(md);
+  });
+
+  test("does not rewrite a reference inside a fence nested inside a list item at 4+ spaces", () => {
+    const md = "- outer\n  - inner\n    ```\n    [a][b]\n    ```\n\n[b]: https://e.com";
+    expect(resolveReferenceLinks(md)).toBe(md);
+  });
+
+  test("protects a link definition sitting inside a <details> raw HTML block", () => {
+    const md = "<details>\n<summary>Notes</summary>\n\n[id]: https://from-details.com\n\n</details>";
+    expect(resolveReferenceLinks(md)).toBe(md);
+  });
+
+  test("protects references and definitions inside a <pre> raw HTML block", () => {
+    const md = "<pre>\n[a][b]\n</pre>\n\n[b]: https://e.com";
+    expect(resolveReferenceLinks(md)).toBe(md);
+  });
+
+  test("a reference used only inside a <details> block never counts as consumed, so the definition stays visible", () => {
+    const md = "<details>\n\n[x][id]\n\n</details>\n\n[id]: https://e.com";
+    expect(resolveReferenceLinks(md)).toBe(md);
+  });
+
+  test("does not treat a GFM footnote definition ([^label]: ...) as a link reference definition", () => {
+    // A footnote body that is a bare token (looks exactly like a definition
+    // destination) is the real hazard — prose bodies with spaces already fail
+    // the destination shape by accident.
+    const md = "See the note.[^1]\n\n[^1]: https://example.com/footnote";
+    expect(resolveReferenceLinks(md)).toBe(md);
+  });
+
+  test("does not clobber a footnote reference ([^1]) that happens to share a label with a real definition", () => {
+    const md = "See[^1] and [x][1]\n\n[^1]: https://footnote.com\n\n[1]: https://real-def.com";
+    expect(resolveReferenceLinks(md)).toBe(
+      "See[^1] and [x](https://real-def.com)\n\n[^1]: https://footnote.com\n\n",
+    );
+  });
+
+  test("leaves an entirely unused link reference definition visible", () => {
+    expect(resolveReferenceLinks("[id]: https://e.com\n\nSome unrelated text.")).toBe(
+      "[id]: https://e.com\n\nSome unrelated text.",
+    );
+  });
+
+  test("leaves a definition visible when its only reference sits inside a fenced code block", () => {
+    const md = "```\n[x][id]\n```\n\n[id]: https://e.com";
+    expect(resolveReferenceLinks(md)).toBe(md);
+  });
+
+  test("still blanks every definition line for a label once it is genuinely consumed, including redefinitions", () => {
+    expect(
+      resolveReferenceLinks("[id]: https://one.com\n[id]: https://two.com\n\n[x][id]"),
+    ).toBe("\n\n\n[x](https://one.com)");
+  });
+
+  test("preserves total line count for a document mixing consumed, unused, and protected definitions", () => {
+    const md = [
+      "# Heading",
+      "",
+      "[used]: https://used.com",
+      "[unused]: https://unused.com",
+      "",
+      "text [x][used]",
+      "",
+      "```",
+      "[y][coded]",
+      "```",
+      "",
+      "[coded]: https://coded.com",
+    ].join("\n");
+    const resolved = resolveReferenceLinks(md);
+    expect(resolved.split("\n").length).toBe(md.split("\n").length);
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks.find((b) => b.type === "heading")?.startLine).toBe(1);
+    // "unused" and "coded" (only referenced inside the fence) must remain
+    // visible; only the genuinely consumed "used" definition is blanked.
+    expect(resolved).toContain("[unused]: https://unused.com");
+    expect(resolved).toContain("[coded]: https://coded.com");
+    expect(resolved).not.toContain("[used]: https://used.com");
+    expect(resolved).toContain("text [x](https://used.com)");
+  });
+
+  test("supports CRLF documents and preserves the CRLF line endings", () => {
+    const md = "[text][id]\r\n\r\n[id]: https://e.com\r\n";
+    expect(resolveReferenceLinks(md)).toBe("[text](https://e.com)\r\n\r\n\r\n");
+  });
+
+  test("leaves an unconsumed CRLF definition visible with its line ending intact", () => {
+    const md = "[id]: https://e.com\r\n\r\nunrelated text\r\n";
+    expect(resolveReferenceLinks(md)).toBe(md);
+  });
+
+  test("does not exhibit quadratic slowdown on a long run of unmatched '[' characters", () => {
+    const junk = "[".repeat(200_000);
+    const md = `${junk}\n\n[id]: https://e.com`;
+    const start = performance.now();
+    const result = resolveReferenceLinks(md);
+    const elapsed = performance.now() - start;
+    // A naive unbounded backtracking scan would take many seconds to minutes
+    // here; a bounded one-pass scan finishes in well under a second.
+    expect(elapsed).toBeLessThan(1500);
+    expect(result.startsWith(junk)).toBe(true);
+  });
+
+  test("caps reference/definition label length so a single pathological label cannot force backtracking", () => {
+    const longLabel = "x".repeat(1500);
+    const md = `[text][${longLabel}]\n\n[${longLabel}]: https://e.com`;
+    // Deliberate safe degradation: a label above the bound is not resolved
+    // and its definition-shaped line is not collected either, so both sides
+    // are left untouched rather than partially/incorrectly rewritten.
+    expect(resolveReferenceLinks(md)).toBe(md);
+  });
+
+  test("is idempotent: resolving an already-resolved document is a no-op", () => {
+    const inputs = [
+      "[text][id]\n\n[id]: https://e.com",
+      "![alt][id]\n\n[id]: /img.png",
+      "```\n[a][b]\n```\n\n[b]: https://e.com",
+      "- [x] done\n\n[x]: https://e.com",
+      "<pre>\n[a][b]\n</pre>\n\n[b]: https://e.com",
+      "[id]: https://e.com\n\nunused elsewhere",
+      "See[^1]\n\n[^1]: https://footnote.com",
+    ];
+    for (const md of inputs) {
+      const once = resolveReferenceLinks(md);
+      const twice = resolveReferenceLinks(once);
+      expect(twice).toBe(once);
+    }
+  });
+
+  test("aligns tilde-fence handling with the block parser (neither treats ~~~ as a code fence)", () => {
+    const md = "~~~\n[a][b]\n~~~\n\n[b]: https://e.com";
+    expect(parseMarkdownToBlocks(md).some((b) => b.type === "code")).toBe(false);
+    expect(resolveReferenceLinks(md)).toBe("~~~\n[a](https://e.com)\n~~~\n\n");
+  });
+
+  test("resolves a destination containing a closing parenthesis", () => {
+    expect(resolveReferenceLinks("[x][id]\n\n[id]: https://e.com/a(b)")).toBe(
+      "[x](https://e.com/a(b))\n\n",
+    );
+  });
+
+  test("backslash-escaped brackets never resolve, and their captured (unusable) label leaves the definition visible", () => {
+    const md = "Not a ref: \\[text\\]\\[id\\]\n\n[id]: https://e.com";
+    expect(resolveReferenceLinks(md)).toBe(md);
+  });
+
+  test("a genuinely nested-bracket shortcut does not corrupt the destination pipeline or crash", () => {
+    // Unescaped nested brackets in link text are not legal CommonMark; the
+    // simplified single-pass scanner does not fully recover the intended
+    // reference, but it must never throw and must never do something that
+    // could bypass URL sanitization later.
+    const md = "[outer [inner] text][id]\n\n[id]: https://e.com";
+    expect(() => resolveReferenceLinks(md)).not.toThrow();
+    const result = resolveReferenceLinks(md);
+    expect(result).toContain("https://e.com");
+  });
+
+  test("dangerous destinations still go through sanitizeLinkUrl identically to a hand-written inline link", () => {
+    // resolveReferenceLinks only ever emits `[text](dest)`, so it reuses the
+    // exact same inline-link rendering/sanitization path — it must never
+    // special-case or bypass it.
+    const resolved = resolveReferenceLinks("[x][id]\n\n[id]: javascript:alert(1)");
+    expect(resolved).toBe("[x](javascript:alert(1))\n\n");
+    // The literal string is unchanged (dangerous-protocol stripping happens
+    // downstream in sanitizeLinkUrl at render time), confirming this pass
+    // does not attempt — and therefore cannot get wrong — its own filtering.
+  });
 });
 
 describe("parseMarkdownToBlocks — code fences", () => {
@@ -152,6 +474,118 @@ describe("parseMarkdownToBlocks — code fences", () => {
     expect(blocks[0].content).toBe("    print('hi')");
     expect(blocks[1].type).toBe("paragraph");
     expect(blocks[1].content).toBe("after");
+  });
+});
+
+describe("parseMarkdownToBlocks — display math", () => {
+  test("multi-line $$ block produces a math block", () => {
+    const md = "$$\n\\int_0^1 x^2 dx = \\frac{1}{3}\n$$";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("math");
+    expect(blocks[0].content).toBe("\\int_0^1 x^2 dx = \\frac{1}{3}");
+    expect(blocks[0].startLine).toBe(1);
+    expect(blocks[0].sourceLineCount).toBe(3);
+  });
+
+  test("single-line $$ block produces a math block", () => {
+    const blocks = parseMarkdownToBlocks("before\n\n$$ E = mc^2 $$\n\nafter");
+    expect(blocks.map((b) => b.type)).toEqual(["paragraph", "math", "paragraph"]);
+    expect(blocks[1].content).toBe("E = mc^2");
+    expect(blocks[1].startLine).toBe(3);
+    expect(blocks[1].sourceLineCount).toBe(1);
+  });
+
+  test("display math does not swallow following paragraphs", () => {
+    const md = "$$\na^2 + b^2 = c^2\n$$\n\nText after.";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks.map((b) => b.type)).toEqual(["math", "paragraph"]);
+    expect(blocks[1].content).toBe("Text after.");
+  });
+
+  test("unclosed display math does NOT swallow the rest of the document", () => {
+    // A stray/unclosed $$ (or informal money like "$$100k") must not consume every
+    // following block to EOF — it's treated as ordinary text and later content
+    // (headings, paragraphs) is preserved. Mirrors the unclosed-HTML-tag policy.
+    const blocks = parseMarkdownToBlocks("$$\nx + y\n\n## Later heading\n\nMore text.");
+    expect(blocks.some((b) => b.type === "math")).toBe(false);
+    expect(blocks.some((b) => b.type === "heading" && b.content === "Later heading")).toBe(true);
+    expect(blocks.some((b) => b.content === "More text.")).toBe(true);
+  });
+
+  test("unclosed $$ does not pair with a stray $$ inside a later code fence", () => {
+    // The close-tag scan stops at a blank line, so an unterminated $$ can't reach
+    // (and pair with) a $$ that appears far below inside a code fence — which would
+    // otherwise swallow every heading/paragraph in between into one broken block.
+    const md = "$$\n\\theta = x\n\n## Next\n\n```\nnot math $$ here\n```\n\n## After";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks.every((b) => !(b.type === "math" && b.content.length > 100))).toBe(true);
+    expect(blocks.some((b) => b.type === "heading" && b.content === "Next")).toBe(true);
+    expect(blocks.some((b) => b.type === "heading" && b.content === "After")).toBe(true);
+    expect(blocks.some((b) => b.type === "code")).toBe(true);
+  });
+
+  test("empty single-line display math does not swallow following content", () => {
+    const blocks = parseMarkdownToBlocks("$$$$\n\nAfter");
+    expect(blocks.map((b) => b.type)).toEqual(["math", "paragraph"]);
+    expect(blocks[0].content).toBe("");
+    expect(blocks[1].content).toBe("After");
+  });
+
+  test("multi-line \\[ block produces a math block", () => {
+    const md = "\\[\n\\int_0^1 x^2 dx = \\frac{1}{3}\n\\]";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("math");
+    expect(blocks[0].content).toBe("\\int_0^1 x^2 dx = \\frac{1}{3}");
+    expect(blocks[0].startLine).toBe(1);
+    expect(blocks[0].sourceLineCount).toBe(3);
+  });
+
+  test("single-line \\[ block produces a math block", () => {
+    const blocks = parseMarkdownToBlocks("before\n\n\\[ E = mc^2 \\]\n\nafter");
+    expect(blocks.map((b) => b.type)).toEqual(["paragraph", "math", "paragraph"]);
+    expect(blocks[1].content).toBe("E = mc^2");
+    expect(blocks[1].startLine).toBe(3);
+    expect(blocks[1].sourceLineCount).toBe(1);
+  });
+
+  // Regression: the closing $$ was only recognized when it was the last thing
+  // on the line, so a trailing char (a period) or trailing words made the line
+  // look like an unterminated opener and swallowed the rest of the document.
+  test("$$ closing with a trailing period does not swallow following content", () => {
+    const md = "$$E = mc^2$$.\n\n## Next\n\nBody.";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks.map((b) => b.type)).toEqual(["math", "paragraph", "heading", "paragraph"]);
+    expect(blocks[0].content).toBe("E = mc^2");
+    expect(blocks[1].content).toBe(".");
+    expect(blocks[2].content).toBe("Next");
+  });
+
+  test("$$ closing with trailing words keeps the trailing text as a paragraph", () => {
+    const md = "$$E = mc^2$$ where E is energy.\n\n## Deploy";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks.map((b) => b.type)).toEqual(["math", "paragraph", "heading"]);
+    expect(blocks[0].content).toBe("E = mc^2");
+    expect(blocks[1].content).toBe("where E is energy.");
+  });
+
+  test("multi-line $$ whose closing line has trailing text does not swallow", () => {
+    const md = "$$\na + b\n= c $$ done\n\nNext.";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks.map((b) => b.type)).toEqual(["math", "paragraph", "paragraph"]);
+    expect(blocks[0].content).toBe("a + b\n= c ");
+    expect(blocks[1].content).toBe("done");
+    expect(blocks[2].content).toBe("Next.");
+  });
+
+  test("\\[ closing with a trailing period does not swallow following content", () => {
+    const md = "\\[a^2 + b^2 = c^2\\].\n\n## Next\n\nBody.";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks.map((b) => b.type)).toEqual(["math", "paragraph", "heading", "paragraph"]);
+    expect(blocks[0].content).toBe("a^2 + b^2 = c^2");
+    expect(blocks[1].content).toBe(".");
+    expect(blocks[2].content).toBe("Next");
   });
 });
 
@@ -436,6 +870,32 @@ describe("parseMarkdownToBlocks — ordered lists", () => {
   });
 });
 
+describe("parseMarkdownToBlocks — heading rule (CommonMark ATX)", () => {
+  const types = (md: string) => parseMarkdownToBlocks(md).map((b) => [b.type, b.content, b.level]);
+
+  test("`#` with no following space is text, not a heading", () => {
+    expect(types("#123 fixed")).toEqual([["paragraph", "#123 fixed", 0]]);
+    expect(types("#hashtag")).toEqual([["paragraph", "#hashtag", 0]]);
+    expect(types("#!/bin/sh")).toEqual([["paragraph", "#!/bin/sh", 0]]);
+  });
+
+  test("seven hashes are text", () => {
+    expect(types("####### seven")[0][0]).toBe("paragraph");
+  });
+
+  test("one to six hashes with a space, or alone, are headings", () => {
+    expect(types("# Title")).toEqual([["heading", "Title", 1]]);
+    expect(types("###### Six")).toEqual([["heading", "Six", 6]]);
+    expect(types("###")).toEqual([["heading", "", 3]]);
+  });
+
+  test("inside a quote the same rule applies", () => {
+    const [quote] = parseMarkdownToBlocks("> #123 fixed\n> # Title");
+    const inner = parseMarkdownToBlocks(quote.content, { frontmatter: false });
+    expect(inner.map((b) => [b.type, b.content])).toEqual([["paragraph", "#123 fixed"], ["heading", "Title"]]);
+  });
+});
+
 describe("parseMarkdownToBlocks — blockquotes", () => {
   test("consecutive '>' lines merge into one blockquote block", () => {
     const md = "> line one\n> line two\n> line three";
@@ -481,54 +941,108 @@ describe("parseMarkdownToBlocks — blockquotes", () => {
     expect(blocks[0].content).toBe("just one");
   });
 
-  test("quoted ordered list does NOT merge — each '> N.' line stays as its own block", () => {
-    // Regression guard for review comment #7. Merging would flatten the
-    // markers into run-on inline text; keeping them as separate blockquote
-    // blocks preserves each line's visual identity.
+  // A run of `>` lines is ONE quote whose content is the quote's own
+  // markdown (the `>` and one space stripped per line, one content line per
+  // source line); the renderer parses it again for the blocks inside.
+  const quoteBody = (block: { content: string }) =>
+    parseMarkdownToBlocks(block.content, { frontmatter: false }).map((b) => [b.type, b.content]);
+
+  test("a code fence inside a quote stays inside one quote block (the reported case)", () => {
+    const md = [
+      "> Thanks for reporting this. It works:",
+      ">",
+      "> ```",
+      "> omp plugin install @plannotator/pi-extension",
+      "> ```",
+      ">",
+      "> Then restart OMP.",
+    ].join("\n");
+    const blocks = parseMarkdownToBlocks(md, { frontmatter: false });
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("blockquote");
+    expect(blocks[0].startLine).toBe(1);
+    expect(quoteBody(blocks[0])).toEqual([
+      ["paragraph", "Thanks for reporting this. It works:"],
+      ["code", "omp plugin install @plannotator/pi-extension"],
+      ["paragraph", "Then restart OMP."],
+    ]);
+  });
+
+  test("the export labels a quote with its full source span", () => {
+    const md = "intro\n\n> one\n>\n> ```\n> code\n> ```\n\nafter";
+    const blocks = parseMarkdownToBlocks(md);
+    const quote = blocks.find((b) => b.type === "blockquote")!;
+    const out = exportAnnotations(blocks, [
+      { id: "a", blockId: quote.id, startOffset: 0, endOffset: 3, type: AnnotationType.COMMENT, text: "why?", originalText: "one", createdA: 1 },
+    ]);
+    expect(out).toContain("(lines 3–7)");
+    expect(blocks.map((b) => b.type)).toEqual(["paragraph", "blockquote", "paragraph"]);
+  });
+
+  test("fence indentation inside a quote is kept", () => {
+    const md = "> ```ts\n> function f() {\n>   return 1;\n> }\n> ```";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(1);
+    const inner = parseMarkdownToBlocks(blocks[0].content, { frontmatter: false });
+    expect(inner).toHaveLength(1);
+    expect(inner[0].type).toBe("code");
+    expect(inner[0].language).toBe("ts");
+    expect(inner[0].content).toBe("function f() {\n  return 1;\n}");
+  });
+
+  test("quoted ordered list: one quote holding the list", () => {
     const md = "> 1. First item\n> 2. Second item\n> 3. Third item";
     const blocks = parseMarkdownToBlocks(md);
-    expect(blocks).toHaveLength(3);
+    expect(blocks).toHaveLength(1);
     expect(blocks[0].type).toBe("blockquote");
-    expect(blocks[0].content).toBe("1. First item");
-    expect(blocks[1].type).toBe("blockquote");
-    expect(blocks[1].content).toBe("2. Second item");
-    expect(blocks[2].type).toBe("blockquote");
-    expect(blocks[2].content).toBe("3. Third item");
+    const inner = parseMarkdownToBlocks(blocks[0].content, { frontmatter: false });
+    expect(inner.map((b) => [b.type, b.ordered, b.content])).toEqual([
+      ["list-item", true, "First item"],
+      ["list-item", true, "Second item"],
+      ["list-item", true, "Third item"],
+    ]);
   });
 
-  test("quoted unordered list does NOT merge", () => {
-    const md = "> - First\n> - Second\n> - Third";
+  test("quoted nested list keeps its levels", () => {
+    const md = "> - First\n>   - Nested\n> - Second";
     const blocks = parseMarkdownToBlocks(md);
-    expect(blocks).toHaveLength(3);
-    expect(blocks.every(b => b.type === "blockquote")).toBe(true);
-    expect(blocks.map(b => b.content)).toEqual(["- First", "- Second", "- Third"]);
+    expect(blocks).toHaveLength(1);
+    const inner = parseMarkdownToBlocks(blocks[0].content, { frontmatter: false });
+    expect(inner.map((b) => [b.type, b.level, b.content])).toEqual([
+      ["list-item", 0, "First"],
+      ["list-item", 1, "Nested"],
+      ["list-item", 0, "Second"],
+    ]);
   });
 
-  test("quoted heading does NOT merge into previous blockquote", () => {
+  test("quoted heading stays inside the quote", () => {
     const md = "> intro text\n> # Heading inside quote\n> more text";
     const blocks = parseMarkdownToBlocks(md);
-    expect(blocks).toHaveLength(3);
-    expect(blocks[0].content).toBe("intro text");
-    expect(blocks[1].content).toBe("# Heading inside quote");
-    expect(blocks[2].content).toBe("more text");
+    expect(blocks).toHaveLength(1);
+    expect(quoteBody(blocks[0])).toEqual([
+      ["paragraph", "intro text"],
+      ["heading", "Heading inside quote"],
+      ["paragraph", "more text"],
+    ]);
   });
 
-  test("quoted code fence line does NOT merge", () => {
-    const md = "> some prose\n> ```js\n> more prose";
-    const blocks = parseMarkdownToBlocks(md);
-    expect(blocks).toHaveLength(3);
-    expect(blocks[0].content).toBe("some prose");
-    expect(blocks[1].content).toBe("```js");
-    expect(blocks[2].content).toBe("more prose");
-  });
-
-  test("nested blockquote (> >) does NOT merge into the outer quote", () => {
+  test("nested blockquote (> >) is a quote inside the outer quote", () => {
     const md = "> outer quote\n> > nested quote\n> back to outer";
     const blocks = parseMarkdownToBlocks(md);
-    expect(blocks).toHaveLength(3);
-    expect(blocks[0].content).toBe("outer quote");
-    expect(blocks[1].content).toBe("> nested quote");
-    expect(blocks[2].content).toBe("back to outer");
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].content).toBe("outer quote\n> nested quote\nback to outer");
+    const inner = parseMarkdownToBlocks(blocks[0].content, { frontmatter: false });
+    expect(inner.map((b) => [b.type, b.content])).toEqual([
+      ["paragraph", "outer quote"],
+      ["blockquote", "nested quote"],
+      ["paragraph", "back to outer"],
+    ]);
+  });
+
+  test(">> without a space nests too", () => {
+    const blocks = parseMarkdownToBlocks(">> deep");
+    expect(blocks).toHaveLength(1);
+    expect(quoteBody(blocks[0])).toEqual([["blockquote", "deep"]]);
   });
 
   test("wrapped prose quote still merges (regression guard for the merge fix)", () => {
@@ -543,13 +1057,45 @@ describe("parseMarkdownToBlocks — blockquotes", () => {
     );
   });
 
-  test("prose quote followed by a quoted list: prose merges, list lines stay separate", () => {
+  test("prose quote followed by a quoted list: one quote, a paragraph then the list", () => {
     const md = "> intro prose\n> that wraps here\n> 1. first step\n> 2. second step";
     const blocks = parseMarkdownToBlocks(md);
-    expect(blocks).toHaveLength(3);
-    expect(blocks[0].content).toBe("intro prose\nthat wraps here");
-    expect(blocks[1].content).toBe("1. first step");
-    expect(blocks[2].content).toBe("2. second step");
+    expect(blocks).toHaveLength(1);
+    expect(quoteBody(blocks[0])).toEqual([
+      ["paragraph", "intro prose\nthat wraps here"],
+      ["list-item", "first step"],
+      ["list-item", "second step"],
+    ]);
+  });
+
+  test("blank '>' lines at a quote's edges are dropped and startLine moves past them", () => {
+    const md = "para\n\n>\n> body\n>";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[1].type).toBe("blockquote");
+    expect(blocks[1].content).toBe("body");
+    expect(blocks[1].startLine).toBe(4);
+  });
+
+  test("a quote followed at once by a paragraph line ends there (no lazy continuation)", () => {
+    const md = "> one\n> ```\n> x\n> ```\nnot quoted";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks.map((b) => b.type)).toEqual(["blockquote", "paragraph"]);
+    expect(blocks[1].content).toBe("not quoted");
+    expect(blocks[1].startLine).toBe(5);
+  });
+
+  test("an unclosed fence inside a quote ends with the quote", () => {
+    const md = "> ```\n> code\n\nafter";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks.map((b) => b.type)).toEqual(["blockquote", "paragraph"]);
+    expect(quoteBody(blocks[0])).toEqual([["code", "code"]]);
+  });
+
+  test("a quote's line numbers stay in step with the source after it", () => {
+    const md = "> a\n>\n> - b\n> - c\n\n# Next";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks.map((b) => [b.type, b.startLine])).toEqual([["blockquote", 1], ["heading", 6]]);
   });
 
   test("multi-paragraph blockquote encodes paragraph break as double newline", () => {
@@ -624,6 +1170,21 @@ describe("parseMarkdownToBlocks — GitHub alerts", () => {
     expect(blocks[0].alertKind).toBe("tip");
     expect(blocks[0].content).toBe("body line");
     expect(blocks[1].type).toBe("paragraph");
+  });
+
+  test("alert with several paragraphs keeps one body, blank line inside", () => {
+    const md = "> [!IMPORTANT]\n> first paragraph\n>\n> second paragraph\n\nafter";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks.map((b) => b.type)).toEqual(["blockquote", "paragraph"]);
+    expect(blocks[0].alertKind).toBe("important");
+    expect(blocks[0].content).toBe("first paragraph\n\nsecond paragraph");
+    expect(blocks[0].startLine).toBe(1);
+  });
+
+  test("alert body keeps skipping blank lines right after the marker", () => {
+    const blocks = parseMarkdownToBlocks("> [!NOTE]\n>\n> body");
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].content).toBe("body");
   });
 
   test("marker-like text mid-quote is not treated as alert", () => {
@@ -789,6 +1350,259 @@ describe("parseMarkdownToBlocks — raw HTML blocks", () => {
   });
 });
 
+describe("parseMarkdownToBlocks / resolveReferenceLinks — unclosed-HTML-opener perf (PR #1168 follow-up)", () => {
+  // Root cause: the balanced open/close depth scan for a multi-line HTML
+  // block does not advance the outer index when it fails to find a closing
+  // tag — so a document with many consecutive unclosed openers (e.g.
+  // thousands of bare `<div>` lines with no `</div>` anywhere) makes EVERY
+  // one of them independently re-scan all the way to end-of-document. That
+  // is O(N^2) work for N such lines, a real DoS-shaped hazard well within
+  // the 2MB annotate cap. Both markProtectedLines (used by
+  // resolveReferenceLinks) and parseMarkdownToBlocks's own HTML-block
+  // section duplicate this exact scan, so both must be fixed.
+  const N = 8000;
+  // Generous bound: a linear/bounded fix finishes in well under 100ms for
+  // this input; the pre-fix O(N^2) scan takes multiple seconds (measured
+  // ~2.2s for N=8000 during triage). 800ms leaves large machine-variance
+  // headroom while still failing clearly against the quadratic behavior.
+  const TIME_BOUND_MS = 800;
+
+  test("parseMarkdownToBlocks stays fast with many consecutive unclosed <div> openers", () => {
+    const md = Array.from({ length: N }, () => "<div>").join("\n");
+    const start = performance.now();
+    const blocks = parseMarkdownToBlocks(md);
+    const elapsed = performance.now() - start;
+    expect(blocks).toHaveLength(N);
+    expect(blocks.every((b) => b.type === "html")).toBe(true);
+    expect(elapsed).toBeLessThan(TIME_BOUND_MS);
+  });
+
+  test("resolveReferenceLinks stays fast with many consecutive unclosed <div> openers", () => {
+    const md =
+      Array.from({ length: N }, () => "<div>").join("\n") +
+      "\n\n[x][id]\n\n[id]: https://e.com";
+    const start = performance.now();
+    const result = resolveReferenceLinks(md);
+    const elapsed = performance.now() - start;
+    expect(result).toContain("[x](https://e.com)");
+    expect(elapsed).toBeLessThan(TIME_BOUND_MS);
+  });
+
+  test("parity: a real <details>...</details> block stays intact and identically protected/parsed among thousands of unclosed <div> decoys", () => {
+    const decoyCount = 5000;
+    const decoys = Array.from({ length: decoyCount }, () => "<div>").join("\n");
+    const md =
+      `${decoys}\n\n` +
+      "<details>\n<summary>Notes</summary>\n\n[id]: https://from-details.com\n\n</details>" +
+      "\n\nAfter.";
+
+    const start = performance.now();
+    const blocks = parseMarkdownToBlocks(md);
+    const resolved = resolveReferenceLinks(md);
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(TIME_BOUND_MS);
+
+    // parseMarkdownToBlocks: the real <details> block is captured whole,
+    // undisturbed by the decoys before it, followed by its own paragraph.
+    const detailsBlock = blocks.find((b) => b.type === "html" && b.content.startsWith("<details>"));
+    expect(detailsBlock).toBeDefined();
+    expect(detailsBlock!.content).toBe(
+      "<details>\n<summary>Notes</summary>\n\n[id]: https://from-details.com\n\n</details>",
+    );
+    const paragraph = blocks.find((b) => b.type === "paragraph" && b.content === "After.");
+    expect(paragraph).toBeDefined();
+
+    // resolveReferenceLinks: the SAME <details> span is protected — the
+    // definition inside it is never consumed by anything, so it stays
+    // visible verbatim, exactly mirroring the block parser's own boundary
+    // for this block (not corrupted, not partially rewritten).
+    expect(resolved).toContain("[id]: https://from-details.com");
+  });
+});
+
+describe("parseMarkdownToBlocks / resolveReferenceLinks — long valid HTML blocks must not be truncated (owner follow-up on 9440be06)", () => {
+  // Regression: a fixed MAX_HTML_BLOCK_SCAN_LINES cap on the balanced
+  // open/close depth scan incorrectly cut off VALID HTML blocks whose
+  // closing tag sits beyond the cap. closeExistsFromLine already rejects a
+  // truly-unclosed opener in O(1) without scanning at all, so a genuinely
+  // closed block — however long — should simply be scanned once to its
+  // real end, not capped. A cap that can truncate valid parsing is not an
+  // acceptable trade-off no matter how generous its value.
+  const N_UNCLOSED = 40_000;
+  const TIME_BOUND_MS = 1500;
+
+  test("a <details> block with its closing tag more than 2000 lines below the opener stays one whole html block", () => {
+    const innerLineCount = 2500; // deliberately past the old 2000-line cap
+    const inner = Array.from({ length: innerLineCount }, (_, i) => `body line ${i}`).join("\n");
+    const md = `<details>\n<summary>Big</summary>\n${inner}\n</details>\n\nAfter.`;
+
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("html");
+    expect(blocks[0].content).toBe(`<details>\n<summary>Big</summary>\n${inner}\n</details>`);
+    expect(blocks[1].type).toBe("paragraph");
+    expect(blocks[1].content).toBe("After.");
+  });
+
+  test("a raw HTML <table> block with its closing tag more than 2000 lines below the opener stays one whole html block", () => {
+    const rowCount = 2200; // deliberately past the old 2000-line cap
+    const rows = Array.from({ length: rowCount }, (_, i) => `<tr><td>${i}</td></tr>`).join("\n");
+    const md = `<table>\n${rows}\n</table>\n\nAfter table.`;
+
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("html");
+    expect(blocks[0].content).toBe(`<table>\n${rows}\n</table>`);
+    expect(blocks[1].type).toBe("paragraph");
+    expect(blocks[1].content).toBe("After table.");
+  });
+
+  test("a link definition inside a long (>2000-line) <details> block stays protected by resolveReferenceLinks, and never wins over a real outside definition", () => {
+    const innerLineCount = 2500;
+    const filler = Array.from({ length: innerLineCount }, (_, i) => `body line ${i}`).join("\n");
+    // Same label defined both inside the (protected) details block and
+    // outside it. If the interior is genuinely protected, the inside
+    // definition is never collected at all, so the outside one — the only
+    // real candidate — wins and resolves the reference. If protection were
+    // to end early (the truncation bug), the inside definition would be
+    // collected FIRST (first-definition-wins) and incorrectly win instead,
+    // and would incorrectly be blanked as "consumed" too.
+    const md =
+      `<details>\n<summary>Big</summary>\n${filler}\n\n[id]: https://inside-details.com\n\n</details>` +
+      `\n\n[id]: https://outside.com\n\ntext [x][id]`;
+    const resolved = resolveReferenceLinks(md);
+    expect(resolved).toContain(`[id]: https://inside-details.com`); // stays visible, untouched
+    expect(resolved).toContain("text [x](https://outside.com)"); // outside definition wins
+    expect(resolved).not.toContain("[id]: https://outside.com\n"); // the real (consumed) one is blanked
+  });
+
+  test("40k unclosed <div> openers (no close anywhere) stay fast, with parity between parser and resolver", () => {
+    const decoys = Array.from({ length: N_UNCLOSED }, () => "<div>").join("\n");
+    const md = `${decoys}\n\n[x][id]\n\n[id]: https://e.com`;
+
+    const parseStart = performance.now();
+    const blocks = parseMarkdownToBlocks(md);
+    const parseElapsed = performance.now() - parseStart;
+
+    const resolveStart = performance.now();
+    const resolved = resolveReferenceLinks(md);
+    const resolveElapsed = performance.now() - resolveStart;
+
+    expect(parseElapsed).toBeLessThan(TIME_BOUND_MS);
+    expect(resolveElapsed).toBeLessThan(TIME_BOUND_MS);
+
+    // Parity: every decoy is its own single-line html block to the parser...
+    expect(blocks.filter((b) => b.type === "html")).toHaveLength(N_UNCLOSED);
+    // ...and every decoy line is likewise individually protected (never
+    // rewritten) by the resolver — same boundary, both call sites agree.
+    expect(resolved).toContain("[x](https://e.com)");
+    expect(resolved.split("\n").filter((l) => l === "<div>")).toHaveLength(N_UNCLOSED);
+  });
+
+  test("a long valid <details> block survives even when preceded by thousands of unclosed <div> decoys", () => {
+    const decoyCount = 5000;
+    const decoys = Array.from({ length: decoyCount }, () => "<div>").join("\n");
+    const innerLineCount = 2500;
+    const inner = Array.from({ length: innerLineCount }, (_, i) => `body line ${i}`).join("\n");
+    const md = `${decoys}\n\n<details>\n<summary>Big</summary>\n${inner}\n</details>\n\nAfter.`;
+
+    const start = performance.now();
+    const blocks = parseMarkdownToBlocks(md);
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(TIME_BOUND_MS);
+
+    const detailsBlock = blocks.find((b) => b.type === "html" && b.content.startsWith("<details>"));
+    expect(detailsBlock).toBeDefined();
+    expect(detailsBlock!.content).toBe(`<details>\n<summary>Big</summary>\n${inner}\n</details>`);
+    const paragraph = blocks.find((b) => b.type === "paragraph" && b.content === "After.");
+    expect(paragraph).toBeDefined();
+  });
+});
+
+describe("parseMarkdownToBlocks / resolveReferenceLinks — linear matching-close index (owner follow-up on a55db2b9)", () => {
+  // Owner-flagged regression: removing the fixed cap fixed truncation but
+  // reintroduced O(N^2) for a different adversarial shape — N unclosed
+  // `<div>` openers followed by a SINGLE trailing `</div>`.
+  // closeExistsFromLine's "does a close exist anywhere" pre-check is true
+  // for every one of the N openers (the trailing close exists), so every
+  // one of them still independently scans forward — most all the way to
+  // end-of-document — before giving up. Measured (pre-fix): 5000 → ~1.0s,
+  // 10000 → ~4.1s (textbook ~4x per doubling). Fixed by replacing the
+  // scan entirely with a per-tag-name prefix-sum + "next smaller-or-equal
+  // element" index (a classic O(N) monotonic-stack construction, built once
+  // per tag name and cached per document), so every opener's closing
+  // position — whether it exists, and exactly where if so, however far away
+  // — is an O(1) lookup with no scanning at all.
+  const N = 40_000;
+  const TIME_BOUND_MS = 1500;
+
+  test("N unclosed <div> openers followed by one trailing </div> stay fast", () => {
+    const md = Array.from({ length: N }, () => "<div>").join("\n") + "\n</div>";
+
+    const parseStart = performance.now();
+    const blocks = parseMarkdownToBlocks(md);
+    const parseElapsed = performance.now() - parseStart;
+    expect(parseElapsed).toBeLessThan(TIME_BOUND_MS);
+
+    // Only the LAST opener (immediately preceding the trailing close) can
+    // actually pair with it — every earlier opener's cumulative depth
+    // overshoots and never returns to its own baseline, so it stays an
+    // unclosed, single-line block. N-1 singles + 1 paired block = N blocks.
+    expect(blocks).toHaveLength(N);
+    expect(blocks.slice(0, N - 1).every((b) => b.type === "html" && b.content === "<div>")).toBe(
+      true,
+    );
+    expect(blocks[N - 1].type).toBe("html");
+    expect(blocks[N - 1].content).toBe("<div>\n</div>");
+  });
+
+  test("resolveReferenceLinks stays fast and agrees with the parser on the same N-openers-plus-one-close document", () => {
+    const md =
+      Array.from({ length: N }, () => "<div>").join("\n") +
+      "\n</div>\n\n[x][id]\n\n[id]: https://e.com";
+
+    const start = performance.now();
+    const resolved = resolveReferenceLinks(md);
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(TIME_BOUND_MS);
+    expect(resolved).toContain("[x](https://e.com)");
+    // Every decoy line and the paired <div>/</div> stay literal (protected),
+    // exactly mirroring the parser's block boundaries above.
+    expect(resolved.split("\n").filter((l) => l === "<div>")).toHaveLength(N);
+    expect(resolved).toContain("</div>");
+  });
+
+  test("nested same-tag blocks still balance correctly (depth, not just presence, matters)", () => {
+    const md =
+      "<details>\n<summary>Outer</summary>\n<details>\n<summary>Inner</summary>\n</details>\nouter tail\n</details>";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("html");
+    expect(blocks[0].content).toBe(md);
+  });
+
+  test("mixed tag types nest independently — a <table> inside a <details> does not confuse the details/details matcher", () => {
+    const md =
+      "<details>\n<summary>Notes</summary>\n<table>\n<tr><td>1</td></tr>\n</table>\nafter table\n</details>\n\nAfter.";
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("html");
+    expect(blocks[0].content).toBe(
+      "<details>\n<summary>Notes</summary>\n<table>\n<tr><td>1</td></tr>\n</table>\nafter table\n</details>",
+    );
+    expect(blocks[1].content).toBe("After.");
+  });
+
+  test("a valid >2000-line <details> block still survives (no truncating cap reintroduced)", () => {
+    const innerLineCount = 3000;
+    const inner = Array.from({ length: innerLineCount }, (_, i) => `body line ${i}`).join("\n");
+    const md = `<details>\n<summary>Big</summary>\n${inner}\n</details>\n\nAfter.`;
+    const blocks = parseMarkdownToBlocks(md);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].content).toBe(`<details>\n<summary>Big</summary>\n${inner}\n</details>`);
+  });
+});
+
 describe("computeListIndices", () => {
   test("all unordered → all null", () => {
     const blocks = [li(0, false), li(0, false), li(0, false)];
@@ -916,6 +1730,269 @@ describe("extractFrontmatter — contentStartLine", () => {
   });
 });
 
+describe("extractFrontmatter — block scalars", () => {
+  test("folded (>-) joins wrapped lines with spaces", () => {
+    const md = `---
+description: >-
+  one two
+  three four
+---
+# Hi`;
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter?.description).toBe("one two three four");
+  });
+
+  test("folded (>) treats a blank line as a paragraph break", () => {
+    const md = `---
+description: >
+  one two
+  three four
+
+  five six
+---
+# Hi`;
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter?.description).toBe("one two three four\nfive six");
+  });
+
+  test("literal (|) preserves newlines", () => {
+    const md = `---
+note: |
+  line one
+  line two
+---
+# Hi`;
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter?.note).toBe("line one\nline two");
+  });
+
+  test("block scalar does not swallow the next key", () => {
+    const md = `---
+description: >-
+  one two
+  three
+name: bar
+---
+# Hi`;
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter?.description).toBe("one two three");
+    expect(frontmatter?.name).toBe("bar");
+  });
+
+  test("CRLF line endings do not leak \\r into the value", () => {
+    const md = "---\r\ndescription: >-\r\n  one two\r\n  three\r\n---\r\n# Hi";
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter?.description).toBe("one two three");
+  });
+
+  test("plain single-line values and arrays still parse", () => {
+    const md = `---
+name: foo
+tags:
+  - a
+  - b
+---
+# Hi`;
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter?.name).toBe("foo");
+    expect(frontmatter?.tags).toEqual(["a", "b"]);
+  });
+});
+
+describe("extractFrontmatter — nested structures (#1485)", () => {
+  test("nested maps and arrays of maps parse into hierarchical structure", () => {
+    const md = `---
+title: Nested Plan
+generated:
+  by: agent-alpha
+  at: 2026-09-16T10:00:00Z
+verified:
+  - by: reviewer-beta
+    at: 2026-09-16T11:00:00Z
+    sources:
+      - url: https://example.com/spec
+        name: specification
+---
+# Content`;
+    const { frontmatter, content, contentStartLine } = extractFrontmatter(md);
+    expect(content).toBe("# Content");
+    expect(contentStartLine).toBe(13);
+    expect(frontmatter).toEqual({
+      title: "Nested Plan",
+      generated: {
+        by: "agent-alpha",
+        at: "2026-09-16T10:00:00Z",
+      },
+      verified: [
+        {
+          by: "reviewer-beta",
+          at: "2026-09-16T11:00:00Z",
+          sources: [
+            {
+              url: "https://example.com/spec",
+              name: "specification",
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  test("same-named child keys at different hierarchy levels do not clobber", () => {
+    const md = `---
+generated:
+  by: bot
+  at: 2026-09-16T10:00:00Z
+verified:
+  - by: human
+    at: 2026-09-16T12:00:00Z
+---
+body`;
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter?.generated).toEqual({
+      by: "bot",
+      at: "2026-09-16T10:00:00Z",
+    });
+    expect(frontmatter?.verified).toEqual([
+      {
+        by: "human",
+        at: "2026-09-16T12:00:00Z",
+      },
+    ]);
+  });
+
+  test("array-of-map items group correctly per item", () => {
+    const md = `---
+reviewers:
+  - name: alice
+    role: lead
+  - name: bob
+    role: peer
+---
+body`;
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter?.reviewers).toEqual([
+      { name: "alice", role: "lead" },
+      { name: "bob", role: "peer" },
+    ]);
+  });
+
+  test("flat scalars and string arrays remain unchanged", () => {
+    const md = `---
+title: Plain Title
+status: draft
+tags:
+  - architecture
+  - performance
+categories:
+  - dev
+  - ops
+---
+body`;
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter).toEqual({
+      title: "Plain Title",
+      status: "draft",
+      tags: ["architecture", "performance"],
+      categories: ["dev", "ops"],
+    });
+  });
+
+  test("block scalars inside nested maps and CRLF are supported", () => {
+    const md = "---\r\ngenerated:\r\n  summary: >-\r\n    line one\r\n    line two\r\n  by: bot\r\n---\r\nbody";
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter?.generated).toEqual({
+      summary: "line one line two",
+      by: "bot",
+    });
+  });
+
+  test("array of scalar strings inside a map element parses correctly", () => {
+    const md = `---
+verified:
+  - by: reviewer
+    sources:
+      - https://example.com/a
+      - https://example.com/b
+---
+body`;
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter?.verified).toEqual([
+      {
+        by: "reviewer",
+        sources: [
+          "https://example.com/a",
+          "https://example.com/b",
+        ],
+      },
+    ]);
+  });
+
+  test("a quoted key is still a mapping entry, not a dropped row", () => {
+    // Regression: the quoted-scalar guard swallowed the whole line, so
+    // `"title": "Doc"` produced {} and the row vanished from the
+    // frontmatter card entirely.
+    const md = `---
+"title": "Doc"
+'status': draft
+"nested":
+  k: v
+---
+body`;
+    const { frontmatter } = extractFrontmatter(md);
+    // Values keep their quotes exactly as an unquoted key would produce
+    // (`title: "Doc"`); only the KEY's quotes are structural.
+    expect(frontmatter).toEqual({
+      title: '"Doc"',
+      status: "draft",
+      nested: { k: "v" },
+    });
+  });
+
+  test("a quoted key parses identically to the same key unquoted", () => {
+    // The point of the fix: quoting a key changes nothing but the key text.
+    const quoted = extractFrontmatter('---\n"title": "Doc"\n"n":\n  k: v\n---\nb');
+    const plain = extractFrontmatter('---\ntitle: "Doc"\nn:\n  k: v\n---\nb');
+    expect(quoted.frontmatter).toEqual(plain.frontmatter!);
+  });
+
+  test("a line that is only a quoted scalar is still not a mapping entry", () => {
+    const md = `---
+ok: 1
+"just a string"
+"nospace":"value"
+---
+body`;
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter).toEqual({ ok: "1" });
+  });
+
+  test("a nested map as an item's FIRST key does not swallow its siblings", () => {
+    // Regression: the pending key recorded the dash's indent, so `id`
+    // (indented to the key's column, not the dash's) landed inside `meta`.
+    const md = `---
+items:
+  - meta:
+      k: v
+    id: 1
+---
+body`;
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter?.items).toEqual([{ meta: { k: "v" }, id: "1" }]);
+  });
+
+  test("an item whose only key is an empty map does not absorb the next item", () => {
+    const md = `---
+items:
+  - meta:
+  - id: 1
+---
+body`;
+    const { frontmatter } = extractFrontmatter(md);
+    expect(frontmatter?.items).toEqual([{}, { id: "1" }]);
+  });
+});
+
 describe("parseMarkdownToBlocks — startLine accuracy", () => {
   test("basic blocks get correct startLine", () => {
     const md = "# Heading\n\nParagraph\n\n- Item";
@@ -988,5 +2065,411 @@ describe("exportAnnotations — line labels", () => {
   test("no sourceConverted means no caveat", () => {
     const output = exportAnnotations(blocks, [{ blockId: blocks[0].id, type: "COMMENT", text: "ok", originalText: "Heading", startOffset: 0 }]);
     expect(output).not.toContain("converted markdown");
+  });
+
+  test("math block line labels cover source fences", () => {
+    const mathBlocks = parseMarkdownToBlocks("Intro\n\n$$\nx + y\n$$");
+    const math = mathBlocks.find(b => b.type === "math")!;
+    const anns = [{ blockId: math.id, type: "COMMENT", text: "clarify", originalText: "x + y", startOffset: 0 }];
+    const output = exportAnnotations(mathBlocks, anns);
+    expect(output).toContain("(lines 3–5)");
+  });
+});
+
+describe("exportAnnotations — multi-target raw-HTML comments", () => {
+  // HTML-surface annotations have blockId '' — no blocks apply.
+  const htmlAnn = (extra: object = {}) => ({
+    blockId: "",
+    startOffset: 0,
+    endOffset: 0,
+    type: "COMMENT",
+    text: "Unify these",
+    originalText: "Primary chip",
+    ...extra,
+  });
+
+  test("additional targets are listed with label + excerpt, primary first", () => {
+    const output = exportAnnotations([], [htmlAnn({
+      htmlAdditionalTargets: [
+        { label: "Button", text: "Create", anchor: { selector: "span.btn", tagName: "span", text: "Create" } },
+        // Fail-closed target (no anchor) still exports its label + text.
+        { label: "rowchip", text: "adopted   by 1" },
+      ],
+    })]);
+    expect(output).toContain('Feedback on: "Primary chip"');
+    expect(output).toContain("Also applies to 2 more elements:");
+    expect(output.indexOf("Primary chip")).toBeLessThan(output.indexOf("Also applies"));
+    expect(output).toContain('- [Button] "Create"');
+    expect(output).toContain('- [rowchip] "adopted by 1"'); // whitespace collapsed
+    // A blank line separates the block from the `> comment` blockquote above,
+    // or markdown lazy continuation folds it INTO the quote.
+    expect(output).toContain('> Unify these\n\n**Also applies');
+  });
+
+  test("hostile labels with newlines cannot inject markdown structure into the export", () => {
+    // Labels come from page-controlled attributes (aria-label). The DTO
+    // boundary collapses whitespace, but persisted pre-fix drafts bypass it —
+    // the exporter must collapse again so no line in agent-read feedback
+    // starts with attacker-controlled markdown.
+    const output = exportAnnotations([], [htmlAnn({
+      htmlAdditionalTargets: [
+        { label: "Save\n## INJECTED HEADING", text: "Save\n# ALSO INJECTED" },
+      ],
+    })]);
+    expect(output).toContain('- [Save ## INJECTED HEADING] "Save # ALSO INJECTED"');
+    expect(output).not.toContain("\n## INJECTED");
+    expect(output).not.toContain("\n# ALSO");
+  });
+
+  test("long excerpts are clipped and label-less targets still list", () => {
+    const output = exportAnnotations([], [htmlAnn({
+      htmlAdditionalTargets: [{ text: "x".repeat(300) }],
+    })]);
+    expect(output).toContain("Also applies to 1 more element:");
+    expect(output).toContain(`- "${"x".repeat(120)}…"`);
+  });
+
+  test("targets with no element context export byte-identically to the pre-context format", () => {
+    // #1517 added the selector/path locator suffix, and claimed the element
+    // context was additive — but it keyed the suffix off `anchor.selector`,
+    // which every multi-target annotation has always had, so an annotation
+    // restored from an older draft silently changed shape. The locator is a
+    // property of the captured context; without context there is none.
+    const output = exportAnnotations([], [htmlAnn({
+      htmlAdditionalTargets: [
+        { label: "Button", text: "Create", anchor: { selector: "span.btn", tagName: "span", text: "Create" } },
+        { label: "rowchip", text: "adopted by 1" },
+      ],
+    })]);
+    expect(output).toBe(
+      "# Plan Feedback\n\nI've reviewed this plan and have 1 piece of feedback:\n\n" +
+      "## 1. Feedback on: \"Primary chip\"\n> Unify these\n" +
+      "\n**Also applies to 2 more elements:**\n" +
+      "- [Button] \"Create\"\n" +
+      "- [rowchip] \"adopted by 1\"\n" +
+      "\n---\n",
+    );
+  });
+
+  test("single-target output is byte-identical to the pre-feature format", () => {
+    const single = exportAnnotations([], [htmlAnn()]);
+    const empty = exportAnnotations([], [htmlAnn({ htmlAdditionalTargets: [] })]);
+    expect(single).toBe(empty);
+    expect(single).not.toContain("Also applies");
+    expect(single).toBe(
+      "# Plan Feedback\n\nI've reviewed this plan and have 1 piece of feedback:\n\n" +
+      "## 1. Feedback on: \"Primary chip\"\n> Unify these\n\n---\n",
+    );
+  });
+});
+
+describe("exportAnnotations — live-app page grouping (heading hierarchy)", () => {
+  // Live sessions stamp annotations with the page they were made on; the
+  // export groups entries under per-page headers. The headers must OUTRANK
+  // the entries (## Page over ### N.) or every page section renders nested
+  // under the previous entry.
+  const liveAnn = (num: string, pageUrl?: string, extra: object = {}) => ({
+    blockId: "",
+    startOffset: 0,
+    endOffset: 0,
+    type: "COMMENT",
+    text: `note ${num}`,
+    originalText: `target ${num}`,
+    ...(pageUrl ? { pageUrl } : {}),
+    ...extra,
+  });
+
+  test("page headers are ## and entries demote to ###, so entries nest below their page", () => {
+    const output = exportAnnotations([], [
+      liveAnn("a", "/dashboard"),
+      liveAnn("b", "/dashboard"),
+      liveAnn("c", "/settings"),
+    ]);
+    // Header level outranks entry level.
+    expect(output).toMatch(/^## Page: \/dashboard$/m);
+    expect(output).toMatch(/^## Page: \/settings$/m);
+    expect(output).toMatch(/^### 1\. /m);
+    expect(output).toMatch(/^### 2\. /m);
+    expect(output).toMatch(/^### 3\. /m);
+    expect(output).not.toMatch(/^### Page: /m);
+    expect(output).not.toMatch(/^## \d+\. /m);
+    // Entries sit BELOW the page header they belong to.
+    expect(output.indexOf("## Page: /dashboard")).toBeLessThan(output.indexOf("### 1. "));
+    expect(output.indexOf("### 2. ")).toBeLessThan(output.indexOf("## Page: /settings"));
+    expect(output.indexOf("## Page: /settings")).toBeLessThan(output.indexOf("### 3. "));
+  });
+
+  test("unpaged entries lead at the same ### level, and global numbering survives grouping", () => {
+    const output = exportAnnotations([], [
+      liveAnn("g", undefined, { type: "GLOBAL_COMMENT", originalText: "" }),
+      liveAnn("a", "/b-page"),
+      liveAnn("c", "/a-page"),
+      liveAnn("d", "/b-page"),
+    ]);
+    // The pageless global leads, before any page header, at entry level.
+    expect(output.indexOf("### 1. ")).toBeLessThan(output.indexOf("## Page: "));
+    // Grouping regroups pages by first appearance but keeps the GLOBAL
+    // numbers (matching on-page markers), so /b-page shows 2 and 4.
+    const bPage = output.slice(output.indexOf("## Page: /b-page"), output.indexOf("## Page: /a-page"));
+    expect(bPage).toContain("### 2. ");
+    expect(bPage).toContain("### 4. ");
+  });
+
+  test("without any pageUrl the export keeps its classic ## entries and no page headers", () => {
+    const output = exportAnnotations([], [liveAnn("a"), liveAnn("b")]);
+    expect(output).toMatch(/^## 1\. /m);
+    expect(output).toMatch(/^## 2\. /m);
+    expect(output).not.toContain("Page: ");
+    expect(output).not.toContain("### ");
+  });
+});
+
+describe("parseMarkdownToBlocks — non-markdown plain text (#1029)", () => {
+  /**
+   * Annotate now accepts YAML/JSON/TOML-style config files and renders them
+   * through the same pipeline as .txt. The parser must treat structured
+   * config content as ordinary text without crashing or dropping lines.
+   */
+  test("YAML content parses into blocks without crashing", () => {
+    const yaml = [
+      "name: plannotator",
+      "on:",
+      "  push:",
+      "    branches: [main]",
+      "jobs:",
+      "  build:",
+      "    steps:",
+      "      - uses: actions/checkout@v4",
+      "      - run: bun test",
+    ].join("\n");
+    const blocks = parseMarkdownToBlocks(yaml);
+    expect(blocks.length).toBeGreaterThan(0);
+    const joined = blocks.map((b) => b.content).join("\n");
+    expect(joined).toContain("name: plannotator");
+    expect(joined).toContain("uses: actions/checkout@v4");
+  });
+
+  test("JSON content parses into blocks without crashing", () => {
+    const json = '{\n  "name": "plannotator",\n  "private": true\n}';
+    const blocks = parseMarkdownToBlocks(json);
+    expect(blocks.length).toBeGreaterThan(0);
+    expect(blocks.map((b) => b.content).join("\n")).toContain('"name": "plannotator"');
+  });
+
+  test("multi-document YAML keeps its first document with frontmatter: false", () => {
+    // A k8s-style multi-document YAML starts with `---`. With frontmatter
+    // stripping disabled (the rule for non-markdown annotatable sources),
+    // the FIRST document must survive parsing.
+    const yaml = "---\napiVersion: v1\nkind: ConfigMap\n---\napiVersion: v1\nkind: Secret\n";
+    const blocks = parseMarkdownToBlocks(yaml, { frontmatter: false });
+    const joined = blocks.map((b) => b.content).join("\n");
+    expect(joined).toContain("kind: ConfigMap");
+    expect(joined).toContain("kind: Secret");
+    // First real content line keeps its original line number (nothing consumed).
+    expect(blocks[0].startLine).toBe(1);
+  });
+
+  test("default parse still strips markdown frontmatter", () => {
+    const md = "---\ntitle: Plan\n---\n# Heading\nbody\n";
+    const blocks = parseMarkdownToBlocks(md);
+    const joined = blocks.map((b) => b.content).join("\n");
+    expect(joined).not.toContain("title: Plan");
+    expect(joined).toContain("body");
+  });
+
+  test("shouldStripFrontmatter keys off the source path", () => {
+    expect(shouldStripFrontmatter(undefined)).toBe(true); // plans/messages
+    expect(shouldStripFrontmatter("notes.md")).toBe(true);
+    expect(shouldStripFrontmatter("guide.mdx")).toBe(true);
+    expect(shouldStripFrontmatter("deploy.yaml")).toBe(false);
+    expect(shouldStripFrontmatter("notes.txt")).toBe(false);
+    expect(shouldStripFrontmatter("data.csv")).toBe(false);
+    expect(shouldStripFrontmatter("https://example.com/page")).toBe(true); // converted source
+  });
+});
+
+describe("exportAnnotations — element context (raw-HTML / live-app pinpoints)", () => {
+  // Failures to catch: the element block silently disappearing (back to a
+  // one-word placeholder), an annotation WITHOUT context changing shape, a
+  // copied entry drifting from what Send Feedback delivers, and a page-
+  // controlled string breaking out of the fence or inline code.
+  const NAV_CONTEXT = {
+    tag: "nav", id: "site-nav", classes: ["site-nav", "sticky"],
+    path: "body > div#root > header.site-header > nav#site-nav",
+    role: "navigation", name: "Primary",
+    attrs: [["aria-label", "Primary"], ["data-component", "AppNav"]] as Array<[string, string]>,
+    outline: '<nav id="site-nav" class="site-nav sticky" aria-label="Primary">\n  <ul class="nav-list">…</ul>\n  <button class="nav-toggle"></button>\n</nav>',
+    children: 2, rect: { x: 0, y: 0, w: 1280, h: 64, vw: 1280, vh: 800 },
+    landmark: "header.site-header", heading: 'h1 "Acme Analytics"', component: "data-component=AppNav",
+  };
+  const navAnn = (extra: object = {}) => ({
+    blockId: "", startOffset: 0, endOffset: 0, type: "COMMENT", text: "this",
+    originalText: "[element: Navigation]",
+    htmlAnchor: { selector: "nav#site-nav", tagName: "nav", text: "" },
+    elementContext: NAV_CONTEXT,
+    ...extra,
+  });
+
+  test("a text-less pinpoint names its element in the heading and prints the fenced skeleton plus locators", () => {
+    const output = exportAnnotations([], [navAnn()]);
+    expect(output).toContain('## 1. Feedback on the <nav> element — "Primary"\n> this\n');
+    expect(output).not.toContain("[element: Navigation]");
+    expect(output).toContain("````html\n<nav id=\"site-nav\" class=\"site-nav sticky\" aria-label=\"Primary\">\n  <ul class=\"nav-list\">…</ul>\n  <button class=\"nav-toggle\"></button>\n</nav>\n````\n");
+    expect(output).toContain("- **selector** `nav#site-nav`\n");
+    expect(output).toContain("- **path** `body > div#root > header.site-header > nav#site-nav`\n");
+    expect(output).toContain('- **role** navigation · **name** "Primary" · **component** `data-component=AppNav`\n');
+    expect(output).toContain('- **attrs** `aria-label="Primary" data-component="AppNav"`\n');
+    expect(output).toContain("- **box** 0,0 1280×64 (viewport 1280×800)\n");
+    expect(output).toContain('- **near** header.site-header · heading h1 "Acme Analytics"\n');
+    // The block sits between the comment and the closing rule.
+    expect(output.indexOf("> this")).toBeLessThan(output.indexOf("````html"));
+    expect(output.indexOf("**near**")).toBeLessThan(output.indexOf("\n---\n"));
+  });
+
+  test("an image pinpoint's heading names which image: alt text, and the file when there is no alt", () => {
+    const img = (context: object, originalText: string) => ({
+      blockId: "", startOffset: 0, endOffset: 0, type: "COMMENT", text: "swap this",
+      originalText, htmlAnchor: { selector: "#hero", tagName: "img", text: "" },
+      elementContext: { tag: "img", role: "img", ...context },
+    });
+    const withAlt = exportAnnotations([], [img({ name: "Team photo", attrs: [["src", "https://cdn.test/img/team.jpg?…"], ["alt", "Team photo"]] }, '[element: Image "Team photo" (team.jpg)]')]);
+    expect(withAlt).toContain('## 1. Feedback on the <img> element — "Team photo" (team.jpg)\n');
+    expect(withAlt).toContain('- **attrs** `src="https://cdn.test/img/team.jpg?…" alt="Team photo"`\n');
+    const noAlt = exportAnnotations([], [img({ attrs: [["src", "/assets/avatars/jane.png?…"]] }, "[element: Image (jane.png)]")]);
+    expect(noAlt).toContain("## 1. Feedback on the <img> element (jane.png)\n");
+    const inline = exportAnnotations([], [img({ attrs: [["src", "data:image/png;base64,…"]] }, "[element: Image (data:image/png)]")]);
+    expect(inline).toContain("## 1. Feedback on the <img> element (data:image/png)\n");
+  });
+
+  // Failure to catch (0.28.1 smoke): an image with no usable `src` (srcset
+  // only, a lazy data: placeholder with the file in data-src, <picture>, a
+  // video poster) exported as a bare "<img> element" or "(data:image/png)"
+  // while the composer quote named the real file.
+  test("an image heading names the file the bridge resolved, not the src attribute alone", () => {
+    const img = (context: object, originalText: string) => ({
+      blockId: "", startOffset: 0, endOffset: 0, type: "COMMENT", text: "swap this",
+      originalText, htmlAnchor: { selector: "#hero", tagName: "img", text: "" },
+      elementContext: { tag: "img", role: "img", ...context },
+    });
+    const srcsetOnly = exportAnnotations([], [img({ sourceName: "hero-480.jpg" }, "[element: Image (hero-480.jpg)]")]);
+    expect(srcsetOnly).toContain("## 1. Feedback on the <img> element (hero-480.jpg)\n");
+    // The data: placeholder in src loses to the resolved lazy file.
+    const lazy = exportAnnotations([], [img(
+      { sourceName: "hero-banner.webp", attrs: [["src", "data:image/gif;base64,…"]] },
+      "[element: Image (hero-banner.webp)]",
+    )]);
+    expect(lazy).toContain("## 1. Feedback on the <img> element (hero-banner.webp)\n");
+    expect(lazy).not.toContain("(data:image/gif)");
+    // A file that equals the accessible name is not repeated.
+    const same = exportAnnotations([], [img({ name: "logo.svg", sourceName: "logo.svg" }, '[element: Image "logo.svg"]')]);
+    expect(same).toContain('## 1. Feedback on the <img> element — "logo.svg"\n');
+  });
+
+  test("a pinpoint with real quoted text keeps its quote line and gains the block", () => {
+    const output = exportAnnotations([], [navAnn({ originalText: "Home About Pricing Docs", elementContext: { ...NAV_CONTEXT, text: "Home About Pricing Docs" } })]);
+    expect(output).toContain('## 1. Feedback on: "Home About Pricing Docs"\n> this\n');
+    expect(output).toContain('- **text** "Home About Pricing Docs"\n');
+    expect(output).toContain("- **selector** `nav#site-nav`");
+  });
+
+  test("an annotation without element context exports byte-identically to before", () => {
+    const withoutContext = exportAnnotations([], [navAnn({ elementContext: undefined })]);
+    expect(withoutContext).toBe(
+      "# Plan Feedback\n\nI've reviewed this plan and have 1 piece of feedback:\n\n" +
+      "## 1. Feedback on: \"[element: Navigation]\"\n> this\n\n---\n",
+    );
+  });
+
+  test("the grouped live-app export omits the route line; the single copied entry carries it", () => {
+    const live = navAnn({ pageUrl: "/dashboard?tab=2", elementContext: { ...NAV_CONTEXT, page: { url: "/dashboard?tab=2", title: "Acme — Dashboard" } } });
+    const grouped = exportAnnotations([], [live]);
+    expect(grouped).toContain("## Page: /dashboard?tab=2\n\n");
+    expect(grouped).not.toContain("**route**");
+    const entry = exportAnnotationEntry(live);
+    expect(entry).toContain('- **route** `/dashboard?tab=2` — "Acme — Dashboard"\n');
+    expect(entry.startsWith('Feedback on the <nav> element — "Primary"\n> this\n')).toBe(true);
+  });
+
+  test("a copied entry is the full export's entry body (never drifts from Send Feedback)", () => {
+    const ann = navAnn();
+    const entry = exportAnnotationEntry(ann, { includeRoute: false });
+    const full = exportAnnotations([], [ann]);
+    expect(full).toContain(entry);
+  });
+
+  test("page-controlled strings cannot escape the fence or an inline code span", () => {
+    const hostile = navAnn({
+      elementContext: {
+        ...NAV_CONTEXT,
+        outline: '<nav>\n````\n# INJECTED\n</nav>',
+        path: "body > `nav` > x",
+        name: "Save\n## INJECTED HEADING",
+      },
+    });
+    const output = exportAnnotations([], [hostile]);
+    // The outline's own 4-backtick run cannot close the export fence.
+    const fences = output.match(/^````/gm) ?? [];
+    expect(fences.length).toBe(2);
+    // The injected heading line is fenced content, never markdown structure.
+    const open = output.indexOf("````html");
+    const close = output.indexOf("````", open + 7);
+    const injected = output.indexOf("\n# INJECTED");
+    expect(injected).toBeGreaterThan(open);
+    expect(injected).toBeLessThan(close);
+    expect(output).toContain("- **path** `body > 'nav' > x`\n");
+    expect(output).toContain('Feedback on the <nav> element — "Save ## INJECTED HEADING"');
+  });
+
+  test("additional targets list their selector and path on one line", () => {
+    const output = exportAnnotations([], [navAnn({
+      htmlAdditionalTargets: [
+        { label: "Button", text: "Cancel", anchor: { selector: "button.btn.btn-ghost", tagName: "button", text: "Cancel" }, context: { tag: "button", path: "body > main > form.signup > div.actions > button:nth-of-type(2)" } },
+        { label: "Link", text: "Learn more" },
+      ],
+    })]);
+    expect(output).toContain('- [Button] "Cancel" — `button.btn.btn-ghost` · `body > main > form.signup > div.actions > button:nth-of-type(2)`\n');
+    expect(output).toContain('- [Link] "Learn more"\n');
+  });
+
+  test("exportAnnotationEntry with includeOutline: false omits the outline fence but keeps identity lines", () => {
+    // Failure caught: model turn wasting ~600 chars of context window on the HTML outline
+    // when disabled, or conversely dropping selector/path/role/name identity lines when outline is disabled.
+    const ann = navAnn();
+    // Default includes outline
+    const defaultEntry = exportAnnotationEntry(ann);
+    expect(defaultEntry).toContain("````html\n");
+    expect(defaultEntry).toContain("- **selector** `nav#site-nav`\n");
+    expect(defaultEntry).toContain("- **path** `body > div#root > header.site-header > nav#site-nav`\n");
+    expect(defaultEntry).toContain('- **role** navigation · **name** "Primary" · **component** `data-component=AppNav`\n');
+
+    // With includeOutline: false, outline fence is omitted, identity lines remain
+    const outlineLessEntry = exportAnnotationEntry(ann, { includeOutline: false });
+    expect(outlineLessEntry).not.toContain("````html");
+    expect(outlineLessEntry).not.toContain("<nav id=\"site-nav\"");
+    expect(outlineLessEntry).toContain("- **selector** `nav#site-nav`\n");
+    expect(outlineLessEntry).toContain("- **path** `body > div#root > header.site-header > nav#site-nav`\n");
+    expect(outlineLessEntry).toContain('- **role** navigation · **name** "Primary" · **component** `data-component=AppNav`\n');
+    expect(outlineLessEntry).toContain('- **attrs** `aria-label="Primary" data-component="AppNav"`\n');
+    expect(outlineLessEntry).toContain("- **box** 0,0 1280×64 (viewport 1280×800)\n");
+    expect(outlineLessEntry).toContain('- **near** header.site-header · heading h1 "Acme Analytics"\n');
+  });
+
+  test("elementContextExportBlock respects includeOutline option", () => {
+    // Failure caught: elementContextExportBlock ignoring includeOutline: false when called directly.
+    const ann = navAnn();
+    const blockWithOutline = elementContextExportBlock(ann, { includeOutline: true });
+    expect(blockWithOutline).toContain("````html\n");
+    expect(blockWithOutline).toContain("- **selector** `nav#site-nav`\n");
+
+    const blockWithoutOutline = elementContextExportBlock(ann, { includeOutline: false });
+    expect(blockWithoutOutline).not.toContain("````html");
+    expect(blockWithoutOutline).toContain("- **selector** `nav#site-nav`\n");
+    expect(blockWithoutOutline).toContain("- **path** `body > div#root > header.site-header > nav#site-nav`\n");
+  });
+
+  test("no mirror validator remains: useHtmlAnnotation imports and re-exports core parseHtmlElementContext", () => {
+    // Failure caught: UI keeping a duplicated/diverged hand-mirrored parseHtmlElementContext
+    // instead of importing and re-exporting the authoritative core validator.
+    expect(uiParseHtmlElementContext).toBe(coreParseHtmlElementContext);
   });
 });

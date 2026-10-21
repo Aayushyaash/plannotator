@@ -3,30 +3,56 @@
  *
  * Extracted from Viewer.tsx so the same markup can render in two places:
  *   - layout="column": original location at the top-left of the plan card (absolute)
- *   - layout="row":   inside the sticky header lane when the user scrolls
+ *   - layout="row":   compact context inside the legacy sticky header lane
+ *   - layout="header": complete context inside Viewer's in-flow shared header
  *
- * In row layout, the demo badge and linked-doc breadcrumb are dropped — the
- * sticky lane hides entirely in linked-doc mode, and the demo badge is purely
- * decorative top-of-doc context.
+ * In row layout, the demo badge and linked-doc breadcrumb are dropped —
+ * everything else is decorative top-of-doc context except the plan-diff
+ * badge, which is NOT suppressed by linkedDocInfo: `planDiffStats`/
+ * `hasPreviousVersion` already arrive pre-scoped to whichever document is
+ * currently active (root, or a folder/linked doc with its own diff
+ * baseline), so it renders in linked-doc mode exactly when that document
+ * actually has a previous version to diff against.
  */
 
 import React from 'react';
 import { PlanDiffBadge } from './plan-diff/PlanDiffBadge';
 import type { PlanDiffStats } from '../utils/planDiffEngine';
-import { hostnameOrFallback } from '@plannotator/shared/project';
+import { hostnameOrFallback } from '@plannotator/core/project';
+import { OpenInAppButton } from './OpenInAppButton';
+
+export interface LinkedDocBadgeInfo {
+  filepath: string;
+  /** Leave the document. Optional for `folder-file`: absent shows no Close
+   *  (a file of a review of several files, which the switcher moves between). */
+  onBack?: () => void;
+  label?: string;
+  backLabel?: string;
+  variant?: 'breadcrumb' | 'folder-file';
+}
 
 export interface DocBadgesProps {
-  layout: 'column' | 'row';
+  layout: 'column' | 'row' | 'header';
   repoInfo?: { display: string; branch?: string } | null;
   planDiffStats?: PlanDiffStats | null;
   isPlanDiffActive?: boolean;
   hasPreviousVersion?: boolean;
   onPlanDiffToggle?: () => void;
+  /** Baseline suffix + tooltip for the plan-diff badge — annotate/folder
+   *  sessions pass "since last review" so the badge's numbers read against
+   *  the right baseline. See PlanDiffBadge. Plan review passes nothing. */
+  planDiffBaselineLabel?: string;
+  planDiffBaselineTooltip?: string;
   showDemoBadge?: boolean;
   archiveInfo?: { status: 'approved' | 'denied' | 'unknown'; timestamp: string; title: string } | null;
-  linkedDocInfo?: { filepath: string; onBack: () => void; label?: string; backLabel?: string } | null;
+  linkedDocInfo?: LinkedDocBadgeInfo | null;
   /** Source attribution for HTML/URL annotations (e.g. "https://..." or "index.html") */
   sourceInfo?: string;
+  /**
+   * Absolute on-disk path of the annotated source file, used by the
+   * Open-in-app control. Omitted (or an https:// URL) -> no control rendered.
+   */
+  openInAppPath?: string | null;
 }
 
 export const DocBadges: React.FC<DocBadgesProps> = ({
@@ -36,31 +62,43 @@ export const DocBadges: React.FC<DocBadgesProps> = ({
   isPlanDiffActive,
   hasPreviousVersion,
   onPlanDiffToggle,
+  planDiffBaselineLabel,
+  planDiffBaselineTooltip,
   showDemoBadge,
   archiveInfo,
   linkedDocInfo,
   sourceInfo,
+  openInAppPath,
 }) => {
   const isRow = layout === 'row';
+  const isHorizontal = layout !== 'column';
+  const canOpenInApp =
+    !!openInAppPath && !/^https?:\/\//i.test(openInAppPath);
+  const openInButton = canOpenInApp ? (
+    <OpenInAppButton filePath={openInAppPath} base={null} />
+  ) : null;
 
   // In row layout, only PlanDiffBadge (when it has stats to show) and
-  // archiveInfo actually render — everything else is hidden. Check what
-  // will truly produce visible output to avoid an empty wrapper div.
+  // archiveInfo (outside linked-doc mode) actually render — everything else
+  // is hidden. Check what will truly produce visible output to avoid an
+  // empty wrapper div. PlanDiffBadge is not linkedDocInfo-gated — see the
+  // header comment.
   const anything = isRow
-    ? (!linkedDocInfo && ((hasPreviousVersion && planDiffStats) || archiveInfo))
-    : repoInfo || hasPreviousVersion || showDemoBadge || linkedDocInfo || archiveInfo || sourceInfo;
+    ? (hasPreviousVersion && planDiffStats) || (archiveInfo && !linkedDocInfo)
+    : repoInfo || hasPreviousVersion || showDemoBadge || linkedDocInfo || archiveInfo || sourceInfo || canOpenInApp;
   if (!anything) return null;
 
   // Row layout: single horizontal line. Column layout: stacked rows.
-  const outerClass = isRow
-    ? 'flex flex-row items-center gap-1.5 text-[9px] text-muted-foreground/70 font-mono'
+  const outerClass = isHorizontal
+    ? `flex flex-row items-center gap-1.5 text-[9px] text-muted-foreground/70 font-mono ${layout === 'header' ? 'flex-wrap' : ''}`
     : 'flex flex-col items-start gap-1 text-[9px] text-muted-foreground/50 font-mono';
 
   return (
     <div className={outerClass}>
-      {/* Row layout (sticky lane) omits repo/branch to keep the bar compact —
+      {/* Legacy row layout omits repo/branch to keep the ghost bar compact —
           they'd otherwise push the container wide enough to visually extend
-          under the action buttons. Plan-diff badge still renders below. */}
+          under the action buttons. The Viewer-owned header measures and wraps
+          the complete badge set, so its `header` layout keeps this context. */}
       {repoInfo && !linkedDocInfo && !isRow && (
         <div className="flex items-center gap-1.5">
           <span
@@ -80,26 +118,38 @@ export const DocBadges: React.FC<DocBadgesProps> = ({
               <span className="truncate">{repoInfo.branch}</span>
             </span>
           )}
+          {/* Markdown/text annotate sessions have no separate source badge, so
+              keep the open-in control attached to the repository context. */}
+          {canOpenInApp && !sourceInfo && openInButton}
         </div>
       )}
 
+      {/* Non-repository files still need an open-in entry when there is no
+          source or linked-document row to attach it to. */}
+      {!isRow && canOpenInApp && !repoInfo && !sourceInfo && !linkedDocInfo && openInButton}
+
       {sourceInfo && !linkedDocInfo && !isRow && (
-        <span
-          className="px-1.5 py-0.5 bg-muted/30 rounded truncate max-w-[200px]"
-          title={sourceInfo}
-        >
-          {/^https?:\/\//i.test(sourceInfo)
-            ? hostnameOrFallback(sourceInfo)
-            : sourceInfo}
-        </span>
+        <div className="flex items-center gap-1">
+          <span
+            className="px-1.5 py-0.5 bg-muted/30 rounded truncate max-w-[200px]"
+            title={sourceInfo}
+          >
+            {/^https?:\/\//i.test(sourceInfo)
+              ? hostnameOrFallback(sourceInfo)
+              : sourceInfo}
+          </span>
+          {openInButton}
+        </div>
       )}
 
-      {onPlanDiffToggle && !linkedDocInfo && (
+      {onPlanDiffToggle && (
         <PlanDiffBadge
           stats={planDiffStats ?? null}
           isActive={isPlanDiffActive ?? false}
           onToggle={onPlanDiffToggle}
           hasPreviousVersion={hasPreviousVersion ?? false}
+          baselineLabel={planDiffBaselineLabel}
+          baselineTooltip={planDiffBaselineTooltip}
         />
       )}
 
@@ -148,36 +198,58 @@ export const DocBadges: React.FC<DocBadgesProps> = ({
 
       {/* Linked-doc breadcrumb: only in column layout (sticky lane is hidden in linked-doc mode) */}
       {!isRow && linkedDocInfo && (
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={linkedDocInfo.onBack}
-            className="px-1.5 py-0.5 bg-primary/10 text-primary rounded hover:bg-primary/20 transition-colors flex items-center gap-1"
-          >
-            <svg
-              className="w-2.5 h-2.5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2.5}
+        linkedDocInfo.variant === 'folder-file' ? (
+          <div className="flex items-center gap-2">
+            {linkedDocInfo.onBack && (
+              <button
+                type="button"
+                onClick={linkedDocInfo.onBack}
+                className="rounded-sm text-[9px] font-medium text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              >
+                Close
+              </button>
+            )}
+            <span
+              className="truncate rounded bg-muted/50 px-1.5 py-0.5 text-[9px] text-muted-foreground max-w-[220px]"
+              title={linkedDocInfo.filepath}
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"
-              />
-            </svg>
-            {linkedDocInfo.backLabel || 'plan'}
-          </button>
-          <span className="px-1.5 py-0.5 bg-primary/10 text-primary/80 rounded">
-            {linkedDocInfo.label || 'Linked File'}
-          </span>
-          <span
-            className="px-1.5 py-0.5 bg-muted/50 text-muted-foreground rounded truncate max-w-[200px]"
-            title={linkedDocInfo.filepath}
-          >
-            {linkedDocInfo.filepath.split('/').pop()}
-          </span>
-        </div>
+              {linkedDocInfo.filepath.split('/').pop()}
+            </span>
+            {openInButton}
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={linkedDocInfo.onBack}
+              className="px-1.5 py-0.5 bg-primary/10 text-primary rounded hover:bg-primary/20 transition-colors flex items-center gap-1"
+            >
+              <svg
+                className="w-2.5 h-2.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2.5}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"
+                />
+              </svg>
+              {linkedDocInfo.backLabel || 'plan'}
+            </button>
+            <span className="px-1.5 py-0.5 bg-primary/10 text-primary/80 rounded">
+              {linkedDocInfo.label || 'Linked File'}
+            </span>
+            <span
+              className="px-1.5 py-0.5 bg-muted/50 text-muted-foreground rounded truncate max-w-[200px]"
+              title={linkedDocInfo.filepath}
+            >
+              {linkedDocInfo.filepath.split('/').pop()}
+            </span>
+            {openInButton}
+          </div>
+        )
       )}
     </div>
   );

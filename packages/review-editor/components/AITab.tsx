@@ -3,6 +3,7 @@ import type { AIChatEntry, PendingPermission } from '../hooks/useAIChat';
 import { renderChatMarkdown } from '../utils/renderChatMarkdown';
 import { formatLineRange } from '../utils/formatLineRange';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
+import { FileNameChip } from './FileNameChip';
 import { SparklesIcon } from '@plannotator/ui/components/SparklesIcon';
 import { CountBadge } from './CountBadge';
 import { CopyButton } from './CopyButton';
@@ -10,7 +11,8 @@ import { PermissionCard } from './PermissionCard';
 import { AIConfigBar } from './AIConfigBar';
 import { submitHint } from '@plannotator/ui/utils/platform';
 import { OverlayScrollArea } from '@plannotator/ui/components/OverlayScrollArea';
-import type { AIProviderOption } from '@plannotator/ui/utils/aiProvider';
+import { hasNonInterruptibleSession, type AIProviderOption } from '@plannotator/ui/utils/aiProvider';
+import { SessionAskActions, SessionAskNote, SessionAskStatus, sessionAskErrorTone, type SessionAskAction } from '@plannotator/ui/components/ai/SessionAskNotice';
 
 interface AITabProps {
   messages: AIChatEntry[];
@@ -20,12 +22,18 @@ interface AITabProps {
   scrollToQuestionId?: string | null;
   onScrollToLines: (filePath: string, lineStart: number, lineEnd: number, side: 'old' | 'new') => void;
   onAskGeneral?: (question: string) => void;
+  /** Stop the in-flight answer. When provided, the input shows a Stop button while streaming. */
+  onStop?: () => void;
   permissionRequests?: PendingPermission[];
   onRespondToPermission?: (requestId: string, allow: boolean) => void;
   aiProviders?: AIProviderOption[];
   aiConfig?: { providerId: string | null; model: string | null; reasoningEffort?: string | null };
   onAIConfigChange?: (config: { providerId?: string | null; model?: string | null; reasoningEffort?: string | null }) => void;
   hasAISession?: boolean;
+  /** "Ask this session": the reviewer's choice on a busy answer. */
+  onSessionAskAction?: (questionId: string, action: SessionAskAction) => void;
+  /** Optional note on how to get "Ask this session" (askSessionSetupHint). */
+  askSessionSetupHint?: string | null;
 }
 
 interface FileGroup {
@@ -47,15 +55,23 @@ export const AITab: React.FC<AITabProps> = ({
   scrollToQuestionId,
   onScrollToLines,
   onAskGeneral,
+  onStop,
   permissionRequests = [],
   onRespondToPermission,
   aiProviders = [],
   aiConfig,
   onAIConfigChange,
   hasAISession = false,
+  onSessionAskAction,
+  askSessionSetupHint,
 }) => {
+  // A session that is never interrupted (T3 Code): Stop only stops listening.
+  const listenOnly = hasNonInterruptibleSession(aiProviders);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
+  // File chat groups default to expanded; this tracks the ones the user has
+  // explicitly collapsed (inverted set), so a freshly-shown file's chat is
+  // visible without a click.
+  const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(new Set());
   const [generalInput, setGeneralInput] = useState('');
   const [highlightFilePath, setHighlightFilePath] = useState<string | null>(null);
 
@@ -88,13 +104,13 @@ export const AITab: React.FC<AITabProps> = ({
     return { fileGroups, generalMessages: general };
   }, [messages]);
 
-  // Auto-expand active file's group
+  // Navigating to a file re-expands its group even if the user had collapsed it.
   useEffect(() => {
     if (activeFilePath) {
-      setExpandedFiles(prev => {
-        if (prev.has(activeFilePath)) return prev;
+      setCollapsedFiles(prev => {
+        if (!prev.has(activeFilePath)) return prev;
         const next = new Set(prev);
-        next.add(activeFilePath);
+        next.delete(activeFilePath);
         return next;
       });
     }
@@ -116,7 +132,7 @@ export const AITab: React.FC<AITabProps> = ({
       setTimeout(() => setHighlightFilePath(null), 1200);
     }
 
-    if (filePath && expandedFiles.has(filePath)) {
+    if (filePath && !collapsedFiles.has(filePath)) {
       setTimeout(() => {
         const el = scrollRef.current?.querySelector(`[data-question-id="${scrollToQuestionId}"]`);
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -136,7 +152,7 @@ export const AITab: React.FC<AITabProps> = ({
   }, [latestMessage?.question.id, latestResponseText, messages.length]);
 
   const toggleFile = (filePath: string) => {
-    setExpandedFiles(prev => {
+    setCollapsedFiles(prev => {
       const next = new Set(prev);
       if (next.has(filePath)) next.delete(filePath);
       else next.add(filePath);
@@ -171,8 +187,9 @@ export const AITab: React.FC<AITabProps> = ({
           selectedReasoningEffort={aiConfig?.reasoningEffort ?? null}
           onReasoningEffortChange={(effort) => onAIConfigChange?.({ reasoningEffort: effort })}
           hasSession={hasAISession}
+          setupHint={askSessionSetupHint}
         />
-        {onAskGeneral && <GeneralInput value={generalInput} onChange={setGeneralInput} onSubmit={handleGeneralSubmit} disabled={isStreaming} />}
+        {onAskGeneral && <GeneralInput value={generalInput} onChange={setGeneralInput} onSubmit={handleGeneralSubmit} disabled={isStreaming} isStreaming={isStreaming} onStop={onStop} observationOnly={listenOnly} />}
       </div>
     );
   }
@@ -189,7 +206,7 @@ export const AITab: React.FC<AITabProps> = ({
 
         {/* File-grouped questions */}
         {fileGroups.map(({ filePath, messages: fileMessages }) => {
-          const isExpanded = expandedFiles.has(filePath);
+          const isExpanded = !collapsedFiles.has(filePath);
           const basename = filePath.split('/').pop() || filePath;
 
           return (
@@ -212,28 +229,13 @@ export const AITab: React.FC<AITabProps> = ({
               {isExpanded && (
                 <div className="ml-3 border-l border-border/30 pl-2 space-y-2 mt-1">
                   {fileMessages.map(({ question, response }) => (
-                    <QAPair key={question.id} question={question} response={response} onScrollToLines={onScrollToLines} />
+                    <QAPair key={question.id} question={question} response={response} canInterrupt={!listenOnly} onScrollToLines={onScrollToLines} onSessionAskAction={onSessionAskAction} />
                   ))}
                 </div>
               )}
             </div>
           );
         })}
-
-        {/* Pending permission requests */}
-        {permissionRequests.filter(p => !p.decided).map(perm => (
-          <div key={perm.requestId} className="mb-2">
-            <PermissionCard
-              requestId={perm.requestId}
-              toolName={perm.toolName}
-              toolInput={perm.toolInput}
-              title={perm.title}
-              displayName={perm.displayName}
-              description={perm.description}
-              onRespond={onRespondToPermission ?? (() => {})}
-            />
-          </div>
-        ))}
 
         {/* General questions */}
         {generalMessages.length > 0 && (
@@ -247,13 +249,32 @@ export const AITab: React.FC<AITabProps> = ({
             )}
             <div className="space-y-2">
               {generalMessages.map(({ question, response }) => (
-                <QAPair key={question.id} question={question} response={response} onScrollToLines={onScrollToLines} />
+                <QAPair key={question.id} question={question} response={response} canInterrupt={!listenOnly} onScrollToLines={onScrollToLines} onSessionAskAction={onSessionAskAction} />
               ))}
             </div>
           </div>
         )}
       </div>
       </OverlayScrollArea>
+
+      {/* Pending permission requests — pinned just above the input/config bar
+          so the user sees them right where they act, not buried in the scroll. */}
+      {permissionRequests.filter(p => !p.decided).length > 0 && (
+        <div className="border-t border-border/50 p-2 space-y-2">
+          {permissionRequests.filter(p => !p.decided).map(perm => (
+            <PermissionCard
+              key={perm.requestId}
+              requestId={perm.requestId}
+              toolName={perm.toolName}
+              toolInput={perm.toolInput}
+              title={perm.title}
+              displayName={perm.displayName}
+              description={perm.description}
+              onRespond={onRespondToPermission ?? (() => {})}
+            />
+          ))}
+        </div>
+      )}
 
       {/* Config bar */}
       <AIConfigBar
@@ -265,10 +286,11 @@ export const AITab: React.FC<AITabProps> = ({
         selectedReasoningEffort={aiConfig?.reasoningEffort ?? null}
         onReasoningEffortChange={(effort) => onAIConfigChange?.({ reasoningEffort: effort })}
         hasSession={hasAISession}
+        setupHint={askSessionSetupHint}
       />
 
       {/* General question input */}
-      {onAskGeneral && <GeneralInput value={generalInput} onChange={setGeneralInput} onSubmit={handleGeneralSubmit} disabled={isStreaming} />}
+      {onAskGeneral && <GeneralInput value={generalInput} onChange={setGeneralInput} onSubmit={handleGeneralSubmit} disabled={isStreaming} isStreaming={isStreaming} onStop={onStop} observationOnly={listenOnly} />}
     </div>
   );
 };
@@ -279,7 +301,10 @@ const GeneralInput: React.FC<{
   onChange: (v: string) => void;
   onSubmit: () => void;
   disabled?: boolean;
-}> = ({ value, onChange, onSubmit, disabled }) => {
+  isStreaming?: boolean;
+  onStop?: () => void;
+  observationOnly?: boolean;
+}> = ({ value, onChange, onSubmit, disabled, isStreaming, onStop, observationOnly = false }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const autoResize = useCallback(() => {
@@ -311,16 +336,30 @@ const GeneralInput: React.FC<{
             }
           }}
         />
-        <button
-          onClick={onSubmit}
-          disabled={disabled || !value.trim()}
-          className="p-1.5 mb-px rounded-md text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0"
-          title={`Send (${submitHint})`}
-        >
-          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
-          </svg>
-        </button>
+        {isStreaming && onStop ? (
+          <button
+            onClick={onStop}
+            className="p-1.5 mb-px rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors flex-shrink-0"
+            title={observationOnly ? 'Stop listening; the question keeps running in the session' : 'Stop generating'}
+            aria-label={observationOnly ? 'Stop listening' : 'Stop generating'}
+          >
+            {observationOnly && <span className="text-[10px] mr-1">Stop listening</span>}
+            <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+              <rect x="6" y="6" width="12" height="12" rx="2" />
+            </svg>
+          </button>
+        ) : (
+          <button
+            onClick={onSubmit}
+            disabled={disabled || !value.trim()}
+            className="p-1.5 mb-px rounded-md text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+            title={`Send (${submitHint})`}
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+            </svg>
+          </button>
+        )}
       </div>
     </div>
   );
@@ -331,7 +370,9 @@ const QAPair = memo<{
   question: AIChatEntry['question'];
   response: AIChatEntry['response'];
   onScrollToLines: AITabProps['onScrollToLines'];
-}>(({ question, response, onScrollToLines }) => {
+  onSessionAskAction?: AITabProps['onSessionAskAction'];
+  canInterrupt?: boolean;
+}>(({ question, response, onScrollToLines, onSessionAskAction, canInterrupt }) => {
   const scope = getQuestionScope(question);
   const renderedResponse = useMemo(
     () => response.text ? renderChatMarkdown(response.text) : null,
@@ -352,10 +393,8 @@ const QAPair = memo<{
                 {formatLineRange(question.lineStart, question.lineEnd)}
               </button>
             )}
-            {scope === 'file' && (
-              <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">
-                file
-              </span>
+            {scope === 'file' && question.filePath && (
+              <FileNameChip path={question.filePath} />
             )}
           </div>
           <span className="text-[10px] text-muted-foreground/50">
@@ -368,7 +407,14 @@ const QAPair = memo<{
       {/* Response */}
       <div className="group relative p-2.5 rounded-lg border border-border/50 bg-popover/50 hover:bg-muted/30 transition-colors">
         {response.error ? (
-          <p className="text-xs text-destructive">{response.error}</p>
+          <>
+            <p className={`text-xs ${sessionAskErrorTone(response)}`}>{response.error}</p>
+            <SessionAskActions
+              response={response}
+              canInterrupt={canInterrupt}
+              onAction={onSessionAskAction ? (action) => onSessionAskAction(question.id, action) : undefined}
+            />
+          </>
         ) : response.text ? (
           <>
             <div className="text-xs review-comment-body">
@@ -377,11 +423,14 @@ const QAPair = memo<{
             </div>
             {!response.isStreaming && <CopyButton text={response.text} />}
           </>
+        ) : response.status ? (
+          <SessionAskStatus response={response} />
         ) : response.isStreaming ? (
           <span className="text-xs text-muted-foreground">
             <span className="ai-streaming-cursor" /> Thinking...
           </span>
         ) : null}
+        {!response.error && <SessionAskNote response={response} />}
       </div>
     </div>
   );

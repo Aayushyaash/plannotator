@@ -1,49 +1,189 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
-import { AllFilesDiffView } from '../../components/AllFilesDiffView';
-import { useReviewState } from '../ReviewStateContext';
+import { AllFilesCodeView } from '../../components/AllFilesCodeView';
+import { CommitDescriptionHeader } from '../../components/CommitDescriptionHeader';
+import { ImageDiffPreview } from '../../components/ImageDiffPreview';
+import { MarkdownViewMenu } from '../../components/MarkdownViewMenu';
+// Lazy: loaded the first time a Markdown file is previewed.
+const MarkdownFilePreview = React.lazy(async () => ({ default: (await import('../../components/MarkdownFilePreview')).MarkdownFilePreview }));
+import type { DiffFile } from '../../types';
+import { useReviewState, useReviewStateOptional } from '../ReviewStateContext';
+
+/**
+ * A Markdown card's view control. Reads review state itself: Pierre's header
+ * slot republishes only on updateItem, but a context consumer inside it still
+ * re-renders, so Changes <-> Read updates the label without touching the item.
+ */
+function ReviewMarkdownViewControl({ file, iconOnly, touch }: { file: DiffFile; iconOnly: boolean; touch: boolean }) {
+  const preview = useReviewStateOptional()?.markdownPreview;
+  if (!preview) return null;
+  return (
+    <MarkdownViewMenu
+      filePath={file.path}
+      view={preview.viewOf(file.path)}
+      views={preview.viewsFor(file)}
+      status={file.status}
+      onChoose={(view) => preview.choose(file.path, view)}
+      iconOnly={iconOnly}
+      touch={touch}
+      disabledReason={preview.lockReason(file.path)}
+    />
+  );
+}
 
 export const ReviewAllFilesDiffPanel: React.FC<IDockviewPanelProps> = () => {
   const state = useReviewState();
 
+  // A commit diff heads the surface with the full commit message and opens
+  // its files folded — the description gives the "what/why", the collapsed
+  // file list the shape, and each file expands on demand. The card rides
+  // INSIDE the scroller (leadingContent), so it scrolls away with the diff.
+  const commitInfo = state.commitInfo;
+  // Before/After previews for changed images (#1598), only when the server
+  // advertised it. Stable per snapshot so header slots do not churn.
+  const snapshotId = state.snapshotId;
+  const compact = state.isCompactTouchLayout;
+  const renderImagePreview = useMemo(
+    () =>
+      state.imagePreviewAvailable
+        ? ({ file, fallback, tooLargeFallback, onHeightChange }: Parameters<NonNullable<React.ComponentProps<typeof AllFilesCodeView>['renderImagePreview']>>[0]) => (
+            <ImageDiffPreview
+              key={`${snapshotId ?? ''}:${file.path}`}
+              filePath={file.path}
+              status={file.status}
+              snapshotId={snapshotId}
+              variant="all-files"
+              compact={compact}
+              fallback={fallback}
+              tooLargeFallback={tooLargeFallback}
+              onHeightChange={onHeightChange}
+            />
+          )
+        : undefined,
+    [state.imagePreviewAvailable, snapshotId, compact],
+  );
+
+  // Rendered Markdown views (one Source / Changes / Read menu per Markdown
+  // file). The card fetches its own contents, lazily, when CodeView mounts
+  // its header slot.
+  const preview = state.markdownPreview;
+  const reviewBase = state.reviewBase;
+  const reviewSnapshotId = state.feedbackDiffContext?.snapshotId;
+  const imagesAvailable = state.imagePreviewAvailable === true;
+  const markdownPreview = useMemo(
+    () =>
+      preview
+        ? {
+            previewedPaths: preview.previewedPaths,
+            isPreviewable: preview.isPreviewable,
+            show: preview.show,
+            onEditingFileChange: preview.setEditingFile,
+            registerViewTarget: preview.registerViewTarget,
+            renderViewControl: ({ file, iconOnly, touch }: { file: DiffFile; iconOnly: boolean; touch: boolean }) => (
+              <ReviewMarkdownViewControl file={file} iconOnly={iconOnly} touch={touch} />
+            ),
+            render: ({ file, onHeightChange }: { file: DiffFile; onHeightChange: () => void }) => (
+              <React.Suspense key={`${reviewSnapshotId ?? ''}:${file.path}`} fallback={null}>
+              <MarkdownFilePreview
+                key={`${reviewSnapshotId ?? ''}:${file.path}`}
+                filePath={file.path}
+                oldPath={file.oldPath}
+                status={file.status}
+                patch={file.patch}
+                reviewBase={reviewBase}
+                reviewSnapshotId={reviewSnapshotId}
+                imageSnapshotId={snapshotId}
+                imagesAvailable={imagesAvailable}
+                variant="all-files"
+                onHeightChange={onHeightChange}
+              />
+              </React.Suspense>
+            ),
+          }
+        : undefined,
+    [preview, reviewBase, reviewSnapshotId, snapshotId, imagesAvailable],
+  );
+
+  // Stable element identity per commit — an inline JSX literal would be a new
+  // object every context re-render and churn the measuring ResizeObserver in
+  // AllFilesCodeView (leadingContent is in its effect deps).
+  const leadingContent = useMemo(
+    () => (commitInfo ? <CommitDescriptionHeader key={commitInfo.sha} info={commitInfo} /> : undefined),
+    [commitInfo],
+  );
+
   return (
-    <AllFilesDiffView
+    <AllFilesCodeView
       files={state.files}
-      annotations={state.allAnnotations}
-      selectedAnnotationId={state.selectedAnnotationId}
-      pendingSelection={state.pendingSelection}
-      onLineSelection={state.onLineSelection}
-      onAddAnnotation={state.onAddAnnotationForFile}
-      onAddFileComment={state.onAddFileCommentForFile}
-      onEditAnnotation={state.onEditAnnotation}
-      onSelectAnnotation={state.onSelectAnnotation}
-      onDeleteAnnotation={state.onDeleteAnnotation}
       diffStyle={state.diffStyle}
       diffOverflow={state.diffOverflow}
       diffIndicators={state.diffIndicators}
       lineDiffType={state.lineDiffType}
       disableLineNumbers={state.disableLineNumbers}
       disableBackground={state.disableBackground}
+      expandUnchanged={state.expandUnchanged}
       fontFamily={state.fontFamily}
       fontSize={state.fontSize}
+      annotations={state.allAnnotations}
+      selectedAnnotationId={state.selectedAnnotationId}
+      scrollTargetAnnotation={state.scrollTargetAnnotation}
+      pendingSelection={state.pendingSelection}
+      reviewBase={state.reviewBase}
+      reviewSnapshotId={state.feedbackDiffContext?.snapshotId}
+      contextExpansionAvailable={state.contextExpansionAvailable}
+      renderImagePreview={renderImagePreview}
+      markdownPreview={markdownPreview}
+      compactTouchLayout={state.isCompactTouchLayout}
+      onLineSelection={state.onLineSelection}
+      onAddAnnotationForFile={state.onAddAnnotationForFile}
+      onEditAnnotation={state.onEditAnnotation}
+      onSelectAnnotation={state.onSelectAnnotation}
+      onDeleteAnnotation={state.onDeleteAnnotation}
+      onAddFileCommentForFile={state.onAddFileCommentForFile}
       viewedFiles={state.viewedFiles}
       onToggleViewed={state.onToggleViewed}
+      generatedFiles={state.generatedFiles}
+      expandedGeneratedFiles={state.expandedGeneratedFiles}
+      onGeneratedFileCollapsedChange={state.onGeneratedFileCollapsedChange}
+      showViewedControls={state.showViewedControls}
       stagedFiles={state.stagedFiles}
       onStage={state.onStage}
       canStageFiles={state.canStageFiles}
+      showStageControls={state.showStageControls}
+      canStagePath={state.canStagePath}
       stagingFile={state.stagingFile}
       stageError={state.stageError}
-      reviewBase={state.reviewBase}
       prUrl={state.prMetadata?.url}
       prDiffScope={state.prDiffScope}
+      // Debounced like ReviewDiffPanel: searchMatches derive from the
+      // debounced query, so painting marks from the raw query mid-debounce
+      // mismatches mark ids and re-walks every rendered item per keystroke.
+      searchQuery={state.isSearchPending ? '' : state.debouncedSearchQuery}
+      searchMatches={state.searchMatches}
+      activeSearchMatchId={state.activeSearchMatchId}
+      activeSearchMatch={state.allFilesActiveSearchMatch}
+      onCodeNavRequest={state.onCodeNavRequest}
+      onTokenHoverEnter={state.onTokenHoverEnter}
+      onTokenHoverLeave={state.onTokenHoverLeave}
       onVisibleFileChange={state.onAllFilesVisibleFileChange}
+      onFileScrolledPast={state.onAllFilesFileScrolledPast}
+      fileOrder={state.allFilesOrder}
+      registerCollapseAllToggle={state.registerAllFilesCollapseToggle}
+      onAllCollapsedChange={state.onAllFilesCollapsedChange}
       isActive={state.isAllFilesActive}
       aiAvailable={state.aiAvailable}
-      onAskAI={state.onAskAI}
+      onAskAIForFile={state.onAskAIForFile}
       isAILoading={state.isAILoading}
       onViewAIResponse={state.onViewAIResponse}
-      aiHistoryForSelection={state.aiHistoryForSelection}
-      onCodeNavRequest={state.onCodeNavRequest}
+      getAIHistoryForFile={state.getAIHistoryForFile}
+      defaultCollapsed={!!commitInfo}
+      leadingContent={leadingContent}
+      // EXPERIMENTAL edit-to-suggestion mode. This plain all-files panel is
+      // the ONLY surface that opts in (Guided Review's viewport manager
+      // evicts CodeViews, which would destroy an active editor session).
+      enableEditSuggestions={state.editSuggestionsEnabled}
+      onAddSuggestionsForFile={state.onAddSuggestionsForFile}
+      onAddEditorCommentForFile={state.onAddEditorCommentForFile}
     />
   );
 };

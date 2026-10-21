@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
+import { Menu } from '@base-ui/react/menu';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
 import type { DiffOption } from '@plannotator/shared/types';
 
@@ -9,17 +9,32 @@ interface DiffTypePickerProps {
   onSelect: (diffType: string) => void;
   isLoading?: boolean;
   hasBasePicker: boolean;
+  /** The live active base (picker selection / server echo / --base flag). */
+  activeBase?: string | null;
 }
+
+/**
+ * Long/full hex SHAs display as their 7-char prefix; branch names, tags, and
+ * HEAD~N pass through unchanged (mirrors review-core's displayRef).
+ */
+const displayRef = (ref: string): string =>
+  /^[0-9a-f]{7,}$/i.test(ref) ? ref.slice(0, 7) : ref;
 
 /**
  * Plain-English explanations shown in a tooltip next to each option.
  * Keep these short — they're hover hints, not docs.
  */
 const OPTION_HINTS: Record<string, string> = {
+  'since-base': "Everything since your branch split from the base — committed, uncommitted, and untracked. What a PR would show if you committed it all and pushed.",
+  'local-vs-remote': "Your local branch and working tree compared with its remote-tracking branch — committed, uncommitted, and untracked differences from the last fetch.",
   uncommitted: "All your local changes — anything you haven't committed yet.",
   staged: "Only what you've run `git add` on.",
   unstaged: "What `git diff` shows with no arguments.",
   'last-commit': "Just your most recent commit.",
+  'workspace-current': "Current local changes in every workspace repo.",
+  'workspace-staged': "Staged Git changes in every workspace repo.",
+  'workspace-unstaged': "Unstaged Git changes in every workspace repo.",
+  'workspace-last': "The last committed Git change or previous jj change in every workspace repo.",
   'jj-current': "Changes in the current jj change.",
   'jj-last': "Changes in the previous jj change.",
   'jj-line': "Changes in your line of work from the selected bookmark or revision.",
@@ -36,6 +51,7 @@ export const DiffTypePicker: React.FC<DiffTypePickerProps> = ({
   onSelect,
   isLoading,
   hasBasePicker,
+  activeBase,
 }) => {
   const [open, setOpen] = useState(false);
 
@@ -43,7 +59,12 @@ export const DiffTypePicker: React.FC<DiffTypePickerProps> = ({
   // base-dependent labels — the branch belongs in the picker.
   const displayLabel = (opt: DiffOption) => {
     if (!hasBasePicker) return opt.label;
-    if (opt.id === 'merge-base') return 'Committed changes';
+    if (opt.id === 'merge-base') return 'Committed changes (PR view)';
+    // getGitContext bakes the since-base label from the DETECTED default at
+    // session start; render it from the live active base instead so the
+    // dropdown agrees with the adjacent base picker after a base switch or a
+    // --base launch.
+    if (opt.id === 'since-base' && activeBase) return `All changes since ${displayRef(activeBase)}`;
     return opt.label;
   };
 
@@ -51,13 +72,16 @@ export const DiffTypePicker: React.FC<DiffTypePickerProps> = ({
   const activeLabel = active ? displayLabel(active) : 'Select diff';
 
   return (
-    <DropdownMenu.Root open={open} onOpenChange={setOpen}>
-      <DropdownMenu.Trigger asChild>
-        <button
-          type="button"
-          disabled={isLoading}
-          className="w-full flex items-center gap-1.5 px-2.5 py-1.5 bg-muted rounded text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 disabled:opacity-50 disabled:cursor-wait"
-        >
+    <Menu.Root open={open} onOpenChange={setOpen}>
+      <Menu.Trigger
+        render={
+          <button
+            type="button"
+            disabled={isLoading}
+            className="w-full flex items-center gap-1.5 px-2.5 py-1.5 bg-muted rounded text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 disabled:opacity-50 disabled:cursor-wait"
+          />
+        }
+      >
           <span className="truncate flex-1 text-left">{activeLabel}</span>
           {isLoading ? (
             <svg className="w-3.5 h-3.5 text-muted-foreground animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
@@ -69,22 +93,17 @@ export const DiffTypePicker: React.FC<DiffTypePickerProps> = ({
               <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
             </svg>
           )}
-        </button>
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
-          side="bottom"
-          align="start"
-          sideOffset={4}
-          className="z-50 min-w-[var(--radix-dropdown-menu-trigger-width)] bg-popover text-popover-foreground border border-border rounded shadow-lg overflow-hidden py-1 origin-[var(--radix-dropdown-menu-content-transform-origin)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0"
-        >
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Positioner side="bottom" align="start" sideOffset={4} className="z-50">
+          <Menu.Popup className="min-w-[var(--anchor-width)] bg-popover text-popover-foreground border border-border rounded shadow-lg overflow-hidden py-1 origin-[var(--transform-origin)] transition-opacity data-starting-style:opacity-0 data-ending-style:opacity-0">
           {options.map((opt) => {
             const hint = OPTION_HINTS[opt.id];
             const isActive = opt.id === activeDiffType;
             return (
-              <DropdownMenu.Item
+              <Menu.Item
                 key={opt.id}
-                onSelect={() => onSelect(opt.id)}
+                onClick={() => onSelect(opt.id)}
                 className={`flex items-center gap-2 mx-1 px-2 py-1.5 text-xs rounded cursor-pointer outline-none data-[highlighted]:bg-muted ${
                   isActive ? 'text-foreground font-medium' : 'text-foreground/80'
                 }`}
@@ -112,11 +131,12 @@ export const DiffTypePicker: React.FC<DiffTypePickerProps> = ({
                     </span>
                   </Tooltip>
                 )}
-              </DropdownMenu.Item>
+              </Menu.Item>
             );
           })}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+          </Menu.Popup>
+        </Menu.Positioner>
+      </Menu.Portal>
+    </Menu.Root>
   );
 };

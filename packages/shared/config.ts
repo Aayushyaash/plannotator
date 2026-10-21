@@ -7,26 +7,25 @@
 
 import { join } from "path";
 import { getPlannotatorDataDir } from "./data-dir";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  existsSync,
+  openSync,
+  writeSync,
+  closeSync,
+  statSync,
+  unlinkSync,
+  renameSync,
+  realpathSync,
+} from "fs";
 import { execSync } from "child_process";
 
-export type DefaultDiffType = 'uncommitted' | 'unstaged' | 'staged' | 'merge-base' | 'all';
-export type DiffLineBgIntensity = 'subtle' | 'normal' | 'strong';
-
-export interface DiffOptions {
-  diffStyle?: 'split' | 'unified';
-  overflow?: 'scroll' | 'wrap';
-  diffIndicators?: 'bars' | 'classic' | 'none';
-  lineDiffType?: 'word-alt' | 'word' | 'char' | 'none';
-  showLineNumbers?: boolean;
-  showDiffBackground?: boolean;
-  fontFamily?: string;
-  fontSize?: string;
-  tabSize?: number;
-  hideWhitespace?: boolean;
-  defaultDiffType?: DefaultDiffType;
-  lineBgIntensity?: DiffLineBgIntensity;
-}
+import type { DefaultDiffType, DiffLineBgIntensity, DiffOptions, ThemeConfig } from '@plannotator/core/config-types';
+import { isFaviconStyle, type FaviconStyle } from './favicon';
+import { isAnnotateAgentTerminalSide, type AnnotateAgentTerminalSide } from './agent-terminal';
+export type { DefaultDiffType, DiffLineBgIntensity, DiffOptions, ThemeConfig, FaviconStyle };
 
 /** Single conventional comment label entry stored in config.json */
 export interface CCLabelConfig {
@@ -46,7 +45,9 @@ export type PromptRuntime =
   | "copilot-cli"
   | "pi"
   | "codex"
-  | "gemini-cli";
+  | "gemini-cli"
+  | "oh-my-pi"
+  | "mistral-vibe";
 
 interface PromptSectionConfig {
   [key: string]: string | Partial<Record<PromptRuntime, PromptSectionOverrides>> | undefined;
@@ -56,6 +57,7 @@ interface PromptSectionConfig {
 export interface PromptConfig {
   review?: PromptSectionConfig & {
     approved?: string;
+    approvedWithNotes?: string;
     denied?: string;
   };
   plan?: PromptSectionConfig & {
@@ -63,11 +65,14 @@ export interface PromptConfig {
     approvedWithNotes?: string;
     autoApproved?: string;
     denied?: string;
+    /** A deny whose only feedback is answers to the plan's questions. */
+    answered?: string;
   };
   annotate?: PromptSectionConfig & {
     fileFeedback?: string;
     messageFeedback?: string;
     approved?: string;
+    approvedWithNotes?: string;
   };
 }
 
@@ -101,10 +106,42 @@ export function mergePromptConfig(
 export interface PlannotatorConfig {
   displayName?: string;
   diffOptions?: DiffOptions;
+  /** Optional analysis layers used by code review. */
+  reviewAnalysis?: {
+    /** Named-entity semantic diff. Enabled by default for backwards compatibility. */
+    semanticDiff?: boolean;
+    /** Call-stack impact analysis powered by the optional CallDiff runtime. */
+    callFlow?: boolean;
+  };
+  /**
+   * Appearance: which mode, plus the palette assigned to each half of the
+   * light/dark pair. Written by the UI through POST /api/config, so a choice
+   * made in one session is picked up by the next one (each hook invocation
+   * runs on its own random port).
+   */
+  theme?: ThemeConfig;
   prompts?: PromptConfig;
   conventionalComments?: boolean;
   /** null = explicitly cleared (use defaults), undefined = not set */
   conventionalLabels?: CCLabelConfig[] | null;
+  /**
+   * Where the annotate-mode Agent TUI docks: "left" (the historic default),
+   * "right", or "hidden" to keep it out of the layout until the user opens it
+   * for a session. Written by the UI through POST /api/config, because every
+   * annotate session runs on its own random port — a cookie alone would make
+   * the choice per-session rather than per-user.
+   *
+   * Typed from @plannotator/core rather than restating the union, so this
+   * field and `isAgentTerminalSide` cannot disagree with the client-side
+   * placement logic about which sides exist.
+   */
+  agentTerminalSide?: AnnotateAgentTerminalSide;
+  /**
+   * Which agent the annotate-mode Agent TUI preselects (an agent id such as
+   * "claude"). Unset means the first available agent wins. Persisted here for
+   * the same random-port reason as agentTerminalSide.
+   */
+  agentTerminalDefaultAgent?: string;
   /**
    * Enable `gh attestation verify` during CLI installation/upgrade.
    * Read by scripts/install.sh|ps1|cmd on every run (not by any runtime code).
@@ -114,12 +151,219 @@ export interface PlannotatorConfig {
    */
   verifyAttestation?: boolean;
   /**
+   * Per-agent installer integration opt-outs. Read by
+   * scripts/install.sh|ps1|cmd on every run (not by any runtime code).
+   * When an agent's flag is true, the installer does not write that agent's
+   * integration even when the agent is detected, reports the detected state
+   * honestly ("detected, skipped"), and never removes an integration a
+   * previous install already wired. Overridden by the
+   * PLANNOTATOR_SKIP_CODEX_INSTALL / PLANNOTATOR_SKIP_GEMINI_INSTALL /
+   * PLANNOTATOR_SKIP_KIRO_INSTALL / PLANNOTATOR_SKIP_VIBE_INSTALL /
+   * PLANNOTATOR_SKIP_OPENCODE_INSTALL env vars, which are in turn overridden
+   * by the --skip-codex / --skip-gemini / --skip-kiro / --skip-vibe /
+   * --skip-opencode flags. OpenCode has no detection leg, so its entry is a
+   * plain do-not-write switch. `skills` skips the skills/slash-command
+   * checkout for every scope (PLANNOTATOR_SKIP_SKILLS_INSTALL / --skip-skills).
+   * `claudePlugin` stops the installers from updating an already-installed
+   * Claude Code plugin (`claude plugin marketplace update plannotator` +
+   * `claude plugin update plannotator@plannotator`);
+   * PLANNOTATOR_SKIP_CLAUDE_PLUGIN_UPDATE / --skip-claude-plugin
+   * (-SkipClaudePlugin). Default: all off.
+   */
+  skipInstall?: {
+    codex?: boolean;
+    gemini?: boolean;
+    kiro?: boolean;
+    vibe?: boolean;
+    opencode?: boolean;
+    skills?: boolean;
+    claudePlugin?: boolean;
+  };
+  /**
    * Enable Jina Reader for URL-to-markdown conversion during annotation.
    * When true (default), `plannotator annotate <url>` routes through
    * r.jina.ai for better JS-rendered page support and reader-mode extraction.
    * Set to false to always use plain fetch + Turndown.
    */
   jina?: boolean;
+  /**
+   * Save per-file version history when annotating local files. Powers the
+   * annotate version diff ("what changed since I last looked"). NOTE: this
+   * writes a copy of each annotated file's content under
+   * ~/.plannotator/history/ (or PLANNOTATOR_DATA_DIR). Set to false to keep
+   * annotate sessions fully stateless. Default: true.
+   */
+  annotateHistory?: boolean;
+  /**
+   * Durably archive every submitted review under ~/.plannotator/feedback/
+   * (or PLANNOTATOR_DATA_DIR): one append-only JSONL record per submission
+   * plus a markdown sidecar for the ones that carry content. NOTE: this
+   * writes the user's own feedback text and the document/code excerpts it
+   * quotes to disk, and nothing prunes the directory. Set to false to never
+   * write. Default: true. Annotate-surface records additionally honor
+   * `annotateHistory`, so the stateless-annotate promise is unchanged.
+   */
+  feedbackHistory?: boolean;
+  /**
+   * Extra file extensions annotate treats as markdown (#1307), e.g.
+   * [".livemd"] for Livebook notebooks. Listed extensions are accepted
+   * everywhere .md is accepted on the annotate path and render as markdown.
+   * Entries must start with a dot and carry no path separators or globs;
+   * invalid entries are dropped and `.env` can never be registered (annotate
+   * copies file contents into the data dir). Resolved by
+   * `resolveMarkdownExtensions` in ./markdown-extensions. Default: none.
+   */
+  markdownExtensions?: string[];
+  /**
+   * Persist successful Guided Reviews (guide content + per-section reviewed
+   * state) under ~/.plannotator/guides/ (or PLANNOTATOR_DATA_DIR) so they
+   * survive closing Plannotator. Set to false to disable writes; already-saved
+   * guides remain readable and listed. Default: true.
+   */
+  guideHistory?: boolean;
+  /**
+   * Remember which files a code review marked viewed, across review sessions,
+   * under ~/.plannotator/review-progress/ (or PLANNOTATOR_DATA_DIR). Records
+   * carry repo file paths in plain text and nothing prunes them. Set to false
+   * to never read or write them; viewed marks then ride the annotation draft,
+   * as they do for review modes without a durable identity. Default: true.
+   */
+  reviewProgress?: boolean;
+  /**
+   * Opt-in background auto-update for the compiled `plannotator` binary.
+   * When true, a session started by the CLI checks GitHub for a newer stable
+   * release at most once per 24h and, when no other review session is open,
+   * runs the normal install script for that exact tag in a detached process
+   * (output in update.log in the data dir). PLANNOTATOR_AUTO_UPDATE wins over
+   * this key. Default: false.
+   */
+  autoUpdate?: boolean;
+  /**
+   * Update notices: whether Plannotator asks GitHub (once a day per machine,
+   * from the machine, never the browser) whether a newer stable release
+   * exists, and tells you in the Inbox, the review windows and the terminal.
+   * `false` makes no automatic request at all, which also stops auto-update;
+   * `plannotator update` and the Inbox's Check now still ask when you run them.
+   * PLANNOTATOR_UPDATE_CHECK wins over this key. Default: true.
+   */
+  updateCheck?: boolean;
+  /**
+   * The Claude Code mod (apps/hook/hooks/mod/): non-blocking plan review,
+   * annotate, code review and annotate-last, plus "Ask this session", where
+   * Claude Code runs hooks modules. On by default; `false` turns it off.
+   * PLANNOTATOR_CLAUDE_MOD wins over this key. Default: true.
+   */
+  claudeCodeMod?: boolean;
+  /**
+   * The `plannotator` agent tool (packages/shared/plannotator-tool.ts) on the
+   * hosts that register it: the Claude Code mod, Pi (and the Pi extension in
+   * Oh My Pi) and OpenCode 2. `true` puts it in the agent's tool list, `false`
+   * keeps it out (the slash commands are unchanged either way). Read once when
+   * a session starts, so a change applies to the next session.
+   * PLANNOTATOR_AGENT_TOOL wins over this key. Unset: the host's default,
+   * AGENT_TOOL_DEFAULTS (on for the Claude Code mod and Oh My Pi, off on Pi
+   * and OpenCode 2).
+   */
+  agentTool?: boolean;
+  /**
+   * The Plannotator Inbox's `plannotator_inbox` tool on the hosts that will
+   * register it (the Claude Code mod, Pi, OpenCode 2), set from the Inbox's
+   * own Settings: `true` / `false` for every host, or one boolean per host
+   * (`{ "claude-code": true, "pi": false }`). Read once when a session starts,
+   * so a change applies to the next session. PLANNOTATOR_INBOX_TOOL wins over
+   * this key. Unset (or a host left out): INBOX_TOOL_DEFAULTS.
+   */
+  inboxTool?: boolean | Partial<Record<InboxToolHost, boolean>>;
+  /**
+   * The Plannotator Inbox's one-line reminder at session start
+   * (INBOX_REMINDER_TEXT), on the hosts that register `plannotator_inbox`
+   * (the Claude Code mod, Pi, OpenCode), set in this file or by the Inbox's Settings → Agents: `true` / `false`
+   * for every host, or one boolean per host. It only ever applies where that
+   * session has the Inbox tool and the Inbox has run on this computer
+   * (`inbox/inbox.json` exists at session start), so the tool switch
+   * (PLANNOTATOR_INBOX_TOOL, `inboxTool`) turns it off too; there is no env
+   * var of its own. Read once when a session starts. Unset (or a host left
+   * out): on wherever the tool is on.
+   */
+  inboxReminder?: boolean | Partial<Record<InboxToolHost, boolean>>;
+  /**
+   * The Plannotator Inbox's browser notifications, set from the Inbox page
+   * (its one-time ask and its Settings), kept here rather than in the page's
+   * localStorage so they survive the Inbox moving to another port (another
+   * origin). `enabled`: notify at all (unset: on). `dismissed`: the person answered the ask with "Not now". `allowedOrigin`:
+   * the page origin where the person last turned them on, so a page on a new
+   * port asks again with "The Inbox moved to a new address".
+   */
+  inboxNotifications?: {
+    enabled?: boolean;
+    dismissed?: boolean;
+    allowedOrigin?: string | null;
+  };
+  /**
+   * The Plannotator Inbox's question sound ("Ding-dong"), set from the Inbox
+   * page (its Settings row and its one-time dialog), kept here for the same
+   * reason as `inboxNotifications`: the Inbox's port, and so its origin, can
+   * change. `enabled`: ring at all (unset: on). `volume`: 10 to 100 (unset:
+   * 60), the same on every device. `dialogDueFor`: the version whose first
+   * start found someone who used an earlier Inbox, so the one-time "The Inbox
+   * can ring now" dialog waits for a page to claim it. `dialogShownFor`: the
+   * version it was shown for (or a fresh install was marked with, so it never
+   * shows); once set it never shows again. Both are written by the server
+   * only; the claim is a compare-and-set, so only one tab ever shows it.
+   */
+  /**
+   * The Plannotator Inbox window's text size: the body size in px (12, 13,
+   * 14 or 15) its whole type ramp scales from. Unset: 14. Written by the
+   * Inbox's Settings → General → Appearance through POST /api/inbox/settings
+   * `{ text_size }`.
+   */
+  inboxTextSize?: number;
+  inboxSound?: {
+    enabled?: boolean;
+    volume?: number;
+    dialogDueFor?: string;
+    dialogShownFor?: string;
+  };
+  /**
+   * The Plannotator Inbox's note in each agent's own instructions file
+   * (packages/server/inbox-agent-notes.ts). `offered`: the window's question
+   * was answered at least once, or `plannotator inbox --notes` added a note;
+   * `asked` names each agent it covered (each agent is asked once). Which
+   * notes exist is kept in `inbox/agent-notes.json`, beside the files they are in.
+   */
+  inboxAgentNotes?: {
+    offered?: boolean;
+    /**
+     * The agents the window's question was asked about, each once (Add, Not
+     * now, Don't add a note, or `plannotator inbox --notes`). Absent before
+     * 0.28.19: `offered` alone then counts for the agents that could take a
+     * note when it is first read (notesAsked in inbox-agent-notes.ts).
+     */
+    asked?: string[];
+  };
+  /**
+   * The Plannotator Inbox's phone surface: pairing, the device door
+   * (`/api/inbox/device/*`), the tailnet and Wi-Fi listeners, the relay and
+   * Settings' Phones block. Hidden until the iPhone app ships, so `true` is
+   * for the app's own development and proofs. PLANNOTATOR_INBOX_PHONES wins
+   * over this key. Read once when the Inbox starts. Default: false.
+   */
+  inboxPhones?: boolean;
+  /**
+   * Publish the Plannotator Inbox over the tailnet (`tailscale serve`, HTTPS,
+   * never funnel) at every start, for the Tailscale login that owns this
+   * machine. Written by the Inbox's Settings ("Over your tailnet");
+   * PLANNOTATOR_INBOX_TAILSCALE wins over this key, and `plannotator inbox
+   * --tailscale` turns it on for one run. Default: false.
+   */
+  inboxTailscale?: boolean;
+  /**
+   * Extra Tailscale logins (`Tailscale-User-Login`, e.g. "me@example.com")
+   * the tailnet-published Inbox lets in besides the machine's owner: for a
+   * shared tailnet where you sign in as another login on another device, or
+   * a tagged machine, which has no owner. Config only. Default: none.
+   */
+  inboxTailscaleAllow?: string[];
   /**
    * Inject a Plannotator Flavored Markdown reminder into every EnterPlanMode
    * call so the agent is aware it can enrich plans with code-file links,
@@ -134,10 +378,132 @@ export interface PlannotatorConfig {
    * Set to false to always use the system browser even when Glimpse is installed.
    */
   glimpse?: boolean;
+  /**
+   * Control URL sharing (Share tab, copy link, short URLs, import review).
+   * Defaults to enabled. Set to "disabled" to hide all sharing UI — useful
+   * for teams working with sensitive plans. Mirrors the PLANNOTATOR_SHARE
+   * env var value, which takes precedence over this setting.
+   */
+  share?: "enabled" | "disabled";
+  /**
+   * Base URL of the guide host that `plannotator guide share` and the
+   * in-app "Create share link" upload Guided Reviews to (default
+   * https://guides.show; a self-hosted `apps/guides-show` origin otherwise).
+   * Must be http(s); a trailing slash is trimmed. Mirrors the
+   * PLANNOTATOR_GUIDE_SHARE_URL env var, which takes precedence. Guide sharing
+   * is off entirely while `share` is "disabled".
+   */
+  guideShareUrl?: string;
+  /**
+   * Atlassian account email for Bitbucket Cloud PR review (basic auth with
+   * `bitbucketToken`). Mirrors PLANNOTATOR_BITBUCKET_EMAIL, which takes
+   * precedence. Omit it to send the token as a Bearer token instead.
+   */
+  bitbucketEmail?: string;
+  /**
+   * Atlassian API token (with Bitbucket scopes) for Bitbucket Cloud PR review.
+   * Mirrors PLANNOTATOR_BITBUCKET_TOKEN, which takes precedence. Stored in
+   * plain text in config.json, so prefer the env var. Never sent to the
+   * browser: getServerConfig() allowlists its keys.
+   */
+  bitbucketToken?: string;
+  /**
+   * Pass `--sandbox enabled` when launching Cursor's `agent` CLI for review
+   * jobs. When true (default), review jobs run with Cursor's sandbox forced
+   * on as part of their read-only posture. Set to false on systems where
+   * Cursor's sandbox cannot start (e.g. NixOS / AppArmor-restricted Linux):
+   * the flag pair is then OMITTED entirely, deferring to the user's own
+   * Cursor Agent sandbox configuration. Mirrors the
+   * PLANNOTATOR_CURSOR_SANDBOX env var, which takes precedence.
+   */
+  cursorSandbox?: boolean;
+  /**
+   * Let Claude Code agent jobs (code review, Code Tour, Guided Review) run
+   * under the user's own Claude Code sandbox setting. When true (default),
+   * Plannotator passes nothing sandbox-related and the user's settings decide.
+   * Set to false on systems where Claude Code's sandbox cannot start (Linux
+   * without bubblewrap/socat, AppArmor-restricted user namespaces): jobs run
+   * with `--permission-mode dontAsk`, so the unsandboxed fallback is refused
+   * and every Bash call dead-ends (#1627). False passes
+   * `--settings {"sandbox":{"enabled":false}}` for the job only, so its
+   * commands run WITHOUT OS containment, the same as for any user who never
+   * enabled Claude's sandbox (the default). The job's command allowlist still
+   * limits what the model can run, but it is not a containment boundary.
+   * Managed (enterprise) settings still win. Mirrors the PLANNOTATOR_CLAUDE_SANDBOX env var, which takes precedence.
+   */
+  claudeSandbox?: boolean;
+  /**
+   * Query the git remote during code review (issue #1553). When true
+   * (default), a local git review runs `git ls-remote --symref origin HEAD`
+   * to discover the remote default branch and to tell whether the baseline is
+   * behind it ("Baseline is behind GitHub"). Set to false when that network
+   * call is unwanted — most sharply when SSH authentication is backed by a
+   * hardware token, where every probe is a physical touch prompt. With it off
+   * the session runs entirely from local refs: the base stays what local
+   * discovery resolved and the behind-the-remote banner never shows — and with
+   * it the one-click Fetch, which lives in that banner, though the
+   * `/api/fetch-base` endpoint itself stays reachable. Mirrors the
+   * PLANNOTATOR_GIT_REMOTE_CHECK env var,
+   * which takes precedence; `review --no-git-remote-check` beats both.
+   */
+  gitRemoteCheck?: boolean;
+  /**
+   * Display-only hostname for advertised session URLs (issue #657). Lets a
+   * remote-mode user hand out a reachable link (e.g. a Tailscale MagicDNS
+   * name or tailnet IP) instead of localhost. Host only — the port is chosen
+   * at runtime and always appended. Never affects which interface the server
+   * binds; that stays governed by PLANNOTATOR_REMOTE. Applied only in remote
+   * sessions: a local session binds loopback, so the override is ignored
+   * (localhost is advertised) with a once-per-process stderr warning.
+   * Mirrors the PLANNOTATOR_URL_HOST env var, which takes precedence.
+   */
+  urlHost?: string;
+  /**
+   * Mirror the approved plan checklist into an editable todo provider during
+   * execution (issue #484). "auto" (default) syncs whenever a provider is
+   * detected — currently pi-todos. Detection checks the configured todo
+   * directory; PI_TODO_PATH only redirects which directory is checked.
+   *
+   * The mirror is additive: the progress widget is left alone. pi-todos has no
+   * live surface of its own (its list renders on demand in `/todos`), so the
+   * widget stays the at-a-glance tracker while the provider contributes
+   * editable, session-durable todos. Sync is one-way; provider-side edits are
+   * never read back. Failures are non-fatal.
+   */
+  todoProvider?: "auto" | "off";
+  /**
+   * Selected favicon style for Plannotator application surfaces:
+   * 'totman' (production brand mascot) or 'classic' (historical dark-navy P tile).
+   */
+  favicon?: FaviconStyle;
 }
 
-const CONFIG_DIR = getPlannotatorDataDir();
-const CONFIG_PATH = join(CONFIG_DIR, "config.json");
+/** Parse the only server-writable call-review analysis flags. */
+export function parseReviewAnalysisConfig(value: unknown): PlannotatorConfig["reviewAnalysis"] | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const result: NonNullable<PlannotatorConfig["reviewAnalysis"]> = {};
+  if (input.semanticDiff !== undefined) {
+    if (typeof input.semanticDiff !== "boolean") return undefined;
+    result.semanticDiff = input.semanticDiff;
+  }
+  if (input.callFlow !== undefined) {
+    if (typeof input.callFlow !== "boolean") return undefined;
+    result.callFlow = input.callFlow;
+  }
+  return result;
+}
+
+// Resolved per call, not at module scope: tests sandbox the data dir by
+// setting PLANNOTATOR_DATA_DIR at runtime, and a module-scope constant would
+// freeze whatever the env held at first import (bun runs every test file in
+// one process).
+function getConfigDir(): string {
+  return getPlannotatorDataDir();
+}
+function getConfigPath(): string {
+  return join(getConfigDir(), "config.json");
+}
 
 /**
  * Load config from ~/.plannotator/config.json.
@@ -145,8 +511,9 @@ const CONFIG_PATH = join(CONFIG_DIR, "config.json");
  */
 export function loadConfig(): PlannotatorConfig {
   try {
-    if (!existsSync(CONFIG_PATH)) return {};
-    const raw = readFileSync(CONFIG_PATH, "utf-8");
+    const configPath = getConfigPath();
+    if (!existsSync(configPath)) return {};
+    const raw = readFileSync(configPath, "utf-8");
     const parsed = JSON.parse(raw);
     return typeof parsed === "object" && parsed !== null ? parsed : {};
   } catch (e) {
@@ -155,27 +522,205 @@ export function loadConfig(): PlannotatorConfig {
   }
 }
 
+// --- config.json write serialization ----------------------------------------
+//
+// saveConfig is a read-merge-write, and one data dir is routinely shared by
+// several Plannotator processes (an annotate session and a review session at
+// once is ordinary). Two of them settling a POST /api/config in the same
+// window both read the pre-change file, both merge onto it, and the second
+// write silently drops the first writer's key while both callers are told the
+// save succeeded. An advisory lockfile makes the read-merge-write a critical
+// section across processes.
+//
+// Advisory, bounded, and never fatal, in that order of priority:
+//  - O_EXCL create of `${configDir}/config.json.lock` is the only primitive
+//    required, so this stays node:fs-only and portable to every runtime that
+//    vendors this file (no flock, no native deps, no fcntl semantics).
+//  - A lock whose mtime is older than the stale window is assumed to belong
+//    to a process that died holding it and is taken over. Holding the lock
+//    spans one read plus one write, i.e. microseconds, so a lock this old is
+//    not a live writer.
+//  - Waiting is bounded by the wait budget. When the budget runs out the
+//    write proceeds unlocked with a warning: a lost update is a bad outcome,
+//    a server wedged forever on a lockfile is a worse one.
+//
+// Residual failure mode, stated plainly: two writers that both judge the same
+// lock stale in the same instant can both take it, and one update is lost
+// exactly as it was before. That needs a >1.5s stall inside a critical
+// section that costs microseconds, and the cost of closing it (owner tokens,
+// re-verification, a second lock) is not worth paying for a settings file.
+
+const CONFIG_LOCK_SUFFIX = ".lock";
+const DEFAULT_CONFIG_LOCK_WAIT_BUDGET_MS = 3000;
+const DEFAULT_CONFIG_LOCK_STALE_MS = 1500;
+const CONFIG_LOCK_POLL_MS = 10;
+
+let configLockWaitBudgetMs = DEFAULT_CONFIG_LOCK_WAIT_BUDGET_MS;
+let configLockStaleMs = DEFAULT_CONFIG_LOCK_STALE_MS;
+
+/**
+ * Test-only seam for the lock windows. The bounded-wait and stale-takeover
+ * paths are otherwise only reachable by waiting out multi-second real time
+ * inside a synchronous function, which no test should do. Pass null to
+ * restore the shipping values.
+ */
+export function __setConfigLockTimingsForTest(
+  timings: { waitBudgetMs?: number; staleMs?: number } | null,
+): void {
+  configLockWaitBudgetMs = timings?.waitBudgetMs ?? DEFAULT_CONFIG_LOCK_WAIT_BUDGET_MS;
+  configLockStaleMs = timings?.staleMs ?? DEFAULT_CONFIG_LOCK_STALE_MS;
+}
+
+/**
+ * Test-only seam: runs inside the lock, after the config has been read and
+ * before the merged result is written. It exists so a test can inspect the
+ * critical section itself (is the lock actually held across the merge?)
+ * rather than racing two writers and hoping the interleaving reproduces.
+ */
+let configSaveMergeWindowHook: (() => void) | null = null;
+export function __setConfigSaveMergeWindowHookForTest(hook: (() => void) | null): void {
+  configSaveMergeWindowHook = hook;
+}
+
+export function getConfigLockPath(): string {
+  return getConfigPath() + CONFIG_LOCK_SUFFIX;
+}
+
+/** Block the calling thread without a timer: saveConfig is synchronous, so an
+ * event-loop-based sleep would never run. Falls back to a spin when
+ * SharedArrayBuffer/Atomics.wait is unavailable on the host runtime. */
+function sleepSync(ms: number): void {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const until = Date.now() + ms;
+    while (Date.now() < until) { /* spin */ }
+  }
+}
+
+/**
+ * Take the advisory config lock, or return false when the wait budget ran out
+ * (the caller then writes unlocked rather than hanging).
+ */
+function acquireConfigLock(lockPath: string): boolean {
+  const deadline = Date.now() + configLockWaitBudgetMs;
+  for (;;) {
+    try {
+      // wx: create-exclusive. Whoever wins the create owns the section.
+      const handle = openSync(lockPath, "wx");
+      try {
+        writeSync(handle, `${process.pid} ${new Date().toISOString()}\n`);
+      } catch { /* the lock is the file's existence, not its contents */ }
+      closeSync(handle);
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code !== "EEXIST") {
+        // Unwritable directory, read-only fs: locking is not available here,
+        // so do not let it block the write it was only meant to serialize.
+        return false;
+      }
+    }
+
+    // Held by someone else. Take it over once it is too old to be live.
+    try {
+      const age = Date.now() - statSync(lockPath).mtimeMs;
+      if (age > configLockStaleMs) {
+        unlinkSync(lockPath);
+        continue;
+      }
+    } catch { /* vanished between the create and the stat: just retry */ }
+
+    if (Date.now() >= deadline) return false;
+    sleepSync(CONFIG_LOCK_POLL_MS);
+  }
+}
+
+function releaseConfigLock(lockPath: string): void {
+  try {
+    unlinkSync(lockPath);
+  } catch { /* already gone (stale takeover by another writer): nothing to do */ }
+}
+
+/**
+ * Write config.json in one step so a concurrent reader never observes a
+ * half-written file: readers deliberately take no lock, and loadConfig treats
+ * malformed JSON as an empty config, which would silently present as "all
+ * settings reset". Writes through an existing symlink rather than replacing
+ * it, so a dotfile-managed config.json keeps its link.
+ */
+function writeConfigAtomic(configPath: string, contents: string): void {
+  let targetPath = configPath;
+  try {
+    if (existsSync(configPath)) targetPath = realpathSync(configPath);
+  } catch { /* unreadable link: fall back to the literal path */ }
+  // Rename replaces the destination's metadata with the temp file's, so carry
+  // the existing file's permissions across instead of re-deciding them.
+  let mode = 0o600;
+  try {
+    if (existsSync(targetPath)) mode = statSync(targetPath).mode & 0o777;
+  } catch { /* new file: keep the private default */ }
+  const tempPath = `${targetPath}.${process.pid}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+  try {
+    writeFileSync(tempPath, contents, { encoding: "utf-8", mode });
+    renameSync(tempPath, targetPath);
+  } catch {
+    try {
+      unlinkSync(tempPath);
+    } catch { /* nothing to clean up */ }
+    // Same-directory rename should not fail, but a write that lands is better
+    // than a settings change that is lost to an exotic filesystem.
+    writeFileSync(targetPath, contents, "utf-8");
+  }
+}
+
 /**
  * Save config by merging partial values into the existing file.
  * Creates ~/.plannotator/ directory if needed.
+ *
+ * The read-merge-write runs under an advisory lockfile so concurrent writers
+ * (in this process or another one sharing the data dir) cannot drop each
+ * other's keys. See the lock notes above for the failure mode: it degrades to
+ * the old unlocked behavior with a warning, never to a hang.
  */
 export function saveConfig(partial: Partial<PlannotatorConfig>): void {
+  let lockPath: string | null = null;
+  let locked = false;
   try {
+    mkdirSync(getConfigDir(), { recursive: true });
+    lockPath = getConfigLockPath();
+    locked = acquireConfigLock(lockPath);
+    if (!locked) {
+      process.stderr.write(
+        `[plannotator] Warning: config.json lock unavailable after ${configLockWaitBudgetMs}ms; `
+        + `saving without it (a concurrent save may be overwritten).\n`,
+      );
+    }
+
     const current = loadConfig();
+    configSaveMergeWindowHook?.();
     const mergedDiffOptions = (current.diffOptions || partial.diffOptions)
       ? { ...current.diffOptions, ...partial.diffOptions }
+      : undefined;
+    const mergedTheme = (current.theme || partial.theme)
+      ? { ...current.theme, ...partial.theme }
+      : undefined;
+    const mergedReviewAnalysis = (current.reviewAnalysis || partial.reviewAnalysis)
+      ? { ...current.reviewAnalysis, ...partial.reviewAnalysis }
       : undefined;
     const mergedPrompts = mergePromptConfig(current.prompts, partial.prompts);
     const merged = {
       ...current,
       ...partial,
       diffOptions: mergedDiffOptions,
+      theme: mergedTheme,
+      reviewAnalysis: mergedReviewAnalysis,
       prompts: mergedPrompts,
     };
-    mkdirSync(CONFIG_DIR, { recursive: true });
-    writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2) + "\n", "utf-8");
+    writeConfigAtomic(getConfigPath(), JSON.stringify(merged, null, 2) + "\n");
   } catch (e) {
     process.stderr.write(`[plannotator] Warning: failed to write config.json: ${e}\n`);
+  } finally {
+    if (locked && lockPath) releaseConfigLock(lockPath);
   }
 }
 
@@ -183,9 +728,9 @@ export function saveConfig(partial: Partial<PlannotatorConfig>): void {
  * Detect the git user name from `git config user.name`.
  * Returns null if git is unavailable, not in a repo, or user.name is not set.
  */
-export function detectGitUser(): string | null {
+export function detectGitUser(cwd?: string): string | null {
   try {
-    const name = execSync("git config user.name", { encoding: "utf-8", timeout: 3000 }).trim();
+    const name = execSync("git config user.name", { cwd, encoding: "utf-8", timeout: 3000 }).trim();
     return name || null;
   } catch {
     return null;
@@ -196,30 +741,152 @@ export function detectGitUser(): string | null {
  * Build the serverConfig payload for API responses.
  * Reads config.json fresh each call so the response reflects the latest file on disk.
  */
-export function getServerConfig(gitUser: string | null): {
+export function getServerConfig(gitUser: string | null, agentToolIntegration?: string | null): {
   displayName?: string;
   diffOptions?: DiffOptions;
+  theme?: ThemeConfig;
+  favicon?: FaviconStyle;
+  reviewAnalysis: NonNullable<PlannotatorConfig["reviewAnalysis"]>;
   gitUser?: string;
   conventionalComments?: boolean;
   conventionalLabels?: CCLabelConfig[] | null;
+  agentTerminalSide?: PlannotatorConfig["agentTerminalSide"];
+  agentTerminalDefaultAgent?: string;
+  autoUpdate: boolean;
+  autoUpdateEnv?: boolean;
+  updateCheck: boolean;
+  updateCheckEnv?: boolean;
+  agentTool?: boolean;
+  agentToolConfigured?: boolean;
+  agentToolEnv?: boolean;
+  agentToolHost?: AgentToolHost;
+  agentToolEnabled?: boolean;
 } {
   const cfg = loadConfig();
+  const autoUpdateEnv = parseAutoUpdateEnv();
+  const updateCheckEnv = parseUpdateCheckEnv();
+  const agentToolEnv = parseAgentToolEnv();
+  const agentToolHost = agentToolHostOf(agentToolIntegration);
   return {
     displayName: cfg.displayName,
     diffOptions: cfg.diffOptions,
+    ...(cfg.theme !== undefined && { theme: cfg.theme }),
+    ...(isFaviconStyle(cfg.favicon) && { favicon: cfg.favicon }),
+    // These values gate server-side work, so always make the resolved defaults
+    // explicit. The client must not revive a stale cookie that disagrees with
+    // the server when the config leaves either optional leaf unset.
+    reviewAnalysis: {
+      semanticDiff: cfg.reviewAnalysis?.semanticDiff !== false,
+      callFlow: cfg.reviewAnalysis?.callFlow === true,
+    },
     gitUser: gitUser ?? undefined,
     ...(cfg.conventionalComments !== undefined && { conventionalComments: cfg.conventionalComments }),
     ...(cfg.conventionalLabels !== undefined && { conventionalLabels: cfg.conventionalLabels }),
+    ...(isAgentTerminalSide(cfg.agentTerminalSide) && { agentTerminalSide: cfg.agentTerminalSide }),
+    ...(typeof cfg.agentTerminalDefaultAgent === "string" &&
+      cfg.agentTerminalDefaultAgent !== "" && {
+        agentTerminalDefaultAgent: cfg.agentTerminalDefaultAgent,
+      }),
+    // Always explicit (the config-file value, default false) so a stale
+    // cookie can never show the toggle on while the config says off.
+    // autoUpdateEnv carries PLANNOTATOR_AUTO_UPDATE when it overrides the file.
+    autoUpdate: coerceConfigBoolean(cfg.autoUpdate, false),
+    ...(autoUpdateEnv !== undefined && { autoUpdateEnv }),
+    // Same shape for update notices (default true); updateCheckEnv carries
+    // PLANNOTATOR_UPDATE_CHECK when it overrides the file.
+    updateCheck: coerceConfigBoolean(cfg.updateCheck, true),
+    ...(updateCheckEnv !== undefined && { updateCheckEnv }),
+    ...agentToolAdvert(cfg, agentToolEnv, agentToolHost),
   };
 }
 
 /**
- * Read the user's preferred default diff type from config, falling back to 'unstaged'.
+ * What a Settings toggle or a one-time "turn the tool on" offer needs about
+ * the `plannotator` agent tool (see getServerConfig):
+ *  - agentToolHost: the integration that started this server, when it is one
+ *    that registers the tool (`agentToolIntegration`: the session-bridge host,
+ *    see agentToolHostOf); absent otherwise, and then so are the fields below
+ *    except a value config.json sets;
+ *  - agentTool: the config-file value, or the host's default while unset
+ *    (always explicit when the host is known, like autoUpdate);
+ *  - agentToolConfigured: whether config.json holds an explicit choice;
+ *  - agentToolEnv: PLANNOTATOR_AGENT_TOOL when it overrides the file;
+ *  - agentToolEnabled: the effective value for this host (env, then file,
+ *    then default). It describes the NEXT session: a running session read the
+ *    setting when it started and never re-reads it.
+ */
+function agentToolAdvert(
+  cfg: PlannotatorConfig,
+  env: boolean | undefined,
+  host: AgentToolHost | null,
+): {
+  agentTool?: boolean;
+  agentToolConfigured?: boolean;
+  agentToolEnv?: boolean;
+  agentToolHost?: AgentToolHost;
+  agentToolEnabled?: boolean;
+} {
+  const configured = parseConfigBoolean(cfg.agentTool);
+  if (!host) return configured !== undefined ? { agentTool: configured, agentToolConfigured: true } : {};
+  const value = configured ?? AGENT_TOOL_DEFAULTS[host];
+  return {
+    agentTool: value,
+    agentToolConfigured: configured !== undefined,
+    ...(env !== undefined && { agentToolEnv: env }),
+    agentToolHost: host,
+    agentToolEnabled: env ?? value,
+  };
+}
+
+/**
+ * Guard for the annotate Agent TUI placement. config.json is hand-editable, so
+ * a bogus value must simply not be advertised — the client then keeps its own
+ * resolved default instead of adopting a side that does not exist.
+ *
+ * The set of sides has exactly one definition, `AnnotateAgentTerminalSide` in
+ * @plannotator/core: `PlannotatorConfig.agentTerminalSide` IS that type and
+ * this predicate delegates to that module's guard, so neither the union nor
+ * its membership test can drift on one side of the boundary. Direct import
+ * rather than a duplicated literal check: the Pi vendor step rewrites the
+ * relative specifier to the flat `./agent-terminal.ts` it already vendors
+ * from core, so both runtimes end up on the same implementation.
+ */
+export function isAgentTerminalSide(
+  value: unknown,
+): value is NonNullable<PlannotatorConfig["agentTerminalSide"]> {
+  return isAnnotateAgentTerminalSide(value);
+}
+
+/**
+ * Read the user's preferred default diff type from config, falling back to
+ * 'since-base' (the composite "what would GitHub show" view). Users with an
+ * explicit defaultDiffType keep their choice.
  */
 export function resolveDefaultDiffType(cfg?: PlannotatorConfig): DefaultDiffType {
   const v = cfg?.diffOptions?.defaultDiffType as string | undefined;
   if (v === 'branch') return 'merge-base';
-  return v === 'uncommitted' || v === 'unstaged' || v === 'staged' || v === 'merge-base' || v === 'all' ? v : 'unstaged';
+  return v === 'since-base' || v === 'local-vs-remote' || v === 'uncommitted' || v === 'unstaged' || v === 'staged' || v === 'merge-base' || v === 'all' ? v : 'since-base';
+}
+
+/**
+ * Coerce a config.json value that should be a boolean. JSON parsing preserves
+ * whatever type the user typed, so a hand-edited `"false"` (quoted) arrives as
+ * a string and would fail `=== false` checks downstream. Accepts real booleans
+ * plus "true"/"false"/"1"/"0" strings; anything else falls back to the default.
+ */
+function coerceConfigBoolean(value: unknown, fallback: boolean): boolean {
+  return parseConfigBoolean(value) ?? fallback;
+}
+
+/** `coerceConfigBoolean` without a fallback: undefined when the value is not a recognizable boolean. */
+function parseConfigBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const v = value.trim().toLowerCase();
+    if (v === "true" || v === "1") return true;
+    if (v === "false" || v === "0") return false;
+  }
+  return undefined;
 }
 
 /**
@@ -233,8 +900,7 @@ export function resolveUseGlimpse(config: PlannotatorConfig): boolean {
   if (envVal !== undefined) {
     return envVal === "1" || envVal.toLowerCase() === "true";
   }
-  if (config.glimpse !== undefined) return config.glimpse;
-  return true;
+  return coerceConfigBoolean(config.glimpse, true);
 }
 
 /**
@@ -243,6 +909,379 @@ export function resolveUseGlimpse(config: PlannotatorConfig): boolean {
  * Priority (highest wins):
  *   --no-jina CLI flag  →  PLANNOTATOR_JINA env var  →  config.jina  →  default true
  */
+/**
+ * Resolve whether annotate mode saves per-file version history.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_ANNOTATE_HISTORY env var  →  config.annotateHistory  →  default true
+ */
+export function resolveAnnotateHistory(config: PlannotatorConfig): boolean {
+  const envVal = process.env.PLANNOTATOR_ANNOTATE_HISTORY;
+  if (envVal !== undefined) {
+    return envVal === "1" || envVal.toLowerCase() === "true";
+  }
+  return coerceConfigBoolean(config.annotateHistory, true);
+}
+
+/**
+ * Resolve whether submitted feedback is archived under feedback/.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_FEEDBACK_HISTORY env var  →  config.feedbackHistory  →  default true
+ *
+ * Deliberately a separate knob from annotateHistory: that one governs copying
+ * ANNOTATED CONTENT into the data dir, this one governs keeping the user's own
+ * SUBMISSIONS, and a code-review user must be able to control the second
+ * without touching the first. Annotate surfaces honor both.
+ */
+export function resolveFeedbackHistory(config: PlannotatorConfig): boolean {
+  const envVal = process.env.PLANNOTATOR_FEEDBACK_HISTORY;
+  if (envVal !== undefined) {
+    return envVal === "1" || envVal.toLowerCase() === "true";
+  }
+  return coerceConfigBoolean(config.feedbackHistory, true);
+}
+
+/**
+ * Resolve whether successful Guided Reviews are persisted to disk.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_GUIDE_HISTORY env var  →  config.guideHistory  →  default true
+ */
+export function resolveGuideHistory(config: PlannotatorConfig): boolean {
+  const envVal = process.env.PLANNOTATOR_GUIDE_HISTORY;
+  if (envVal !== undefined) {
+    return envVal === "1" || envVal.toLowerCase() === "true";
+  }
+  return coerceConfigBoolean(config.guideHistory, true);
+}
+
+/**
+ * Resolve whether code review persists viewed-file progress across sessions.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_REVIEW_PROGRESS env var  →  config.reviewProgress  →  default true
+ *
+ * Env `0` / `false` / `off` / `disabled` turn it off and `1` / `true` / `on`
+ * turn it on; an empty (or unrecognized) value counts as unset, so the config
+ * key still decides.
+ */
+export function resolveReviewProgress(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const v = env.PLANNOTATOR_REVIEW_PROGRESS?.trim().toLowerCase();
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  if (v === "1" || v === "true" || v === "on") return true;
+  return coerceConfigBoolean(config.reviewProgress, true);
+}
+
+/**
+ * Resolve whether the compiled CLI keeps itself up to date in the background.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_AUTO_UPDATE env var  →  config.autoUpdate  →  default false
+ *
+ * Env `1` / `true` / `on` turn it on and `0` / `false` / `off` / `disabled`
+ * turn it off; an empty or unrecognized value counts as unset.
+ */
+export function resolveAutoUpdate(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const fromEnv = parseAutoUpdateEnv(env);
+  if (fromEnv !== undefined) return fromEnv;
+  return coerceConfigBoolean(config.autoUpdate, false);
+}
+
+/**
+ * Resolve whether Plannotator checks for a newer release and shows update
+ * notices (default on; this is the opt-out). Off also stops auto-update,
+ * which needs the check.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_UPDATE_CHECK env var  →  config.updateCheck  →  default true
+ *
+ * Env `0` / `false` / `off` / `disabled` turn it off and `1` / `true` / `on`
+ * turn it on; an empty or unrecognized value counts as unset.
+ */
+export function resolveUpdateCheck(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const fromEnv = parseUpdateCheckEnv(env);
+  if (fromEnv !== undefined) return fromEnv;
+  return coerceConfigBoolean(config.updateCheck, true);
+}
+
+/** The PLANNOTATOR_UPDATE_CHECK override, or undefined when it does not decide. */
+export function parseUpdateCheckEnv(env: NodeJS.ProcessEnv = process.env): boolean | undefined {
+  const v = env.PLANNOTATOR_UPDATE_CHECK?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return undefined;
+}
+
+/**
+ * Resolve whether the Claude Code mod is on (default on; this is the opt-out).
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_CLAUDE_MOD env var  →  config.claudeCodeMod  →  default true
+ *
+ * Env `1` / `true` / `on` turn it on and `0` / `false` / `off` / `disabled`
+ * turn it off; an empty or unrecognized value counts as unset. The mod is a
+ * hooks module that cannot import this file, so it carries a mirror
+ * (`apps/hook/hooks/mod/enabled.ts`) that `enabled.test.ts` keeps in step.
+ */
+export function resolveClaudeCodeMod(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const v = env.PLANNOTATOR_CLAUDE_MOD?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return coerceConfigBoolean(config.claudeCodeMod, true);
+}
+
+/**
+ * The hosts that register the `plannotator` agent tool. `oh-my-pi` is the Pi
+ * extension running inside Oh My Pi (a Pi fork), which the extension tells
+ * from plain Pi itself (`apps/pi-extension/pi-host.ts`): it is the same
+ * extension and the same session bridge (host `pi`), with its own default.
+ */
+export type AgentToolHost = "claude-code" | "pi" | "oh-my-pi" | "opencode";
+
+/**
+ * Whether each host registers the `plannotator` agent tool when nothing is
+ * set: the owner's call, and the one place it lives. On for the Claude Code
+ * mod (the tool is deferred behind tool search there, so it costs only its
+ * name until used) and for Oh My Pi (owner's call 2026-10-12: OMP lists an
+ * extension tool as one line in its system prompt, about 50 tokens, and loads
+ * the schema only when the model reads it); off on Pi and OpenCode 2 (a full
+ * tool definition, about 780 tokens, in every request). The mod's mirror
+ * (`apps/hook/hooks/mod/enabled.ts`) is kept equal to the claude-code entry by
+ * `enabled.test.ts`.
+ */
+export const AGENT_TOOL_DEFAULTS: Readonly<Record<AgentToolHost, boolean>> = {
+  "claude-code": true,
+  pi: false,
+  "oh-my-pi": true,
+  opencode: false,
+};
+
+/**
+ * The tool host for a server's launching integration, or null. Callers pass
+ * the session-bridge host that started the server (the Claude Code mod and
+ * the OpenCode 2 plugin hand one to the CLI), or, for the servers that run
+ * inside the Pi extension, the extension's own host (`pi` or `oh-my-pi`).
+ * Never the agent origin: an origin of claude-code or opencode also covers
+ * the classic hook and OpenCode 1, which have no tool, and the CLI's origin
+ * `oh-my-pi` is a `plannotator` run from OMP's shell, which has none either
+ * (the CLI only ever passes a session-bridge host, which is never `oh-my-pi`).
+ */
+export function agentToolHostOf(host: string | null | undefined): AgentToolHost | null {
+  return host === "claude-code" || host === "pi" || host === "oh-my-pi" || host === "opencode" ? host : null;
+}
+
+/** The PLANNOTATOR_AGENT_TOOL override, or undefined when it does not decide. */
+export function parseAgentToolEnv(env: NodeJS.ProcessEnv = process.env): boolean | undefined {
+  const v = env.PLANNOTATOR_AGENT_TOOL?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return undefined;
+}
+
+/**
+ * Resolve whether `host` registers the `plannotator` agent tool.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_AGENT_TOOL env var  →  config.agentTool  →  AGENT_TOOL_DEFAULTS[host]
+ *
+ * Env `1` / `true` / `on` turn it on and `0` / `false` / `off` / `disabled`
+ * turn it off; an empty or unrecognized value counts as unset. The env var and
+ * the config key override the host default in both directions. Hosts call it
+ * ONCE per session start and never again for that session: the tool list is
+ * part of the model's prompt, so changing it mid-session would change the
+ * prompt prefix (and miss the cache). A change applies to the next session.
+ */
+export function resolveAgentTool(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv,
+  host: AgentToolHost,
+): boolean {
+  return parseAgentToolEnv(env) ?? parseConfigBoolean(config.agentTool) ?? AGENT_TOOL_DEFAULTS[host];
+}
+
+/**
+ * The hosts that register the Inbox's `plannotator_inbox` tool. The Pi
+ * extension registers it as `pi` in Oh My Pi too: OMP has no Inbox host key
+ * of its own (yet), so `inboxTool.pi` and the Pi default decide there.
+ */
+export type InboxToolHost = "claude-code" | "pi" | "opencode";
+
+/**
+ * Whether each host registers the Inbox's `plannotator_inbox` tool when
+ * nothing is set: the agent tool's rule (on for the Claude Code mod, where
+ * tools are deferred behind tool search; off on Pi and OpenCode 2, which send
+ * every tool's full definition with each request).
+ */
+export const INBOX_TOOL_DEFAULTS: Readonly<Record<InboxToolHost, boolean>> = {
+  "claude-code": AGENT_TOOL_DEFAULTS["claude-code"],
+  pi: AGENT_TOOL_DEFAULTS.pi,
+  opencode: AGENT_TOOL_DEFAULTS.opencode,
+};
+
+export const INBOX_TOOL_HOSTS: readonly InboxToolHost[] = ["claude-code", "pi", "opencode"];
+
+/** The PLANNOTATOR_INBOX_TOOL override, or undefined when it does not decide. */
+export function parseInboxToolEnv(env: NodeJS.ProcessEnv = process.env): boolean | undefined {
+  const v = env.PLANNOTATOR_INBOX_TOOL?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return undefined;
+}
+
+/** config.inboxTool for one host: the shared boolean, the host's own entry, or undefined. */
+export function configuredInboxTool(config: PlannotatorConfig, host: InboxToolHost): boolean | undefined {
+  const value = config.inboxTool;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return parseConfigBoolean((value as Record<string, unknown>)[host]);
+  }
+  return parseConfigBoolean(value);
+}
+
+/**
+ * Resolve whether `host` registers the Inbox tool. Priority (highest wins):
+ * PLANNOTATOR_INBOX_TOOL → config.inboxTool (shared or per host) →
+ * INBOX_TOOL_DEFAULTS[host]. Hosts call it once per session start, like
+ * resolveAgentTool, so a change applies to the next session.
+ */
+export function resolveInboxTool(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv,
+  host: InboxToolHost,
+): boolean {
+  return parseInboxToolEnv(env) ?? configuredInboxTool(config, host) ?? INBOX_TOOL_DEFAULTS[host];
+}
+
+/** config.inboxReminder for one host: the shared boolean, the host's own entry, or undefined. */
+export function configuredInboxReminder(config: PlannotatorConfig, host: InboxToolHost): boolean | undefined {
+  const value = config.inboxReminder;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return parseConfigBoolean((value as Record<string, unknown>)[host]);
+  }
+  return parseConfigBoolean(value);
+}
+
+/**
+ * Resolve whether a `host` session starts with the Inbox's one-line reminder
+ * (INBOX_REMINDER_TEXT): only where that session gets the Inbox tool
+ * (resolveInboxTool), then config.inboxReminder (shared or per host), on by
+ * default. No env var of its own: PLANNOTATOR_INBOX_TOOL decides it through
+ * the tool. Hosts call it once per session start, with the tool.
+ */
+export function resolveInboxReminder(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv,
+  host: InboxToolHost,
+): boolean {
+  return resolveInboxTool(config, env, host) && (configuredInboxReminder(config, host) ?? true);
+}
+
+/**
+ * Resolve whether the Plannotator Inbox serves phones (pairing, the device
+ * door, the tailnet and Wi-Fi listeners, the relay, Settings' Phones block).
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_INBOX_PHONES env var  →  config.inboxPhones  →  default false
+ *
+ * Env `1` / `true` / `on` turn it on and `0` / `false` / `off` / `disabled`
+ * turn it off; an empty or unrecognized value counts as unset. Off until the
+ * iPhone app ships: the Inbox then does nothing phone-related at all.
+ */
+export function resolveInboxPhones(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const v = env.PLANNOTATOR_INBOX_PHONES?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return coerceConfigBoolean(config.inboxPhones, false);
+}
+
+/** The PLANNOTATOR_INBOX_TAILSCALE override, or undefined when it does not decide. */
+export function parseInboxTailscaleEnv(env: NodeJS.ProcessEnv = process.env): boolean | undefined {
+  const v = env.PLANNOTATOR_INBOX_TAILSCALE?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return undefined;
+}
+
+export type InboxTailscaleSource = "flag" | "env" | "config" | "default";
+
+/**
+ * Resolve whether the Plannotator Inbox publishes itself over the tailnet.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_INBOX_TAILSCALE  →  `plannotator inbox --tailscale` (this run,
+ *   also the control route)  →  config.inboxTailscale  →  default false
+ *
+ * The env var is a hard switch: `0` / `false` / `off` / `disabled` keeps it
+ * off even against the flag, `1` / `true` / `on` keeps it on; an empty or
+ * unrecognized value counts as unset. The flag only turns it on.
+ */
+export function resolveInboxTailscale(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+  flag = false,
+): { on: boolean; source: InboxTailscaleSource } {
+  const fromEnv = parseInboxTailscaleEnv(env);
+  if (fromEnv !== undefined) return { on: fromEnv, source: "env" };
+  if (flag) return { on: true, source: "flag" };
+  const fromConfig = parseConfigBoolean(config.inboxTailscale);
+  if (fromConfig !== undefined) return { on: fromConfig, source: "config" };
+  return { on: false, source: "default" };
+}
+
+/**
+ * config.inboxTailscaleAllow, normalized: trimmed, lower-cased (logins are
+ * compared case-insensitively), deduplicated. Entries that are not strings,
+ * are empty, or carry whitespace or control characters are dropped: a login
+ * is one token.
+ */
+export function resolveInboxTailscaleAllow(config: PlannotatorConfig): string[] {
+  const value = config.inboxTailscaleAllow;
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const login = entry.trim().toLowerCase();
+    if (login === "" || /[\s\u0000-\u001f\u007f]/.test(login) || out.includes(login)) continue;
+    out.push(login);
+  }
+  return out;
+}
+
+/**
+ * After a POST /api/config saveConfig: whether an `agentTool` change did NOT
+ * reach config.json. saveConfig logs a write failure and returns normally, so
+ * the handlers check the file and answer 500 instead of `ok`: the one-time
+ * "turn the tool on" offer and the Settings switch then report that nothing
+ * changed rather than promising the tool in the next session.
+ */
+export function agentToolSaveFailed(toSave: { agentTool?: unknown }): boolean {
+  if (typeof toSave.agentTool !== "boolean") return false;
+  return parseConfigBoolean(loadConfig().agentTool) !== toSave.agentTool;
+}
+
+/** The PLANNOTATOR_AUTO_UPDATE override, or undefined when it does not decide. */
+export function parseAutoUpdateEnv(env: NodeJS.ProcessEnv = process.env): boolean | undefined {
+  const v = env.PLANNOTATOR_AUTO_UPDATE?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return undefined;
+}
+
 export function resolveUseJina(cliNoJina: boolean, config: PlannotatorConfig): boolean {
   // CLI flag has highest priority
   if (cliNoJina) return false;
@@ -253,9 +1292,286 @@ export function resolveUseJina(cliNoJina: boolean, config: PlannotatorConfig): b
     return envVal === "1" || envVal.toLowerCase() === "true";
   }
 
-  // Config file
-  if (config.jina !== undefined) return config.jina;
+  // Config file (default: enabled)
+  return coerceConfigBoolean(config.jina, true);
+}
 
-  // Default: enabled
+/**
+ * Resolve whether URL sharing is enabled.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_SHARE env var  →  config.share  →  default true
+ */
+export function resolveSharingEnabled(config: PlannotatorConfig, env: NodeJS.ProcessEnv = process.env): boolean {
+  const envVal = env.PLANNOTATOR_SHARE;
+  if (envVal !== undefined) return envVal !== "disabled";
+  if (config.share !== undefined) return config.share !== "disabled";
   return true;
 }
+
+/** Where shared Guided Reviews are uploaded by default (guide share hosting contract, §7). */
+export const DEFAULT_GUIDE_SHARE_URL = "https://guides.show";
+
+/**
+ * Validate and normalize a guide share service URL: http(s) only, credentials,
+ * query and fragment dropped, trailing slashes trimmed so callers can append
+ * `/api/g`. Null when the value must not be used.
+ */
+export function normalizeGuideShareUrl(input: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(input.trim());
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  const path = parsed.pathname.replace(/\/+$/, "");
+  return `${parsed.protocol}//${parsed.host}${path}`;
+}
+
+const warnedInvalidGuideShareUrls = new Set<string>();
+
+/**
+ * Resolve the guide host that guide share links are created on.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_GUIDE_SHARE_URL env var  →  config.guideShareUrl  →  https://guides.show
+ *
+ * An empty (but set) env var counts as unset. A value that is not an http(s)
+ * URL warns once per value on stderr and falls back to the default: a share
+ * setting must never break a server launch or a CLI run. Whether sharing is
+ * allowed at all is a separate question (`resolveSharingEnabled`).
+ */
+export function resolveGuideShareUrl(config: PlannotatorConfig, env: NodeJS.ProcessEnv = process.env): string {
+  const envVal = env.PLANNOTATOR_GUIDE_SHARE_URL;
+  const raw = envVal !== undefined && envVal.trim() !== "" ? envVal : config.guideShareUrl;
+  if (typeof raw !== "string" || raw.trim() === "") return DEFAULT_GUIDE_SHARE_URL;
+  const normalized = normalizeGuideShareUrl(raw);
+  if (normalized) return normalized;
+  if (!warnedInvalidGuideShareUrls.has(raw)) {
+    warnedInvalidGuideShareUrls.add(raw);
+    process.stderr.write(
+      `[plannotator] Warning: invalid guide share URL ${JSON.stringify(raw)} — expected an http(s) URL; using ${DEFAULT_GUIDE_SHARE_URL}\n`,
+    );
+  }
+  return DEFAULT_GUIDE_SHARE_URL;
+}
+
+// Bare hostname or IPv4: letters/digits/dots/hyphens, no leading/trailing
+// dot or hyphen. Covers MagicDNS names ("my-machine.tailnet.ts.net").
+const URL_HOST_HOSTNAME_RE = /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/;
+// Bracketed IPv6 literal, e.g. [fd7a::1]; dots allow IPv4-mapped forms.
+const URL_HOST_IPV6_RE = /^\[[0-9A-Fa-f:.]+\]$/;
+
+/**
+ * Validate a display host for advertised URLs. Host only: anything carrying a
+ * scheme, path, query, credentials, whitespace, or a port (":" outside IPv6
+ * brackets — the runtime-chosen port is always appended) is rejected.
+ */
+export function isValidUrlHost(host: string): boolean {
+  return URL_HOST_HOSTNAME_RE.test(host) || URL_HOST_IPV6_RE.test(host);
+}
+
+const warnedInvalidUrlHosts = new Set<string>();
+
+/**
+ * Resolve the display-only hostname used in advertised session URLs.
+ * Returns undefined when unset (callers advertise localhost). An empty (but
+ * set) env var suppresses the config key. Callers apply this only to remote
+ * sessions; local sessions ignore it (see buildAdvertisedUrl).
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_URL_HOST env var  →  config.urlHost  →  undefined
+ *
+ * An invalid value warns once per value on stderr and falls back to
+ * localhost — a display setting must never crash a server launch. The echoed
+ * value is JSON-encoded so an embedded newline cannot forge extra stderr
+ * lines (hosts surface "Plannotator session ready" lines as clickable links).
+ *
+ * The sentinel "auto" is returned verbatim (it matches the hostname shape);
+ * the advertised-URL layer resolves it via Tailscale detection
+ * (packages/server/remote.ts and the Pi network.ts mirror).
+ */
+export function resolveUrlHost(config: PlannotatorConfig): string | undefined {
+  const envVal = process.env.PLANNOTATOR_URL_HOST;
+  const raw = envVal !== undefined ? envVal : config.urlHost;
+  if (typeof raw !== "string") return undefined;
+  const host = raw.trim();
+  if (host === "") return undefined;
+  if (isValidUrlHost(host)) return host;
+  if (!warnedInvalidUrlHosts.has(host)) {
+    warnedInvalidUrlHosts.add(host);
+    process.stderr.write(
+      `[plannotator] Warning: invalid advertised URL host ${JSON.stringify(host)} — expected a bare hostname, IPv4, or bracketed IPv6 (no scheme, port, or path); using localhost\n`,
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Resolve whether Plannotator-managed AI features are enabled.
+ *
+ * Set PLANNOTATOR_AI=disabled to prevent provider runtime initialization and
+ * hide the corresponding UI. External agents may still open Plannotator as a
+ * review surface and submit annotations through the external annotation API.
+ */
+export function resolveAIEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return env.PLANNOTATOR_AI?.toLowerCase() !== "disabled";
+}
+
+/**
+ * Resolve whether Cursor review jobs pass `--sandbox enabled` to the `agent` CLI.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_CURSOR_SANDBOX env var  →  config.cursorSandbox  →  default true
+ *
+ * Env values `0` / `false` / `disabled` turn the flag off (the pair is omitted
+ * from the argv, deferring to the user's own Cursor Agent configuration);
+ * anything else — including `1` / `true` / `enabled` — keeps the default.
+ */
+export function resolveCursorSandbox(config: PlannotatorConfig): boolean {
+  const envVal = process.env.PLANNOTATOR_CURSOR_SANDBOX;
+  if (envVal !== undefined) {
+    const v = envVal.toLowerCase();
+    return v !== "0" && v !== "false" && v !== "disabled";
+  }
+  return coerceConfigBoolean(config.cursorSandbox, true);
+}
+
+/**
+ * Resolve whether Claude Code review jobs defer to the user's own Claude Code
+ * sandbox setting (true) or run with the sandbox turned off for the job (false).
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_CLAUDE_SANDBOX env var  →  config.claudeSandbox  →  default true
+ *
+ * Env values `0` / `false` / `disabled` turn it off; anything else keeps the
+ * default. See `claudeSandbox` on PlannotatorConfig for why (#1627).
+ */
+export function resolveClaudeSandbox(config: PlannotatorConfig): boolean {
+  const envVal = process.env.PLANNOTATOR_CLAUDE_SANDBOX;
+  if (envVal !== undefined) {
+    const v = envVal.toLowerCase();
+    return v !== "0" && v !== "false" && v !== "disabled";
+  }
+  return coerceConfigBoolean(config.claudeSandbox, true);
+}
+
+/**
+ * Resolve whether code review may query the git remote (issue #1553).
+ *
+ * Priority (highest wins):
+ *   `review --no-git-remote-check`  →  PLANNOTATOR_GIT_REMOTE_CHECK env var
+ *   →  config.gitRemoteCheck  →  default true
+ *
+ * Env values `0` / `false` / `disabled` turn the remote check off; anything
+ * else — including `1` / `true` — keeps it on. "Off" means the whole session
+ * makes no `ls-remote` call at all, startup probes included: the compare
+ * target stays whatever local ref discovery resolved, and the
+ * behind-the-remote banner never shows (and with it the one-click Fetch it
+ * carries). `POST /api/fetch-base` stays reachable on its own predicate: an
+ * explicit Fetch is the user asking for the network.
+ */
+export function resolveGitRemoteCheck(
+  cliNoGitRemoteCheck: boolean,
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (cliNoGitRemoteCheck) return false;
+  const envVal = env.PLANNOTATOR_GIT_REMOTE_CHECK;
+  if (envVal !== undefined) {
+    const v = envVal.trim().toLowerCase();
+    return v !== "0" && v !== "false" && v !== "disabled";
+  }
+  return coerceConfigBoolean(config.gitRemoteCheck, true);
+}
+
+/**
+ * Resolve whether the approved plan checklist is mirrored into an editable todo
+ * provider during execution.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_TODO_PROVIDER env var  →  config.todoProvider  →  default auto
+ *
+ * Env values `off` / `0` / `false` / `disabled` turn the mirror off, matching
+ * the vocabulary the other flags accept; anything else — including `auto` —
+ * keeps it on. Enabled only means "sync when a provider is detected": with no
+ * provider present, the progress widget is the whole experience either way.
+ */
+export function resolveTodoProviderEnabled(config: PlannotatorConfig): boolean {
+  const envVal = process.env.PLANNOTATOR_TODO_PROVIDER;
+  if (envVal !== undefined) {
+    const v = envVal.toLowerCase();
+    return v !== "off" && v !== "0" && v !== "false" && v !== "disabled";
+  }
+  if (config.todoProvider !== undefined) return config.todoProvider !== "off";
+  return true;
+}
+
+/** Default Bitbucket Cloud REST API base. */
+export const DEFAULT_BITBUCKET_API_URL = "https://api.bitbucket.org/2.0";
+
+/** Resolved Bitbucket Cloud credentials. Never log `token`. */
+export interface BitbucketCredentials {
+  /** Atlassian account email for basic auth; absent means Bearer auth. */
+  email?: string;
+  token: string;
+}
+
+/**
+ * Resolve Bitbucket Cloud API credentials.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_BITBUCKET_TOKEN / _EMAIL env vars  →  config.bitbucketToken / bitbucketEmail
+ *
+ * The token and email are resolved together from one source: an env token
+ * never pairs with a config-file email (a stale email would turn a valid
+ * Bearer token into failing basic auth). Empty values count as unset.
+ * Returns null when no token is configured.
+ */
+export function resolveBitbucketCredentials(
+  config: PlannotatorConfig,
+  env: Record<string, string | undefined> = process.env,
+): BitbucketCredentials | null {
+  const clean = (v: unknown): string | undefined =>
+    typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
+  const envToken = clean(env.PLANNOTATOR_BITBUCKET_TOKEN);
+  if (envToken) {
+    const email = clean(env.PLANNOTATOR_BITBUCKET_EMAIL);
+    return { token: envToken, ...(email ? { email } : {}) };
+  }
+  const cfgToken = clean(config.bitbucketToken);
+  if (cfgToken) {
+    const email = clean(config.bitbucketEmail);
+    return { token: cfgToken, ...(email ? { email } : {}) };
+  }
+  return null;
+}
+
+/**
+ * Resolve the Bitbucket Cloud REST API base URL. PLANNOTATOR_BITBUCKET_API_URL
+ * overrides the default for tests (a local fake API) and proxies. Credentials
+ * are sent to this URL, so anything that is not `https:` — or `http:` on a
+ * loopback host — is refused with a warning and the default is used.
+ */
+export function resolveBitbucketApiUrl(env: Record<string, string | undefined> = process.env): string {
+  const raw = env.PLANNOTATOR_BITBUCKET_API_URL?.trim();
+  if (!raw) return DEFAULT_BITBUCKET_API_URL;
+  try {
+    const u = new URL(raw);
+    const loopback = u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]";
+    if ((u.protocol === "https:" || (u.protocol === "http:" && loopback)) && !u.username && !u.password) {
+      return `${u.origin}${u.pathname.replace(/\/+$/, "")}`;
+    }
+  } catch { /* fall through */ }
+  if (!warnedBitbucketApiUrls.has(raw)) {
+    warnedBitbucketApiUrls.add(raw);
+    console.error(
+      `[plannotator] Ignoring PLANNOTATOR_BITBUCKET_API_URL: must be an https URL (or http on localhost). Using ${DEFAULT_BITBUCKET_API_URL}.`,
+    );
+  }
+  return DEFAULT_BITBUCKET_API_URL;
+}
+const warnedBitbucketApiUrls = new Set<string>();

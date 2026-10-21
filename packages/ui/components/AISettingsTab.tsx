@@ -1,15 +1,16 @@
 import type React from 'react';
 import { getProviderMeta } from './ProviderIcons';
+import { ModelSourceHint, modelSourceToolForProvider } from './ModelSourceHint';
 import {
+  findSessionBridge,
   getAIProviderSettings,
-  resolveAIModelForProvider,
   resolveAIProviderSelection,
   saveAIProviderSelection,
   savePreferredModel,
   type AIProviderOption,
 } from '../utils/aiProvider';
 import { useState } from 'react';
-import type { Origin } from '@plannotator/shared/agents';
+import type { Origin } from '@plannotator/core/agents';
 
 interface AIProvider extends AIProviderOption {
   capabilities: Record<string, boolean>;
@@ -37,9 +38,11 @@ export const AISettingsTab: React.FC<AISettingsTabProps> = ({
 
   const handleSelectProvider = (providerId: string) => {
     onProviderChange(providerId);
-    const provider = providers.find(p => p.id === providerId) ?? null;
-    const model = resolveAIModelForProvider(provider, getAIProviderSettings().preferredModels);
-    saveAIProviderSelection({ providerId, model, origin });
+    // Persist only the provider choice. Writing the resolved model here would
+    // clobber a saved preference the currently-advertised model list doesn't
+    // include (e.g. before deferred Codex discovery has run) with the static
+    // fallback id — the saved model only changes when the user picks one.
+    saveAIProviderSelection({ providerId, model: null, origin });
   };
 
   const handleModelChange = (providerId: string, modelId: string) => {
@@ -63,6 +66,37 @@ export const AISettingsTab: React.FC<AISettingsTabProps> = ({
     );
   }
 
+  // "Ask this session": the session that opened Plannotator answers Ask AI and
+  // nothing else is offered. Nothing here writes a preference, so a saved
+  // provider still applies to sessions that have no attached session.
+  const sessionBridge = findSessionBridge(providers);
+  if (sessionBridge) {
+    const meta = getProviderMeta(sessionBridge.name, sessionBridge.label);
+    const Icon = meta.icon;
+    return (
+      <>
+        <div>
+          <div className="text-sm font-medium">AI Provider</div>
+          <div className="text-xs text-muted-foreground">
+            Ask AI is answered by the agent session that opened Plannotator.
+          </div>
+        </div>
+        <div
+          className="flex items-center gap-3 p-3 rounded-lg border border-primary bg-primary/5"
+          data-ai-settings-session-bridge
+        >
+          <div className="w-6 h-6 rounded-md bg-muted flex items-center justify-center text-muted-foreground">
+            <Icon className="w-4 h-4" />
+          </div>
+          <div className="text-sm font-medium">{meta.label}</div>
+        </div>
+        <div className="text-[10px] text-muted-foreground/70">
+          Your provider choice applies when Plannotator is opened without an attached session.
+        </div>
+      </>
+    );
+  }
+
   return (
     <>
       <div>
@@ -74,7 +108,7 @@ export const AISettingsTab: React.FC<AISettingsTabProps> = ({
 
       <div className="space-y-2">
         {providers.map((p) => {
-          const meta = getProviderMeta(p.name);
+          const meta = getProviderMeta(p.name, p.label);
           const Icon = meta.icon;
           const isSelected = effectiveSelection === p.id;
           const models = p.models ?? [];
@@ -120,6 +154,11 @@ export const AISettingsTab: React.FC<AISettingsTabProps> = ({
                       ))}
                     </select>
                   </label>
+                  <ModelSourceHint
+                    tool={modelSourceToolForProvider(p.name)}
+                    info={p}
+                    className="mt-1.5 text-[10px] text-muted-foreground/60"
+                  />
                 </div>
               )}
 

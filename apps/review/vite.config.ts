@@ -5,6 +5,7 @@ import { viteSingleFile } from 'vite-plugin-singlefile';
 import tailwindcss from '@tailwindcss/vite';
 import pkg from '../../package.json';
 import { DEMO_FILE_CONTENTS } from '../../packages/review-editor/demoData';
+import { katexWoff2Only } from '../../build/katex-woff2-only';
 
 function demoFileContentPlugin(): Plugin {
   return {
@@ -30,15 +31,33 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
-  plugins: [demoFileContentPlugin(), react(), tailwindcss(), viteSingleFile()],
+  plugins: [demoFileContentPlugin(), react(), tailwindcss(), katexWoff2Only(), viteSingleFile()],
   resolve: {
     alias: {
+      // Drop the dead Oniguruma WASM (~622 KB base64, inlined twice here: main
+      // thread + worker). See build/shiki-wasm-stub.ts. `resolve.alias` is
+      // shared with the worker build below; `plugins` would not be.
+      'shiki/wasm': path.resolve(__dirname, '../../build/shiki-wasm-stub.ts'),
       '@': path.resolve(__dirname, '.'),
       '@plannotator/shared': path.resolve(__dirname, '../../packages/shared'),
       '@plannotator/ui': path.resolve(__dirname, '../../packages/ui'),
       '@plannotator/review-editor/styles': path.resolve(__dirname, '../../packages/review-editor/index.css'),
+      '@plannotator/review-editor/worker-pool': path.resolve(__dirname, '../../packages/review-editor/workerPool.tsx'),
       '@plannotator/review-editor': path.resolve(__dirname, '../../packages/review-editor/App.tsx'),
     }
+  },
+  // The Pierre highlight worker (?worker&inline) contains a dynamic
+  // import("shiki/wasm") branch (aliased to a stub above, but still a dynamic
+  // import edge); iife (Vite's default worker format) can't code-split, so
+  // emit the worker as ES with dynamic imports collapsed into the single
+  // inlined bundle.
+  worker: {
+    format: 'es',
+    rollupOptions: {
+      output: {
+        inlineDynamicImports: true,
+      },
+    },
   },
   build: {
     target: 'esnext',

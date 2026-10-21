@@ -1,4 +1,9 @@
 import React from 'react';
+import { Button } from './ui/button';
+import { cn } from '../lib/utils';
+import { Send, Check, X } from 'lucide-react';
+
+type ToolbarLabelBreakpoint = 'md' | 'lg';
 
 interface FeedbackButtonProps {
   onClick: () => void;
@@ -9,7 +14,7 @@ interface FeedbackButtonProps {
   loadingLabel?: string;
   shortLoadingLabel?: string;
   title?: string;
-  muted?: boolean;
+  labelBreakpoint?: ToolbarLabelBreakpoint;
 }
 
 export const FeedbackButton: React.FC<FeedbackButtonProps> = ({
@@ -21,32 +26,31 @@ export const FeedbackButton: React.FC<FeedbackButtonProps> = ({
   loadingLabel = 'Sending...',
   shortLoadingLabel,
   title = 'Send Feedback',
-  muted = false,
+  labelBreakpoint = 'md',
 }) => (
-  <button
+  <Button
+    variant="outline"
+    size="xs"
     onClick={onClick}
     disabled={disabled}
-    className={`p-1.5 md:px-2.5 md:py-1 rounded-md text-xs font-medium transition-all ${
-      muted
-        ? 'opacity-50 cursor-not-allowed bg-accent/10 text-accent/50'
-        : disabled
-          ? 'opacity-50 cursor-not-allowed bg-muted text-muted-foreground'
-          : 'bg-accent/15 text-accent hover:bg-accent/25 border border-accent/30'
-    }`}
     title={title}
+    iconLeft={<Send className="size-3.5" />}
   >
-    <svg className="w-4 h-4 md:hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-    </svg>
     {shortLabel ? (
       <>
-        <span className="hidden md:inline lg:hidden">{isLoading ? (shortLoadingLabel ?? loadingLabel) : shortLabel}</span>
-        <span className="hidden lg:inline">{isLoading ? loadingLabel : label}</span>
+        <span className={labelBreakpoint === 'lg' ? 'hidden lg:inline xl:hidden' : 'hidden md:inline lg:hidden'}>
+          {isLoading ? (shortLoadingLabel ?? loadingLabel) : shortLabel}
+        </span>
+        <span className={labelBreakpoint === 'lg' ? 'hidden xl:inline' : 'hidden lg:inline'}>
+          {isLoading ? loadingLabel : label}
+        </span>
       </>
     ) : (
-      <span className="hidden md:inline">{isLoading ? loadingLabel : label}</span>
+      <span className={labelBreakpoint === 'lg' ? 'hidden lg:inline' : 'hidden md:inline'}>
+        {isLoading ? loadingLabel : label}
+      </span>
     )}
-  </button>
+  </Button>
 );
 
 export interface ApproveButtonProps {
@@ -58,8 +62,11 @@ export interface ApproveButtonProps {
   mobileLabel?: string;
   mobileLoadingLabel?: string;
   title?: string;
+  /** Kept for plan mode (packages/editor AppHeader) — the softened "you have
+   *  annotations" treatment. The old platform-mode `muted` prop died with
+   *  PR6 (DecisionControl owns the self-approval mute now). */
   dimmed?: boolean;
-  muted?: boolean;
+  labelBreakpoint?: ToolbarLabelBreakpoint;
 }
 
 export const ApproveButton: React.FC<ApproveButtonProps> = ({
@@ -72,25 +79,27 @@ export const ApproveButton: React.FC<ApproveButtonProps> = ({
   mobileLoadingLabel = '...',
   title,
   dimmed = false,
-  muted = false,
+  labelBreakpoint = 'md',
 }) => (
-  <button
+  <Button
+    variant="success"
+    size="xs"
     onClick={onClick}
     disabled={disabled}
-    className={`px-2 py-1 md:px-2.5 rounded-md text-xs font-medium transition-all ${
-      muted
-        ? 'opacity-40 cursor-not-allowed bg-muted text-muted-foreground'
-        : disabled
-          ? 'opacity-50 cursor-not-allowed bg-muted text-muted-foreground'
-          : dimmed
-            ? 'bg-success/50 text-success-foreground/70 hover:bg-success hover:text-success-foreground'
-            : 'bg-success text-success-foreground hover:opacity-90'
-    }`}
     title={title}
+    iconLeft={<Check className="size-3.5" />}
+    className={cn(
+      disabled && 'bg-muted text-muted-foreground hover:bg-muted',
+      dimmed && !disabled && 'bg-success/50 text-success-foreground/70 hover:bg-success hover:text-success-foreground',
+    )}
   >
-    <span className="md:hidden">{isLoading ? mobileLoadingLabel : mobileLabel}</span>
-    <span className="hidden md:inline">{isLoading ? loadingLabel : label}</span>
-  </button>
+    <span className={labelBreakpoint === 'lg' ? 'lg:hidden' : 'md:hidden'}>
+      {isLoading ? mobileLoadingLabel : mobileLabel}
+    </span>
+    <span className={labelBreakpoint === 'lg' ? 'hidden lg:inline' : 'hidden md:inline'}>
+      {isLoading ? loadingLabel : label}
+    </span>
+  </Button>
 );
 
 interface ExitButtonProps {
@@ -98,6 +107,11 @@ interface ExitButtonProps {
   disabled?: boolean;
   isLoading?: boolean;
   title?: string;
+  labelBreakpoint?: ToolbarLabelBreakpoint;
+  /** `'ghost'` renders the icon-only ghost-X form that sits beside the
+   *  decision control. Default `'pill'` keeps every existing caller
+   *  byte-identical. */
+  appearance?: 'pill' | 'ghost';
 }
 
 export const ExitButton: React.FC<ExitButtonProps> = ({
@@ -105,18 +119,41 @@ export const ExitButton: React.FC<ExitButtonProps> = ({
   disabled = false,
   isLoading = false,
   title = 'Close session without sending feedback',
-}) => (
-  <button
+  labelBreakpoint = 'md',
+  appearance = 'pill',
+}) => appearance === 'ghost' ? (
+  <Button
+    variant="ghost"
+    size="xs"
     onClick={onClick}
     disabled={disabled || isLoading}
-    className={`px-2.5 py-1 rounded-md text-xs font-medium transition-all ${
-      disabled || isLoading
-        ? 'opacity-50 cursor-not-allowed bg-muted text-muted-foreground'
-        : 'bg-muted text-muted-foreground hover:bg-muted/80'
-    }`}
     title={title}
+    aria-label={title}
+    // Maintainer ruling (post-demo): a bare X carries "close without
+    // sending" semantics an unlabeled icon should not carry alone — the
+    // word renders at every breakpoint.
+    className="px-2 text-muted-foreground gap-1.5"
   >
-    <span className="md:hidden">{isLoading ? '...' : '✕'}</span>
-    <span className="hidden md:inline">{isLoading ? 'Closing...' : 'Close'}</span>
-  </button>
+    {isLoading ? '…' : (
+      <>
+        <X className="size-3.5" aria-hidden="true" />
+        <span>Close</span>
+      </>
+    )}
+  </Button>
+) : (
+  <Button
+    variant="secondary"
+    size="xs"
+    onClick={onClick}
+    disabled={disabled || isLoading}
+    title={title}
+    aria-label={title}
+    className="bg-muted text-muted-foreground hover:bg-muted/80"
+  >
+    <span className={labelBreakpoint === 'lg' ? 'lg:hidden' : 'md:hidden'}>
+      {isLoading ? '…' : <X className="size-3.5" aria-hidden="true" />}
+    </span>
+    <span className={labelBreakpoint === 'lg' ? 'hidden lg:inline' : 'hidden md:inline'}>{isLoading ? 'Closing...' : 'Close'}</span>
+  </Button>
 );

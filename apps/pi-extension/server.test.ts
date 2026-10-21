@@ -1,27 +1,78 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  canStageFiles,
   getGitContext,
   getVcsContext,
+  getVcsDiffFingerprint,
+  getVcsFileContentsForDiff,
   prepareLocalReviewDiff,
   runGitDiff,
+  runVcsDiff,
+  stageFile,
+  startAnnotateServer,
+  startPlanReviewServer,
   startReviewServer,
-} from "./server";
+  unstageFile,
+} from "./server.ts";
+import { WorkspaceReviewSession } from "./generated/review-workspace.ts";
+import { parseReviewArgs } from "./generated/review-args.ts";
+import { warmFileListCache } from "./generated/resolve-file.ts";
 
 const tempDirs: string[] = [];
 const originalCwd = process.cwd();
 const originalHome = process.env.HOME;
 const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
 const originalPort = process.env.PLANNOTATOR_PORT;
+const originalSemPath = process.env.PLANNOTATOR_SEM_PATH;
+const originalDataDir = process.env.PLANNOTATOR_DATA_DIR;
+const originalFileBrowserLimit = process.env.PLANNOTATOR_FILE_BROWSER_MAX_FILES;
+const originalPath = process.env.PATH;
 
 function makeTempDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   tempDirs.push(dir);
   return dir;
+}
+
+function linkDirectory(target: string, path: string): void {
+  symlinkSync(target, path, process.platform === "win32" ? "junction" : "dir");
+}
+
+function writeTempFile(root: string, relativePath: string, content = "x"): string {
+  const full = join(root, relativePath);
+  mkdirSync(join(full, ".."), { recursive: true });
+  writeFileSync(full, content, "utf-8");
+  return full;
+}
+
+interface PiTreeNode {
+  path: string;
+  type: "file" | "folder";
+  children?: PiTreeNode[];
+}
+
+function flattenTree(nodes: PiTreeNode[]): string[] {
+  const paths: string[] = [];
+  for (const node of nodes) {
+    if (node.type === "file") paths.push(node.path);
+    else paths.push(...flattenTree(node.children ?? []));
+  }
+  return paths;
 }
 
 function childEnv(): NodeJS.ProcessEnv {
@@ -60,6 +111,76 @@ function initRepo(): string {
   git(repoDir, ["commit", "-m", "initial"]);
 
   return repoDir;
+}
+
+function makeMockSem(dir: string, options: {
+  runCwdLogPath?: string;
+  inputLogPath?: string;
+} = {}): string {
+  const semPath = join(dir, "sem");
+  writeFileSync(
+    semPath,
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      'if [ "${1:-}" = "--version" ]; then',
+      '  echo "sem 0.8.0"',
+      "  exit 0",
+      "fi",
+      ...(options.runCwdLogPath ? [`pwd >> ${JSON.stringify(options.runCwdLogPath)}`] : []),
+      ...(options.inputLogPath ? [`cat > ${JSON.stringify(options.inputLogPath)}`] : ["cat >/dev/null"]),
+      "cat <<'JSON'",
+      JSON.stringify({
+        summary: { fileCount: 1, added: 1, modified: 0, deleted: 0, moved: 0, renamed: 0, reordered: 0, binary: 0, orphan: 0, total: 1 },
+        changes: [
+          {
+            entityId: "src/app.ts::function::created",
+            changeType: "added",
+            entityType: "function",
+            entityName: "created",
+            filePath: "src/app.ts",
+            startLine: 1,
+            endLine: 3,
+          },
+        ],
+        binaryChanges: [],
+      }),
+      "JSON",
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+  chmodSync(semPath, 0o755);
+  return semPath;
+}
+
+function makeBlockingSem(dir: string): { semPath: string; startedPath: string; releasePath: string } {
+  const semPath = join(dir, "sem-blocking");
+  const startedPath = join(dir, "started");
+  const releasePath = join(dir, "release");
+  writeFileSync(semPath, [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    'if [ "${1:-}" = "--version" ]; then',
+    `  : > ${JSON.stringify(startedPath)}`,
+    `  while [ ! -f ${JSON.stringify(releasePath)} ]; do sleep 0.02; done`,
+    '  echo "sem 0.8.0"',
+    "  exit 0",
+    "fi",
+    "cat >/dev/null",
+    "echo '{}'",
+    "",
+  ].join("\n"), "utf-8");
+  chmodSync(semPath, 0o755);
+  return { semPath, startedPath, releasePath };
+}
+
+async function waitForFile(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (existsSync(path)) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(`Timed out waiting for ${path}`);
 }
 
 function initJjRepo(): string {
@@ -108,6 +229,15 @@ function reservePort(): Promise<number> {
   });
 }
 
+// Sandbox every test's data dir so a contributor's ~/.plannotator/config.json
+// (e.g. reviewAnalysis.semanticDiff: false) can never change server behavior.
+// The root bunfig preload does this too, but not when bun runs from this
+// package directory (its own `bun test` script). Tests that need a specific
+// dir still override it; afterEach restores the original value.
+beforeEach(() => {
+  process.env.PLANNOTATOR_DATA_DIR = makeTempDir("plannotator-pi-server-data-");
+});
+
 afterEach(() => {
   process.chdir(originalCwd);
   if (originalHome === undefined) {
@@ -125,14 +255,920 @@ afterEach(() => {
   } else {
     process.env.PLANNOTATOR_PORT = originalPort;
   }
+  if (originalSemPath === undefined) {
+    delete process.env.PLANNOTATOR_SEM_PATH;
+  } else {
+    process.env.PLANNOTATOR_SEM_PATH = originalSemPath;
+  }
+  if (originalDataDir === undefined) {
+    delete process.env.PLANNOTATOR_DATA_DIR;
+  } else {
+    process.env.PLANNOTATOR_DATA_DIR = originalDataDir;
+  }
+  if (originalFileBrowserLimit === undefined) {
+    delete process.env.PLANNOTATOR_FILE_BROWSER_MAX_FILES;
+  } else {
+    process.env.PLANNOTATOR_FILE_BROWSER_MAX_FILES = originalFileBrowserLimit;
+  }
+  if (originalPath === undefined) {
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = originalPath;
+  }
 
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
+function observePiWarmState(projectRoot: string): Promise<"ready" | "warm"> {
+  const warm = warmFileListCache(projectRoot, "code").then(() => "warm" as const);
+  const ready = new Promise<"ready">((resolve) => {
+    queueMicrotask(() => resolve("ready"));
+  });
+  return Promise.race([warm, ready]);
+}
+
+async function expectPiReadyBeforeWarm(
+  start: () => Promise<{ url: string; stop(): void }>,
+): Promise<void> {
+  const projectRoot = makeTempDir("plannotator-pi-startup-warm-");
+  const dataRoot = makeTempDir("plannotator-pi-startup-data-");
+  writeTempFile(projectRoot, "document.md", "# Test\n");
+  writeTempFile(projectRoot, "source.ts", "export {};\n");
+  process.chdir(projectRoot);
+  process.env.PLANNOTATOR_DATA_DIR = dataRoot;
+  process.env.PLANNOTATOR_FILE_BROWSER_MAX_FILES = "1";
+  process.env.PLANNOTATOR_PORT = String(await reservePort());
+
+  const server = await start();
+  try {
+    expect(await observePiWarmState(process.cwd())).toBe("ready");
+    const response = await fetch(`${server.url}/api/plan`);
+    expect(response.status).toBe(200);
+  } finally {
+    server.stop();
+  }
+}
+
+describe("pi startup file-cache warm", () => {
+  test("plan server binds before its cache warm can settle", async () => {
+    await expectPiReadyBeforeWarm(() =>
+      startPlanReviewServer({
+        plan: "# Test plan",
+        origin: "pi",
+        htmlContent: "<!doctype html><html><body>plan</body></html>",
+      }),
+    );
+  });
+
+  test("annotate server binds before its cache warm can settle", async () => {
+    await expectPiReadyBeforeWarm(() =>
+      startAnnotateServer({
+        markdown: "# Test document",
+        filePath: join(process.cwd(), "document.md"),
+        htmlContent: "<!doctype html><html><body>annotate</body></html>",
+        origin: "pi",
+      }),
+    );
+  });
+});
+
+describe("pi annotate approval notes", () => {
+  test("returns the explicit approval-notes capability", async () => {
+    for (const approvalNotesSupported of [true, false]) {
+      delete process.env.PLANNOTATOR_PORT;
+      const server = await startAnnotateServer({
+        markdown: "# Test",
+        filePath: join(makeTempDir("plannotator-pi-approval-capability-"), "test.md"),
+        htmlContent: "<!doctype html><html><body>annotate</body></html>",
+        origin: "pi",
+        approvalNotesSupported,
+      });
+
+      try {
+        const response = await fetch(`${server.url}/api/plan`);
+        const plan = await response.json() as { approvalNotesSupported?: boolean };
+        expect(plan.approvalNotesSupported).toBe(approvalNotesSupported);
+      } finally {
+        server.stop();
+      }
+    }
+  });
+
+  test("preserves feedback and annotations on approval", async () => {
+    delete process.env.PLANNOTATOR_PORT;
+    const server = await startAnnotateServer({
+      markdown: "# Test",
+      filePath: join(makeTempDir("plannotator-pi-approval-notes-"), "test.md"),
+      htmlContent: "<!doctype html><html><body>annotate</body></html>",
+      origin: "pi",
+      approvalNotesSupported: true,
+    });
+
+    try {
+      const response = await fetch(`${server.url}/api/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          feedback: "Keep the retry bounded.",
+          annotations: [{ id: "a1" }],
+          draftGeneration: 3,
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(await server.waitForDecision()).toEqual({
+        approved: true,
+        feedback: "Keep the retry bounded.",
+        annotations: [{ id: "a1" }],
+      });
+    } finally {
+      server.stop();
+    }
+  });
+
+  // Pi resolves the anchor message from selectedMessageId/feedbackScope, so
+  // approve-with-notes has to carry them exactly like /api/feedback does.
+  test("forwards the message scope on approval", async () => {
+    delete process.env.PLANNOTATOR_PORT;
+    const server = await startAnnotateServer({
+      markdown: "# Test",
+      filePath: join(makeTempDir("plannotator-pi-approval-scope-"), "test.md"),
+      htmlContent: "<!doctype html><html><body>annotate</body></html>",
+      origin: "pi",
+      approvalNotesSupported: true,
+    });
+
+    try {
+      const response = await fetch(`${server.url}/api/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          feedback: "Scope this to the picked message.",
+          annotations: [],
+          selectedMessageId: "message-2",
+          feedbackScope: "messages",
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(await server.waitForDecision()).toEqual({
+        approved: true,
+        feedback: "Scope this to the picked message.",
+        annotations: [],
+        selectedMessageId: "message-2",
+        feedbackScope: "messages",
+      });
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("keeps bodyless approval compatible", async () => {
+    delete process.env.PLANNOTATOR_PORT;
+    const server = await startAnnotateServer({
+      markdown: "# Test",
+      filePath: join(makeTempDir("plannotator-pi-approval-bodyless-"), "test.md"),
+      htmlContent: "<!doctype html><html><body>annotate</body></html>",
+      origin: "pi",
+    });
+
+    try {
+      const response = await fetch(`${server.url}/api/approve`, { method: "POST" });
+      expect(response.status).toBe(200);
+      expect(await server.waitForDecision()).toEqual({
+        approved: true,
+        feedback: "",
+        annotations: [],
+      });
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("rejects malformed or wrong-type approval bodies without resolving", async () => {
+    delete process.env.PLANNOTATOR_PORT;
+    const server = await startAnnotateServer({
+      markdown: "# Test",
+      filePath: join(makeTempDir("plannotator-pi-approval-invalid-"), "test.md"),
+      htmlContent: "<!doctype html><html><body>annotate</body></html>",
+      origin: "pi",
+    });
+
+    try {
+      const decision = server.waitForDecision();
+      const malformed = await fetch(`${server.url}/api/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{",
+      });
+      expect(malformed.status).toBe(400);
+      expect(await Promise.race([decision.then(() => "resolved"), Bun.sleep(25).then(() => "pending")])).toBe("pending");
+
+      const wrongType = await fetch(`${server.url}/api/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ feedback: 42, annotations: [] }),
+      });
+      expect(wrongType.status).toBe(400);
+      expect(await Promise.race([decision.then(() => "resolved"), Bun.sleep(25).then(() => "pending")])).toBe("pending");
+
+      await fetch(`${server.url}/api/approve`, { method: "POST" });
+      expect(await decision).toEqual({ approved: true, feedback: "", annotations: [] });
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("pi annotate client lease", () => {
+  /**
+   * Connect to the client-lease SSE stream and wait for the ready comment.
+   * Returns a `disconnect()` that aborts the underlying request — a plain
+   * `reader.cancel()` only stops local reads and does not close the
+   * connection the server observes, whereas aborting the fetch closes the
+   * socket the way an abandoned browser tab actually would (triggering the
+   * node:http response's "close" event).
+   */
+  async function connectClientLease(url: string): Promise<{ disconnect: () => Promise<void> }> {
+    const controller = new AbortController();
+    const response = await fetch(`${url}/api/annotate/client-lease`, { signal: controller.signal });
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    const first = await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Timed out waiting for ready comment")), 1000);
+      }),
+    ]);
+    expect(first.done).toBe(false);
+    return {
+      disconnect: async () => {
+        controller.abort();
+        await reader.cancel().catch(() => {});
+      },
+    };
+  }
+
+  /** Track whether a promise has settled, without racing it against a timer. */
+  function trackSettled<T>(promise: Promise<T>): () => boolean {
+    let settled = false;
+    promise.then(() => {
+      settled = true;
+    });
+    return () => settled;
+  }
+
+  test("advertises the effective client-lease capability in /api/plan", async () => {
+    for (const clientLeaseSupported of [true, false]) {
+      delete process.env.PLANNOTATOR_PORT;
+      const server = await startAnnotateServer({
+        markdown: "# Test",
+        filePath: join(makeTempDir("plannotator-pi-client-lease-capability-"), "test.md"),
+        htmlContent: "<!doctype html><html><body>annotate</body></html>",
+        origin: "pi",
+        gate: true,
+        approvalNotesSupported: true,
+        clientLeaseSupported,
+      });
+
+      try {
+        const response = await fetch(`${server.url}/api/plan`);
+        const plan = await response.json() as { clientLease?: { enabled: boolean; reconnectGraceMs?: number } };
+        if (clientLeaseSupported) {
+          expect(plan.clientLease).toEqual({ enabled: true, reconnectGraceMs: 30_000 });
+        } else {
+          expect(plan.clientLease).toEqual({ enabled: false });
+        }
+      } finally {
+        server.stop();
+      }
+    }
+  });
+
+  test("returns 404 for the client-lease stream when the capability is disabled", async () => {
+    delete process.env.PLANNOTATOR_PORT;
+    const server = await startAnnotateServer({
+      markdown: "# Test",
+      filePath: join(makeTempDir("plannotator-pi-client-lease-disabled-"), "test.md"),
+      htmlContent: "<!doctype html><html><body>annotate</body></html>",
+      origin: "pi",
+    });
+
+    try {
+      const response = await fetch(`${server.url}/api/annotate/client-lease`);
+      expect(response.status).toBe(404);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("resolves the decision as dismissed after the last client disconnects and the grace period elapses", async () => {
+    delete process.env.PLANNOTATOR_PORT;
+    const server = await startAnnotateServer({
+      markdown: "# Test",
+      filePath: join(makeTempDir("plannotator-pi-client-lease-expiry-"), "test.md"),
+      htmlContent: "<!doctype html><html><body>annotate</body></html>",
+      origin: "pi",
+      gate: true,
+      approvalNotesSupported: true,
+      clientLeaseSupported: true,
+      clientLeaseTestOverrides: { graceMs: 50 },
+    });
+
+    try {
+      const decision = server.waitForDecision();
+      const isSettled = trackSettled(decision);
+      const client = await connectClientLease(server.url);
+
+      // Still connected — no expiry.
+      await Bun.sleep(20);
+      expect(isSettled()).toBe(false);
+
+      await client.disconnect();
+
+      expect(await decision).toEqual({ feedback: "", annotations: [], exit: true });
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a reconnect before the grace deadline cancels the pending expiry", async () => {
+    delete process.env.PLANNOTATOR_PORT;
+    const server = await startAnnotateServer({
+      markdown: "# Test",
+      filePath: join(makeTempDir("plannotator-pi-client-lease-reconnect-"), "test.md"),
+      htmlContent: "<!doctype html><html><body>annotate</body></html>",
+      origin: "pi",
+      gate: true,
+      approvalNotesSupported: true,
+      clientLeaseSupported: true,
+      clientLeaseTestOverrides: { graceMs: 80 },
+    });
+
+    try {
+      const decision = server.waitForDecision();
+      const isSettled = trackSettled(decision);
+
+      const firstClient = await connectClientLease(server.url);
+      await firstClient.disconnect();
+
+      // Reconnect well before the 80ms grace deadline.
+      await Bun.sleep(20);
+      const secondClient = await connectClientLease(server.url);
+
+      // Even past the original deadline, the reconnect cancelled the pending expiry.
+      await Bun.sleep(100);
+      expect(isSettled()).toBe(false);
+
+      // A fresh disconnect starts its own full grace window.
+      await secondClient.disconnect();
+      expect(await decision).toEqual({ feedback: "", annotations: [], exit: true });
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an explicit approval wins over a later client-lease expiry", async () => {
+    delete process.env.PLANNOTATOR_PORT;
+    const server = await startAnnotateServer({
+      markdown: "# Test",
+      filePath: join(makeTempDir("plannotator-pi-client-lease-explicit-"), "test.md"),
+      htmlContent: "<!doctype html><html><body>annotate</body></html>",
+      origin: "pi",
+      gate: true,
+      approvalNotesSupported: true,
+      clientLeaseSupported: true,
+      clientLeaseTestOverrides: { graceMs: 60 },
+    });
+
+    try {
+      const client = await connectClientLease(server.url);
+
+      const approve = await fetch(`${server.url}/api/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ feedback: "Looks good.", annotations: [] }),
+      });
+      expect(approve.status).toBe(200);
+      expect(await server.waitForDecision()).toEqual({
+        approved: true,
+        feedback: "Looks good.",
+        annotations: [],
+      });
+
+      // Disconnecting after the explicit decision must not overwrite it once
+      // the grace period elapses — the approval already cancelled tracking.
+      await client.disconnect();
+      await Bun.sleep(120);
+      expect(await server.waitForDecision()).toEqual({
+        approved: true,
+        feedback: "Looks good.",
+        annotations: [],
+      });
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a decision arriving after the lease expired is rejected instead of reported as applied", async () => {
+    delete process.env.PLANNOTATOR_PORT;
+    const server = await startAnnotateServer({
+      markdown: "# Test",
+      filePath: join(makeTempDir("plannotator-pi-client-lease-late-"), "test.md"),
+      htmlContent: "<!doctype html><html><body>annotate</body></html>",
+      origin: "pi",
+      gate: true,
+      approvalNotesSupported: true,
+      clientLeaseSupported: true,
+      clientLeaseTestOverrides: { graceMs: 30 },
+    });
+
+    try {
+      const client = await connectClientLease(server.url);
+      await client.disconnect();
+      expect(await server.waitForDecision()).toEqual({
+        feedback: "",
+        annotations: [],
+        exit: true,
+      });
+
+      for (const [path, init] of [
+        [
+          "/api/approve",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ feedback: "Looks good.", annotations: [] }),
+          },
+        ],
+        [
+          "/api/feedback",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ feedback: "Please change this.", annotations: [] }),
+          },
+        ],
+        ["/api/exit", { method: "POST" }],
+      ] as const) {
+        const response = await fetch(`${server.url}${path}`, init);
+        expect(response.status).toBe(409);
+      }
+
+      expect(await server.waitForDecision()).toEqual({
+        feedback: "",
+        annotations: [],
+        exit: true,
+      });
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("stopping the server ends live lease streams", async () => {
+    delete process.env.PLANNOTATOR_PORT;
+    const server = await startAnnotateServer({
+      markdown: "# Test",
+      filePath: join(makeTempDir("plannotator-pi-client-lease-stop-"), "test.md"),
+      htmlContent: "<!doctype html><html><body>annotate</body></html>",
+      origin: "pi",
+      gate: true,
+      approvalNotesSupported: true,
+      clientLeaseSupported: true,
+    });
+
+    const response = await fetch(`${server.url}/api/annotate/client-lease`);
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toBe(": ready\n\n");
+
+    server.stop();
+
+    const next = await reader.read();
+    expect(next.done).toBe(true);
+  });
+});
+
 describe("pi review server", () => {
   const testIfJj = hasJj() ? test : test.skip;
+  const testIfUnix = process.platform === "win32" ? test.skip : test;
+  const semanticRawPatch = [
+    "diff --git a/src/app.ts b/src/app.ts",
+    "new file mode 100644",
+    "index 0000000..1111111",
+    "--- /dev/null",
+    "+++ b/src/app.ts",
+    "@@ -0,0 +1,3 @@",
+    "+export function created() {",
+    "+  return true;",
+    "+}",
+    "",
+  ].join("\n");
+
+  testIfUnix("parses and serves an explicitly forced GitButler review through Pi", async () => {
+    expect(parseReviewArgs("--gitbutler")).toMatchObject({ vcsType: "gitbutler" });
+
+    const repoDir = initRepo();
+    const mergeBase = git(repoDir, ["rev-parse", "HEAD"]);
+    git(repoDir, ["checkout", "-b", "feature-a"]);
+    writeFileSync(join(repoDir, "feature.txt"), "feature\n", "utf-8");
+    git(repoDir, ["add", "feature.txt"]);
+    git(repoDir, ["commit", "-m", "feature"]);
+    const tip = git(repoDir, ["rev-parse", "HEAD"]);
+    git(repoDir, ["checkout", "-b", "gitbutler/workspace"]);
+    git(repoDir, ["config", "gitbutler.project.targetref", "refs/remotes/origin/main"]);
+
+    const binDir = makeTempDir("plannotator-pi-but-bin-");
+    const butPath = join(binDir, "but");
+    const status = JSON.stringify({
+      uncommittedChanges: [],
+      stacks: [{
+        cliId: "i0",
+        assignedChanges: [],
+        branches: [{
+          cliId: "g0",
+          name: "feature-a",
+          commits: [{ commitId: tip }],
+          upstreamCommits: [],
+        }],
+      }],
+      mergeBase: { commitId: mergeBase },
+    });
+    const statusPath = join(binDir, "status.json");
+    writeFileSync(statusPath, status, "utf-8");
+    writeFileSync(butPath, [
+      "#!/bin/sh",
+      'if [ "${1:-}" = "--version" ]; then',
+      '  echo "but 0.21.0"',
+      "  exit 0",
+      "fi",
+      `cat ${JSON.stringify(statusPath)}`,
+      "",
+    ].join("\n"), "utf-8");
+    chmodSync(butPath, 0o755);
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+
+    const prepared = await prepareLocalReviewDiff({
+      cwd: repoDir,
+      vcsType: "gitbutler",
+      configuredDiffType: "since-base",
+    });
+    expect(prepared).toMatchObject({
+      diffType: "gitbutler:workspace",
+      base: mergeBase,
+      gitContext: { vcsType: "gitbutler" },
+    });
+    expect(prepared.rawPatch).toContain("diff --git a/feature.txt b/feature.txt");
+
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+    const server = await startReviewServer({
+      rawPatch: prepared.rawPatch,
+      gitRef: prepared.gitRef,
+      error: prepared.error,
+      diffType: prepared.diffType,
+      gitContext: prepared.gitContext,
+      initialBase: prepared.base,
+      initialFingerprint: prepared.fingerprint,
+      origin: "pi",
+      htmlContent: "<!doctype html><html><body>review</body></html>",
+    });
+    try {
+      const initial = await fetch(`${server.url}/api/diff`).then((response) => response.json()) as {
+        rawPatch: string;
+        snapshotId: string;
+        diffType: string;
+        gitContext?: { vcsType?: string; diffOptions: Array<{ id: string }> };
+      };
+      expect(initial.diffType).toBe("gitbutler:workspace");
+      expect(initial.gitContext?.vcsType).toBe("gitbutler");
+      expect(initial.gitContext?.diffOptions.map((option) => option.id)).toContain(
+        "gitbutler:branch:feature-a",
+      );
+      expect((await fetch(`${server.url}/api/editor-annotation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filePath: "feature.txt",
+          selectedText: "feature",
+          lineStart: 1,
+          lineEnd: 1,
+        }),
+      })).status).toBe(200);
+
+      const updatedStatus = JSON.parse(status) as {
+        mergeBase: { commitId: string };
+        stacks: Array<{ branches: Array<Record<string, unknown>> }>;
+      };
+      updatedStatus.stacks[0]?.branches.unshift({
+        cliId: "h0",
+        name: "empty-new-top",
+        commits: [],
+        upstreamCommits: [],
+      });
+      writeFileSync(statusPath, JSON.stringify(updatedStatus), "utf-8");
+      await Bun.sleep(1_050);
+
+      const refreshedResponse = await fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "gitbutler:workspace" }),
+      });
+      expect(refreshedResponse.status).toBe(200);
+      const refreshed = await refreshedResponse.json() as {
+        rawPatch: string;
+        snapshotId: string;
+        gitContext?: { diffOptions: Array<{ id: string }> };
+      };
+      expect(refreshed.rawPatch).toBe(initial.rawPatch);
+      expect(refreshed.snapshotId).not.toBe(initial.snapshotId);
+      expect(refreshed.gitContext?.diffOptions.map((option) => option.id)).toContain(
+        "gitbutler:stack:feature-a",
+      );
+      const refreshedSnapshotProbe = await fetch(
+        `${server.url}/api/diff/fresh?snapshot=${encodeURIComponent(refreshed.snapshotId)}`,
+      ).then((response) => response.json()) as { fresh: boolean };
+      expect(refreshedSnapshotProbe.fresh).toBe(true);
+      const oldSnapshotProbe = await fetch(
+        `${server.url}/api/diff/fresh?snapshot=${encodeURIComponent(initial.snapshotId)}`,
+      ).then((response) => response.json()) as { fresh: boolean };
+      expect(oldSnapshotProbe.fresh).toBe(false);
+      const reloaded = await fetch(`${server.url}/api/diff`).then((response) => response.json()) as {
+        snapshotId: string;
+        gitContext?: { diffOptions: Array<{ id: string }> };
+      };
+      expect(reloaded.snapshotId).toBe(refreshed.snapshotId);
+      expect(reloaded.gitContext?.diffOptions.map((option) => option.id)).toContain(
+        "gitbutler:stack:feature-a",
+      );
+
+      const crossProviderSwitch = await fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "uncommitted" }),
+      });
+      expect(crossProviderSwitch.status).toBe(400);
+      const stageAttempt = await fetch(`${server.url}/api/git-add`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath: "feature.txt" }),
+      });
+      expect(stageAttempt.status).toBe(400);
+
+      const switchedResponse = await fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "gitbutler:branch:feature-a" }),
+      });
+      expect(switchedResponse.status).toBe(200);
+      const switched = await switchedResponse.json() as {
+        diffType: string;
+        rawPatch: string;
+        semanticDiff?: { available: boolean };
+      };
+      expect(switched.diffType).toBe("gitbutler:branch:feature-a");
+      expect(switched.rawPatch).toContain("feature.txt");
+      expect(switched.semanticDiff).toEqual({ available: false });
+      await expect(fetch(`${server.url}/api/semantic-diff`).then((response) => response.json())).resolves.toMatchObject({
+        status: "unavailable",
+        reason: "gitbutler-committed-view",
+      });
+      await expect(fetch(`${server.url}/api/editor-annotations`).then((response) => response.json())).resolves.toEqual({
+        annotations: [],
+      });
+      expect((await fetch(`${server.url}/api/editor-annotation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filePath: "feature.txt",
+          selectedText: "feature",
+          lineStart: 1,
+          lineEnd: 1,
+        }),
+      })).status).toBe(400);
+      expect((await fetch(`${server.url}/api/open-in`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath: "feature.txt" }),
+      })).status).toBe(400);
+      expect((await fetch(`${server.url}/api/code-nav/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: "feature",
+          filePath: "feature.txt",
+          line: 1,
+          column: 1,
+        }),
+      })).status).toBe(400);
+      expect((await fetch(
+        `${server.url}/api/code-nav/file?path=${encodeURIComponent("feature.txt")}`,
+      )).status).toBe(400);
+
+      updatedStatus.mergeBase.commitId = tip;
+      writeFileSync(statusPath, JSON.stringify(updatedStatus), "utf-8");
+      await Bun.sleep(1_050);
+      const rebasedResponse = await fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "gitbutler:workspace" }),
+      });
+      expect(rebasedResponse.status).toBe(200);
+      const rebased = await rebasedResponse.json() as {
+        base: string;
+        rawPatch: string;
+        gitContext?: { defaultBranch: string };
+      };
+      expect(rebased.base).toBe(tip);
+      expect(rebased.gitContext?.defaultBranch).toBe(tip);
+      expect(rebased.rawPatch).toBe("");
+      const restoredEditorAnnotations = await fetch(`${server.url}/api/editor-annotations`)
+        .then((response) => response.json()) as { annotations: unknown[] };
+      expect(restoredEditorAnnotations.annotations).toHaveLength(1);
+    } finally {
+      server.stop();
+    }
+  }, 15_000);
+
+  testIfUnix("does not partially commit a valid switch superseded by an invalid request", async () => {
+    const repoDir = initRepo();
+    writeFileSync(join(repoDir, "tracked.txt"), "dirty\n", "utf-8");
+    const gitContext = await getVcsContext(repoDir, "git");
+    const semDir = makeTempDir("plannotator-pi-switch-atomic-sem-");
+    const blocker = makeBlockingSem(semDir);
+    process.env.PLANNOTATOR_SEM_PATH = blocker.semPath;
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+    const initialPatch = "diff --git a/initial.txt b/initial.txt\n";
+    const server = await startReviewServer({
+      rawPatch: initialPatch,
+      gitRef: "Initial snapshot",
+      diffType: "uncommitted",
+      gitContext,
+      origin: "pi",
+      htmlContent: "<!doctype html><html><body>review</body></html>",
+    });
+
+    try {
+      const validSwitch = fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "last-commit" }),
+      });
+      await waitForFile(blocker.startedPath);
+      const invalid = await fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(invalid.status).toBe(400);
+      writeFileSync(blocker.releasePath, "release\n", "utf-8");
+      await expect(validSwitch.then((response) => response.json())).resolves.toEqual({ superseded: true });
+
+      const current = await fetch(`${server.url}/api/diff`).then((response) => response.json()) as {
+        rawPatch: string;
+        diffType: string;
+        gitRef: string;
+      };
+      expect(current).toMatchObject({
+        rawPatch: initialPatch,
+        diffType: "uncommitted",
+        gitRef: "Initial snapshot",
+      });
+    } finally {
+      if (!existsSync(blocker.releasePath)) writeFileSync(blocker.releasePath, "release\n", "utf-8");
+      server.stop();
+    }
+  }, 10_000);
+
+  test("advertises semantic diff availability and serves parsed sem output", async () => {
+    const dir = makeTempDir("plannotator-pi-sem-server-");
+    const dataDir = makeTempDir("plannotator-pi-sem-data-");
+    const cwdLogPath = join(dir, "cwd-log");
+    process.env.PLANNOTATOR_DATA_DIR = dataDir;
+    process.env.PLANNOTATOR_SEM_PATH = makeMockSem(dir, { runCwdLogPath: cwdLogPath });
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+
+    const server = await startReviewServer({
+      rawPatch: semanticRawPatch,
+      gitRef: "test",
+      origin: "pi",
+      htmlContent: "<!doctype html><html><body>review</body></html>",
+    });
+
+    try {
+      const diffPayload = await fetch(`${server.url}/api/diff`).then((response) => response.json()) as {
+        semanticDiff?: { available: boolean; semVersion?: string; semSource?: string };
+      };
+      expect(diffPayload.semanticDiff).toMatchObject({
+        available: true,
+        semVersion: "0.8.0",
+        semSource: "env",
+      });
+
+      const semanticPayload = await fetch(`${server.url}/api/semantic-diff?fileExt=.ts`).then((response) => response.json()) as {
+        status: string;
+        summary?: { added: number; fileCount: number };
+        changes?: Array<{ entityType: string; entityName: string; filePath: string }>;
+      };
+      expect(semanticPayload).toMatchObject({
+        status: "ok",
+        summary: { added: 1, fileCount: 1 },
+        changes: [
+          { entityType: "function", entityName: "created", filePath: "src/app.ts" },
+        ],
+      });
+      expect(realpathSync(readFileSync(cwdLogPath, "utf-8").trim())).toBe(
+        realpathSync(join(dataDir, "semantic-diff", "patch-only")),
+      );
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("runs semantic diff from the local agent cwd when one is available", async () => {
+    const dir = makeTempDir("plannotator-pi-sem-agent-");
+    const agentCwd = makeTempDir("plannotator-pi-sem-agent-cwd-");
+    const cwdLogPath = join(dir, "cwd-log");
+    process.env.PLANNOTATOR_SEM_PATH = makeMockSem(dir, { runCwdLogPath: cwdLogPath });
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+
+    const server = await startReviewServer({
+      rawPatch: semanticRawPatch,
+      gitRef: "test",
+      origin: "pi",
+      agentCwd,
+      htmlContent: "<!doctype html><html><body>review</body></html>",
+    });
+
+    try {
+      const semanticPayload = await fetch(`${server.url}/api/semantic-diff`).then((response) => response.json()) as {
+        status: string;
+      };
+      expect(semanticPayload.status).toBe("ok");
+      expect(realpathSync(readFileSync(cwdLogPath, "utf-8").trim())).toBe(realpathSync(agentCwd));
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("runs semantic diff from the local git context cwd in local review mode", async () => {
+    const dir = makeTempDir("plannotator-pi-sem-local-");
+    const repoDir = initRepo();
+    const cwdLogPath = join(dir, "cwd-log");
+    const gitContext = await getVcsContext(repoDir);
+    process.env.PLANNOTATOR_SEM_PATH = makeMockSem(dir, { runCwdLogPath: cwdLogPath });
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+
+    const server = await startReviewServer({
+      rawPatch: semanticRawPatch,
+      gitRef: "test",
+      origin: "pi",
+      diffType: "unstaged",
+      gitContext,
+      htmlContent: "<!doctype html><html><body>review</body></html>",
+    });
+
+    try {
+      const semanticPayload = await fetch(`${server.url}/api/semantic-diff`).then((response) => response.json()) as {
+        status: string;
+      };
+      expect(semanticPayload.status).toBe("ok");
+      expect(realpathSync(readFileSync(cwdLogPath, "utf-8").trim())).toBe(realpathSync(repoDir));
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("hides semantic diff from /api/diff when sem cannot be resolved", async () => {
+    const dir = makeTempDir("plannotator-pi-sem-missing-server-");
+    process.env.PLANNOTATOR_SEM_PATH = join(dir, "missing-sem");
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+
+    const server = await startReviewServer({
+      rawPatch: semanticRawPatch,
+      gitRef: "test",
+      origin: "pi",
+      htmlContent: "<!doctype html><html><body>review</body></html>",
+    });
+
+    try {
+      const diffPayload = await fetch(`${server.url}/api/diff`).then((response) => response.json()) as {
+        semanticDiff?: { available: boolean };
+      };
+      expect(diffPayload.semanticDiff).toEqual({ available: false });
+
+      const semanticPayload = await fetch(`${server.url}/api/semantic-diff`).then((response) => response.json()) as {
+        status: string;
+        reason?: string;
+      };
+      expect(semanticPayload).toMatchObject({
+        status: "unavailable",
+        reason: "sem-path-missing",
+      });
+    } finally {
+      server.stop();
+    }
+  });
 
   test("serves review diff parity endpoints including drafts, uploads, and editor annotations", async () => {
     const homeDir = makeTempDir("plannotator-pi-home-");
@@ -162,6 +1198,7 @@ describe("pi review server", () => {
       expect(diffResponse.status).toBe(200);
       const diffPayload = await diffResponse.json() as {
         rawPatch: string;
+        snapshotId: string;
         gitContext?: { diffOptions: Array<{ id: string }> };
         origin?: string;
         repoInfo?: { display: string };
@@ -173,13 +1210,19 @@ describe("pi review server", () => {
       );
       expect(diffPayload.repoInfo?.display).toBeTruthy();
 
-      const fileContentResponse = await fetch(`${server.url}/api/file-content?path=tracked.txt`);
+      const fileContentResponse = await fetch(
+        `${server.url}/api/file-content?path=tracked.txt&snapshot=${encodeURIComponent(diffPayload.snapshotId)}`,
+      );
       const fileContent = await fileContentResponse.json() as {
         oldContent: string | null;
         newContent: string | null;
       };
       expect(fileContent.oldContent).toBe("before\n");
       expect(fileContent.newContent).toBe("after\n");
+      const staleContentResponse = await fetch(
+        `${server.url}/api/file-content?path=tracked.txt&snapshot=stale-snapshot`,
+      );
+      expect(staleContentResponse.status).toBe(409);
 
       const draftBody = { annotations: [{ id: "draft-1" }] };
       const draftSave = await fetch(`${server.url}/api/draft`, {
@@ -236,6 +1279,8 @@ describe("pi review server", () => {
         `${server.url}/api/image?path=${encodeURIComponent(uploadPayload.path)}`,
       );
       expect(imageResponse.status).toBe(200);
+      expect(imageResponse.headers.get("content-security-policy")).toStartWith("sandbox;");
+      expect(imageResponse.headers.get("x-content-type-options")).toBe("nosniff");
       expect(await imageResponse.text()).toBe("png-bytes");
 
       const draftDelete = await fetch(`${server.url}/api/draft`, { method: "DELETE" });
@@ -244,16 +1289,35 @@ describe("pi review server", () => {
       const draftMissing = await fetch(`${server.url}/api/draft`);
       expect(draftMissing.status).toBe(404);
 
+      const generatedDraft = { codeAnnotations: [{ id: "stale-draft" }], draftGeneration: 5 };
+      const generatedDraftSave = await fetch(`${server.url}/api/draft`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(generatedDraft),
+      });
+      expect(generatedDraftSave.status).toBe(200);
+
       const feedbackResponse = await fetch(`${server.url}/api/feedback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          draftGeneration: 5,
           approved: false,
           feedback: "Please update the diff",
           annotations: [{ id: "note-1" }],
         }),
       });
       expect(feedbackResponse.status).toBe(200);
+
+      const lateDraftSave = await fetch(`${server.url}/api/draft`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(generatedDraft),
+      });
+      expect(lateDraftSave.status).toBe(200);
+      const lateDraftLoad = await fetch(`${server.url}/api/draft`);
+      expect(lateDraftLoad.status).toBe(404);
+      expect(await lateDraftLoad.json()).toEqual({ found: false, draftGeneration: 5 });
 
       await expect(server.waitForDecision()).resolves.toEqual({
         approved: false,
@@ -353,6 +1417,140 @@ describe("pi review server", () => {
         }),
       });
       await server.waitForDecision();
+    } finally {
+      server.stop();
+    }
+  }, 15_000);
+
+  test("workspace mode maps prefixed paths to child repos", async () => {
+    const homeDir = makeTempDir("plannotator-pi-home-");
+    const root = makeTempDir("plannotator-pi-workspace-");
+    const apiTarget = makeTempDir("plannotator-pi-workspace-api-");
+    const apiDir = join(root, "api");
+    const semDir = makeTempDir("plannotator-pi-workspace-switch-sem-");
+    const cwdLogPath = join(semDir, "cwd-log");
+    const inputLogPath = join(semDir, "input.patch");
+    linkDirectory(apiTarget, apiDir);
+    process.env.HOME = homeDir;
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+    process.env.PLANNOTATOR_SEM_PATH = makeMockSem(semDir, { runCwdLogPath: cwdLogPath, inputLogPath });
+
+    git(apiDir, ["init"]);
+    git(apiDir, ["branch", "-M", "main"]);
+    git(apiDir, ["config", "user.email", "pi-review@example.com"]);
+    git(apiDir, ["config", "user.name", "Pi Review"]);
+    writeFileSync(join(apiDir, "tracked.txt"), "before\n", "utf-8");
+    git(apiDir, ["add", "tracked.txt"]);
+    git(apiDir, ["commit", "-m", "initial"]);
+    writeFileSync(join(apiDir, "tracked.txt"), "after\n", "utf-8");
+
+    const workspace = await WorkspaceReviewSession.create({
+      getVcsContext,
+      runVcsDiff,
+      getVcsFileContentsForDiff,
+      getVcsDiffFingerprint,
+      canStageFiles,
+      stageFile,
+      unstageFile,
+    }, root);
+    const getFingerprint = workspace.getFingerprint.bind(workspace);
+    let fingerprintCalls = 0;
+    workspace.getFingerprint = async () => {
+      fingerprintCalls += 1;
+      await Bun.sleep(25);
+      return getFingerprint();
+    };
+
+    const server = await startReviewServer({
+      rawPatch: workspace.rawPatch,
+      gitRef: workspace.gitRef,
+      error: workspace.error,
+      diffType: workspace.diffType,
+      origin: "pi",
+      htmlContent: "<!doctype html><html><body>review</body></html>",
+      workspace,
+      agentCwd: root,
+    });
+
+    try {
+      const diffResponse = await fetch(`${server.url}/api/diff`);
+      const diffPayload = await diffResponse.json() as {
+        mode?: string;
+        agentCwd?: string;
+        diffType?: string;
+        diffOptions?: Array<{ id: string }>;
+        semanticDiff?: { available: boolean };
+      };
+      expect(diffPayload.mode).toBe("workspace");
+      expect(diffPayload.diffType).toBe("workspace-current");
+      expect(diffPayload.diffOptions?.map((option) => option.id)).toContain("workspace-last");
+      expect(diffPayload.agentCwd).toBe(root);
+      expect(diffPayload.semanticDiff).toEqual(expect.objectContaining({ available: true }));
+      expect("workspace" in diffPayload).toBe(false);
+
+      const semanticPayload = await fetch(`${server.url}/api/semantic-diff`).then((response) => response.json()) as {
+        status: string;
+      };
+      expect(semanticPayload.status).toBe("ok");
+      expect(realpathSync(readFileSync(cwdLogPath, "utf-8").trim())).toBe(realpathSync(root));
+      expect(readFileSync(inputLogPath, "utf-8")).toContain("diff --git a/api/tracked.txt b/api/tracked.txt");
+
+      const switchResponse = await fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "workspace-last", hideWhitespace: true }),
+      });
+      expect(switchResponse.status).toBe(200);
+      const switched = await switchResponse.json() as {
+        diffType?: string;
+        diffOptions?: Array<{ id: string }>;
+        semanticDiff?: { available: boolean };
+      };
+      expect(switched.diffType).toBe("workspace-last");
+      expect(switched.diffOptions?.map((option) => option.id)).toContain("workspace-current");
+      expect(switched.semanticDiff).toEqual(expect.objectContaining({ available: true }));
+
+      const currentResponse = await fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "workspace-current", hideWhitespace: false }),
+      });
+      expect(currentResponse.status).toBe(200);
+      const currentPayload = await currentResponse.json() as { snapshotId: string };
+      fingerprintCalls = 0;
+
+      const concurrentExpansions = await Promise.all(Array.from({ length: 6 }, () =>
+        fetch(
+          `${server.url}/api/file-content?path=api/tracked.txt&snapshot=${encodeURIComponent(currentPayload.snapshotId)}`,
+        )
+      ));
+      expect(concurrentExpansions.every((response) => response.status === 200)).toBe(true);
+      // All six expansion requests share one probe after the switch capture.
+      expect(fingerprintCalls).toBe(1);
+
+      const fileContentResponse = await fetch(`${server.url}/api/file-content?path=api/tracked.txt`);
+      expect(fileContentResponse.status).toBe(200);
+      const fileContent = await fileContentResponse.json() as {
+        oldContent: string | null;
+        newContent: string | null;
+      };
+      expect(fileContent.oldContent).toBe("before\n");
+      expect(fileContent.newContent).toBe("after\n");
+
+      const stageResponse = await fetch(`${server.url}/api/git-add`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath: "api/tracked.txt" }),
+      });
+      expect(stageResponse.status).toBe(200);
+      expect(git(apiDir, ["diff", "--staged", "--name-only"])).toContain("tracked.txt");
+
+      const invalidStageResponse = await fetch(`${server.url}/api/git-add`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath: "api/../tracked.txt" }),
+      });
+      expect(invalidStageResponse.status).toBe(400);
     } finally {
       server.stop();
     }
@@ -599,11 +1797,32 @@ describe("pi review server", () => {
       expect(last.diffType).toBe("jj-last");
       expect(last.rawPatch).toContain("last.txt");
 
+      const automaticLineResponse = await fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "jj-line" }),
+      });
+      expect(automaticLineResponse.status).toBe(200);
+      const automaticLine = await automaticLineResponse.json() as {
+        diffType: string;
+        gitContext?: { diffFallback?: { requestedDiffType: string; effectiveDiffType: string } };
+      };
+      expect(automaticLine.diffType).toBe("jj-current");
+      // Deliberate copy pin: the sentence is the only discriminator between
+      // the root-fork and ambiguous-fork fallback branches on the wire.
+      expect(automaticLine.gitContext?.diffFallback).toEqual({
+        requestedDiffType: "jj-line",
+        effectiveDiffType: "jj-current",
+        message: "The line of work starts at the repository root. Showing Current change instead.",
+      });
+
       for (const nextType of ["jj-line", "jj-all"] as const) {
         const response = await fetch(`${server.url}/api/diff/switch`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ diffType: nextType }),
+          body: JSON.stringify(nextType === "jj-line"
+            ? { diffType: nextType, base: expectedJjBase, explicitBase: true }
+            : { diffType: nextType }),
         });
         expect(response.status).toBe(200);
         const payload = await response.json() as { diffType: string; rawPatch: string };
@@ -648,4 +1867,80 @@ describe("pi review server", () => {
       server.stop();
     }
   }, 20_000);
+});
+
+describe("pi plan archive server", () => {
+  test("serves an empty archived plan as a found plan", async () => {
+    const archiveDir = makeTempDir("plannotator-pi-archive-");
+    const filename = "2026-01-02-empty-approved.md";
+    writeFileSync(join(archiveDir, filename), "", "utf-8");
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+
+    const server = await startPlanReviewServer({
+      plan: "",
+      origin: "pi",
+      htmlContent: "<!doctype html><html><body>archive</body></html>",
+      mode: "archive",
+      customPlanPath: archiveDir,
+    });
+
+    try {
+      const url = new URL(`${server.url}/api/archive/plan`);
+      url.searchParams.set("filename", filename);
+      url.searchParams.set("customPath", archiveDir);
+      const response = await fetch(url);
+      const payload = await response.json() as { markdown?: string; filepath?: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.markdown).toBe("");
+      expect(payload.filepath).toBe(filename);
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("pi plan server file browser", () => {
+  test("filters excluded folders from tree and workspace status", async () => {
+    const repo = makeTempDir("plannotator-pi-files-");
+    const dataDir = makeTempDir("plannotator-pi-files-data-");
+    process.env.PLANNOTATOR_DATA_DIR = dataDir;
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+    process.chdir(repo);
+
+    git(repo, ["init"]);
+    git(repo, ["branch", "-M", "main"]);
+    git(repo, ["config", "user.email", "pi-files@example.com"]);
+    git(repo, ["config", "user.name", "Pi Files"]);
+    writeTempFile(repo, "docs/visible.md", "visible\n");
+    writeTempFile(repo, "dist/generated.md", "before\n");
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-m", "initial"]);
+
+    writeTempFile(repo, "dist/generated.md", "after\n");
+    writeTempFile(repo, "packages/app/node_modules/pkg/readme.md", "hidden\n");
+
+    const server = await startPlanReviewServer({
+      plan: "# Plan",
+      origin: "pi",
+      htmlContent: "<!doctype html><html><body>plan</body></html>",
+    });
+
+    try {
+      const url = new URL(`${server.url}/api/reference/files`);
+      url.searchParams.set("dirPath", repo);
+      const response = await fetch(url);
+      const payload = await response.json() as {
+        tree: PiTreeNode[];
+        workspaceStatus: { totals: { files: number }; files: Record<string, unknown> };
+      };
+
+      expect(response.status).toBe(200);
+      expect(flattenTree(payload.tree)).toEqual(["docs/visible.md"]);
+      expect(payload.workspaceStatus.totals.files).toBe(0);
+      expect(payload.workspaceStatus.files).toEqual({});
+    } finally {
+      server.stop();
+    }
+  });
 });

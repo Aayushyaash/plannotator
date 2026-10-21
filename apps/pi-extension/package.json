@@ -1,6 +1,6 @@
 {
   "name": "@plannotator/pi-extension",
-  "version": "0.19.27",
+  "version": "0.28.25",
   "type": "module",
   "description": "Plannotator Pi extension - interactive plan review with annotations, annotate agent messages, and review code/PRs",
   "author": "backnotprop",
@@ -14,45 +14,68 @@
   "bugs": {
     "url": "https://github.com/backnotprop/plannotator/issues"
   },
-  "keywords": ["pi-package", "plannotator", "plan-review", "ai-agent", "coding-agent"],
+  "keywords": [
+    "pi-package",
+    "plannotator",
+    "plan-review",
+    "ai-agent",
+    "coding-agent"
+  ],
+  "//pi": "skills/ is vendored by vendor.sh from apps/skills/core/plannotator and is gitignored. It is deliberately NOT listed under pi.skills: bundled-skill.ts offers it from resources_discover only when no other plannotator skill is loaded, so it cannot collide with the CLI installer's ~/.agents/skills copy (#1642).",
   "pi": {
-    "extensions": ["./"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./"
+    ]
   },
   "files": [
     "index.ts",
+    "bundled-skill.ts",
+    "annotate-outcome.ts",
+    "review-outcome.ts",
     "assistant-message.ts",
+    "browser-session-error.ts",
     "current-pi-session.ts",
+    "pi-session-bridge.ts",
     "plannotator-browser.ts",
+    "plannotator-browser-runtime.ts",
     "plannotator-events.ts",
+    "plannotator-tool-host.ts",
+    "session-opened.ts",
+    "pi-host.ts",
+    "inbox.ts",
     "server.ts",
     "tool-scope.ts",
     "config.ts",
     "plannotator.json",
     "server/",
+    "todo-providers/",
     "generated/",
+    "skills/",
     "README.md",
     "plannotator.html",
-    "review-editor.html",
-    "skills/"
+    "review-editor.html"
   ],
   "scripts": {
-    "build": "cp ../hook/dist/index.html plannotator.html && cp ../hook/dist/review.html review-editor.html && rm -rf skills && cp -r ../skills skills && bash vendor.sh",
+    "build": "cp ../hook/dist/index.html plannotator.html && cp ../hook/dist/review.html review-editor.html && bash vendor.sh",
     "prepublishOnly": "cd ../.. && bun run build:pi"
   },
   "dependencies": {
     "@joplin/turndown-plugin-gfm": "^1.0.64",
-    "@pierre/diffs": "^1.1.12",
-    "glimpseui": "^0.8.0",
+    "@pierre/diffs": "1.3.6",
+    "@plannotator/webtui": "0.1.0",
+    "chokidar": "^5.0.0",
+    "diff": "^8.0.4",
+    "parse5": "^7.3.0",
     "turndown": "^7.2.4"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.74.0"
+    "@earendil-works/pi-coding-agent": ">=0.79.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.74.0",
-    "@earendil-works/pi-agent-core": ">=0.74.0",
-    "@earendil-works/pi-ai": ">=0.74.0",
-    "@earendil-works/pi-tui": ">=0.74.0"
+    "glimpseui": "^0.8.0",
+    "@earendil-works/pi-coding-agent": ">=0.79.1",
+    "@earendil-works/pi-agent-core": ">=0.79.1",
+    "@earendil-works/pi-ai": ">=0.79.1",
+    "@earendil-works/pi-tui": ">=0.79.1"
   }
 }

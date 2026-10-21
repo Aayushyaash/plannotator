@@ -1,12 +1,109 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Annotation, AnnotationType, Block, type CodeAnnotation, type EditorAnnotation } from '../types';
+import React, { useState, useRef, useEffect, useId } from 'react';
+import { AnnotationType, type Annotation, type Block, type CodeAnnotation, type EditorAnnotation } from '../types';
+import type { MentionSource } from '../utils/mentions';
+import { useMentionAutocomplete } from '../hooks/useMentionAutocomplete';
+import { MentionAutocompleteMenu, mentionActiveOptionId } from './MentionAutocomplete';
 import { isCurrentUser } from '../utils/identity';
 import { ImageThumbnail } from './ImageThumbnail';
 import { EditorAnnotationCard } from './EditorAnnotationCard';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { OverlayScrollArea } from './OverlayScrollArea';
+import { Button } from './ui/button';
+import { cn } from '../lib/utils';
+import { resolveReplyParents, resolveThreadRootTimestamps } from '@plannotator/core/annotation-threads';
+import { ROOT_DOCUMENT_GROUP_KEY } from '../utils/annotationScope';
+import type { AnnotationScope, AnnotationDocumentGroup } from '../utils/annotationScope';
+import type { QuestionPanelRow } from '../utils/questionAnswers';
+import { QuestionsPanelSection } from './QuestionsPanelSection';
+import { HostTitle } from './HostTitle';
+
+// Card type-word colors. Deletion uses `destructive` (reliably red on every
+// theme, matching the in-document .deletion highlight). Comment uses the
+// `annotation-comment` token, which defaults to each theme's --accent (so it
+// stays consistent with the .comment highlight) but is overridden to a legible
+// blue in neutral themes whose accent is a low-contrast gray (e.g. "simple").
+// Global has no in-document highlight, so it uses a fixed legible purple.
+const TYPE_COLOR: Record<AnnotationType, string> = {
+  [AnnotationType.DELETION]: 'text-destructive',
+  [AnnotationType.COMMENT]: 'text-annotation-comment',
+  [AnnotationType.GLOBAL_COMMENT]: 'text-purple-500',
+};
+
+const TYPE_LABEL: Record<AnnotationType, string> = {
+  [AnnotationType.DELETION]: 'Deletion',
+  [AnnotationType.COMMENT]: 'Comment',
+  [AnnotationType.GLOBAL_COMMENT]: 'Global',
+};
+
+const PencilIcon = () => (
+  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+  </svg>
+);
+
+const TrashCardIcon = () => (
+  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+  </svg>
+);
+
+/**
+ * Order annotations so every reply follows its parent (replies among
+ * themselves stay in creation order). The threading rule is the shared one
+ * (resolveReplyParents, also what the export applies): a reply whose parent
+ * is absent, a self-reference, and every member of an `inReplyTo` cycle
+ * render as top-level cards in input order, so nothing is ever dropped.
+ * Without any `inReplyTo` the input order is returned unchanged, so
+ * annotations without replies render exactly as before.
+ */
+export function threadReplies(sorted: Annotation[]): Array<{ annotation: Annotation; isReply: boolean }> {
+  if (!sorted.some((a) => a.inReplyTo)) return sorted.map((annotation) => ({ annotation, isReply: false }));
+  const parents = resolveReplyParents(sorted);
+  const byParent = new Map<string, Annotation[]>();
+  for (const a of sorted) {
+    const parent = parents.get(a.id);
+    if (!parent) continue;
+    const list = byParent.get(parent) ?? [];
+    list.push(a);
+    byParent.set(parent, list);
+  }
+  // Depth-first, iteratively: a 5,000-deep chain must not recurse 5,000
+  // frames deep. The stack holds each node's replies in reverse so they pop
+  // in creation order.
+  const out: Array<{ annotation: Annotation; isReply: boolean }> = [];
+  const stack: Array<{ annotation: Annotation; isReply: boolean }> = [];
+  const pushReplies = (a: Annotation) => {
+    const replies = byParent.get(a.id);
+    if (!replies) return;
+    for (let i = replies.length - 1; i >= 0; i--) stack.push({ annotation: replies[i], isReply: true });
+  };
+  for (const a of sorted) {
+    if (parents.get(a.id)) continue;
+    out.push({ annotation: a, isReply: false });
+    pushReplies(a);
+    while (stack.length > 0) {
+      const next = stack.pop()!;
+      out.push(next);
+      pushReplies(next.annotation);
+    }
+  }
+  return out;
+}
+
+interface DirectEditsPanelItem {
+  id: string;
+  title?: string;
+  label?: string;
+  added: number;
+  removed: number;
+  diffText: string;
+  description?: string;
+  onDiscard?: () => void;
+}
 
 interface PanelProps {
+  /** The second line of the empty state. Default "Select text to annotate"; a host whose document is an image or code says how to comment there. */
+  emptyHint?: string;
   isOpen: boolean;
   annotations: Annotation[];
   blocks: Block[];
@@ -19,20 +116,110 @@ interface PanelProps {
   onDeleteCodeAnnotation?: (id: string) => void;
   onEditCodeAnnotation?: (id: string, updates: Partial<CodeAnnotation>) => void;
   sharingEnabled?: boolean;
-  width?: number;
+  width?: number | string;
   editorAnnotations?: EditorAnnotation[];
   onDeleteEditorAnnotation?: (id: string) => void;
   onClose?: () => void;
-  onQuickCopy?: () => Promise<void>;
+  /** Copy the full feedback payload. May resolve a success boolean; resolving
+    *  `false` suppresses the "Copied" flash. A void resolution (existing hosts)
+    *  is treated as success, preserving the original behavior. */
+  onQuickCopy?: () => Promise<void | boolean>;
   onShare?: () => void;
   otherFileAnnotations?: { count: number; files: number };
   onOtherFileAnnotationsClick?: () => void;
+  /** Committed direct edits to one or more documents. Rendered as pinned cards
+    *  above the annotation timeline with expandable unified diffs. */
+  directEdits?: DirectEditsPanelItem[] | null;
+  /** Host slot rendered at the foot of each plan-annotation card (e.g. reply/
+    *  resolve UI). The panel stays presentation-only; clicks inside the slot
+    *  do not select the card. Default: nothing rendered. */
+  renderCardFooter?: (annotation: Annotation) => React.ReactNode;
+  /** Host slot rendered inside the header row of each plan-annotation card,
+    *  after `author · time` and before the built-in edit/delete actions — the
+    *  place for a status stamp (resolved, needs reply, a reviewer badge). Twin
+    *  of `renderCardFooter`: the panel stays presentation-only, clicks inside
+    *  the slot do not select the card, and it renders under `readOnly` too
+    *  (a stamp is a read affordance). Default: nothing rendered, and no
+    *  wrapper element exists at all. */
+  renderCardHeader?: (annotation: Annotation) => React.ReactNode;
+  /** Opt-in host capability: an `@` mention source for the EDIT box of each
+    *  plan-annotation card, the same `MentionSource` `Viewer` and `HtmlViewer`
+    *  take for their creation composers. Supplied → the edit textarea grows
+    *  the `@` picker and a save that follows a pick carries the surviving ids
+    *  as `Annotation.mentions`. Absent → the edit box is exactly what it was:
+    *  no listener, no picker, no `mentions` key. */
+  mentionSource?: MentionSource;
+  /** Hide every built-in mutation affordance (delete/edit, direct-edit
+    *  discard). The host footer slot still renders: its contents are
+    *  host-owned and may be read affordances (replies, links), so the host
+    *  gates what belongs in it. Selection and scrolling still work.
+    *  Default false — today's behavior. */
+  readOnly?: boolean;
+  /** Embed only the timeline body in a host-owned stage. The host owns the
+    *  title, close control, visible-viewport geometry, and focus boundary. */
+  presentation?: 'panel' | 'embedded';
+  /** Ids of annotations with no live location in the document (e.g. the
+    *  HTML viewer's onUnanchoredChange report after a refresh). Matching
+    *  cards show a small "Unanchored" chip. Absent: no chip, DOM unchanged. */
+  unanchoredIds?: ReadonlySet<string>;
+  /**
+   * Multi-document sessions (annotate folder sessions, and any session whose
+   * linked documents carry feedback): which documents the timeline shows.
+   * Supplying this together with `onAnnotationScopeChange` turns on the
+   * `This file | All files` toggle and the grouped cross-file view. Omitting
+   * them — as every host that has not opted in does — leaves the panel exactly
+   * as it was, including the legacy `+N in M other files` affordance.
+   */
+  annotationScope?: AnnotationScope;
+  onAnnotationScopeChange?: (scope: AnnotationScope) => void;
+  /** One group per document carrying feedback, open document first (see
+   *  `groupAnnotationsByDocument`). Only read while the scope is `all`. */
+  documentGroups?: readonly AnnotationDocumentGroup[];
+  /** Select/jump to an annotation by its owning document. A card in another
+   *  document is the host's cue to navigate there first. */
+  onSelectInDocument?: (path: string, id: string) => void;
+  /** Delete an annotation from its owning document's store. */
+  onDeleteInDocument?: (path: string, id: string) => void;
+  /** Edit an annotation in its owning document's store. */
+  onEditInDocument?: (path: string, id: string, updates: Partial<Annotation>) => void;
+  /**
+   * `:::question` rows for the open document (`buildQuestionPanelRows`).
+   * Supplied, a Questions section renders above a Comments section and the
+   * answer annotations (rows carrying `questionAnswer`) leave the comment
+   * timeline; a row whose question is gone offers Remove through `onDelete`.
+   * Absent, the panel is unchanged and answers list as comment cards.
+   */
+  questionRows?: readonly QuestionPanelRow[];
+  /** A Questions row was clicked (the host scrolls to the card). */
+  onSelectQuestion?: (row: QuestionPanelRow) => void;
+  /**
+   * The order of the comment timeline (and of each document group), for a
+   * host whose comments have an order of their own (the Inbox's video
+   * comments, by the moment they are at). Ties keep creation order. Absent:
+   * creation order, exactly as before.
+   */
+  compareAnnotations?: (a: Annotation, b: Annotation) => number;
+  /**
+   * The panel's title (default "Annotations") and a quiet note at the right
+   * of its header (the Inbox's "By time" for a video's comments). Absent:
+   * the header is exactly as before.
+   */
+  title?: string;
+  titleNote?: string;
+  /**
+   * Which built-in parts a plan-annotation card draws: its quoted text
+   * (`quote`) and its attached images under the comment (`images`). A host
+   * that draws them itself (the Inbox's video comments show the moment and
+   * the frame in `renderCardHeader`) turns them off per card. Absent: both
+   * drawn, exactly as before.
+   */
+  cardParts?: (annotation: Annotation) => { quote?: boolean; images?: boolean };
 }
 
 export const AnnotationPanel: React.FC<PanelProps> = ({
+  emptyHint = 'Select text to annotate',
   isOpen,
   annotations,
-  blocks,
   onSelect,
   onDelete,
   onEdit,
@@ -50,17 +237,108 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
   onShare,
   otherFileAnnotations,
   onOtherFileAnnotationsClick,
+  directEdits = null,
+  renderCardFooter,
+  renderCardHeader,
+  mentionSource,
+  readOnly = false,
+  presentation = 'panel',
+  unanchoredIds,
+  annotationScope,
+  onAnnotationScopeChange,
+  documentGroups,
+  onSelectInDocument,
+  onDeleteInDocument,
+  onEditInDocument,
+  questionRows,
+  onSelectQuestion,
+  compareAnnotations,
+  title = 'Annotations',
+  titleNote,
+  cardParts,
 }) => {
   const isMobile = useIsMobile();
+  const embedded = presentation === 'embedded';
+  const mobilePanel = isMobile && !embedded;
   const [copiedText, setCopiedText] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
-  const sortedAnnotations = [...annotations].sort((a, b) => a.createdA - b.createdA);
+  // With a Questions section, answers are listed there, not as comments.
+  const showQuestions = questionRows !== undefined && questionRows.length > 0;
+  const timelineAnnotations = questionRows !== undefined
+    ? annotations.filter((a) => a.questionAnswer == null)
+    : annotations;
+  const byCreation = (a: Annotation, b: Annotation) => a.createdA - b.createdA;
+  const byHost = compareAnnotations ? (a: Annotation, b: Annotation) => compareAnnotations(a, b) || byCreation(a, b) : byCreation;
+  const sortedAnnotations = [...timelineAnnotations].sort(byHost);
   const sortedCodeAnnotations = [...codeAnnotations].sort((a, b) => a.createdAt - b.createdAt);
-  const timelineEntries = [
-    ...sortedAnnotations.map(annotation => ({ kind: 'plan' as const, ts: annotation.createdA, annotation })),
-    ...sortedCodeAnnotations.map(annotation => ({ kind: 'code' as const, ts: annotation.createdAt, annotation })),
-  ].sort((a, b) => a.ts - b.ts);
+  // Replies (`inReplyTo`) thread under their parent: each reply is lifted to
+  // sit right after its parent (and the parent's earlier replies) at the
+  // parent's timeline position. With no replies the order is untouched.
+  const threadedAnnotations = threadReplies(sortedAnnotations);
+  // Thread timestamps are resolved once per render, linearly (shared helper),
+  // and the comparator only reads the map: resolving each chain inside the
+  // comparator with a linear parent lookup was O(n^2 log n) and froze the
+  // tab on a few thousand threaded comments.
+  const threadRootTs = resolveThreadRootTimestamps(sortedAnnotations);
+  const planEntries = threadedAnnotations.map(({ annotation, isReply }) => ({ kind: 'plan' as const, ts: annotation.createdA, threadTs: threadRootTs.get(annotation.id) ?? annotation.createdA, annotation, isReply }));
+  const codeEntries = sortedCodeAnnotations.map(annotation => ({ kind: 'code' as const, ts: annotation.createdAt, threadTs: annotation.createdAt, annotation, isReply: false }));
+  // A host order keeps the plan comments as the host sorted them (code comments after).
+  const timelineEntries = compareAnnotations
+    ? [...planEntries, ...codeEntries]
+    : [...planEntries, ...codeEntries].sort((a, b) => {
+        if (a.threadTs !== b.threadTs) return a.threadTs - b.threadTs;
+        return a.ts - b.ts;
+      });
   const totalCount = annotations.length + codeAnnotations.length + (editorAnnotations?.length ?? 0);
+  const timelineCount = timelineAnnotations.length + codeAnnotations.length + (editorAnnotations?.length ?? 0);
+
+  // --- Cross-file scope (opt-in: a host that passes neither prop is unchanged) ---
+  const scopeEnabled = annotationScope !== undefined && onAnnotationScopeChange !== undefined;
+  const scope: AnnotationScope = scopeEnabled ? annotationScope! : 'current';
+  const groups = documentGroups ?? [];
+  const otherGroups = groups.filter((group) => !group.isCurrent);
+  const otherGroupCount = otherGroups.reduce((n, group) => n + group.annotations.length, 0);
+  const groupedTotal = groups.reduce((n, group) => n + group.annotations.length, 0);
+  const showGroups = scope === 'all' && groups.length > 0;
+  const headerCount = showGroups
+    ? groupedTotal + codeAnnotations.length + (editorAnnotations?.length ?? 0)
+    : totalCount;
+  const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleGroup = (path: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+  const scopeToggle = scopeEnabled ? (
+    <div
+      data-annotation-scope-toggle="true"
+      role="group"
+      aria-label="Annotation scope"
+      className="flex items-center gap-0.5 rounded-md bg-surface-1/60 p-0.5"
+    >
+      {(['current', 'all'] as const).map((value) => (
+        <button
+          key={value}
+          type="button"
+          data-pn-touch-target="true"
+          data-annotation-scope={value}
+          aria-pressed={scope === value}
+          onClick={() => onAnnotationScopeChange!(value)}
+          className={cn(
+            'cursor-pointer rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors',
+            scope === value
+              ? 'bg-card text-foreground shadow-sm'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+        >
+          {value === 'current' ? 'This file' : 'All files'}
+        </button>
+      ))}
+    </div>
+  ) : null;
 
   // Scroll selected annotation card into view
   useEffect(() => {
@@ -76,79 +354,315 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
   const panel = (
     <aside
       data-annotation-panel="true"
-      className={`border-l border-border/50 bg-card/30 backdrop-blur-sm flex flex-col flex-shrink-0 ${
-        isMobile ? 'fixed top-12 bottom-0 right-0 z-[60] w-full max-w-sm shadow-2xl bg-card' : ''
+      data-plan-sidebar="right"
+      className={`bg-card flex flex-col ${embedded ? 'h-full min-h-0 w-full flex-1' : 'flex-shrink-0 border-l border-border/50'} ${
+        mobilePanel ? 'fixed top-12 bottom-0 right-0 z-[60] w-full max-w-sm shadow-2xl bg-card' : ''
       }`}
-      style={isMobile ? undefined : { width: width ?? 288 }}
+      style={embedded || mobilePanel ? undefined : { width: width ?? 288 }}
     >
       {/* Header */}
-      <div className="p-3 border-b border-border/50">
-        <div className="flex items-center justify-between">
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            Annotations
-          </h2>
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-mono bg-muted px-1.5 py-0.5 rounded text-muted-foreground">
-              {totalCount}
-            </span>
-            {isMobile && onClose && (
-              <button
-                onClick={onClose}
-                className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                title="Close panel"
-              >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
+      {!embedded && (
+        <div className="border-b border-border/50">
+          <div className="flex h-10 items-center justify-between px-3">
+            <div className="flex items-center gap-2">
+              <h2 className="text-xs font-medium text-foreground">
+                {title}
+              </h2>
+              {headerCount > 0 && (
+                <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-primary/10 px-1 font-mono text-[10px] font-medium tabular-nums text-primary">
+                  {headerCount}
+                </span>
+              )}
+            </div>
+            {titleNote && <span data-annotation-panel-note="" className="ml-auto mr-1 text-[11px] text-muted-foreground">{titleNote}</span>}
+            {mobilePanel && onClose && (
+              <HostTitle title="Close panel">
+                <button
+                  onClick={onClose}
+                  className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-foreground md:hidden"
+                  aria-label="Close panel"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </HostTitle>
             )}
           </div>
+          {scopeEnabled ? (
+            <div className="flex items-center justify-between gap-2 px-3 pb-2">
+              {scopeToggle}
+              {otherGroupCount > 0 && scope === 'current' && (
+                <span className="truncate text-[10px] text-muted-foreground/70">
+                  +{otherGroupCount} elsewhere
+                </span>
+              )}
+            </div>
+          ) : (
+            otherFileAnnotations && otherFileAnnotations.count > 0 && (
+              <HostTitle title="Show annotated files in sidebar">
+                <button
+                  onClick={onOtherFileAnnotationsClick}
+                  className="px-3 pb-2 text-[10px] text-primary/70 hover:text-primary transition-colors cursor-pointer"
+                >
+                  +{otherFileAnnotations.count} in {otherFileAnnotations.files} other file{otherFileAnnotations.files === 1 ? '' : 's'}
+                </button>
+              </HostTitle>
+            )
+          )}
         </div>
-        {otherFileAnnotations && otherFileAnnotations.count > 0 && (
+      )}
+
+      {embedded && scopeEnabled && (
+        <div className="flex min-h-11 flex-shrink-0 items-center justify-between gap-2 border-b border-border/50 px-3">
+          {scopeToggle}
+          {otherGroupCount > 0 && scope === 'current' && (
+            <span className="truncate text-[10px] text-muted-foreground/70">+{otherGroupCount} elsewhere</span>
+          )}
+        </div>
+      )}
+
+      {embedded && !scopeEnabled && otherFileAnnotations && otherFileAnnotations.count > 0 && (
+        <HostTitle title="Show annotated files in navigator">
           <button
+            type="button"
+            data-pn-touch-target="true"
             onClick={onOtherFileAnnotationsClick}
-            className="mt-1.5 text-[10px] text-primary/70 hover:text-primary transition-colors cursor-pointer"
-            title="Show annotated files in sidebar"
+            className="min-h-11 flex-shrink-0 border-b border-border/50 px-3 text-left text-xs text-primary/80 active:bg-muted"
           >
-            +{otherFileAnnotations.count} in {otherFileAnnotations.files} other file{otherFileAnnotations.files === 1 ? '' : 's'}
+            {otherFileAnnotations.count} more in {otherFileAnnotations.files} other file{otherFileAnnotations.files === 1 ? '' : 's'}
           </button>
-        )}
-      </div>
+        </HostTitle>
+      )}
 
       {/* List */}
       <OverlayScrollArea className="flex-1 min-h-0">
-        <div ref={listRef} className="p-2 space-y-1.5">
-        {totalCount === 0 ? (
-          <div className="flex flex-col items-center justify-center h-40 text-center px-4">
-            <div className="w-10 h-10 rounded-full bg-muted/50 flex items-center justify-center mb-3">
-              <svg className="w-5 h-5 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
-              </svg>
+        <div ref={listRef} className="p-2 flex flex-col gap-1.5">
+        {directEdits?.map((item) => (
+          <DirectEditsCard key={item.id} {...item} onDiscard={readOnly ? undefined : item.onDiscard} />
+        ))}
+        {showQuestions && (
+          <>
+            <QuestionsPanelSection
+              rows={questionRows!}
+              onSelect={onSelectQuestion}
+              onRemoveOrphan={readOnly ? undefined : (row) => { if (row.annotationId) onDelete(row.annotationId); }}
+            />
+            <div className="mx-0.5 mt-1 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
+              <span className="flex-1">Comments</span>
+              <span className="tabular-nums">{showGroups ? groupedTotal : timelineCount}</span>
             </div>
-            <p className="text-xs text-muted-foreground">
-              Select text or code lines to add annotations
-            </p>
-          </div>
+          </>
+        )}
+        {showGroups ? (
+          <>
+            {groups.map((group) => {
+              const collapsed = collapsedGroups.has(group.path);
+              // The open document's answers are in the Questions section.
+              const groupAnnotations = group.isCurrent && questionRows !== undefined
+                ? group.annotations.filter((a) => a.questionAnswer == null)
+                : group.annotations;
+              const sorted = [...groupAnnotations].sort(byHost);
+              const threaded = threadReplies(sorted);
+              return (
+                <section key={group.path} data-annotation-group={group.path}>
+                  <button
+                    type="button"
+                    data-pn-touch-target="true"
+                    onClick={() => toggleGroup(group.path)}
+                    aria-expanded={!collapsed}
+                    className="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-1/50"
+                  >
+                    <svg
+                      className={cn('h-2.5 w-2.5 flex-shrink-0 text-muted-foreground/60 transition-transform', collapsed ? '' : 'rotate-90')}
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth={3}
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                    </svg>
+                    {/* The pathless root document (plan review) is keyed by a
+                        sentinel, which is not something to show a reader. */}
+                    <HostTitle title={group.path === ROOT_DOCUMENT_GROUP_KEY ? group.label : group.path}>
+                      <span className={cn('min-w-0 flex-1 truncate font-mono text-[10px]', group.isCurrent ? 'text-foreground' : 'text-muted-foreground')}>
+                        {group.label}
+                      </span>
+                    </HostTitle>
+                    {group.isCurrent && (
+                      <span className="flex-shrink-0 text-[9px] text-muted-foreground/50">open</span>
+                    )}
+                    <span className="flex h-[16px] min-w-[16px] flex-shrink-0 items-center justify-center rounded-full bg-primary/10 px-1 font-mono text-[9px] font-medium tabular-nums text-primary">
+                      {group.annotations.length}
+                    </span>
+                  </button>
+                  {!collapsed && (
+                    <div className="mt-0.5 flex flex-col gap-1.5">
+                      {threaded.map(({ annotation, isReply }) => {
+                        const card = (
+                          <AnnotationCard
+                            annotation={annotation}
+                            isSelected={selectedId === annotation.id}
+                            isMe={isCurrentUser(annotation.author)}
+                            onSelect={() => (group.isCurrent
+                              ? onSelect(annotation.id)
+                              : onSelectInDocument?.(group.path, annotation.id))}
+                            onDelete={() => (group.isCurrent
+                              ? onDelete(annotation.id)
+                              : onDeleteInDocument?.(group.path, annotation.id))}
+                            onEdit={group.isCurrent
+                              ? (onEdit ? (updates: Partial<Annotation>) => onEdit(annotation.id, updates) : undefined)
+                              : (onEditInDocument ? (updates: Partial<Annotation>) => onEditInDocument(group.path, annotation.id, updates) : undefined)}
+                            readOnly={readOnly}
+                            footer={group.isCurrent ? renderCardFooter?.(annotation) : undefined}
+                            header={group.isCurrent ? renderCardHeader?.(annotation) : undefined}
+                            parts={group.isCurrent ? cardParts?.(annotation) : undefined}
+                            mentionSource={mentionSource}
+                            unanchored={group.isCurrent ? (unanchoredIds?.has(annotation.id) ?? false) : false}
+                          />
+                        );
+                        return isReply ? (
+                          <div key={annotation.id} data-annotation-reply="true" className="ml-3 border-l-2 border-border/40 pl-1.5">
+                            {card}
+                          </div>
+                        ) : (
+                          <React.Fragment key={annotation.id}>{card}</React.Fragment>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              );
+            })}
+            {sortedCodeAnnotations.length > 0 && (
+              <>
+                <div className="flex items-center gap-2 pt-2 pb-1">
+                  <div className="flex-1 border-t border-border/30" />
+                  <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">Code</span>
+                  <div className="flex-1 border-t border-border/30" />
+                </div>
+                {sortedCodeAnnotations.map((annotation) => (
+                  <CodeAnnotationCard
+                    key={annotation.id}
+                    annotation={annotation}
+                    isSelected={selectedId === annotation.id}
+                    isMe={isCurrentUser(annotation.author)}
+                    onSelect={() => onSelectCodeAnnotation?.(annotation.id)}
+                    onDelete={() => onDeleteCodeAnnotation?.(annotation.id)}
+                    onEdit={onEditCodeAnnotation ? (updates: Partial<CodeAnnotation>) => onEditCodeAnnotation(annotation.id, updates) : undefined}
+                    readOnly={readOnly}
+                  />
+                ))}
+              </>
+            )}
+            {editorAnnotations && editorAnnotations.length > 0 && (
+              <>
+                <div className="flex items-center gap-2 pt-2 pb-1">
+                  <div className="flex-1 border-t border-border/30" />
+                  <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground/60">Editor</span>
+                  <div className="flex-1 border-t border-border/30" />
+                </div>
+                {editorAnnotations.map(ann => (
+                  <EditorAnnotationCard
+                    key={ann.id}
+                    annotation={ann}
+                    onDelete={readOnly ? undefined : () => onDeleteEditorAnnotation?.(ann.id)}
+                  />
+                ))}
+              </>
+            )}
+            {otherGroups.length > 0 && onOtherFileAnnotationsClick && (
+              <HostTitle title="Show annotated files in the navigator">
+                <button
+                  type="button"
+                  data-pn-touch-target="true"
+                  data-annotation-show-in-files="true"
+                  onClick={onOtherFileAnnotationsClick}
+                  className="mt-1 cursor-pointer self-start px-1.5 text-[10px] text-muted-foreground/60 transition-colors hover:text-primary"
+                >
+                  Show in files
+                </button>
+              </HostTitle>
+            )}
+          </>
+        ) : timelineCount === 0 && showQuestions ? (
+          <p className="px-1 py-2.5 text-[12.5px] text-muted-foreground">
+            Select text in the document to comment. Question and option text is selectable too.
+          </p>
+        ) : timelineCount === 0 ? (
+          (!directEdits || directEdits.length === 0) && (
+            <div className="flex flex-col items-center justify-center px-4 py-16 text-center">
+              <p className="text-xs text-muted-foreground/60">
+                No annotations yet
+              </p>
+              <p className="mt-1 text-[11px] text-muted-foreground/40">
+                {emptyHint}
+              </p>
+              {scopeEnabled && otherGroupCount > 0 && (
+                <button
+                  type="button"
+                  data-pn-touch-target="true"
+                  data-annotation-view-all="true"
+                  onClick={() => onAnnotationScopeChange!('all')}
+                  className="mt-3 cursor-pointer rounded-md px-2 py-1 text-[11px] text-primary/80 transition-colors hover:bg-surface-1 hover:text-primary"
+                >
+                  View all {otherGroupCount} in {otherGroups.length} other file{otherGroups.length === 1 ? '' : 's'}
+                </button>
+              )}
+            </div>
+          )
         ) : (
           <>
             {timelineEntries.map(entry => (
               entry.kind === 'plan' ? (
+                entry.isReply ? (
+                  <div
+                    key={entry.annotation.id}
+                    data-annotation-reply="true"
+                    className="ml-3 border-l-2 border-border/40 pl-1.5"
+                  >
+                    <AnnotationCard
+                      annotation={entry.annotation}
+                      isSelected={selectedId === entry.annotation.id}
+                      isMe={isCurrentUser(entry.annotation.author)}
+                      onSelect={() => onSelect(entry.annotation.id)}
+                      onDelete={() => onDelete(entry.annotation.id)}
+                      onEdit={onEdit ? (updates: Partial<Annotation>) => onEdit(entry.annotation.id, updates) : undefined}
+                      readOnly={readOnly}
+                      footer={renderCardFooter?.(entry.annotation)}
+                      header={renderCardHeader?.(entry.annotation)}
+                  parts={cardParts?.(entry.annotation)}
+                      mentionSource={mentionSource}
+                      unanchored={unanchoredIds?.has(entry.annotation.id) ?? false}
+                    />
+                  </div>
+                ) : (
                 <AnnotationCard
                   key={entry.annotation.id}
                   annotation={entry.annotation}
                   isSelected={selectedId === entry.annotation.id}
+                  isMe={isCurrentUser(entry.annotation.author)}
                   onSelect={() => onSelect(entry.annotation.id)}
                   onDelete={() => onDelete(entry.annotation.id)}
                   onEdit={onEdit ? (updates: Partial<Annotation>) => onEdit(entry.annotation.id, updates) : undefined}
+                  readOnly={readOnly}
+                  footer={renderCardFooter?.(entry.annotation)}
+                  header={renderCardHeader?.(entry.annotation)}
+                  parts={cardParts?.(entry.annotation)}
+                  mentionSource={mentionSource}
+                  unanchored={unanchoredIds?.has(entry.annotation.id) ?? false}
                 />
+                )
               ) : (
                 <CodeAnnotationCard
                   key={entry.annotation.id}
                   annotation={entry.annotation}
                   isSelected={selectedId === entry.annotation.id}
+                  isMe={isCurrentUser(entry.annotation.author)}
                   onSelect={() => onSelectCodeAnnotation?.(entry.annotation.id)}
                   onDelete={() => onDeleteCodeAnnotation?.(entry.annotation.id)}
                   onEdit={onEditCodeAnnotation ? (updates: Partial<CodeAnnotation>) => onEditCodeAnnotation(entry.annotation.id, updates) : undefined}
+                  readOnly={readOnly}
                 />
               )
             ))}
@@ -165,7 +679,7 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
                   <EditorAnnotationCard
                     key={ann.id}
                     annotation={ann}
-                    onDelete={() => onDeleteEditorAnnotation?.(ann.id)}
+                    onDelete={readOnly ? undefined : () => onDeleteEditorAnnotation?.(ann.id)}
                   />
                 ))}
               </>
@@ -177,16 +691,19 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
       </OverlayScrollArea>
 
       {/* Quick Actions Footer */}
-      {totalCount > 0 && (
-        <div className="p-2 border-t border-border/50 flex gap-1.5">
+      {headerCount > 0 && (
+        <div className="border-t border-border/50 px-3 py-2 flex gap-1.5">
           {onQuickCopy && (
             <button
               onClick={async () => {
-                await onQuickCopy();
+                const result = await onQuickCopy();
+                if (result === false) return;
                 setCopiedText(true);
                 setTimeout(() => setCopiedText(false), 2000);
               }}
-              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              className={`flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-medium transition-colors ${
+                copiedText ? 'text-green-500' : 'text-muted-foreground hover:bg-surface-1 hover:text-foreground'
+              }`}
             >
               {copiedText ? (
                 <>
@@ -208,7 +725,7 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
           {sharingEnabled && onShare && (
             <button
               onClick={onShare}
-              className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              className="flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-medium transition-colors text-muted-foreground hover:bg-surface-1 hover:text-foreground"
             >
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
@@ -221,7 +738,7 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
     </aside>
   );
 
-  if (isMobile) {
+  if (mobilePanel) {
     return (
       <>
         <div
@@ -249,26 +766,240 @@ function formatTimestamp(ts: number): string {
   if (hours < 24) return `${hours}h`;
   if (days < 7) return `${days}d`;
 
-  return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  // An older date names its year: "Oct 20" alone reads as this October.
+  const date = new Date(ts);
+  const thisYear = date.getFullYear() === new Date(now).getFullYear();
+  return date.toLocaleDateString(
+    undefined,
+    thisYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' },
+  );
 }
+
+/**
+ * A card's "author · time" line. The author truncates (its full name in the
+ * title) while the time never shrinks, so a long name cannot push the time
+ * out; `<bdi>` keeps a right-to-left name from reordering the time around it.
+ * The text reads exactly as before: "Alice (me) · 5m".
+ */
+const CardByline: React.FC<{ author?: string; isMe: boolean; timestamp: number }> = ({ author, isMe, timestamp }) => (
+  <span data-annotation-byline="true" className="flex min-w-0 items-center text-[10px] text-muted-foreground/50">
+    {author ? (
+      <>
+        <HostTitle title={author} cut>
+          <span data-annotation-author="true" className="min-w-0 truncate">
+            <bdi>{author}</bdi>
+          </span>
+        </HostTitle>
+        {isMe ? <span data-annotation-me="true" className="shrink-0 whitespace-pre"> (me)</span> : null}
+        <span className="shrink-0 whitespace-pre"> · </span>
+      </>
+    ) : null}
+    <span data-annotation-time="true" className="shrink-0">{formatTimestamp(timestamp)}</span>
+  </span>
+);
+
+/** Pinned card for committed direct edits: +N/−M summary, expandable unified
+ *  diff, and a two-step discard. Not part of the annotation timeline — edits
+ *  are document state, not a selection-anchored note. */
+const DirectEditsCard: React.FC<{
+  title?: string;
+  label?: string;
+  added: number;
+  removed: number;
+  diffText: string;
+  description?: string;
+  onDiscard?: () => void;
+}> = ({ title = 'Edits', label, added, removed, diffText, description, onDiscard }) => {
+  const [expanded, setExpanded] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+
+  // Auto-cancel the discard confirmation after a beat.
+  useEffect(() => {
+    if (!confirmDiscard) return;
+    const t = setTimeout(() => setConfirmDiscard(false), 3000);
+    return () => clearTimeout(t);
+  }, [confirmDiscard]);
+
+  // Show from the first hunk header; the ---/+++ preamble is noise here.
+  const diffLines = React.useMemo(() => {
+    const lines = diffText.split('\n');
+    const fileSeparators = lines.filter((l) => l.startsWith('===')).length;
+    if (fileSeparators > 1) return lines;
+    const firstHunk = lines.findIndex((l) => l.startsWith('@@'));
+    return firstHunk === -1 ? lines : lines.slice(firstHunk);
+  }, [diffText]);
+
+  return (
+    <div className="w-full rounded-lg px-3 py-2.5 bg-surface-1/40 ring-1 ring-border/40">
+      <div className="flex items-center gap-1.5">
+        <span className="text-[11px] font-medium text-primary">{title}</span>
+        {label && (
+          <HostTitle title={label} cut>
+            <span className="min-w-0 truncate text-[10px] text-muted-foreground">{label}</span>
+          </HostTitle>
+        )}
+        <span className="font-mono text-[10px] tabular-nums">
+          <span className="text-success">+{added}</span>
+          <span className="text-muted-foreground/40">/</span>
+          <span className="text-destructive">-{removed}</span>
+        </span>
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="cursor-pointer rounded px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-surface-1 hover:text-foreground"
+            aria-expanded={expanded}
+          >
+            {expanded ? 'Hide diff' : 'Diff'}
+          </button>
+          {onDiscard && (
+            <button
+              type="button"
+              onClick={() => {
+                if (confirmDiscard) {
+                  setConfirmDiscard(false);
+                  onDiscard();
+                } else {
+                  setConfirmDiscard(true);
+                }
+              }}
+              className={cn(
+                'cursor-pointer rounded px-1.5 py-0.5 text-[10px] transition-colors',
+                confirmDiscard
+                  ? 'bg-destructive/15 text-destructive hover:bg-destructive/25'
+                  : 'text-muted-foreground hover:bg-surface-1 hover:text-destructive',
+              )}
+            >
+              {confirmDiscard ? 'Confirm?' : 'Discard'}
+            </button>
+          )}
+        </div>
+      </div>
+      <p className="mt-1 text-[10px] leading-snug text-muted-foreground/60">
+        {description ?? 'Your text changes — sent with the feedback as a diff.'}
+      </p>
+      {expanded && (
+        <pre className="mt-2 max-h-56 overflow-auto rounded-md bg-muted/40 p-2 font-mono text-[10px] leading-relaxed">
+          {diffLines.map((line, i) => (
+            <div
+              key={i}
+              className={
+                line.startsWith('+') ? 'text-success'
+                : line.startsWith('-') ? 'text-destructive'
+                : line.startsWith('@@') ? 'text-primary/70'
+                : 'text-muted-foreground'
+              }
+            >
+              {line.length === 0 ? ' ' : line}
+            </div>
+          ))}
+        </pre>
+      )}
+    </div>
+  );
+};
+
+/**
+ * The plan-annotation card's edit box.
+ *
+ * Mounted only while a card is in edit mode, which is also what scopes an
+ * `@` pick to ONE edit session: `useMentionAutocomplete`'s tagged-people
+ * state lives and dies with this component, so reopening the editor starts
+ * with nobody picked and a pick-less save is `{ text }` again.
+ *
+ * Without a `mentionSource` every mention path here is inert — no listener,
+ * no menu state, no picker DOM, and the textarea's attributes are exactly
+ * the ones it rendered before the prop existed (all five mention-related
+ * ARIA attributes resolve to `undefined`).
+ *
+ * KNOWN DIFFERENCE from `CommentPopover`: no chip overlay. The token stays
+ * plain text here. Chips live in `ComposerTextarea` (mirrored overlay behind
+ * a transparent-text textarea) and duplicating that layer is not the way to
+ * get them — the follow-up is to make this box use `ComposerTextarea`.
+ */
+const AnnotationEditComposer: React.FC<{
+  value: string;
+  onChange: (text: string) => void;
+  /** Save with the mention ids the body still tags (empty without a source). */
+  onSave: (mentions: readonly string[]) => void;
+  onCancel: () => void;
+  mentionSource?: MentionSource;
+}> = ({ value, onChange, onSave, onCancel, mentionSource }) => {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const mention = useMentionAutocomplete({ text: value, setText: onChange, textareaRef, source: mentionSource });
+  const listboxId = `annotation-card-mentions-${useId().replace(/:/g, '')}`;
+  const menuOpen = mention.menu !== null;
+
+  // Focus-on-open, unchanged: this component mounts exactly when editing starts.
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.focus();
+      textareaRef.current.select();
+    }
+  }, []);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // The menu is offered the key FIRST: while it is open Escape closes it
+    // (and only a second Escape cancels the edit), and an arrowed-to row
+    // takes Enter. Mod+Enter is never consumed by the menu.
+    if (mention.onKeyDown(e)) return;
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      onSave(mention.mentionIds);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      onCancel();
+    }
+  };
+
+  return (
+    <div onClick={(e: React.MouseEvent) => e.stopPropagation()}>
+      <textarea
+        data-pn-mobile-editable="true"
+        ref={textareaRef}
+        value={value}
+        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => { onChange(e.target.value); mention.onSelect(); }}
+        onSelect={mention.onSelect}
+        onKeyDown={handleKeyDown}
+        placeholder="Add your comment..."
+        aria-label="Annotation comment"
+        aria-autocomplete={mentionSource ? 'list' : undefined}
+        aria-haspopup={mentionSource ? 'listbox' : undefined}
+        aria-controls={menuOpen ? listboxId : undefined}
+        aria-owns={menuOpen ? listboxId : undefined}
+        aria-activedescendant={mentionActiveOptionId(listboxId, mention.menu)}
+        className="w-full resize-none rounded-lg border border-border/50 bg-card px-2.5 py-2 text-base leading-relaxed text-foreground outline-none transition-colors placeholder:text-muted-foreground/50 focus:border-primary/40 focus:ring-1 focus:ring-primary/20"
+        style={{ fieldSizing: 'content', minHeight: 44 } as React.CSSProperties}
+      />
+      <div className="mt-1.5 flex justify-end gap-1.5">
+        <Button variant="ghost" size="xxs" onClick={onCancel}>Cancel</Button>
+        <Button size="xxs" disabled={!value.trim()} onClick={() => onSave(mention.mentionIds)}>Save</Button>
+      </div>
+      <MentionAutocompleteMenu id={listboxId} menu={mention.menu} onSelect={mention.select} />
+    </div>
+  );
+};
 
 const AnnotationCard: React.FC<{
   annotation: Annotation;
   isSelected: boolean;
+  isMe: boolean;
   onSelect: () => void;
   onDelete: () => void;
   onEdit?: (updates: Partial<Annotation>) => void;
-}> = ({ annotation, isSelected, onSelect, onDelete, onEdit }) => {
+  readOnly?: boolean;
+  footer?: React.ReactNode;
+  /** Host slot in the card's header row (see `renderCardHeader`). */
+  header?: React.ReactNode;
+  /** An `@` mention source for the edit box (see `mentionSource`). */
+  mentionSource?: MentionSource;
+  /** The annotation has no live location in the document (host-reported). */
+  unanchored?: boolean;
+  /** Built-in parts to draw (see `cardParts`). */
+  parts?: { quote?: boolean; images?: boolean };
+}> = ({ annotation, isSelected, isMe, onSelect, onDelete, onEdit, readOnly = false, footer, header, mentionSource, unanchored = false, parts }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState(annotation.text || '');
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    if (isEditing && textareaRef.current) {
-      textareaRef.current.focus();
-      textareaRef.current.select();
-    }
-  }, [isEditing]);
 
   // Update editText when annotation.text changes
   useEffect(() => {
@@ -283,9 +1014,14 @@ const AnnotationCard: React.FC<{
     setIsEditing(true);
   };
 
-  const handleSaveEdit = () => {
+  const handleSaveEdit = (mentions: readonly string[]) => {
     if (onEdit) {
-      onEdit({ text: editText });
+      // The presence rule, same as the creation composers': the key exists
+      // only when a source was supplied AND at least one id survived to save,
+      // so an untouched or pick-less edit can never wipe tags the annotation
+      // already carries.
+      if (mentionSource && mentions.length > 0) onEdit({ text: editText, mentions });
+      else onEdit({ text: editText });
     }
     setIsEditing(false);
   };
@@ -295,206 +1031,127 @@ const AnnotationCard: React.FC<{
     setIsEditing(false);
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
-      e.preventDefault();
-      handleSaveEdit();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      handleCancelEdit();
-    }
-  };
+  const typeColor = TYPE_COLOR[annotation.type] ?? 'text-muted-foreground';
+  const typeLabel = TYPE_LABEL[annotation.type] ?? 'Note';
+  const isGlobal = annotation.type === AnnotationType.GLOBAL_COMMENT;
 
-  const typeConfig = {
-    [AnnotationType.DELETION]: {
-      label: 'Delete',
-      color: 'text-destructive',
-      bg: 'bg-destructive/10',
-      icon: (
-        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-        </svg>
-      )
-    },
-    [AnnotationType.COMMENT]: {
-      label: 'Comment',
-      color: 'text-accent',
-      bg: 'bg-accent/10',
-      icon: (
-        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
-        </svg>
-      )
-    },
-    [AnnotationType.GLOBAL_COMMENT]: {
-      label: 'Global',
-      color: 'text-secondary',
-      bg: 'bg-secondary/10',
-      icon: (
-        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
-        </svg>
-      )
-    }
-  };
-
-  // Fallback for unknown types (forward compatibility)
-  const config = typeConfig[annotation.type] || {
-    label: 'Note',
-    color: 'text-muted-foreground',
-    bg: 'bg-muted/50',
-    icon: (
-      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
-    )
-  };
+  // The edit box, mounted only while editing (see AnnotationEditComposer).
+  const editComposer = (
+    <AnnotationEditComposer
+      value={editText}
+      onChange={setEditText}
+      onSave={handleSaveEdit}
+      onCancel={handleCancelEdit}
+      mentionSource={mentionSource}
+    />
+  );
 
   return (
     <div
       data-annotation-id={annotation.id}
+      role="button"
+      tabIndex={0}
       onClick={onSelect}
-      className={`
-        group relative p-2.5 rounded-lg border cursor-pointer transition-all
-        ${isSelected
-          ? 'bg-primary/5 border-primary/30 shadow-sm'
-          : 'border-transparent hover:bg-muted/50 hover:border-border/50'
+      onKeyDown={(e: React.KeyboardEvent<HTMLDivElement>) => {
+        if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
+          e.preventDefault();
+          onSelect();
         }
-      `}
-    >
-      {/* Author */}
-      {annotation.author && (
-        <div className={`flex items-center gap-1.5 text-[10px] font-mono truncate mb-1.5 ${isCurrentUser(annotation.author) ? 'text-muted-foreground/60' : 'text-muted-foreground'}`}>
-          <svg className="w-3 h-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-          </svg>
-          <span className="truncate">{annotation.author}{isCurrentUser(annotation.author) && ' (me)'}</span>
-        </div>
+      }}
+      className={cn(
+        'group w-full cursor-pointer rounded-lg px-3 py-2.5 text-left transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
+        isSelected ? 'bg-surface-1 ring-1 ring-border/50' : 'hover:bg-surface-1/50',
       )}
-
-      {/* Type Badge + Timestamp + Actions */}
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
-          <div className={`flex items-center gap-1.5 ${config.color}`}>
-            <span className={`p-1 rounded ${config.bg}`}>
-              {config.icon}
-            </span>
-            <span className="text-[10px] font-semibold uppercase tracking-wide">
-              {config.label}
-            </span>
-          </div>
-          {annotation.diffContext && (
-            <span className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-muted text-muted-foreground">
-              diff
-            </span>
-          )}
-          <span className="text-[10px] text-muted-foreground/50">
-            {formatTimestamp(annotation.createdA)}
+    >
+      {/* Header: type word + author · time + actions */}
+      <div className="mb-1.5 flex items-center gap-1.5">
+        <span className={cn('text-[11px] font-medium', typeColor)}>{typeLabel}</span>
+        {annotation.diffContext && (
+          <span className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-muted text-muted-foreground">
+            diff
           </span>
-        </div>
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-all">
-          {onEdit && annotation.type !== AnnotationType.DELETION && !isEditing && (
-            <button
-              onClick={handleStartEdit}
-              className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-all"
-              title="Edit annotation"
-            >
-              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-              </svg>
-            </button>
-          )}
-          <button
-            onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); onDelete(); }}
-            className="p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-all"
-            title="Delete annotation"
+        )}
+        {annotation.pageUrl && (
+          <HostTitle title={annotation.pageUrl}>
+            <span className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-muted text-muted-foreground truncate max-w-[10rem]">
+              {annotation.pageUrl}
+            </span>
+          </HostTitle>
+        )}
+        {unanchored && (
+          <HostTitle title="This comment no longer matches a location in the document">
+            <span data-annotation-unanchored="true" className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-muted text-muted-foreground">
+              Unanchored
+            </span>
+          </HostTitle>
+        )}
+        <CardByline author={annotation.author} isMe={isMe} timestamp={annotation.createdA} />
+        {/* Host header slot (a status stamp etc.) — interactions inside it
+            must not toggle card selection, exactly like the footer slot.
+            Rendered under readOnly too: its contents are host-owned. */}
+        {header != null && header !== false && (
+          <div
+            data-annotation-card-header="true"
+            className="flex min-w-0 items-center"
+            onClick={(e: React.MouseEvent) => e.stopPropagation()}
+            onKeyDown={(e: React.KeyboardEvent) => e.stopPropagation()}
           >
-            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
+            {header}
+          </div>
+        )}
+        {!readOnly && (
+          <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100">
+            {onEdit && annotation.type !== AnnotationType.DELETION && !isEditing && (
+              <HostTitle title="Edit annotation" name>
+                <button
+                  type="button"
+                  onClick={handleStartEdit}
+                  className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-foreground"
+                >
+                  <PencilIcon />
+                </button>
+              </HostTitle>
+            )}
+            <HostTitle title="Delete annotation" name>
+              <button
+                type="button"
+                onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); onDelete(); }}
+                className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-destructive"
+              >
+                <TrashCardIcon />
+              </button>
+            </HostTitle>
+          </div>
+        )}
       </div>
 
       {/* Global Comment - show text directly */}
-      {annotation.type === AnnotationType.GLOBAL_COMMENT ? (
+      {isGlobal ? (
         isEditing ? (
-          <div className="space-y-2">
-            <textarea
-              ref={textareaRef}
-              value={editText}
-              onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditText(e.target.value)}
-              onKeyDown={handleKeyDown}
-              onClick={(e: React.MouseEvent<HTMLTextAreaElement>) => e.stopPropagation()}
-              className="w-full text-xs text-foreground/90 pl-2 border-l-2 border-purple-500/50 bg-background border border-border rounded px-2 py-1.5 resize-none focus:outline-none focus:ring-2 focus:ring-primary/50"
-              rows={Math.min(editText.split('\n').length + 1, 8)}
-            />
-            <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-              <span>Press Cmd+Enter to save, Esc to cancel</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); handleSaveEdit(); }}
-                className="px-2 py-1 text-[10px] font-medium rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-              >
-                Save
-              </button>
-              <button
-                onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); handleCancelEdit(); }}
-                className="px-2 py-1 text-[10px] font-medium rounded bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
+          editComposer
         ) : (
-          <div className="text-xs text-foreground/90 pl-2 border-l-2 border-purple-500/50 whitespace-pre-wrap">
+          <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[13px] leading-relaxed text-foreground/90">
             {annotation.text}
-          </div>
+          </p>
         )
       ) : (
         <>
-          {/* Original Text */}
-          <div className="text-[11px] font-mono text-muted-foreground bg-muted/50 rounded px-2 py-1.5 whitespace-pre-wrap max-h-24 overflow-y-auto">
-            "{annotation.originalText}"
-          </div>
+          {/* Quote — the annotated text */}
+          {parts?.quote !== false && (
+            <p className="mb-1.5 line-clamp-2 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-[11px] leading-relaxed text-muted-foreground/80">
+              "{annotation.originalText}"
+            </p>
+          )}
 
           {/* Comment/Replacement Text */}
           {annotation.type !== AnnotationType.DELETION && (
             isEditing ? (
-              <div className="mt-2 space-y-2">
-                <textarea
-                  ref={textareaRef}
-                  value={editText}
-                  onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditText(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  onClick={(e: React.MouseEvent<HTMLTextAreaElement>) => e.stopPropagation()}
-                  className="w-full text-xs text-foreground/90 pl-2 border-l-2 border-primary/50 bg-background border border-border rounded px-2 py-1.5 resize-none focus:outline-none focus:ring-2 focus:ring-primary/50"
-                  rows={Math.min(editText.split('\n').length + 1, 8)}
-                />
-                <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                  <span>Press Cmd+Enter to save, Esc to cancel</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); handleSaveEdit(); }}
-                    className="px-2 py-1 text-[10px] font-medium rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-                  >
-                    Save
-                  </button>
-                  <button
-                    onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.stopPropagation(); handleCancelEdit(); }}
-                    className="px-2 py-1 text-[10px] font-medium rounded bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
+              editComposer
             ) : (
               annotation.text && (
-                <div className="mt-2 text-xs text-foreground/90 pl-2 border-l-2 border-primary/50 whitespace-pre-wrap">
+                <p className="whitespace-pre-wrap [overflow-wrap:anywhere] text-[13px] leading-relaxed text-foreground/90">
                   {annotation.text}
-                </div>
+                </p>
               )
             )
           )}
@@ -502,7 +1159,7 @@ const AnnotationCard: React.FC<{
       )}
 
       {/* Attached Images */}
-      {annotation.images && annotation.images.length > 0 && (
+      {parts?.images !== false && annotation.images && annotation.images.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {annotation.images.map((img, idx) => (
             <div key={idx} className="text-center">
@@ -511,9 +1168,24 @@ const AnnotationCard: React.FC<{
                 size="sm"
                 showRemove={false}
               />
-              <div className="text-[9px] text-muted-foreground truncate max-w-[3rem]" title={img.name}>{img.name}</div>
+              <HostTitle title={img.name} cut>
+                <div className="text-[9px] text-muted-foreground truncate max-w-[3rem]">{img.name}</div>
+              </HostTitle>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Host footer slot (reply/resolve UI etc.) — interactions inside it
+          must not toggle card selection. */}
+      {footer != null && footer !== false && (
+        <div
+          data-annotation-card-footer="true"
+          className="mt-2"
+          onClick={(e: React.MouseEvent) => e.stopPropagation()}
+          onKeyDown={(e: React.KeyboardEvent) => e.stopPropagation()}
+        >
+          {footer}
         </div>
       )}
     </div>
@@ -523,10 +1195,12 @@ const AnnotationCard: React.FC<{
 const CodeAnnotationCard: React.FC<{
   annotation: CodeAnnotation;
   isSelected: boolean;
+  isMe: boolean;
   onSelect: () => void;
   onDelete: () => void;
   onEdit?: (updates: Partial<CodeAnnotation>) => void;
-}> = ({ annotation, isSelected, onSelect, onDelete, onEdit }) => {
+  readOnly?: boolean;
+}> = ({ annotation, isSelected, isMe, onSelect, onDelete, onEdit, readOnly = false }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState(annotation.text || '');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -552,80 +1226,75 @@ const CodeAnnotationCard: React.FC<{
     : `lines ${annotation.lineStart}-${annotation.lineEnd}`;
   const fileName = annotation.filePath.split('/').pop() || annotation.filePath;
 
+  const handleCancelEdit = () => {
+    setIsEditing(false);
+    setEditText(annotation.text || '');
+  };
+
   return (
     <div
       data-annotation-id={annotation.id}
+      role="button"
+      tabIndex={0}
       onClick={onSelect}
-      className={`group relative p-2.5 rounded-lg border cursor-pointer transition-all ${
-        isSelected
-          ? 'bg-primary/5 border-primary/30 shadow-sm'
-          : 'border-transparent hover:bg-muted/50 hover:border-border/50'
-      }`}
-    >
-      {annotation.author && (
-        <div className={`flex items-center gap-1.5 text-[10px] font-mono truncate mb-1.5 ${isCurrentUser(annotation.author) ? 'text-muted-foreground/60' : 'text-muted-foreground'}`}>
-          <svg className="w-3 h-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-          </svg>
-          <span className="truncate">{annotation.author}{isCurrentUser(annotation.author) && ' (me)'}</span>
-        </div>
+      onKeyDown={(e: React.KeyboardEvent<HTMLDivElement>) => {
+        if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+      className={cn(
+        'group w-full cursor-pointer rounded-lg px-3 py-2.5 text-left transition-colors duration-150 outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
+        isSelected ? 'bg-surface-1 ring-1 ring-border/50' : 'hover:bg-surface-1/50',
       )}
-
-      <div className="flex items-center justify-between mb-2">
-        <div className="min-w-0 flex items-center gap-2">
-          <div className="flex items-center gap-1.5 text-primary">
-            <span className="p-1 rounded bg-primary/10">
-              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-              </svg>
-            </span>
-            <span className="text-[10px] font-semibold uppercase tracking-wide">Code</span>
+    >
+      {/* Header: type word + author · time + actions */}
+      <div className="mb-1.5 flex items-center gap-1.5">
+        <span className="text-[11px] font-medium text-primary">Code</span>
+        <CardByline author={annotation.author} isMe={isMe} timestamp={annotation.createdAt} />
+        {!readOnly && (
+          <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100">
+            {onEdit && !isEditing && (
+              <HostTitle title="Edit annotation" name>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); setIsEditing(true); }}
+                  className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-foreground"
+                >
+                  <PencilIcon />
+                </button>
+              </HostTitle>
+            )}
+            <HostTitle title="Delete annotation" name>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-destructive"
+              >
+                <TrashCardIcon />
+              </button>
+            </HostTitle>
           </div>
-          <span className="text-[10px] text-muted-foreground/50">{formatTimestamp(annotation.createdAt)}</span>
-        </div>
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-all">
-          {onEdit && !isEditing && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setIsEditing(true);
-              }}
-              className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-all"
-              title="Edit annotation"
-            >
-              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-              </svg>
-            </button>
-          )}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete();
-            }}
-            className="p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-all"
-            title="Delete annotation"
-          >
-            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
+        )}
       </div>
 
-      <div className="text-[11px] font-mono text-muted-foreground bg-muted/50 rounded px-2 py-1.5 truncate" title={annotation.filePath}>
-        {fileName} · {lineRange}
-      </div>
+      {/* File / line meta */}
+      <HostTitle title={annotation.filePath}>
+        <div className="rounded px-2 py-1 bg-surface-1 font-mono text-[11px] text-muted-foreground truncate">
+          {fileName} · {lineRange}
+        </div>
+      </HostTitle>
 
       {annotation.originalCode && (
-        <div className="mt-1.5 text-[11px] font-mono text-muted-foreground bg-muted/30 rounded px-2 py-1.5 whitespace-pre-wrap max-h-24 overflow-y-auto">
+        <p className="mt-1.5 line-clamp-2 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-[11px] leading-relaxed text-muted-foreground/80">
           {annotation.originalCode}
-        </div>
+        </p>
       )}
 
       {isEditing ? (
-        <div className="mt-2 space-y-2">
+        <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
           <textarea
+            data-pn-mobile-editable="true"
             ref={textareaRef}
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
@@ -635,41 +1304,24 @@ const CodeAnnotationCard: React.FC<{
                 handleSaveEdit();
               } else if (e.key === 'Escape') {
                 e.preventDefault();
-                setIsEditing(false);
-                setEditText(annotation.text || '');
+                handleCancelEdit();
               }
             }}
-            onClick={(e) => e.stopPropagation()}
-            className="w-full text-xs text-foreground/90 pl-2 border-l-2 border-primary/50 bg-background border border-border rounded px-2 py-1.5 resize-none focus:outline-none focus:ring-2 focus:ring-primary/50"
-            rows={Math.min(editText.split('\n').length + 1, 8)}
+            placeholder="Add your comment..."
+            aria-label="Annotation comment"
+            className="w-full resize-none rounded-lg border border-border/50 bg-card px-2.5 py-2 text-base leading-relaxed text-foreground outline-none transition-colors placeholder:text-muted-foreground/50 focus:border-primary/40 focus:ring-1 focus:ring-primary/20"
+            style={{ fieldSizing: 'content', minHeight: 44 } as React.CSSProperties}
           />
-          <div className="flex items-center gap-2">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleSaveEdit();
-              }}
-              className="px-2 py-1 text-[10px] font-medium rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-            >
-              Save
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setIsEditing(false);
-                setEditText(annotation.text || '');
-              }}
-              className="px-2 py-1 text-[10px] font-medium rounded bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
-            >
-              Cancel
-            </button>
+          <div className="mt-1.5 flex justify-end gap-1.5">
+            <Button variant="ghost" size="xxs" onClick={handleCancelEdit}>Cancel</Button>
+            <Button size="xxs" disabled={!editText.trim()} onClick={handleSaveEdit}>Save</Button>
           </div>
         </div>
       ) : (
         annotation.text && (
-          <div className="mt-2 text-xs text-foreground/90 pl-2 border-l-2 border-primary/50 whitespace-pre-wrap">
+          <p className="mt-1.5 whitespace-pre-wrap [overflow-wrap:anywhere] text-[13px] leading-relaxed text-foreground/90">
             {annotation.text}
-          </div>
+          </p>
         )
       )}
 
@@ -678,7 +1330,9 @@ const CodeAnnotationCard: React.FC<{
           {annotation.images.map((img) => (
             <div key={img.path} className="text-center">
               <ImageThumbnail path={img.path} size="sm" showRemove={false} />
-              <div className="text-[9px] text-muted-foreground truncate max-w-[3rem]" title={img.name}>{img.name}</div>
+              <HostTitle title={img.name} cut>
+                <div className="text-[9px] text-muted-foreground truncate max-w-[3rem]">{img.name}</div>
+              </HostTitle>
             </div>
           ))}
         </div>

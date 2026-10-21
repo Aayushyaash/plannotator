@@ -1,0 +1,134 @@
+/**
+ * Unified diff → per-file records. The one splitter/path resolver shared by
+ * the review app, the guide chain, and the portable-format helpers
+ * (`listGuidePatchFiles`, language preload detection), so every consumer
+ * agrees on which files a patch contains.
+ *
+ * Browser-safe and dependency-free.
+ */
+
+import { parseDiffFilePathLines, parseDiffGitHeader, parseDiffMetadataPathLines } from "./diff-paths";
+
+/**
+ * Change type derived from the diff's metadata lines. 'modified' is the
+ * default and is deliberately NOT decorated in the UI (mirroring Pierre's
+ * diffshub: most files are modifications, so only A/D/R stand out).
+ */
+export type DiffFileStatus = "added" | "deleted" | "renamed" | "modified";
+
+/** One file of a unified diff, as the guide and the review app both consume it. */
+export interface DiffFile {
+  path: string;
+  oldPath?: string;
+  patch: string;
+  additions: number;
+  deletions: number;
+  status: DiffFileStatus;
+}
+
+/** ANSI CSI sequences (SGR color/bold `\x1b[1;31m`, the bare reset `\x1b[m`, …). */
+const ANSI_CSI = /\x1b\[[0-9;:?]*[A-Za-z]/g;
+/** A file header line that a terminal color code was wrapped around. */
+const COLORED_DIFF_HEADER = /^(?:\x1b\[[0-9;:?]*[A-Za-z])+diff --git /m;
+
+/**
+ * True when the patch's own headers carry ANSI color codes, the shape a VCS
+ * produces when the user's config forces color into a pipe (`color.diff =
+ * always`, jj `ui.color = "always"`; #1661). A normal patch never matches:
+ * its `diff --git` headers are plain, and escape bytes inside a changed file's
+ * content sit after a `+`/`-`/space prefix, never at the start of a header.
+ */
+export function isColorizedPatch(rawPatch: string): boolean {
+  return rawPatch.includes("\x1b[") && !/^diff --git /m.test(rawPatch) && COLORED_DIFF_HEADER.test(rawPatch);
+}
+
+/**
+ * Remove terminal color codes from a colorized patch so it still parses.
+ * Returns any other patch unchanged, byte for byte, so content that really
+ * contains escape bytes is never altered.
+ */
+export function stripPatchColor(rawPatch: string): string {
+  return isColorizedPatch(rawPatch) ? rawPatch.replace(ANSI_CSI, "") : rawPatch;
+}
+
+function splitDiffChunks(rawPatch: string): string[] {
+  const matches = [...rawPatch.matchAll(/^diff --git /gm)];
+  return matches.map((match, index) => {
+    const start = match.index ?? 0;
+    const end = matches[index + 1]?.index ?? rawPatch.length;
+    return rawPatch.slice(start, end);
+  });
+}
+
+/**
+ * Change type from the chunk's git metadata lines. Scans only the extended
+ * header (everything before the first hunk/--- line) so file content that
+ * happens to contain "rename from" etc. can't misclassify.
+ */
+function deriveStatus(lines: string[], oldPath: string, newPath: string): DiffFileStatus {
+  for (const line of lines) {
+    if (line.startsWith("@@") || line.startsWith("--- ") || line.startsWith("+++ ")) break;
+    if (line.startsWith("new file mode")) return "added";
+    if (line.startsWith("deleted file mode")) return "deleted";
+    if (line.startsWith("rename from ") || line.startsWith("copy from ")) return "renamed";
+  }
+  // Reconstructed/odd patches may carry distinct paths without rename lines.
+  return oldPath !== newPath ? "renamed" : "modified";
+}
+
+export function parseDiffToFiles(rawPatch: string): DiffFile[] {
+  const files: DiffFile[] = [];
+
+  // A patch that arrived colorized would otherwise parse to 0 files and look
+  // exactly like "no changes" (#1661). The VCS runners turn color off; this
+  // covers patches from anywhere else (piped patch files, older servers).
+  for (const chunk of splitDiffChunks(stripPatchColor(rawPatch))) {
+    const lines = chunk.split("\n");
+    const fromFileLines = parseDiffFilePathLines(lines);
+    const fromMetadata = parseDiffMetadataPathLines(lines);
+    const fromHeader = parseDiffGitHeader(lines[0] ?? "");
+    const oldPath = fromFileLines.oldPath ?? fromFileLines.newPath ?? fromMetadata.oldPath ?? fromHeader.oldPath;
+    const newPath = fromFileLines.newPath ?? fromFileLines.oldPath ?? fromMetadata.newPath ?? fromHeader.newPath;
+    if (!oldPath || !newPath) continue;
+
+    let additions = 0;
+    let deletions = 0;
+
+    for (const line of lines) {
+      if (line.startsWith("+") && !line.startsWith("+++")) additions += 1;
+      if (line.startsWith("-") && !line.startsWith("---")) deletions += 1;
+    }
+
+    files.push({
+      path: newPath,
+      oldPath: oldPath !== newPath ? oldPath : undefined,
+      patch: chunk,
+      additions,
+      deletions,
+      status: deriveStatus(lines, oldPath, newPath),
+    });
+  }
+
+  return files;
+}
+
+/** Return true only when the complete source range is represented by one diff hunk. */
+export function isLineRangeInPatch(
+  patch: string,
+  lineStart: number,
+  lineEnd: number,
+  side: "old" | "new",
+): boolean {
+  if (!Number.isInteger(lineStart) || !Number.isInteger(lineEnd) || lineStart < 1 || lineEnd < lineStart) {
+    return false;
+  }
+  for (const line of patch.split("\n")) {
+    const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (!match) continue;
+    const start = Number(side === "old" ? match[1] : match[3]);
+    const count = Number((side === "old" ? match[2] : match[4]) ?? "1");
+    if (count === 0) continue;
+    if (lineStart >= start && lineEnd <= start + count - 1) return true;
+  }
+  return false;
+}

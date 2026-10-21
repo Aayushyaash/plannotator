@@ -17,6 +17,7 @@ import { PlanCleanDiffView } from "./PlanCleanDiffView";
 import { PlanRawDiffView } from "./PlanRawDiffView";
 import { PlanDiffBadge } from "./PlanDiffBadge";
 import { VSCodeIcon } from "./VSCodeIcon";
+import { noteServerSessionMismatch, withServerSession } from "../../utils/serverSession";
 
 interface PlanDiffViewerProps {
   diffBlocks: PlanDiffBlock[];
@@ -34,7 +35,31 @@ interface PlanDiffViewerProps {
   onSelectAnnotation?: (id: string | null) => void;
   selectedAnnotationId?: string | null;
   mode?: EditorMode;
+  onOpenVscodeDiff?: (baseVersion: number) => Promise<{ ok?: boolean; error?: string }>;
 }
+
+const defaultOpenVscodeDiff = async (
+  baseVersion: number
+): Promise<{ ok?: boolean; error?: string }> => {
+  try {
+    const res = await fetch("/api/plan/vscode-diff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // The stale-tab guard (a no-op for a host that never adopted a session).
+      body: JSON.stringify(withServerSession({ baseVersion })),
+    });
+    if (await noteServerSessionMismatch(res)) {
+      return { error: "This review was replaced. Reload the page." };
+    }
+    const data = (await res.json()) as { ok?: boolean; error?: string };
+    if (!res.ok || data.error) {
+      return { error: data.error || "Failed to open VS Code diff" };
+    }
+    return { ok: true };
+  } catch {
+    return { error: "Failed to connect to server" };
+  }
+};
 
 export const PlanDiffViewer: React.FC<PlanDiffViewerProps> = ({
   diffBlocks,
@@ -51,6 +76,7 @@ export const PlanDiffViewer: React.FC<PlanDiffViewerProps> = ({
   onSelectAnnotation,
   selectedAnnotationId,
   mode,
+  onOpenVscodeDiff,
 }) => {
   const [vscodeDiffLoading, setVscodeDiffLoading] = useState(false);
   const [vscodeDiffError, setVscodeDiffError] = useState<string | null>(null);
@@ -58,21 +84,18 @@ export const PlanDiffViewer: React.FC<PlanDiffViewerProps> = ({
   const canOpenVscodeDiff = baseVersion != null;
 
   const handleOpenVscodeDiff = async () => {
-    if (!canOpenVscodeDiff) return;
+    if (!canOpenVscodeDiff || baseVersion == null) return;
     setVscodeDiffLoading(true);
     setVscodeDiffError(null);
     try {
-      const res = await fetch("/api/plan/vscode-diff", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ baseVersion }),
-      });
-      const data = await res.json() as { ok?: boolean; error?: string };
-      if (!res.ok || data.error) {
-        setVscodeDiffError(data.error || "Failed to open VS Code diff");
+      const result = await (onOpenVscodeDiff ?? defaultOpenVscodeDiff)(baseVersion);
+      if (result.error) {
+        setVscodeDiffError(result.error);
       }
     } catch {
-      setVscodeDiffError("Failed to connect to server");
+      // A host-supplied opener that throws (instead of returning { error }) must
+      // not wedge the button in a permanent loading state.
+      setVscodeDiffError("Failed to open VS Code diff");
     } finally {
       setVscodeDiffLoading(false);
     }

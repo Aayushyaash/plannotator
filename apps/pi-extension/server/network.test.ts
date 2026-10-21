@@ -1,11 +1,27 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+	chmodSync,
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { createServer } from "node:http";
+import os, { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+import { closeServer, occupyConsecutivePorts } from "../../../tests/helpers/ports.ts";
+import {
+	buildAdvertisedUrl,
 	getServerHostname,
 	getServerPort,
+	getServerPorts,
 	isNoOpBrowserSentinel,
+	isPosixBrowserTarget,
 	isRemoteSession,
+	listenOnPort,
 	openBrowser,
-} from "./network";
+} from "./network.ts";
 
 const savedEnv: Record<string, string | undefined> = {};
 const envKeys = [
@@ -15,6 +31,7 @@ const envKeys = [
 	"SSH_CONNECTION",
 	"PLANNOTATOR_BROWSER",
 	"BROWSER",
+	"PLANNOTATOR_URL_HOST",
 ];
 
 function clearEnv() {
@@ -86,14 +103,14 @@ describe("pi remote detection", () => {
 });
 
 describe("pi port selection", () => {
-	test("uses random local port when false overrides SSH", () => {
+	test("PLANNOTATOR_PORT unset preserves the random local default", () => {
 		clearEnv();
 		process.env.PLANNOTATOR_REMOTE = "false";
 		process.env.SSH_TTY = "/dev/pts/0";
 		expect(getServerPort()).toEqual({ port: 0, portSource: "random" });
 	});
 
-	test("uses default remote port when SSH is detected", () => {
+	test("PLANNOTATOR_PORT unset preserves the 19432 remote default", () => {
 		clearEnv();
 		process.env.SSH_CONNECTION = "192.168.1.1 12345 192.168.1.2 22";
 		expect(getServerPort()).toEqual({ port: 19432, portSource: "remote-default" });
@@ -105,6 +122,128 @@ describe("pi port selection", () => {
 		process.env.SSH_TTY = "/dev/pts/0";
 		process.env.PLANNOTATOR_PORT = "9999";
 		expect(getServerPort()).toEqual({ port: 9999, portSource: "env" });
+	});
+
+	test("expands an inclusive port range", () => {
+		clearEnv();
+		process.env.PLANNOTATOR_PORT = "19432-19435";
+		expect(getServerPorts()).toEqual({
+			ports: [19432, 19433, 19434, 19435],
+			portSource: "env",
+		});
+		expect(getServerPort()).toEqual({ port: 19432, portSource: "env" });
+	});
+
+	test("ignores reversed port ranges", () => {
+		clearEnv();
+		process.env.PLANNOTATOR_PORT = "19435-19432";
+		expect(getServerPorts()).toEqual({ ports: [0], portSource: "random" });
+	});
+
+	test("rejects malformed fixed ports and ranges without accepting numeric prefixes", () => {
+		clearEnv();
+		for (const value of [
+			"19432garbage",
+			"19432.5",
+			"19432-19435garbage",
+			"19432-19435-19436",
+		]) {
+			process.env.PLANNOTATOR_PORT = value;
+			expect(getServerPorts()).toEqual({ ports: [0], portSource: "random" });
+		}
+	});
+
+	test("a malformed range follows the existing remote default path", () => {
+		clearEnv();
+		process.env.PLANNOTATOR_REMOTE = "1";
+		process.env.PLANNOTATOR_PORT = "19432-19435garbage";
+		expect(getServerPorts()).toEqual({
+			ports: [19432],
+			portSource: "remote-default",
+		});
+	});
+
+	test("binds the next port when the range start is occupied", async () => {
+		clearEnv();
+		const { start, servers } = await occupyConsecutivePorts(2);
+		await closeServer(servers[1]);
+		process.env.PLANNOTATOR_PORT = `${start}-${start + 1}`;
+		const server = createServer();
+		try {
+			expect(await listenOnPort(server)).toEqual({
+				port: start + 1,
+				portSource: "env",
+			});
+			expect(server.listenerCount("error")).toBe(0);
+			expect(server.listenerCount("listening")).toBe(0);
+		} finally {
+			await closeServer(server);
+			await closeServer(servers[0]);
+		}
+	});
+
+	test("reports an exhausted occupied range", async () => {
+		clearEnv();
+		const { start, servers } = await occupyConsecutivePorts(2);
+		process.env.PLANNOTATOR_PORT = `${start}-${start + 1}`;
+		const server = createServer();
+
+		try {
+			await expect(listenOnPort(server)).rejects.toThrow(
+				new RegExp(`^Port selection ${start}-${start + 1} exhausted$`),
+			);
+		} finally {
+			await Promise.all(servers.map(closeServer));
+		}
+	});
+
+	test("treats a valid one-port range as range syntax", async () => {
+		clearEnv();
+		const { start, servers } = await occupyConsecutivePorts(1);
+		process.env.PLANNOTATOR_PORT = `${start}-${start}`;
+		const server = createServer();
+
+		try {
+			await expect(listenOnPort(server)).rejects.toThrow(
+				new RegExp(`^Port selection ${start}-${start} exhausted$`),
+			);
+		} finally {
+			await closeServer(servers[0]);
+		}
+	});
+
+	test("removes failed-attempt listeners across a long occupied range", async () => {
+		clearEnv();
+		const { start, servers } = await occupyConsecutivePorts(12);
+		process.env.PLANNOTATOR_PORT = `${start}-${start + servers.length - 1}`;
+		const server = createServer();
+
+		try {
+			await expect(listenOnPort(server)).rejects.toThrow("exhausted");
+			expect(server.listenerCount("error")).toBe(0);
+			expect(server.listenerCount("listening")).toBe(0);
+		} finally {
+			await Promise.all(servers.map(closeServer));
+		}
+	});
+});
+
+describe("pi non-range port compatibility", () => {
+	test("an occupied fixed port preserves the existing retry error", async () => {
+		clearEnv();
+		const { start, servers } = await occupyConsecutivePorts(1);
+		process.env.PLANNOTATOR_PORT = String(start);
+		const server = createServer();
+
+		try {
+			await expect(listenOnPort(server)).rejects.toThrow(
+				new RegExp(`^Port ${start} in use after 5 retries$`),
+			);
+			expect(server.listenerCount("error")).toBe(0);
+			expect(server.listenerCount("listening")).toBe(0);
+		} finally {
+			await closeServer(servers[0]);
+		}
 	});
 });
 
@@ -154,5 +293,253 @@ describe("pi browser no-op sentinels", () => {
 			isRemote: true,
 			url: "http://127.0.0.1:19432",
 		});
+	});
+});
+
+describe("pi PLANNOTATOR_BROWSER script path", () => {
+	// #1391: on darwin, `open -a <script>` fails with LaunchServices -10811,
+	// so a slash-containing non-.app value must be executed directly.
+	test.if(process.platform !== "win32")(
+		"executes a script path directly with the URL as argument",
+		async () => {
+			clearEnv();
+			const { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } =
+				await import("node:fs");
+			const { join } = await import("node:path");
+			const { tmpdir } = await import("node:os");
+			const dir = mkdtempSync(join(tmpdir(), "pn-browser-"));
+			try {
+				const marker = join(dir, "opened.txt");
+				const script = join(dir, "handler.sh");
+				writeFileSync(script, `#!/bin/sh\nprintf '%s' \"$1\" > \"${marker}.tmp\" && mv \"${marker}.tmp\" \"${marker}\"\n`, {
+					mode: 0o755,
+				});
+				process.env.PLANNOTATOR_BROWSER = script;
+
+				const result = await openBrowser("http://127.0.0.1:19432");
+				expect(result.opened).toBe(true);
+
+				// spawn is detached; poll briefly for the marker (written whole by the
+				// script's mv, so it never reads empty)
+				const deadline = Date.now() + 2000;
+				while (!existsSync(marker) && Date.now() < deadline) {
+					await new Promise((r) => setTimeout(r, 25));
+				}
+				expect(readFileSync(marker, "utf-8")).toBe("http://127.0.0.1:19432");
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		},
+	);
+});
+
+describe("pi buildAdvertisedUrl", () => {
+	test("defaults to localhost", () => {
+		clearEnv();
+		process.env.PLANNOTATOR_REMOTE = "1";
+		// An empty (but set) env var suppresses any urlHost in the developer's
+		// real config.json, isolating the default path.
+		process.env.PLANNOTATOR_URL_HOST = "";
+		expect(buildAdvertisedUrl(19432)).toBe("http://localhost:19432");
+	});
+
+	test("a local session ignores the override and advertises localhost", () => {
+		clearEnv();
+		process.env.PLANNOTATOR_URL_HOST = "my-machine.tailnet.ts.net";
+		expect(buildAdvertisedUrl(1234)).toBe("http://localhost:1234");
+	});
+
+	test("appends the runtime port to the override host", () => {
+		clearEnv();
+		process.env.PLANNOTATOR_REMOTE = "1";
+		process.env.PLANNOTATOR_URL_HOST = "my-machine.tailnet.ts.net";
+		expect(buildAdvertisedUrl(19432)).toBe("http://my-machine.tailnet.ts.net:19432");
+	});
+
+	test("keeps bracketed IPv6 hosts intact", () => {
+		clearEnv();
+		process.env.PLANNOTATOR_REMOTE = "1";
+		process.env.PLANNOTATOR_URL_HOST = "[fd7a::1]";
+		expect(buildAdvertisedUrl(9999)).toBe("http://[fd7a::1]:9999");
+	});
+
+	test("an invalid host falls back to localhost instead of throwing", () => {
+		clearEnv();
+		process.env.PLANNOTATOR_REMOTE = "1";
+		process.env.PLANNOTATOR_URL_HOST = "https://evil.example/path";
+		expect(buildAdvertisedUrl(1234)).toBe("http://localhost:1234");
+	});
+
+	test("the override never affects the bind hostname", () => {
+		clearEnv();
+		process.env.PLANNOTATOR_URL_HOST = "my-machine.tailnet.ts.net";
+		expect(getServerHostname()).toBe("127.0.0.1");
+		process.env.PLANNOTATOR_REMOTE = "1";
+		expect(getServerHostname()).toBe("0.0.0.0");
+	});
+});
+
+// --- WSL PLANNOTATOR_BROWSER routing (#1472) ---
+
+const realPlatform = process.platform;
+const realRelease = os.release;
+
+/** Pretend to run under WSL: the WSL test is process.platform + os.release(). */
+function mockWsl() {
+	Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+	os.release = () => "5.15.90.1-microsoft-standard-WSL2";
+}
+
+function restoreHostPlatform() {
+	Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
+	os.release = realRelease;
+}
+
+function writeExecutable(dir: string, name: string, body: string): string {
+	const file = join(dir, name);
+	writeFileSync(file, `#!/bin/sh\n${body}\n`);
+	chmodSync(file, 0o755);
+	return file;
+}
+
+async function waitForFile(file: string, timeoutMs = 2000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!existsSync(file)) {
+		if (Date.now() > deadline) throw new Error(`timed out waiting for ${file}`);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+}
+
+const URL = "http://127.0.0.1:19432/plan";
+
+describe("pi WSL configured browser launch", () => {
+	afterEach(() => {
+		restoreHostPlatform();
+	});
+
+	test("a POSIX path is spawned directly with the URL", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "plannotator-pi-browser-"));
+		const log = join(dir, "args.txt");
+		const script = writeExecutable(dir, "fake-browser", `printf '%s' "$1" > '${log}'`);
+		try {
+			clearEnv();
+			mockWsl();
+			process.env.PLANNOTATOR_BROWSER = script;
+
+			expect(await openBrowser(URL)).toEqual({ opened: true });
+			await waitForFile(log);
+			expect(readFileSync(log, "utf8")).toBe(URL);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a Windows .exe target still routes through cmd.exe", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "plannotator-pi-browser-"));
+		const cmdLog = join(dir, "cmd.txt");
+		const directLog = join(dir, "direct.txt");
+		writeExecutable(dir, "cmd.exe", `printf '%s' "$*" > '${cmdLog}'`);
+		writeExecutable(dir, "chrome.exe", `printf '%s' "$1" > '${directLog}'`);
+		const originalPath = process.env.PATH;
+		try {
+			process.env.PATH = `${dir}${delimiter}${originalPath ?? ""}`;
+			clearEnv();
+			mockWsl();
+			process.env.PLANNOTATOR_BROWSER = "chrome.exe";
+
+			expect(await openBrowser(URL)).toEqual({ opened: true });
+			await waitForFile(cmdLog);
+			expect(readFileSync(cmdLog, "utf8")).toContain("chrome.exe");
+			expect(existsSync(directLog)).toBe(false);
+		} finally {
+			if (originalPath === undefined) delete process.env.PATH;
+			else process.env.PATH = originalPath;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a missing configured browser warns and reports opened: false", async () => {
+		const missing = join(tmpdir(), "plannotator-missing-1472", "browser");
+		const originalWrite = process.stderr.write;
+		const chunks: string[] = [];
+		(process.stderr as { write: unknown }).write = (chunk: string) => {
+			chunks.push(String(chunk));
+			return true;
+		};
+		try {
+			clearEnv();
+			mockWsl();
+			process.env.PLANNOTATOR_BROWSER = missing;
+
+			expect(await openBrowser(URL)).toEqual({ opened: false });
+			const warning = chunks.join("");
+			expect(warning).toContain(missing);
+			expect(warning).toContain("PLANNOTATOR_BROWSER");
+		} finally {
+			(process.stderr as { write: unknown }).write = originalWrite;
+		}
+	});
+
+	test("Windows targets are excluded from POSIX routing", () => {
+		expect(isPosixBrowserTarget("/usr/bin/firefox")).toBe(true);
+		expect(isPosixBrowserTarget("chrome.exe")).toBe(false);
+		expect(isPosixBrowserTarget("/mnt/c/Program Files/Chrome/chrome.exe")).toBe(false);
+	});
+});
+
+// --- darwin PLANNOTATOR_BROWSER routing (#1391) ---
+
+/** Pretend to run on macOS: the darwin branch is chosen by process.platform alone. */
+function mockDarwin() {
+	Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+}
+
+describe("pi darwin configured browser launch", () => {
+	afterEach(() => {
+		restoreHostPlatform();
+	});
+
+	// The platform is faked so this also runs on Linux CI; the unfaked test
+	// above only reaches the darwin branch on a real Mac.
+	test("a script path is spawned directly with the URL", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "plannotator-pi-darwin-"));
+		const log = join(dir, "direct.txt");
+		const script = writeExecutable(dir, "handler.sh", `printf '%s' "$1" > '${log}'`);
+		try {
+			clearEnv();
+			mockDarwin();
+			process.env.PLANNOTATOR_BROWSER = script;
+
+			expect(await openBrowser(URL)).toEqual({ opened: true });
+			await waitForFile(log);
+			expect(readFileSync(log, "utf8")).toBe(URL);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	// The other half of the decision table: widening the script branch must not
+	// swallow app names or .app bundles, which only `open -a` can launch.
+	test("an app name or .app bundle still launches through open -a", async () => {
+		for (const value of ["Google Chrome", "/Applications/Firefox.app"]) {
+			const dir = mkdtempSync(join(tmpdir(), "plannotator-pi-darwin-"));
+			const log = join(dir, "open.txt");
+			writeExecutable(dir, "open", `printf '%s' "$*" > '${log}'`);
+			const originalPath = process.env.PATH;
+			try {
+				process.env.PATH = `${dir}${delimiter}${originalPath ?? ""}`;
+				clearEnv();
+				mockDarwin();
+				process.env.PLANNOTATOR_BROWSER = value;
+
+				expect(await openBrowser(URL)).toEqual({ opened: true });
+				await waitForFile(log);
+				expect(readFileSync(log, "utf8")).toBe(`-a ${value} ${URL}`);
+			} finally {
+				if (originalPath === undefined) delete process.env.PATH;
+				else process.env.PATH = originalPath;
+				rmSync(dir, { recursive: true, force: true });
+			}
+		}
 	});
 });

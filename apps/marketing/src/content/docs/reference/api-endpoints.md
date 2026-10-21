@@ -69,6 +69,8 @@ Body:
 }
 ```
 
+Optional: `"answersOnly": true` when the only feedback is answers to the plan's [questions](/docs/guides/questions/). The agent then receives the `plan.answered` message instead of the denied message. Any value other than the boolean `true` is ignored.
+
 ## Review server
 
 Used during code review (`/plannotator-review`).
@@ -76,6 +78,12 @@ Used during code review (`/plannotator-review`).
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/api/diff` | GET | Returns the diff and session info |
+| `/api/semantic-diff` | GET | Returns optional semantic analysis for the active patch |
+| `/api/call-flow` | GET | Returns snapshot-bound CallDiff trees, raw output, per-file impacts, and skipped-language metadata (`?snapshot=<id>`) |
+| `/api/call-flow/install` | POST | Starts or joins the selective core/pack install; the consented UI calls it once per target per review session, while Retry/install-ahead use the same route. Body `{ languageIds?: [...] }`; omission uses the current review plan (Node 22+ preflight; same-origin only) |
+| `/api/call-flow/install-status` | GET | Polls `{ state, stage?, languageIds?, currentLanguageId?, error? }` across `downloading`, `verifying`, `installing-deps`, `building` |
+| `/api/review-analysis` | GET / POST | GET refreshes adverts without mutation; POST persists independent `{ semanticDiff, callFlow }` flags and returns adverts |
+| `/api/review-progress?snapshot=<snapshotId>` | GET/POST | Load or save durable viewed-file progress; writes carry the scope key and per-file fingerprints, and stale snapshots return 409 |
 | `/api/feedback` | POST | Submit review feedback |
 | `/api/image` | GET | Serve a local image by path |
 | `/api/upload` | POST | Upload an image attachment |
@@ -117,6 +125,7 @@ Used during file annotation (`/plannotator-annotate`).
 |----------|--------|---------|
 | `/api/plan` | GET | Returns the file content in annotate mode |
 | `/api/feedback` | POST | Submit annotation feedback |
+| `/api/share-html` | GET | Lazily prepare portable raw HTML for sharing |
 | `/api/image` | GET | Serve a local image by path |
 | `/api/upload` | POST | Upload an image attachment |
 | `/api/external-annotations/stream` | GET | SSE stream for real-time external annotations |
@@ -172,7 +181,7 @@ Body:
 
 Returns: `{ "id": "aBcDeFgH" }` (201 Created)
 
-Limits: 512KB max payload. Auto-deleted after configured TTL (default: 7 days).
+Limits: 5 MB max encrypted payload. Auto-deleted after configured TTL (default: 7 days).
 
 ### GET `/api/paste/:id`
 

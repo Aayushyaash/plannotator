@@ -16,59 +16,17 @@
  */
 
 import { type Plugin, tool } from "@opencode-ai/plugin";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
-import path from "path";
-import { getPlannotatorDataDir } from "@plannotator/shared/data-dir";
-
-// OpenCode's @hono/node-server patches global.Response with a polyfill that
-// Bun.serve() doesn't accept (it checks native type tags, not instanceof).
-// This happens in "opencode web" and "opencode serve" modes, where
-// createAdaptorServer() runs before plugins load. Recover the native Response
-// from the polyfill's prototype chain — hono sets up:
-//   Object.setPrototypeOf(Response2.prototype, GlobalResponse.prototype)
-// so the parent prototype's constructor IS the original native Response.
-const _proto = Object.getPrototypeOf(Response.prototype);
-if (_proto?.constructor && _proto.constructor !== Response && _proto.constructor !== Object) {
-  globalThis.Response = _proto.constructor;
-  // Also fix Request — hono patches both with the same pattern
-  const _reqProto = Object.getPrototypeOf(Request.prototype);
-  if (_reqProto?.constructor && _reqProto.constructor !== Request && _reqProto.constructor !== Object) {
-    globalThis.Request = _reqProto.constructor;
-  }
-}
-import {
-  startPlannotatorServer,
-  handleServerReady,
-} from "@plannotator/server";
-import {
-  startReviewServer,
-  handleReviewServerReady,
-} from "@plannotator/server/review";
-import {
-  startAnnotateServer,
-  handleAnnotateServerReady,
-} from "@plannotator/server/annotate";
-import {
-  handleReviewCommand,
-  handleAnnotateCommand,
-  handleAnnotateLastCommand,
-  handleArchiveCommand,
-  type CommandDeps,
-} from "./commands";
-import {
-  getPlanDeniedPrompt,
-  getPlanApprovedPrompt,
-  getPlanApprovedWithNotesPrompt,
-  getPlanToolName,
-  getAnnotateMessageFeedbackPrompt,
-} from "@plannotator/shared/prompts";
-import { loadConfig } from "@plannotator/shared/config";
+import { existsSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { loadConfig, resolveInboxReminder, resolveSharingEnabled } from "@plannotator/shared/config";
 import { readImprovementHook } from "@plannotator/shared/improvement-hooks";
 import { composeImproveContext } from "@plannotator/shared/pfm-reminder";
 import {
+  composeSystemPrompt,
   stripConflictingPlanModeRules,
 } from "./plan-mode";
-import { sanitizeTag } from "@plannotator/shared/project";
 import {
   applyWorkflowConfig,
   isPlanningAgent,
@@ -78,20 +36,44 @@ import {
   shouldInjectGenericPlanReminder,
   shouldModifyPrompts,
   shouldRegisterSubmitPlan,
-  shouldRejectSubmitPlanForAgent,
+  type RuntimeMode,
   type PlannotatorOpenCodeOptions,
 } from "./workflow";
+import {
+  handleCliCommand,
+  runCliPlanReview,
+  type OpenCodeBridgeContext,
+  type OpenCodePlanReviewResult,
+} from "./cli-bridge";
+import { resolveValidatedTargetAgent } from "./agent-switch";
+import { shouldFallbackAfterEmbeddedError } from "./prompt-delivery-error";
+import { executeSubmitPlan } from "./submit-plan-executor";
+import { getPlanningPrompt } from "./planning-prompt";
+import { announceSessionUrl } from "./session-url";
+import { addInboxReminderOpenCode1, findInboxConnection, inboxToolArgs, openCode1AgentHasInbox } from "./inbox";
+import { inboxAgentTool } from "@plannotator/shared/inbox/connection";
+import {
+  appendCommandFeedback,
+  CommandMessageAgents,
+  createCommandTurnClient,
+  resolveFeedbackTarget,
+  retargetCommandMessage,
+  type CommandModelRef,
+  type FeedbackTarget,
+  type PendingCommandFeedback,
+} from "./command-turn";
 
 // Lazy-load HTML at first use instead of embedding in the bundle.
 // The two SPA files are ~20 MB combined — inlining them as string literals
 // adds ~160ms to module parse time (see GitHub issue #410).
 let _planHtml: string | null = null;
 let _reviewHtml: string | null = null;
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
 function resolveBundledHtmlPath(filename: string): string {
   const candidates = [
-    path.join(import.meta.dir, filename),
-    path.join(import.meta.dir, "..", filename),
+    path.join(moduleDir, filename),
+    path.join(moduleDir, "..", filename),
   ];
 
   for (const candidate of candidates) {
@@ -107,6 +89,16 @@ function readBundledHtml(filename: string): string {
   return readFileSync(resolveBundledHtmlPath(filename), "utf-8");
 }
 
+/** Best-effort warm of the sync cache. Never throws, on any failure. */
+function preloadBundledHtml(filename: string, assign: (html: string) => void): void {
+  try {
+    readFile(resolveBundledHtmlPath(filename), "utf-8").then(assign).catch(() => {});
+  } catch {
+    // The asset is not on disk. The lazy getters raise a clear error if and
+    // when a code path actually needs it.
+  }
+}
+
 function getPlanHtml(): string {
   if (!_planHtml) _planHtml = readBundledHtml("plannotator.html");
   return _planHtml;
@@ -118,168 +110,6 @@ function getReviewHtml(): string {
 }
 
 const DEFAULT_PLAN_TIMEOUT_SECONDS = 345_600; // 96 hours
-const MAX_PLAN_SIZE = 5 * 1024 * 1024; // 5MB
-
-// ── Edit-based plan management ────────────────────────────────────────────
-
-interface PlanEdit {
-  start: number;
-  end?: number | null;
-  content: string;
-}
-
-/**
- * Backing file for the current plan. Stored outside the workspace in
- * `~/.plannotator/active/{project}/_active-plan.md` so it never appears
- * in git status or editor file trees. Managed entirely by the plugin;
- * the agent never sees or touches this file directly.
- */
-export function getPlanBackingPath(project: string): string {
-  return path.join(getPlannotatorDataDir(), "active", project, "_active-plan.md");
-}
-
-/**
- * Apply line-range edits to a plan stored as an array of lines.
- *
- * Edit semantics:
- *   - start/end are 1-indexed line numbers (inclusive)
- *   - end omitted or null: replace from start through end of file
- *     (on first call with start=1, this writes the entire plan)
- *   - content="" with start/end: delete those lines
- *   - edits are applied in order; line numbers refer to the document
- *     state BEFORE any edits in this batch (offsets are adjusted internally)
- */
-export function applyEdits(existingLines: string[], edits: PlanEdit[]): string[] {
-  // Sort by start ascending so offset adjustment works correctly
-  const sorted = [...edits].sort((a, b) => a.start - b.start);
-  const lines = [...existingLines];
-  let offset = 0;
-
-  for (const edit of sorted) {
-    const start = edit.start - 1 + offset; // convert to 0-indexed + adjust
-    const end = edit.end != null
-      ? edit.end + offset   // end is inclusive, so this becomes the exclusive upper bound
-      : lines.length;       // null/omitted = through end of file
-
-    const newLines = edit.content ? edit.content.split("\n") : [];
-    const removedCount = end - start;
-    lines.splice(start, removedCount, ...newLines);
-    offset += newLines.length - removedCount;
-  }
-
-  return lines;
-}
-
-/**
- * Validate a batch of edits against the current file state.
- * Returns an error string if invalid, or null if all edits are acceptable.
- */
-export function validateEdits(existingLines: string[], edits: PlanEdit[]): string | null {
-  const lineCount = existingLines.length;
-
-  for (const edit of edits) {
-    if (!Number.isInteger(edit.start) || edit.start < 1) {
-      return `start must be a positive integer >= 1, got ${edit.start}`;
-    }
-    if (edit.start > lineCount + 1) {
-      return `start (${edit.start}) exceeds file length + 1 (${lineCount + 1})`;
-    }
-    if (edit.end != null) {
-      if (!Number.isInteger(edit.end) || edit.end < edit.start) {
-        return `end (${edit.end}) must be >= start (${edit.start})`;
-      }
-      // On an empty file (lineCount === 0) every edit is a pure insert;
-      // end is semantically meaningless and applyEdits handles it via splice
-      // clamping. Rejecting here breaks first-call payloads where the agent
-      // or framework includes end (see #742).
-      if (edit.end > lineCount && lineCount > 0) {
-        return `end (${edit.end}) exceeds file length (${lineCount})`;
-      }
-    }
-  }
-
-  // Check for overlapping ranges (sorted by start ascending)
-  const sorted = [...edits].sort((a, b) => a.start - b.start);
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = sorted[i - 1];
-    const curr = sorted[i];
-    // Appending edits (start > lineCount) have no range that can overlap
-    if (prev.start > lineCount) continue;
-    const prevEnd = prev.end ?? lineCount;
-    if (curr.start <= prevEnd) {
-      return `edits overlap: [${prev.start},${prevEnd}] and [${curr.start},${curr.end ?? "end"}]`;
-    }
-  }
-
-  return null;
-}
-
-/**
- * Format the plan content with line numbers for the agent's reference.
- * Returned in the tool response so the agent can track line positions.
- */
-export function formatWithLineNumbers(content: string): string {
-  const lines = content.split("\n");
-  const width = String(lines.length).length;
-  return lines
-    .map((line, i) => `${String(i + 1).padStart(width)}| ${line}`)
-    .join("\n");
-}
-
-// ── Planning prompt ───────────────────────────────────────────────────────
-
-/**
- * Unified planning prompt injected for all primary agents.
- *
- * Design principles:
- * - Explain the WHY — the model is smart, give it context
- * - Keep it lean — every line should pull its weight
- * - Don't overfit — let the agent and user dictate the workflow
- * - Edit-based: all submissions use line-range edits against a backing file
- */
-function getPlanningPrompt(): string {
-  return `## Plannotator — Plan Review
-
-You have a plan submission tool called \`submit_plan\`. It opens an interactive review UI where the user can annotate, approve, or request changes.
-
-**How to use it:**
-
-\`submit_plan\` accepts an array of line-range edits. On first submission, pass the full plan as a single edit starting at line 1:
-
-\`\`\`json
-{ "edits": [{ "start": 1, "content": "# My Plan\\n\\n## Goals\\n..." }] }
-\`\`\`
-
-If the user denies and requests changes, apply surgical edits using line ranges. The tool response includes your plan with line numbers so you can target specific ranges:
-
-\`\`\`json
-{ "edits": [
-  { "start": 12, "end": 14, "content": "revised section content" },
-  { "start": 30, "end": 30, "content": "" }
-] }
-\`\`\`
-
-Edit semantics:
-- \`start\` and \`end\` are 1-indexed, inclusive line numbers
-- Omit \`end\` to replace from \`start\` through end of file (use this for the initial full write)
-- Empty \`content\` with \`start\`/\`end\` deletes those lines
-- Multiple edits in one call are applied in order; line numbers refer to the state before edits
-
-### Before you write a plan
-
-Do not jump straight to writing a plan. First:
-
-1. **Explore** — Read the relevant code, trace dependencies, and look at existing patterns. The depth should match the task.
-2. **Ask questions** — If you need information only the user can provide (requirements, preferences, tradeoffs), ask using the \`question\` tool. Don't guess at ambiguous requirements.
-
-Only write and submit a plan once you have sufficient context.
-
-### What NOT to do
-
-- Don't proceed with implementation until the plan is approved.
-- Don't use \`plan_exit\` — use \`submit_plan\` instead.
-- Don't end your turn without either submitting a plan or asking the user a question.`;
-}
 
 // ── Plugin ────────────────────────────────────────────────────────────────
 
@@ -294,14 +124,206 @@ function getLastUserAgentFromMessages(messages: any[] | undefined): string | und
   return undefined;
 }
 
-export const PlannotatorPlugin: Plugin = async (ctx, rawOptions?: PlannotatorOpenCodeOptions) => {
+function getBunRuntime(): { serve?: unknown; sleep?: (ms: number) => Promise<void> } | undefined {
+  return (globalThis as typeof globalThis & {
+    Bun?: { serve?: unknown; sleep?: (ms: number) => Promise<void> };
+  }).Bun;
+}
+
+function hasEmbeddedRuntime(): boolean {
+  return typeof getBunRuntime()?.serve === "function";
+}
+
+function shouldUseEmbeddedRuntime(runtime: RuntimeMode): boolean {
+  return runtime !== "cli" && hasEmbeddedRuntime();
+}
+
+function getEmbeddedRuntimeError(): string {
+  return "runtime \"embedded\" requires a Bun-hosted OpenCode plugin runtime. Use runtime \"auto\" or \"cli\" with this OpenCode host.";
+}
+
+type EmbeddedRuntimeModule = {
+  runEmbeddedPlanReview: (input: {
+    client: any;
+    planContent: string;
+    sharingEnabled: boolean;
+    shareBaseUrl?: string;
+    pasteApiUrl?: string;
+    htmlContent: string;
+    timeoutSeconds: number | null;
+    abortSignal: AbortSignal;
+    logReady: (url: string, isRemote: boolean, port: number) => void;
+  }) => Promise<OpenCodePlanReviewResult>;
+  handleEmbeddedCommand: (
+    command: string,
+    event: any,
+    deps: {
+      client: any;
+      htmlContent: string;
+      reviewHtmlContent: string;
+      getSharingEnabled: () => Promise<boolean>;
+      getShareBaseUrl: () => string | undefined;
+      getPasteApiUrl: () => string | undefined;
+      directory?: string;
+    },
+  ) => Promise<{ feedback?: string | null }>;
+};
+
+async function importEmbeddedRuntime(): Promise<EmbeddedRuntimeModule> {
+  const builtPath = path.join(moduleDir, "embedded.js");
+  if (existsSync(builtPath)) {
+    return await import(pathToFileURL(builtPath).href) as EmbeddedRuntimeModule;
+  }
+  const sourceSpecifier = "./embedded";
+  return await import(sourceSpecifier) as EmbeddedRuntimeModule;
+}
+
+/** Run one OpenCode plan review in the configured runtime. */
+async function runPlanReview(input: {
+  client: any;
+  runtime: RuntimeMode;
+  planContent: string;
+  sharingEnabled: boolean;
+  shareBaseUrl?: string;
+  pasteApiUrl?: string;
+  htmlContent: string;
+  timeoutSeconds: number | null;
+  abortSignal: AbortSignal;
+  cwd?: string;
+  bridge: OpenCodeBridgeContext;
+}): Promise<OpenCodePlanReviewResult> {
+  input.abortSignal.throwIfAborted();
+  if (input.runtime === "embedded" && !hasEmbeddedRuntime()) {
+    throw new Error(getEmbeddedRuntimeError());
+  }
+
+  if (shouldUseEmbeddedRuntime(input.runtime)) {
+    try {
+      const embedded = await importEmbeddedRuntime();
+      return await embedded.runEmbeddedPlanReview({
+        client: input.client,
+        planContent: input.planContent,
+        sharingEnabled: input.sharingEnabled,
+        shareBaseUrl: input.shareBaseUrl,
+        pasteApiUrl: input.pasteApiUrl,
+        htmlContent: input.htmlContent,
+        timeoutSeconds: input.timeoutSeconds,
+        abortSignal: input.abortSignal,
+        logReady: (url) => announceSessionUrl(input.client, "plan review", url),
+      });
+    } catch (error) {
+      input.abortSignal.throwIfAborted();
+      if (input.runtime === "embedded") throw error;
+      try {
+        void input.client.app.log({
+          level: "error",
+          message: `[Plannotator] Embedded runtime unavailable; falling back to CLI: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      } catch {}
+    }
+  }
+
+  return await runCliPlanReview({
+    client: input.client,
+    planContent: input.planContent,
+    cwd: input.cwd,
+    timeoutSeconds: input.timeoutSeconds,
+    abortSignal: input.abortSignal,
+    bridge: input.bridge,
+  });
+}
+
+const PlannotatorPlugin: Plugin = async (ctx, rawOptions?: PlannotatorOpenCodeOptions) => {
   const workflowOptions = normalizeWorkflowOptions(rawOptions);
 
-  // Preload HTML in background — populates the sync cache before first use
-  Bun.file(resolveBundledHtmlPath("plannotator.html")).text().then(h => { _planHtml = h; });
-  Bun.file(resolveBundledHtmlPath("review-editor.html")).text().then(h => { _reviewHtml = h; });
+  // Preload HTML in background: populates the sync cache before first use.
+  // `resolveBundledHtmlPath` THROWS when the asset is absent, and it runs
+  // synchronously here, outside the .catch that was meant to absorb exactly
+  // that. An unbuilt checkout (or a partial install) therefore took down plugin
+  // construction itself, before any code path that needs the HTML. A missing
+  // asset must only fail the feature that reads it, which is what the lazy
+  // getters already do.
+  preloadBundledHtml("plannotator.html", (html) => { _planHtml = html; });
+  preloadBundledHtml("review-editor.html", (html) => { _reviewHtml = html; });
 
   let cachedAgents: any[] | null = null;
+  // Feedback a slash command put in its own message, waiting for `chat.message`
+  // to give that message the agent/model/variant the feedback prompt would
+  // have had. Keyed by session.
+  const commandFeedback = new Map<string, PendingCommandFeedback>();
+  // The agent each retargeted command message was built with, so later
+  // commands still read the user's agent from it. See `CommandMessageAgents`.
+  const commandMessageAgents = new CommandMessageAgents();
+
+  /**
+   * What OpenCode would have used for the old separate feedback prompt (agent
+   * named or not, no model, no variant), read when the feedback is delivered:
+   * before the command's own message exists, so the session's model is still
+   * the one that prompt would have seen. Every read is best-effort; see
+   * `resolveFeedbackTarget` for what a missing answer falls back to.
+   */
+  async function resolveCommandFeedbackTarget(
+    sessionID: string,
+    namedAgent: string | undefined,
+  ): Promise<FeedbackTarget | undefined> {
+    const query = { query: { directory: ctx.directory } };
+    const client = ctx.client as any;
+    const [agents, config, session, providers] = await Promise.allSettled([
+      client.app.agents(query),
+      namedAgent ? Promise.resolve(undefined) : client.config.get(query),
+      client.session.get({ path: { id: sessionID }, ...query }),
+      client.config.providers(query),
+    ]);
+    const agentList = agents.status === "fulfilled" && Array.isArray(agents.value?.data) ? agents.value.data : [];
+    const defaultAgent = config.status === "fulfilled" && typeof config.value?.data?.default_agent === "string"
+      ? config.value.data.default_agent
+      : undefined;
+
+    const readModel = (value: any): CommandModelRef | undefined => {
+      const modelID = typeof value?.modelID === "string" ? value.modelID : value?.id;
+      return typeof value?.providerID === "string" && typeof modelID === "string" && value.providerID && modelID
+        ? { providerID: value.providerID, modelID }
+        : undefined;
+    };
+    // `currentModel`: the session's stored model, else the last user message's.
+    let sessionModel = session.status === "fulfilled" ? readModel(session.value?.data?.model) : undefined;
+    if (!sessionModel) {
+      try {
+        const messages = (await client.session.messages({ path: { id: sessionID }, ...query }))?.data;
+        for (let i = (messages?.length ?? 0) - 1; i >= 0 && !sessionModel; i--) {
+          if (messages[i]?.info?.role === "user") sessionModel = readModel(messages[i].info.model);
+        }
+      } catch {
+        // Leave it to the message's own model.
+      }
+    }
+
+    const providerList = providers.status === "fulfilled" && Array.isArray(providers.value?.data?.providers)
+      ? providers.value.data.providers
+      : undefined;
+    // How the old prompt picked its variant changed across 1.x (see
+    // `agentVariantRule`), so the version matters. OpenCode 1 plugins get the
+    // v1 SDK, whose `global` domain has only `event()`, so the running host's
+    // version (`/global/health`) is out of reach; the session's own `version`
+    // is used instead. It names the OpenCode that CREATED the session, which
+    // differs only for a session resumed under another release.
+    const sessionVersion = session.status === "fulfilled" ? session.value?.data?.version : undefined;
+    const hostVersion = typeof sessionVersion === "string" ? sessionVersion : undefined;
+    return resolveFeedbackTarget({
+      namedAgent,
+      agents: agentList,
+      defaultAgent,
+      sessionModel,
+      hostVersion,
+      // `provider.getModel` in createUserMessage: an unknown model offers no
+      // variants. Undefined only when the listing itself failed.
+      modelVariants: (model) => {
+        if (!providerList) return undefined;
+        const entry = providerList.find((provider: any) => provider?.id === model.providerID)?.models?.[model.modelID];
+        return entry?.variants && typeof entry.variants === "object" ? Object.keys(entry.variants) : [];
+      },
+    });
+  }
 
   async function getSharingEnabled(): Promise<boolean> {
     try {
@@ -312,9 +334,9 @@ export const PlannotatorPlugin: Plugin = async (ctx, rawOptions?: PlannotatorOpe
         return share !== "disabled";
       }
     } catch {
-      // Config read failed, fall through to env var
+      // Config read failed, fall through to env var / plannotator config
     }
-    return process.env.PLANNOTATOR_SHARE !== "disabled";
+    return resolveSharingEnabled(loadConfig());
   }
 
   function getShareBaseUrl(): string | undefined {
@@ -323,6 +345,29 @@ export const PlannotatorPlugin: Plugin = async (ctx, rawOptions?: PlannotatorOpe
 
   function getPasteApiUrl(): string | undefined {
     return process.env.PLANNOTATOR_PASTE_URL || undefined;
+  }
+
+  async function getOpenCodeAgents(): Promise<any[] | undefined> {
+    try {
+      if (!cachedAgents) {
+        const response = await ctx.client.app.agents({
+          query: { directory: ctx.directory },
+        });
+        cachedAgents = response.data ?? [];
+      }
+      return cachedAgents;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function getBridgeContext(): Promise<OpenCodeBridgeContext> {
+    return {
+      sharingEnabled: await getSharingEnabled(),
+      shareBaseUrl: getShareBaseUrl(),
+      pasteApiUrl: getPasteApiUrl(),
+      agents: await getOpenCodeAgents(),
+    };
   }
 
   function getPlanTimeoutSeconds(): number | null {
@@ -447,32 +492,32 @@ tools (except writing markdown files), or otherwise make changes to the system.
 
       if (shouldInjectFullPlanningPrompt(lastUserAgent, workflowOptions)) {
         const stripped = stripConflictingPlanModeRules(output.system);
-        output.system.length = 0;
-        output.system.push(...stripped);
-        output.system.push(getPlanningPrompt());
-
         const hook = readImprovementHook("enterplanmode-improve");
         const pfmEnabled = loadConfig().pfmReminder === true;
         const improveContext = composeImproveContext({
           pfmEnabled,
           improvementHookContent: hook?.content ?? null,
         });
-        if (improveContext) {
-          output.system.push(improveContext);
-        }
+        const parts = [...stripped, getPlanningPrompt()];
+        if (improveContext) parts.push(improveContext);
+        output.system.length = 0;
+        output.system.push(...composeSystemPrompt([], parts));
 
         return;
       }
 
       if (!shouldInjectGenericPlanReminder(lastUserAgent, isSubagent, workflowOptions)) return;
 
-      output.system.push(`## Plan Submission
+      const planSubmissionReminder = `## Plan Submission
 
 When you have completed your plan, call the \`submit_plan\` tool to submit it for user review. Pass your full plan as a single edit: \`{ "edits": [{ "start": 1, "content": "..." }] }\`.
 
 The user will review your plan in a visual UI where they can annotate, approve, or request changes. If rejected, the response includes your plan with line numbers; use targeted edits to revise specific sections.
 
-Do NOT proceed with implementation until your plan is approved.`);
+Do NOT proceed with implementation until your plan is approved.`;
+      const composed = composeSystemPrompt(output.system, [planSubmissionReminder]);
+      output.system.length = 0;
+      output.system.push(...composed);
     },
 
     // Intercept plannotator commands before the agent sees them.
@@ -490,52 +535,121 @@ Do NOT proceed with implementation until your plan is approved.`);
       if (
         cmd !== "plannotator-last" &&
         cmd !== "plannotator-annotate" &&
-        cmd !== "plannotator-review" &&
-        cmd !== "plannotator-archive"
+        cmd !== "plannotator-review"
       ) return;
 
       output.parts.length = 0;
+      commandFeedback.delete(input.sessionID);
 
-      const deps: CommandDeps = {
-        client: ctx.client,
-        htmlContent: getPlanHtml(),
-        reviewHtmlContent: getReviewHtml(),
-        getSharingEnabled,
-        getShareBaseUrl,
-        getPasteApiUrl,
-        directory: ctx.directory,
-      };
-      // input.arguments is the raw tail string from OpenCode's command dispatcher —
-      // needed so --gate / --json reach the handlers' parseAnnotateArgs.
-      const event = {
-        properties: { sessionID: input.sessionID, arguments: input.arguments },
-      };
-
-      if (cmd === "plannotator-last") {
-        const feedback = await handleAnnotateLastCommand(event, deps);
+      // Feedback rides the command's OWN message instead of a second prompt:
+      // OpenCode runs a model turn for that message no matter what, so a
+      // separate prompt meant two turns for one review. See command-turn.ts.
+      const turn = createCommandTurnClient(ctx.client, input.sessionID, {
+        messageAgents: commandMessageAgents,
+      });
+      try {
+        await runPlannotatorCommand(cmd, input, turn.client);
+      } finally {
+        const feedback = turn.take();
         if (feedback) {
-          try {
-            await ctx.client.session.prompt({
-              path: { id: input.sessionID },
-              body: {
-                parts: [{
-                  type: "text",
-                  text: getAnnotateMessageFeedbackPrompt("opencode", undefined, { feedback }),
-                }],
-              },
-            });
-          } catch {
-            // Session may not be available
-          }
+          appendCommandFeedback(output.parts as unknown[], feedback);
+          const target = await resolveCommandFeedbackTarget(input.sessionID, feedback.agent)
+            .catch(() => undefined);
+          if (target) commandFeedback.set(input.sessionID, { text: feedback.text, target });
         }
-        return;
       }
+    },
 
-      if (cmd === "plannotator-annotate") return handleAnnotateCommand(event, deps);
-      if (cmd === "plannotator-review") return handleReviewCommand(event, deps);
-      if (cmd === "plannotator-archive") return handleArchiveCommand(event, deps);
+    // The command's message is built right after `command.execute.before`
+    // returns; this is where it still gets the agent, model and variant the
+    // separate feedback prompt used to have (the review UI's agent switch,
+    // the writer of an annotated message #1612, or OpenCode's default agent).
+    // One-shot, and only for the message carrying our text.
+    "chat.message": async (input, output) => {
+      const pending = commandFeedback.get(input.sessionID);
+      if (!pending) return;
+      commandFeedback.delete(input.sessionID);
+      const message = output.message as { id?: unknown; agent?: unknown };
+      const builtWith = message.agent;
+      if (retargetCommandMessage({
+        sessionID: input.sessionID,
+        pending,
+        hook: input,
+        message,
+        parts: output.parts,
+      })) {
+        // The next command reads "the user's agent" from this message.
+        commandMessageAgents.record(message.id, builtWith, message.agent);
+      }
     },
   };
+
+  async function runPlannotatorCommand(
+    cmd: "plannotator-last" | "plannotator-annotate" | "plannotator-review",
+    input: { sessionID: string; arguments?: string },
+    client: any,
+  ): Promise<void> {
+    // input.arguments is the raw tail string from OpenCode's command dispatcher —
+    // needed so --gate / --json reach the handlers' parseAnnotateArgs.
+    const event = {
+      properties: { sessionID: input.sessionID, arguments: input.arguments },
+    };
+
+    if (shouldUseEmbeddedRuntime(workflowOptions.runtime)) {
+      try {
+        const embedded = await importEmbeddedRuntime();
+        const deps = {
+          client,
+          htmlContent: getPlanHtml(),
+          reviewHtmlContent: getReviewHtml(),
+          getSharingEnabled,
+          getShareBaseUrl,
+          getPasteApiUrl,
+          directory: ctx.directory,
+        };
+        const result = await embedded.handleEmbeddedCommand(cmd, event, deps);
+        if (cmd === "plannotator-last" && result.feedback) {
+          await embedded.deliverEmbeddedAnnotateMessagePrompt({
+            client,
+            sessionId: input.sessionID,
+            approved: Boolean(result.approved),
+            feedback: result.feedback,
+            agent: result.agent,
+          });
+        }
+        return;
+      } catch (error) {
+        if (!shouldFallbackAfterEmbeddedError(workflowOptions.runtime, error)) {
+          throw error;
+        }
+        try {
+          void ctx.client.app.log({
+            level: "error",
+            message: `[Plannotator] Embedded runtime unavailable; falling back to CLI: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        } catch {}
+      }
+    }
+
+    if (workflowOptions.runtime === "embedded" && !hasEmbeddedRuntime()) {
+      try {
+        void ctx.client.app.log({
+          level: "error",
+          message: `[Plannotator] ${getEmbeddedRuntimeError()}`,
+        });
+      } catch {}
+      return;
+    }
+
+    await handleCliCommand({
+      command: cmd,
+      client,
+      sessionId: input.sessionID,
+      rawArgs: input.arguments ?? "",
+      cwd: ctx.directory,
+      bridge: await getBridgeContext(),
+    });
+  }
 
   if (shouldRegisterSubmitPlan(workflowOptions)) {
     plugin.tool = {
@@ -555,144 +669,107 @@ Do NOT proceed with implementation until your plan is approved.`);
         },
 
         async execute(args, context) {
-          const invokingAgent = (context as { agent?: string }).agent;
-          if (shouldRejectSubmitPlanForAgent(invokingAgent, workflowOptions)) {
-            return `Plannotator is configured for plan-agent mode. submit_plan can only be called by: ${workflowOptions.planningAgents.join(", ")}.
-
-Use /plannotator-last or /plannotator-annotate for manual review, or set workflow to all-agents to allow broader submit_plan access.`;
-          }
-
-          if (!args.edits || args.edits.length === 0) {
-            return "Error: No edits provided. Pass at least one edit with start and content.";
-          }
-
-          // Read existing backing file (empty on first call)
-          const project = sanitizeTag(path.basename(ctx.directory)) || "_unknown";
-          const backingPath = getPlanBackingPath(project);
-          const backingDir = path.dirname(backingPath);
-          mkdirSync(backingDir, { recursive: true });
-
-          let existingContent = "";
-          if (existsSync(backingPath)) {
-            existingContent = readFileSync(backingPath, "utf-8");
-          }
-
-          // Validate and apply edits
-          const existingLines = existingContent ? existingContent.split("\n") : [];
-
-          const validationError = validateEdits(existingLines, args.edits);
-          if (validationError) {
-            return `Error: ${validationError}`;
-          }
-
-          let resultLines: string[];
-          try {
-            resultLines = applyEdits(existingLines, args.edits);
-          } catch (err) {
-            return `Error applying edits: ${err instanceof Error ? err.message : String(err)}`;
-          }
-
-          const planContent = resultLines.join("\n");
-          if (planContent.length > MAX_PLAN_SIZE) {
-            return `Error: Plan content exceeds the maximum size of ${MAX_PLAN_SIZE / (1024 * 1024)}MB.`;
-          }
-          if (!planContent.trim()) {
-            return "Error: Plan content is empty after applying edits.";
-          }
-
-          // Write backing file
-          writeFileSync(backingPath, planContent, "utf-8");
-
-          const sharingEnabled = await getSharingEnabled();
-          const server = await startPlannotatorServer({
-            plan: planContent,
-            origin: "opencode",
-            sharingEnabled,
-            shareBaseUrl: getShareBaseUrl(),
-            pasteApiUrl: getPasteApiUrl(),
-            htmlContent: getPlanHtml(),
-            opencodeClient: ctx.client,
-            onReady: async (url, isRemote, port) => {
-              handleServerReady(url, isRemote, port);
-              if (isRemote) {
-                ctx.client.app.log({ level: "info", message: `[Plannotator] Open in browser: ${url}` });
-              }
+          return await executeSubmitPlan({
+            edits: args.edits,
+            invokingAgent: context.agent,
+            sessionId: context.sessionID,
+            abortSignal: context.abort,
+            directory: ctx.directory,
+            workflowOptions,
+          }, {
+            reviewPlan: async ({ planContent }) => await runPlanReview({
+              client: ctx.client,
+              runtime: workflowOptions.runtime,
+              planContent,
+              sharingEnabled: await getSharingEnabled(),
+              shareBaseUrl: getShareBaseUrl(),
+              pasteApiUrl: getPasteApiUrl(),
+              htmlContent: getPlanHtml(),
+              timeoutSeconds: getPlanTimeoutSeconds(),
+              abortSignal: context.abort,
+              cwd: ctx.directory,
+              bridge: await getBridgeContext(),
+            }),
+            resolveTargetAgent: async ({ requestedAgent, directory, delivery }) =>
+              await resolveValidatedTargetAgent({
+                client: ctx.client,
+                targetAgent: requestedAgent,
+                directory,
+                delivery,
+              }),
+            sendApprovalHandoff: async ({ sessionId, targetAgent, text }) => {
+              await ctx.client.session.prompt({
+                path: { id: sessionId },
+                body: {
+                  agent: targetAgent,
+                  noReply: true,
+                  parts: [{ type: "text", text }],
+                },
+              });
             },
           });
-
-          const timeoutSeconds = getPlanTimeoutSeconds();
-          const timeoutMs = timeoutSeconds === null ? null : timeoutSeconds * 1000;
-
-          const result = timeoutMs === null
-            ? await server.waitForDecision()
-            : await new Promise<Awaited<ReturnType<typeof server.waitForDecision>>>((resolve) => {
-                const timeoutId = setTimeout(
-                  () =>
-                    resolve({
-                      approved: false,
-                      feedback: `[Plannotator] No response within ${timeoutSeconds} seconds. Port released automatically. Please call submit_plan again.`,
-                    }),
-                  timeoutMs
-                );
-
-                server.waitForDecision().then((r) => {
-                  clearTimeout(timeoutId);
-                  resolve(r);
-                });
-              });
-          await Bun.sleep(1500);
-          server.stop();
-
-          if (result.approved) {
-            // Clean up backing file after approval
-            try { unlinkSync(backingPath); } catch { /* already gone */ }
-
-            const shouldSwitchAgent = result.agentSwitch && result.agentSwitch !== 'disabled';
-            const targetAgent = result.agentSwitch || 'build';
-
-            if (shouldSwitchAgent) {
-              try {
-                await ctx.client.session.prompt({
-                  path: { id: context.sessionID },
-                  body: {
-                    agent: targetAgent,
-                    noReply: true,
-                    parts: [{ type: "text", text: "Proceed with implementation" }],
-                  },
-                });
-              } catch {
-                // Silently fail if session is busy
-              }
-            }
-
-            if (result.feedback) {
-              return getPlanApprovedWithNotesPrompt("opencode", undefined, {
-                planFilePath: backingPath,
-                doneMsg: result.savedPath ? `Saved to: ${result.savedPath}` : "",
-                feedback: result.feedback,
-                proceedSuffix: shouldSwitchAgent
-                  ? "\n\nProceed with implementation, incorporating these notes where applicable."
-                  : "",
-              });
-            }
-
-            return getPlanApprovedPrompt("opencode", undefined, {
-              planFilePath: backingPath,
-              doneMsg: result.savedPath ? ` Saved to: ${result.savedPath}` : "",
-            });
-          } else {
-            const lineNumberedPlan = formatWithLineNumbers(planContent);
-            const totalLines = planContent.split("\n").length;
-
-            return getPlanDeniedPrompt("opencode", undefined, {
-              toolName: getPlanToolName("opencode"),
-              planFileRule: "",
-              feedback: result.feedback || "Plan changes requested",
-            }) + `\n\n## Current Plan (${totalLines} lines)\n\nThe plan below shows the current state with line numbers. Use these exact line numbers in your next \`submit_plan\` call:\n\n\`\`\`\n${lineNumberedPlan}\n\`\`\`\n\nCall \`submit_plan\` with targeted edits to address the feedback above.`;
-          }
         },
       }),
     };
+  }
+
+  // The Plannotator Inbox tool (inbox.ts), decided once at plugin setup: only
+  // where the inbox tool switch allows it for OpenCode and an Inbox was found.
+  // OpenCode 1 gets the tool only: it has no way to wake an idle session, so
+  // replies are read with wait_for_reply or read_thread, and the description
+  // says nothing about them arriving by themselves.
+  try {
+    const inbox = await findInboxConnection();
+    const spec = inbox ? inboxAgentTool(inbox.tools, { wakes: false }) : null;
+    if (inbox && spec) {
+      plugin.tool = {
+        ...(plugin.tool ?? {}),
+        [spec.name]: tool({
+          description: spec.description,
+          args: inboxToolArgs(spec.inputSchema, tool.schema),
+          async execute(args, context) {
+            const result = await inbox.callTool(args, { sessionId: context.sessionID, cwd: context.directory });
+            if (result.isError) throw new Error(result.text);
+            return result.text;
+          },
+        }),
+      };
+      // The Inbox reminder, decided with the tool: one fixed line at the end
+      // of the last system part, on every request of an agent that has the
+      // tool (OpenCode 1 rebuilds the system prompt per request, so a fixed
+      // line keeps the prefix stable), the no-wake wording since replies do
+      // not come back by themselves here. A subagent, or an agent whose
+      // `tools` switch it off, gets none. `inboxReminder` turns it off.
+      // A lookup that fails reuses the session's last answer (no answer yet:
+      // no line), so the system prompt cannot flip between requests.
+      if (resolveInboxReminder(loadConfig(), process.env, "opencode")) {
+        const planTransform = plugin["experimental.chat.system.transform"];
+        const lastAnswer = new Map<string, boolean>();
+        plugin["experimental.chat.system.transform"] = async (input, output) => {
+          await planTransform?.(input, output);
+          if (!input.sessionID) return;
+          let hasInbox: boolean;
+          try {
+            const messages = await ctx.client.session.messages({ path: { id: input.sessionID } });
+            const name = getLastUserAgentFromMessages(messages.data);
+            let agent: { mode?: unknown; tools?: unknown } | undefined;
+            if (name) {
+              const agents = await getOpenCodeAgents();
+              if (!agents) throw new Error("agents unavailable");
+              agent = agents.find((candidate: { name?: string }) => candidate.name === name);
+            }
+            hasInbox = openCode1AgentHasInbox(agent);
+          } catch {
+            hasInbox = lastAnswer.get(input.sessionID) ?? false;
+          }
+          if (lastAnswer.size > 500 && !lastAnswer.has(input.sessionID)) lastAnswer.clear();
+          lastAnswer.set(input.sessionID, hasInbox);
+          if (hasInbox) addInboxReminderOpenCode1(output.system);
+        };
+      }
+    }
+  } catch (error) {
+    console.error(`[Plannotator] Could not register the plannotator_inbox tool: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   return plugin;

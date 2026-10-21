@@ -11,6 +11,7 @@
  * to keep inline chat safe and cost-bounded.
  */
 
+import { execFile } from "node:child_process";
 import { buildSystemPrompt, buildForkPreamble, buildEffectivePrompt } from "../context.ts";
 import { BaseSession } from "../base-session.ts";
 import type {
@@ -21,6 +22,13 @@ import type {
   CreateSessionOptions,
   ClaudeAgentSDKConfig,
 } from "../types.ts";
+import {
+  CLAUDE_FALLBACK_MODELS,
+  claudeCatalogFromSdk,
+  cliVersionFrom,
+  type CatalogModel,
+  type ClaudeSdkModelInfo,
+} from "@plannotator/core/model-catalog";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -28,18 +36,115 @@ import type {
 
 const PROVIDER_NAME = "claude-agent-sdk";
 
-/** Default read-only tools for inline chat. */
-const DEFAULT_ALLOWED_TOOLS = ["Read", "Glob", "Grep", "WebSearch"];
+/**
+ * Default tools for inline chat. Read-only investigation plus *scoped* read-only
+ * git so the agent can inspect the changes itself (e.g. `git diff`) instead of
+ * having the whole diff pasted into the prompt — which matters because large
+ * diffs don't fit in the prompt budget.
+ *
+ * These are deliberately NOT bare `Bash`. In the Agent SDK, `allowedTools`
+ * pre-approves matching calls; anything that doesn't match falls through to the
+ * permission flow. So `Bash(git diff:*)` auto-approves `git diff …`, while any
+ * other shell command (including a write git command or an injected compound
+ * command) surfaces an Allow/Deny card instead of running silently.
+ */
+const DEFAULT_ALLOWED_TOOLS = [
+  "Read",
+  "Glob",
+  "Grep",
+  "WebSearch",
+  "Bash(git diff:*)",
+  "Bash(git show:*)",
+  "Bash(git log:*)",
+  "Bash(git status:*)",
+  "Bash(git rev-parse:*)",
+  "Bash(git merge-base:*)",
+  "Bash(git ls-files:*)",
+];
 
 const DEFAULT_MAX_TURNS = 99;
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+const DEFAULT_MODEL = "sonnet";
+/** Model discovery must never hang a picker: bound the `claude` spawn + reply. */
+const MODEL_DISCOVERY_TIMEOUT_MS = 10_000;
+
+// ---------------------------------------------------------------------------
+// Bedrock / Vertex model resolution
+// ---------------------------------------------------------------------------
+
+/** Env-var truthiness, matching Claude Code's own `1`/`true` convention. */
+function isTruthyEnv(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+/**
+ * A model string that already names a Bedrock/Vertex target — a full ARN
+ * (`arn:aws:bedrock:...`) or any inference-profile / publisher id containing
+ * `anthropic.` (e.g. `us.anthropic.claude-...`). Bare aliases like
+ * `claude-sonnet-4-6` deliberately do NOT match.
+ */
+function isCloudModelId(model: string): boolean {
+  return model.startsWith("arn:") || model.includes("anthropic.");
+}
+
+/**
+ * Resolve the model identifier to hand the Claude Agent SDK.
+ *
+ * Plannotator's model picker uses bare aliases (`claude-sonnet-4-6`). Those
+ * are valid against the first-party Anthropic API but are rejected by Bedrock
+ * and Vertex, which require a full inference-profile id / ARN — producing
+ * `400 The provided model identifier is invalid`. Claude Code itself reads
+ * those identifiers from `ANTHROPIC_MODEL` and the
+ * `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` env vars; we mirror that here:
+ *
+ *   - Off Bedrock/Vertex: return the requested model unchanged.
+ *   - Already a cloud identifier (ARN / `anthropic.` profile): pass through.
+ *   - A bare family alias (opus/sonnet/haiku): map to the matching
+ *     `ANTHROPIC_DEFAULT_*_MODEL` env var when set.
+ *   - Anything else: fall back to `ANTHROPIC_MODEL`, or `undefined` so the SDK
+ *     inherits the environment's default model.
+ *
+ * Returning `undefined` is meaningful: the caller omits `--model` entirely,
+ * letting the spawned `claude` resolve the model from its own env config.
+ */
+export function resolveSDKModel(
+  requestedModel: string | undefined,
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  const onCloud =
+    isTruthyEnv(env.CLAUDE_CODE_USE_BEDROCK) ||
+    isTruthyEnv(env.CLAUDE_CODE_USE_VERTEX);
+  if (!onCloud) return requestedModel;
+
+  // Already a Bedrock/Vertex identifier — trust it as-is.
+  if (requestedModel && isCloudModelId(requestedModel)) return requestedModel;
+
+  // Map a bare family alias to the user's configured default ARN.
+  if (requestedModel) {
+    const family = requestedModel.toLowerCase();
+    if (family.includes("opus") && env.ANTHROPIC_DEFAULT_OPUS_MODEL) {
+      return env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+    }
+    if (family.includes("sonnet") && env.ANTHROPIC_DEFAULT_SONNET_MODEL) {
+      return env.ANTHROPIC_DEFAULT_SONNET_MODEL;
+    }
+    if (family.includes("haiku") && env.ANTHROPIC_DEFAULT_HAIKU_MODEL) {
+      return env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+    }
+  }
+
+  // Fall back to the env default model, or let the SDK inherit from the env.
+  return env.ANTHROPIC_MODEL || undefined;
+}
 
 // ---------------------------------------------------------------------------
 // SDK query options — typed to catch typos at compile time
 // ---------------------------------------------------------------------------
 
 interface ClaudeSDKQueryOptions {
-  model: string;
+  /** Omitted when undefined so the SDK inherits the env's default model (Bedrock/Vertex). */
+  model?: string;
   maxTurns: number;
   allowedTools: string[];
   cwd: string;
@@ -54,6 +159,8 @@ interface ClaudeSDKQueryOptions {
   allowDangerouslySkipPermissions?: boolean;
   pathToClaudeCodeExecutable?: string;
   settingSources?: string[];
+  effort?: string;
+  strictMcpConfig?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -68,15 +175,12 @@ export class ClaudeAgentSDKProvider implements AIProvider {
     streaming: true,
     tools: true,
   };
-  readonly models = [
-    { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', default: true },
-    { id: 'claude-sonnet-4-6[1m]', label: 'Sonnet 4.6 (1M)' },
-    { id: 'claude-opus-4-7', label: 'Opus 4.7' },
-    { id: 'claude-opus-4-7[1m]', label: 'Opus 4.7 (1M)' },
-    { id: 'claude-opus-4-6', label: 'Opus 4.6' },
-    { id: 'claude-opus-4-6[1m]', label: 'Opus 4.6 (1M)' },
-    { id: 'claude-haiku-4-5', label: 'Haiku 4.5' },
-  ] as const;
+  // Fallback used only until fetchModels() replaces it with the installed
+  // `claude`'s own list (the SDK's supportedModels()).
+  models: CatalogModel[] = CLAUDE_FALLBACK_MODELS;
+  modelsSource: 'fallback' | 'discovered' = 'fallback';
+  /** The installed `claude`'s version, from `claude --version` during discovery. */
+  toolVersion: string | undefined;
 
   private config: ClaudeAgentSDKConfig;
 
@@ -124,6 +228,77 @@ export class ClaudeAgentSDKProvider implements AIProvider {
     });
   }
 
+  /**
+   * Populate `models` from the installed `claude` via the SDK's
+   * supportedModels(). Starts a throwaway CLI process with no prompt, no
+   * settings sources (so no user hooks or plugins run) and no MCP servers,
+   * reads the list from the initialize handshake, and closes it. Bounded by
+   * MODEL_DISCOVERY_TIMEOUT_MS. On failure the static fallback stays and the
+   * error propagates, so the runtime's once-wrapper may retry later.
+   */
+  async fetchModels(): Promise<void> {
+    // `claude --version` runs alongside discovery (once, since a success is
+    // kept for the process) and is kept even if discovery fails.
+    const versionProbe = this.toolVersion ? undefined : this.probeToolVersion();
+    try {
+      await this.discoverModels();
+    } finally {
+      const version = await versionProbe;
+      if (version) this.toolVersion = version;
+    }
+  }
+
+  /** The installed `claude`'s version; undefined without a path or on any failure. */
+  private probeToolVersion(): Promise<string | undefined> {
+    const path = this.config.claudeExecutablePath;
+    if (!path) return Promise.resolve(undefined);
+    return new Promise((resolve) => {
+      try {
+        execFile(path, ["--version"], { timeout: MODEL_DISCOVERY_TIMEOUT_MS, windowsHide: true }, (err, stdout) => {
+          resolve(err ? undefined : cliVersionFrom(String(stdout), /claude code/i));
+        });
+      } catch {
+        resolve(undefined);
+      }
+    });
+  }
+
+  private async discoverModels(): Promise<void> {
+    const abortController = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let q: { supportedModels: () => Promise<ClaudeSdkModelInfo[]>; close: () => void } | null = null;
+    try {
+      const queryFn = await getSDKQuery();
+      q = queryFn({
+        prompt: idlePrompt(abortController.signal),
+        options: {
+          cwd: this.config.cwd ?? process.cwd(),
+          abortController,
+          persistSession: false,
+          settingSources: [],
+          strictMcpConfig: true,
+          ...(this.config.claudeExecutablePath && {
+            pathToClaudeCodeExecutable: this.config.claudeExecutablePath,
+          }),
+        },
+      });
+      const infos = await Promise.race([
+        q!.supportedModels(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("model discovery timed out")), MODEL_DISCOVERY_TIMEOUT_MS);
+        }),
+      ]);
+      const models = claudeCatalogFromSdk(infos ?? []);
+      if (models.length === 0) throw new Error("claude reported no models");
+      this.models = models;
+      this.modelsSource = 'discovered';
+    } finally {
+      if (timer) clearTimeout(timer);
+      abortController.abort();
+      try { q?.close(); } catch { /* already closed */ }
+    }
+  }
+
   dispose(): void {
     // No persistent resources to clean up
   }
@@ -131,6 +306,7 @@ export class ClaudeAgentSDKProvider implements AIProvider {
   private baseConfig(options?: CreateSessionOptions) {
     return {
       model: options?.model ?? this.config.model ?? DEFAULT_MODEL,
+      effort: options?.reasoningEffort,
       maxTurns: options?.maxTurns ?? DEFAULT_MAX_TURNS,
       maxBudgetUsd: options?.maxBudgetUsd,
       allowedTools: this.config.allowedTools ?? DEFAULT_ALLOWED_TOOLS,
@@ -156,6 +332,14 @@ async function getSDKQuery() {
   return sdkQueryFn!;
 }
 
+/** A streaming-input prompt that sends nothing and ends when aborted. */
+async function* idlePrompt(signal: AbortSignal): AsyncGenerator<never> {
+  await new Promise<void>((resolve) => {
+    if (signal.aborted) resolve();
+    else signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
@@ -164,6 +348,7 @@ interface SessionConfig {
   systemPrompt: string | null;
   forkPreamble?: string;
   model: string;
+  effort?: string;
   maxTurns: number;
   maxBudgetUsd?: number;
   allowedTools: string[];
@@ -261,8 +446,13 @@ class ClaudeAgentSDKSession extends BaseSession {
   // -------------------------------------------------------------------------
 
   private buildQueryOptions(): ClaudeSDKQueryOptions {
+    // On Bedrock/Vertex, bare aliases (e.g. "claude-sonnet-4-6") are rejected
+    // with a 400; resolveSDKModel() maps them to the configured ARN or returns
+    // undefined so the SDK inherits the environment's default model.
+    const resolvedModel = resolveSDKModel(this.config.model);
     const opts: ClaudeSDKQueryOptions = {
-      model: this.config.model,
+      ...(resolvedModel !== undefined && { model: resolvedModel }),
+      ...(this.config.effort && { effort: this.config.effort }),
       maxTurns: this.config.maxTurns,
       allowedTools: this.config.allowedTools,
       cwd: this.config.cwd,

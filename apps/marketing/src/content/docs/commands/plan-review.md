@@ -29,6 +29,8 @@ Agent resubmits → Plan Diff shows what changed
 
 The hook configuration lives at `apps/hook/hooks/hooks.json` and matches the `ExitPlanMode` tool name.
 
+On Claude Code 2.1.287 or newer, the [Plannotator mod](/docs/guides/claude-code/#the-plannotator-mod) runs plan review instead of the hook, and Claude does not wait. When the review opens, Claude ends its turn, and your decision arrives later as a message. A revised plan updates the same tab. After you approve, Claude calls `ExitPlanMode` once more and works from the exact plan text you approved.
+
 ## Codex flow
 
 Codex does not expose a dedicated `ExitPlanMode` interception point. Instead, Plannotator integrates through Codex's experimental `Stop` hook.
@@ -106,7 +108,9 @@ Images are stored as temporary files and referenced by name in the feedback sent
 
 ## Agent switching (OpenCode)
 
-OpenCode users can configure which agent receives the approved plan. Set this in Settings — choose from available agents or enter a custom agent name. If the configured agent isn't found, Plannotator shows a warning before approval.
+OpenCode users can configure which agent receives the approved plan. By default, approved plans are handed off to the build agent. See [Agent switching settings](/docs/getting-started/ui-settings/#agent-switching).
+
+If the configured agent isn't found in the current OpenCode session, Plannotator logs a warning and shows a warning toast, then omits the agent switch so the current/default OpenCode flow continues.
 
 ## Server API
 

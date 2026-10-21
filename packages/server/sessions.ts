@@ -24,6 +24,12 @@ export interface SessionInfo {
   project: string;
   startedAt: string;
   label: string;
+  /** The agent session that started this one, when the host tagged it (`claude-code:<session id>`). */
+  hostSession?: string;
+  /** The `pn-` id the host gave this review (`PLANNOTATOR_HOST_REVIEW_ID`), when a host started it. */
+  reviewId?: string;
+  /** What the session is of, in full: an absolute path, URL, PR URL or reviewed directory (a bundle's files joined with ", "). */
+  target?: string;
 }
 
 function getSessionsDir(): string {
@@ -49,21 +55,27 @@ function isAlive(pid: number): boolean {
 }
 
 /**
- * Register the current server session.
+ * Register the current server session. Best-effort: the registry only powers
+ * `plannotator sessions` discovery, so an unwritable data dir (read-only
+ * mount, disk full) must never take the server down with it.
  */
 export function registerSession(info: SessionInfo): void {
-  writeFileSync(sessionPath(info.pid), JSON.stringify(info, null, 2), "utf-8");
+  try {
+    writeFileSync(sessionPath(info.pid), JSON.stringify(info, null, 2), "utf-8");
+  } catch {
+    // Session discovery is unavailable; the session itself is unaffected.
+  }
 }
 
 /**
  * Unregister the current process's session. No-op if not found.
  */
 export function unregisterSession(pid: number = process.pid): void {
-  const filePath = sessionPath(pid);
   try {
+    const filePath = sessionPath(pid);
     if (existsSync(filePath)) unlinkSync(filePath);
   } catch {
-    // Ignore delete failures
+    // Ignore delete failures (including an unwritable sessions dir).
   }
 }
 
@@ -71,11 +83,12 @@ export function unregisterSession(pid: number = process.pid): void {
  * List all active sessions. Automatically removes stale entries.
  */
 export function listSessions(): SessionInfo[] {
-  const dir = getSessionsDir();
   const active: SessionInfo[] = [];
 
   let entries: string[];
+  let dir: string;
   try {
+    dir = getSessionsDir();
     entries = readdirSync(dir);
   } catch {
     return [];

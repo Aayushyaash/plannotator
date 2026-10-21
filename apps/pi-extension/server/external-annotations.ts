@@ -14,10 +14,12 @@ import {
 	serializeSSEEvent,
 	HEARTBEAT_COMMENT,
 	HEARTBEAT_INTERVAL_MS,
+	validateReplyTarget,
+	validateAnnotationPatch,
 	type StorableAnnotation,
 	type ExternalAnnotationEvent,
-} from "../generated/external-annotation.js";
-import { json, parseBody } from "./helpers.js";
+} from "../generated/external-annotation.ts";
+import { json, parseBody } from "./helpers.ts";
 
 // ---------------------------------------------------------------------------
 // Route prefix
@@ -35,8 +37,7 @@ export function createExternalAnnotationHandler(mode: "plan" | "review") {
 	const subscribers = new Set<ServerResponse>();
 	const transform = mode === "plan" ? transformPlanInput : transformReviewInput;
 
-	// Wire store mutations → SSE broadcast
-	store.onMutation((event: ExternalAnnotationEvent<StorableAnnotation>) => {
+	const broadcast = (event: ExternalAnnotationEvent<StorableAnnotation>) => {
 		const data = serializeSSEEvent(event);
 		for (const res of subscribers) {
 			try {
@@ -46,9 +47,15 @@ export function createExternalAnnotationHandler(mode: "plan" | "review") {
 				subscribers.delete(res);
 			}
 		}
-	});
+	};
+
+	// Wire store mutations → SSE broadcast
+	store.onMutation(broadcast);
 
 	return {
+		/** Send an event that is not a store mutation (session-closed) to every open stream. */
+		broadcast,
+
 		/** Push annotations directly into the store (bypasses HTTP, reuses same validation). */
 		addAnnotations(body: unknown): { ids: string[] } | { error: string } {
 			const parsed = transform(body);
@@ -146,17 +153,40 @@ export function createExternalAnnotationHandler(mode: "plan" | "review") {
 					json(res, { error: "Missing ?id parameter" }, 400);
 					return true;
 				}
+				let body: unknown;
 				try {
-					const body = await parseBody(req);
-					const updated = store.update(id, body as Partial<StorableAnnotation>);
-					if (!updated) {
-						json(res, { error: "Not found" }, 404);
-						return true;
-					}
-					json(res, { annotation: updated });
+					body = await parseBody(req);
 				} catch {
 					json(res, { error: "Invalid JSON" }, 400);
+					return true;
 				}
+				// Field-level validation with the same validators POST applies:
+				// unknown keys are dropped and a malformed structured value is a
+				// 400, never a stored one the renderer then reads a property off
+				// (`{"diagramAnchor": null}` used to blank the page).
+				// Mirrors packages/server/external-annotations.ts.
+				const patch = validateAnnotationPatch(mode, body);
+				if ("error" in patch) {
+					json(res, { error: patch.error }, 400);
+					return true;
+				}
+				// A reply must point at an existing, different annotation and must
+				// not close a cycle: the export and the panel treat cycle members as
+				// roots, but the invalid state should not be creatable in the first
+				// place. (POST never carries inReplyTo, so PATCH is the only ingest.)
+				if ("inReplyTo" in patch.fields) {
+					const problem = validateReplyTarget(store.getAll(), id, patch.fields.inReplyTo);
+					if (problem) {
+						json(res, { error: problem }, 400);
+						return true;
+					}
+				}
+				const updated = store.update(id, patch.fields as Partial<StorableAnnotation>);
+				if (!updated) {
+					json(res, { error: "Not found" }, 404);
+					return true;
+				}
+				json(res, { annotation: updated });
 				return true;
 			}
 

@@ -29,18 +29,19 @@ function context(overrides: Partial<GitContext>): GitContext {
 
 function provider(
   id: string,
-  detected: boolean,
+  detected: boolean | (() => boolean),
   ownedTypes: string[],
   contextOverrides: Partial<GitContext> = {},
   root?: string,
 ): VcsProvider {
+  const isDetected = () => typeof detected === "function" ? detected() : detected;
   return {
     id,
     async detect() {
-      return detected;
+      return isDetected();
     },
     async getRoot() {
-      return detected ? root ?? "/repo" : null;
+      return isDetected() ? root ?? "/repo" : null;
     },
     ownsDiffType(diffType: string) {
       return ownedTypes.includes(diffType);
@@ -58,6 +59,12 @@ function provider(
 }
 
 const gitRuntime: ReviewGitRuntime = {
+  async getFileInfo() {
+    return null;
+  },
+  async readLink() {
+    return null;
+  },
   async runGit() {
     return { stdout: "", stderr: "", exitCode: 0 };
   },
@@ -74,6 +81,50 @@ describe("createVcsApi", () => {
 
     await expect(api.detectVcs("/repo")).resolves.toBe(jj);
     await expect(api.getVcsContext("/repo")).resolves.toMatchObject({ vcsType: "jj" });
+  });
+
+  test("selects GitButler ahead of Git without changing JJ precedence", async () => {
+    const jj = provider("jj", false, ["jj-current"], {}, "/repo");
+    const gitButler = provider("gitbutler", true, ["gitbutler:workspace"], {}, "/repo");
+    const git = provider("git", true, ["uncommitted"], {}, "/repo");
+    const api = createVcsApi([jj, gitButler, git]);
+
+    await expect(api.detectVcs("/repo")).resolves.toBe(gitButler);
+    await expect(api.getVcsContext("/repo")).resolves.toMatchObject({ vcsType: "gitbutler" });
+
+    const colocatedJj = provider("jj", true, ["jj-current"], {}, "/repo");
+    const jjApi = createVcsApi([colocatedJj, gitButler, git]);
+    await expect(jjApi.detectVcs("/repo")).resolves.toBe(colocatedJj);
+    expect(api.vcsOwnsDiffType("gitbutler", "gitbutler:workspace")).toBe(true);
+    expect(api.vcsOwnsDiffType("gitbutler", "uncommitted")).toBe(false);
+  });
+
+  test("re-detects Git to GitButler to Git transitions in a long-lived runtime", async () => {
+    let gitButlerActive = false;
+    const gitButler = provider(
+      "gitbutler",
+      () => gitButlerActive,
+      ["gitbutler:workspace"],
+      { diffOptions: [{ id: "gitbutler:workspace", label: "Workspace" }] },
+      "/repo",
+    );
+    const git = provider("git", true, ["uncommitted"], {
+      diffOptions: [{ id: "uncommitted", label: "Uncommitted" }],
+    }, "/repo");
+    const api = createVcsApi([gitButler, git]);
+    const prepare = () => api.prepareLocalReviewDiff({
+      cwd: "/repo",
+      configuredDiffType: "since-base",
+    });
+
+    await expect(prepare()).resolves.toMatchObject({ gitContext: { vcsType: "git" } });
+    gitButlerActive = true;
+    await expect(prepare()).resolves.toMatchObject({
+      gitContext: { vcsType: "gitbutler" },
+      diffType: "gitbutler:workspace",
+    });
+    gitButlerActive = false;
+    await expect(prepare()).resolves.toMatchObject({ gitContext: { vcsType: "git" } });
   });
 
   test("detects the nearest VCS root so nested Git repos beat outer JJ workspaces", async () => {
@@ -108,6 +159,35 @@ describe("createVcsApi", () => {
     await expect(api.getVcsContext("/repo")).resolves.toMatchObject({ vcsType: "p4" });
   });
 
+  test("detectManagedVcs returns null instead of falling back when no provider detects a workspace", async () => {
+    const git = provider("git", false, ["uncommitted"]);
+    const api = createVcsApi([git]);
+
+    await expect(api.detectManagedVcs("/not-a-repo")).resolves.toBeNull();
+    await expect(api.detectVcs("/not-a-repo")).resolves.toBe(git);
+  });
+
+  test("detectManagedVcs respects forced VCS selection without throwing", async () => {
+    const jj = provider("jj", true, ["jj-current"], {}, "/repo");
+    const git = provider("git", false, ["uncommitted"]);
+    const api = createVcsApi([jj, git]);
+
+    await expect(api.detectManagedVcs("/repo", "git")).resolves.toBeNull();
+    await expect(api.detectManagedVcs("/repo", "jj")).resolves.toBe(jj);
+  });
+
+  test("detectManagedVcs returns null when forced provider detection throws", async () => {
+    const git = {
+      ...provider("git", true, ["uncommitted"]),
+      async detect() {
+        throw new Error("git failed");
+      },
+    };
+    const api = createVcsApi([git]);
+
+    await expect(api.detectManagedVcs("/repo", "git")).resolves.toBeNull();
+  });
+
   test("routes operations by diff type before falling back to detection", async () => {
     const jj = provider("jj", false, ["jj-current"]);
     const git = provider("git", true, ["uncommitted"]);
@@ -130,6 +210,15 @@ describe("createVcsApi", () => {
     await expect(git.canStageFiles("staged", "/repo")).resolves.toBe(false);
     await expect(git.canStageFiles("branch", "/repo")).resolves.toBe(false);
     await expect(git.canStageFiles("merge-base", "/repo")).resolves.toBe(false);
+    // Historical commit diffs have nothing stageable — plain and worktree forms.
+    await expect(git.canStageFiles("commit:abc1234", "/repo")).resolves.toBe(false);
+    await expect(git.canStageFiles("worktree:/repo:commit:abc1234", "/repo")).resolves.toBe(false);
+  });
+
+  test("the git provider owns commit:<sha> diff types", () => {
+    const git = createGitProvider(gitRuntime);
+    expect(git.ownsDiffType("commit:abc1234")).toBe(true);
+    expect(git.ownsDiffType("worktree:/repo:commit:abc1234")).toBe(true);
   });
 
   test("requires providers to explicitly opt into staging", async () => {
@@ -199,6 +288,79 @@ describe("createVcsApi", () => {
     });
   });
 
+  test("falls back from an unavailable provider mode without changing the requested preference", async () => {
+    const jj = provider("jj", true, ["jj-current", "jj-line"], {
+      defaultBranch: "trunk()",
+      diffOptions: [
+        { id: "jj-current", label: "Current change" },
+        { id: "jj-line", label: "Line of work" },
+      ],
+      diffAvailability: {
+        "jj-line": {
+          fallbackDiffType: "jj-current",
+          message: "Choose a line-of-work base.",
+          candidates: [{ revision: "abc", labels: ["left"], subject: "Left base" }],
+        },
+      },
+      vcsType: "jj",
+    });
+    const api = createVcsApi([jj]);
+
+    await expect(api.prepareLocalReviewDiff({
+      cwd: "/repo",
+      requestedDiffType: "jj-line",
+      configuredDiffType: "jj-current",
+    })).resolves.toMatchObject({
+      diffType: "jj-current",
+      rawPatch: "jj:jj-current:trunk()",
+      gitContext: {
+        diffFallback: {
+          requestedDiffType: "jj-line",
+          effectiveDiffType: "jj-current",
+          message: "Choose a line-of-work base.",
+        },
+      },
+    });
+  });
+
+  test("uses provider context captured atomically with the prepared patch", async () => {
+    const initialContext = context({
+      vcsType: "gitbutler",
+      defaultBranch: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      diffOptions: [{ id: "gitbutler:workspace", label: "Workspace" }],
+    });
+    const patchContext = context({
+      vcsType: "gitbutler",
+      defaultBranch: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      diffOptions: [{ id: "gitbutler:workspace", label: "Workspace" }],
+    });
+    const gitButler: VcsProvider = {
+      ...provider("gitbutler", true, ["gitbutler:workspace"]),
+      async getContext() {
+        return initialContext;
+      },
+      async runDiff() {
+        return {
+          patch: "atomic patch",
+          label: "Workspace",
+          gitContext: patchContext,
+          fingerprint: "atomic fingerprint",
+        };
+      },
+    };
+    const api = createVcsApi([gitButler]);
+
+    await expect(api.prepareLocalReviewDiff({
+      cwd: "/repo",
+      configuredDiffType: "since-base",
+    })).resolves.toMatchObject({
+      gitContext: patchContext,
+      base: patchContext.defaultBranch,
+      rawPatch: "atomic patch",
+      fingerprint: "atomic fingerprint",
+    });
+  });
+
   test("prepares Git local reviews by honoring valid requested base and ignoring JJ diff modes", async () => {
     const git = provider("git", true, ["uncommitted", "merge-base"]);
     const api = createVcsApi([git]);
@@ -233,6 +395,29 @@ describe("createVcsApi", () => {
       diffType: "merge-base",
       base: "main",
       rawPatch: "git:merge-base:main",
+    });
+  });
+
+  test("can force GitButler and ignores Git-shaped saved defaults and bases", async () => {
+    const gitButler = provider("gitbutler", true, ["gitbutler:workspace"], {
+      defaultBranch: "abc1234",
+      diffOptions: [{ id: "gitbutler:workspace", label: "Workspace" }],
+      vcsType: "gitbutler",
+    });
+    const git = provider("git", true, ["uncommitted", "merge-base"]);
+    const api = createVcsApi([gitButler, git]);
+
+    await expect(api.prepareLocalReviewDiff({
+      cwd: "/repo",
+      vcsType: "gitbutler",
+      requestedDiffType: "merge-base",
+      requestedBase: "main",
+      configuredDiffType: "unstaged",
+    })).resolves.toMatchObject({
+      gitContext: { vcsType: "gitbutler" },
+      diffType: "gitbutler:workspace",
+      base: "abc1234",
+      rawPatch: "gitbutler:gitbutler:workspace:abc1234",
     });
   });
 

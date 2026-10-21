@@ -2,11 +2,11 @@
 
 This directory contains manual testing scripts for Plannotator.
 
-## UI Tests (`manual/local/`)
+## Manual Browser UI Smokes (`tests/manual/local/`)
 
-These scripts test the UI components and require a browser.
+These are local-only scripts for launching Plannotator UI flows with fixture data so you can manually verify them in a browser. They are not automated CI tests.
 
-**Plan review UI:**
+**Plan review UI smoke tests:**
 
 ```bash
 ./tests/manual/local/test-hook.sh          # Claude Code simulation
@@ -22,6 +22,11 @@ These scripts test the UI components and require a browser.
 ```
 
 See [UI-TESTING.md](../docs/UI-TESTING.md) for detailed UI testing documentation.
+
+The end-to-end, user-centered Vim controls matrix lives in
+[manual/vim-ux-smoke.md](manual/vim-ux-smoke.md). It covers real Markdown and
+raw-HTML navigation, selection, annotation, focus recovery, HUD behavior, and
+native-control compatibility.
 
 ## Integration & Utility Tests (`manual/local/`)
 

@@ -1,11 +1,39 @@
 import React from 'react';
-import * as RadixTooltip from '@radix-ui/react-tooltip';
+import { Tooltip as BaseTooltip } from '@base-ui/react/tooltip';
 
-export const TooltipProvider = RadixTooltip.Provider;
+/**
+ * TooltipProvider keeps the Radix-era prop names (`delayDuration`,
+ * `skipDelayDuration`, `disableHoverableContent`) as its public API and maps
+ * them onto Base UI's Provider (`delay`, `timeout`) — call sites in the apps
+ * stay unchanged. `disableHoverableContent` has no provider-level equivalent
+ * in Base UI (it moved to per-root `disableHoverablePopup`), so it is carried
+ * via context and applied to every Tooltip root under the provider.
+ */
+const DisableHoverablePopupContext = React.createContext(false);
+
+interface TooltipProviderProps {
+  delayDuration?: number;
+  skipDelayDuration?: number;
+  disableHoverableContent?: boolean;
+  children?: React.ReactNode;
+}
+
+export const TooltipProvider: React.FC<TooltipProviderProps> = ({
+  delayDuration,
+  skipDelayDuration,
+  disableHoverableContent = false,
+  children,
+}) => (
+  <BaseTooltip.Provider delay={delayDuration} timeout={skipDelayDuration}>
+    <DisableHoverablePopupContext.Provider value={disableHoverableContent}>
+      {children}
+    </DisableHoverablePopupContext.Provider>
+  </BaseTooltip.Provider>
+);
 
 interface TooltipProps {
   content: React.ReactNode;
-  children: React.ReactNode;
+  children: React.ReactElement;
   side?: 'top' | 'right' | 'bottom' | 'left';
   align?: 'start' | 'center' | 'end';
   delayDuration?: number;
@@ -16,6 +44,25 @@ interface TooltipProps {
    * that use it for short button labels.
    */
   wide?: boolean;
+  /**
+   * Asked each time the tooltip would open, with the trigger element; `false`
+   * keeps it closed this time (e.g. open only while the trigger's text is cut
+   * off). Unset: it always opens, as before.
+   */
+  shouldOpen?: (trigger: Element) => boolean;
+  /**
+   * Where the popup is portaled. Unset: the document body. A trigger inside a
+   * native modal `<dialog>` needs the dialog here, or the popup is drawn
+   * under the dialog's top layer.
+   */
+  container?: HTMLElement | null;
+  /**
+   * When true, Escape closes the tooltip without using the key up: it still
+   * reaches the page (not default-prevented, not stopped), so the page's own
+   * Escape (closing a pane) works while a tooltip is open. Unset: Base UI's
+   * default, where the Escape that closes a tooltip goes no further.
+   */
+  escapePassesThrough?: boolean;
 }
 
 export const Tooltip: React.FC<TooltipProps> = ({
@@ -26,20 +73,52 @@ export const Tooltip: React.FC<TooltipProps> = ({
   delayDuration,
   sideOffset = 8,
   wide = false,
-}) => (
-  <RadixTooltip.Root delayDuration={delayDuration}>
-    <RadixTooltip.Trigger asChild>{children}</RadixTooltip.Trigger>
-    <RadixTooltip.Portal>
-      <RadixTooltip.Content
-        side={side}
-        align={align}
-        sideOffset={sideOffset}
-        className={`z-50 px-2 py-1 text-xs bg-popover text-popover-foreground border border-border rounded shadow-md origin-[var(--radix-tooltip-content-transform-origin)] transition-[opacity,transform] duration-150 ease-out data-[state=closed]:opacity-0 data-[state=closed]:scale-95 data-[state=delayed-open]:opacity-100 data-[state=delayed-open]:scale-100 data-[state=instant-open]:opacity-100 data-[state=instant-open]:scale-100 ${
-          wide ? 'max-w-[260px] leading-snug whitespace-normal' : 'whitespace-nowrap'
-        }`}
-      >
-        {content}
-      </RadixTooltip.Content>
-    </RadixTooltip.Portal>
-  </RadixTooltip.Root>
-);
+  shouldOpen,
+  container,
+  escapePassesThrough = false,
+}) => {
+  const disableHoverablePopup = React.useContext(DisableHoverablePopupContext);
+  // Controlled only for escapePassesThrough: the Escape close is canceled (so Base UI neither prevents nor stops
+  // the key) and the tooltip is closed here instead.
+  const [controlledOpen, setControlledOpen] = React.useState(false);
+  const controlled = escapePassesThrough ? { open: controlledOpen } : {};
+  return (
+    <BaseTooltip.Root
+      disableHoverablePopup={disableHoverablePopup}
+      {...controlled}
+      onOpenChange={
+        shouldOpen || escapePassesThrough
+          ? (open, details) => {
+              if (open && shouldOpen && !(details.trigger && shouldOpen(details.trigger))) {
+                details.cancel();
+                return;
+              }
+              if (!escapePassesThrough) return;
+              if (!open && details.reason === 'escape-key') {
+                details.cancel();
+                details.allowPropagation();
+              }
+              setControlledOpen(open);
+            }
+          : undefined
+      }
+    >
+      <BaseTooltip.Trigger render={children} delay={delayDuration} />
+      <BaseTooltip.Portal container={container ?? undefined}>
+        {/* Above the annotation toolbar (z-[100]), so a tooltip that flips toward it is never tucked under it. */}
+        <BaseTooltip.Positioner side={side} align={align} sideOffset={sideOffset} className="isolate z-[110]">
+          <BaseTooltip.Popup
+            data-pn-tooltip=""
+            className={`z-[110] px-2 py-1 text-xs bg-popover text-popover-foreground border border-border rounded shadow-md origin-[var(--transform-origin)] transition-[opacity,scale] duration-150 ease-out data-[starting-style]:opacity-0 data-[starting-style]:scale-95 data-[ending-style]:opacity-0 data-[ending-style]:scale-95 ${
+              wide
+                ? 'max-w-[min(260px,calc(100vw-1rem))] leading-snug whitespace-normal [overflow-wrap:anywhere]'
+                : 'whitespace-nowrap'
+            }`}
+          >
+            {content}
+          </BaseTooltip.Popup>
+        </BaseTooltip.Positioner>
+      </BaseTooltip.Portal>
+    </BaseTooltip.Root>
+  );
+};

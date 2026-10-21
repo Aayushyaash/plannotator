@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { computePlanDiff, computeInlineDiff } from "./planDiffEngine";
+import type { InlineDiffToken } from "./planDiffEngine";
+import { parseMarkdownToBlocks } from "./parser";
 
 describe("computePlanDiff — block-level behavior", () => {
   test("pure unchanged produces a single unchanged block, no stats", () => {
@@ -34,6 +36,42 @@ describe("computePlanDiff — block-level behavior", () => {
     expect(mods[0].oldContent).toContain("old");
     expect(mods[0].content).toContain("new");
     expect(stats.modifications).toBe(1);
+  });
+});
+
+describe("computePlanDiff — a quote holding a code fence diffs as one unit", () => {
+  // Each diff chunk renders as its own quote. Line-level diffing split an
+  // edit inside a quoted fence into chunks holding half a fence each, so one
+  // chunk opened a fence it never closed and rendered the prose after it as
+  // code.
+  const OLD = "# Plan\n\n> Steps:\n>\n> ```\n> step one\n> step two\n> ```\n>\n> Done.\n\nAfter.\n";
+  const NEW = OLD.replace("step two", "step 2");
+  const fenceLines = (text: string) => text.split("\n").filter((line) => /^\s*(>\s?)+`{3,}/.test(line)).length;
+
+  test("the edit is one modified quote, both sides whole", () => {
+    const { blocks } = computePlanDiff(OLD, NEW);
+    const changed = blocks.filter((b) => b.type !== "unchanged");
+    expect(changed).toHaveLength(1);
+    expect(changed[0].type).toBe("modified");
+    for (const side of [changed[0].oldContent!, changed[0].content]) {
+      const parsed = parseMarkdownToBlocks(side, { frontmatter: false });
+      expect(parsed.map((b) => b.type)).toEqual(["blockquote"]);
+      const inner = parseMarkdownToBlocks(parsed[0].content, { frontmatter: false });
+      expect(inner.map((b) => b.type)).toEqual(["paragraph", "code", "paragraph"]);
+    }
+  });
+
+  test("no chunk holds an unclosed quoted fence", () => {
+    const { blocks } = computePlanDiff(OLD, NEW);
+    for (const block of blocks) {
+      expect(fenceLines(block.content) % 2).toBe(0);
+      if (block.oldContent) expect(fenceLines(block.oldContent) % 2).toBe(0);
+    }
+  });
+
+  test("a quote without a fence still diffs line by line", () => {
+    const { blocks } = computePlanDiff("> one\n> two\n> three\n", "> one\n> 2\n> three\n");
+    expect(blocks.map((b) => b.type)).toEqual(["unchanged", "modified", "unchanged"]);
   });
 });
 
@@ -160,7 +198,7 @@ describe("computeInlineDiff — token content", () => {
 
 // Helper to build a unified <ins>/<del>-wrapped string from a computeInlineDiff
 // result for readable assertions in tests below.
-function unify(result: { tokens: import("./planDiffEngine").InlineDiffToken[] }) {
+function unify(result: { tokens: InlineDiffToken[] }) {
   return result.tokens
     .map((t) => {
       if (t.type === "added") return `<ins>${t.value}</ins>`;
@@ -545,5 +583,45 @@ describe("computePlanDiff — modified blocks populate inlineTokens when qualifi
     if (mod) {
       expect(mod.inlineTokens).toBeUndefined();
     }
+  });
+});
+
+describe("computePlanDiff — reference-link definition edits (PR #1168)", () => {
+  test("a URL-only edit to a link reference definition renders as a real change, not an empty diff", () => {
+    // diffLines isolates just the definition line into its own hunk (the
+    // paragraph that actually uses [docs][ref] is unchanged and elsewhere).
+    // Before the resolver stopped blanking unconsumed definitions, resolving
+    // that isolated one-line chunk on its own (no co-located reference to
+    // consume the label) blanked it to nothing on both sides, so the diff
+    // silently rendered zero blocks for a real content change.
+    const oldText =
+      "Read the [docs][ref] for details.\n\n[ref]: https://old.example.com/docs\n";
+    const newText =
+      "Read the [docs][ref] for details.\n\n[ref]: https://new.example.com/docs\n";
+    const { blocks } = computePlanDiff(oldText, newText);
+    const modified = blocks.find((b) => b.type === "modified");
+    expect(modified).toBeDefined();
+    expect(modified!.content.trim().length).toBeGreaterThan(0);
+    expect(modified!.oldContent!.trim().length).toBeGreaterThan(0);
+    // The isolated chunk must render as at least one visible block on each
+    // side — this is exactly what PlanCleanDiffView's MarkdownChunk uses to
+    // draw the change; zero blocks here is the "non-empty edit renders as
+    // empty" bug.
+    expect(parseMarkdownToBlocks(modified!.oldContent!).length).toBeGreaterThan(0);
+    expect(parseMarkdownToBlocks(modified!.content).length).toBeGreaterThan(0);
+    // The isolated chunk resolves to a single paragraph on each side (no
+    // co-located reference to consume the definition), so it qualifies for
+    // word-level inline diffing and the URL change is actually visible.
+    expect(modified!.inlineTokens).toBeDefined();
+    const removedText = modified!.inlineTokens!
+      .filter((t) => t.type === "removed")
+      .map((t) => t.value)
+      .join("");
+    const addedText = modified!.inlineTokens!
+      .filter((t) => t.type === "added")
+      .map((t) => t.value)
+      .join("");
+    expect(removedText).toContain("old");
+    expect(addedText).toContain("new");
   });
 });

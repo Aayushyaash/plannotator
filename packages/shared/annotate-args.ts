@@ -1,8 +1,8 @@
 /**
  * Parse CLI-style args arriving as a single whitespace-delimited string.
  *
- * Extracts the `--gate`, `--json`, and `--hook` flags from the remainder,
- * which is treated as the target path. Leading `@` is
+ * Extracts known annotate flags from the remainder, which is treated as the
+ * target path. Leading `@` is
  * stripped via the shared at-reference helper — reference-mode is primary.
  * Scoped-package-style literal `@` paths are handled by a fallback that the
  * downstream resolver opts into (see at-reference.ts).
@@ -44,6 +44,12 @@ export interface ParsedAnnotateArgs {
   json: boolean;
   hook: boolean;
   renderHtml: boolean;
+  renderMarkdown: boolean;
+  noJina: boolean;
+  /** --app: force a live app session (recognized only with `liveFlags`). */
+  app: boolean;
+  /** --static: force the classic conversion pipeline (only with `liveFlags`). */
+  static: boolean;
 }
 
 type Segment = { type: "ws" | "tok"; text: string };
@@ -53,11 +59,31 @@ const FLAG_MAP = {
   "--json": "json",
   "--hook": "hook",
   "--render-html": "renderHtml",
+  "--markdown": "renderMarkdown",
+  "--no-jina": "noJina",
 } as const satisfies Record<string, keyof Omit<ParsedAnnotateArgs, "filePath" | "rawFilePath">>;
 
-export function parseAnnotateArgs(raw: string): ParsedAnnotateArgs {
+/** Live-mode flags, recognized only where the host actually supports live
+ * app sessions (`liveFlags: true` — Pi today). A host that cannot act on
+ * --app must NOT silently strip it: leaving the token in the path keeps the
+ * legacy "File not found: --app ..." error, which is honest about the flag
+ * being unsupported there. */
+const LIVE_FLAG_MAP = {
+  "--app": "app",
+  "--static": "static",
+} as const satisfies Record<string, keyof Omit<ParsedAnnotateArgs, "filePath" | "rawFilePath">>;
+
+export interface ParseAnnotateArgsOptions {
+  /** Recognize --app / --static (hosts with live app annotation support). */
+  liveFlags?: boolean;
+}
+
+export function parseAnnotateArgs(raw: string, opts?: ParseAnnotateArgsOptions): ParsedAnnotateArgs {
   const s = (raw ?? "").trim();
-  const flags = { gate: false, json: false, hook: false, renderHtml: false };
+  const flags = { gate: false, json: false, hook: false, renderHtml: false, renderMarkdown: false, noJina: false, app: false, static: false };
+  const flagMap: Record<string, keyof typeof flags> = opts?.liveFlags
+    ? { ...FLAG_MAP, ...LIVE_FLAG_MAP }
+    : { ...FLAG_MAP };
 
   const segments: Segment[] = [];
   for (let i = 0; i < s.length;) {
@@ -71,7 +97,7 @@ export function parseAnnotateArgs(raw: string): ParsedAnnotateArgs {
   for (let j = 0; j < segments.length; j++) {
     const seg = segments[j];
     if (seg.type !== "tok") continue;
-    const key = FLAG_MAP[seg.text as keyof typeof FLAG_MAP];
+    const key = flagMap[seg.text];
     if (!key) continue;
 
     flags[key] = true;
@@ -102,4 +128,61 @@ export function parseAnnotateArgs(raw: string): ParsedAnnotateArgs {
   if (flags.hook) flags.gate = true;
 
   return { filePath: stripAtPrefix(rawFilePath), rawFilePath, ...flags };
+}
+
+/**
+ * The target words of a slash command's raw annotate arguments (the text
+ * `parseAnnotateArgs` takes), known flags dropped, for a host that hands them
+ * to `plannotator annotate` as separate arguments so the CLI's tolerant
+ * resolution reads them one by one (`. notes.md` opens notes.md).
+ *
+ * Quotes group a path that holds spaces (`"my notes.md" b.md`) and are
+ * dropped. A quote groups only when it opens a word and closes at a word's
+ * end; anywhere else it is an ordinary character, so the apostrophes of prose
+ * stay inside their words (`it's notes.md, don't` keeps `notes.md` a word of
+ * its own). A quote left open is prose too, and that input splits on
+ * whitespace alone. Nothing is expanded and a backslash is an ordinary
+ * character, so a Windows path keeps its separators.
+ *
+ * Read from the raw text rather than `rawFilePath`, whose wrapping-quote strip
+ * turns `"a b.md" "c d.md"` into `a b.md" "c d.md`.
+ */
+export function annotateTargetWords(raw: string, opts?: ParseAnnotateArgsOptions): string[] {
+  const text = (raw ?? "").trim();
+  const scanned = scanAnnotateWords(text);
+  const words = scanned.unterminated ? text.split(/\s+/) : scanned.words;
+  const flags = new Set<string>([...Object.keys(FLAG_MAP), ...(opts?.liveFlags ? Object.keys(LIVE_FLAG_MAP) : [])]);
+  return words.filter((word) => word && !flags.has(word));
+}
+
+function scanAnnotateWords(text: string): { words: string[]; unterminated: boolean } {
+  const words: string[] = [];
+  let current = "";
+  let quote: "'" | "\"" | undefined;
+  const isSpace = (char: string | undefined) => char === undefined || /\s/.test(char);
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (quote) {
+      if (char === quote && isSpace(text[i + 1])) {
+        quote = undefined;
+        if (current) words.push(current);
+        current = "";
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if ((char === "'" || char === "\"") && !current && isSpace(text[i - 1])) {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) words.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current) words.push(current);
+  return { words, unterminated: quote !== undefined };
 }

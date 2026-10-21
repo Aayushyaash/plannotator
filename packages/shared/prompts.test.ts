@@ -3,22 +3,32 @@ import { mergePromptConfig, type PromptRuntime } from "./config";
 import {
   DEFAULT_REVIEW_APPROVED_PROMPT,
   DEFAULT_PLAN_DENIED_PROMPT,
+  DEFAULT_PLAN_ANSWERED_PROMPT,
   DEFAULT_PLAN_APPROVED_PROMPT,
   DEFAULT_PLAN_APPROVED_WITH_NOTES_PROMPT,
   DEFAULT_PLAN_AUTO_APPROVED_PROMPT,
   DEFAULT_ANNOTATE_FILE_FEEDBACK_PROMPT,
   DEFAULT_ANNOTATE_MESSAGE_FEEDBACK_PROMPT,
   DEFAULT_ANNOTATE_APPROVED_PROMPT,
+  DEFAULT_ANNOTATE_APPROVED_WITH_NOTES_PROMPT,
+  DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT,
   DEFAULT_REVIEW_DENIED_SUFFIX,
+  LEGACY_REVIEW_APPROVAL_PLACEHOLDER,
+  composeReviewApprovedMessage,
   getConfiguredPrompt,
   getReviewApprovedPrompt,
   getPlanDeniedPrompt,
+  getPlanAnsweredPrompt,
+  composePlanDeniedMessage,
   getPlanApprovedPrompt,
   getPlanApprovedWithNotesPrompt,
   getPlanAutoApprovedPrompt,
   getAnnotateFileFeedbackPrompt,
+  getAnnotateFileFeedbackTemplate,
   getAnnotateMessageFeedbackPrompt,
+  getAnnotateMessageFeedbackTemplate,
   getAnnotateApprovedPrompt,
+  getAnnotateApprovedWithNotesPrompt,
   getReviewDeniedSuffix,
   resolveTemplate,
   getPlanToolName,
@@ -61,6 +71,58 @@ describe("resolveTemplate", () => {
 });
 
 // ─── A2. Plan denied ─────────────────────────────────────────────────────────
+
+// What regresses: an answers-only deny reads "YOUR PLAN WAS NOT APPROVED",
+// or an ordinary deny stops being byte-identical to the denied prompt.
+describe("composePlanDeniedMessage (plan.answered)", () => {
+  const vars = { toolName: "ExitPlanMode", planFileRule: "", feedback: "## Answers to your questions" };
+
+  test("answersOnly selects the answered prompt, filled in", () => {
+    const result = composePlanDeniedMessage("claude-code", {}, vars, { answersOnly: true });
+    expect(result).toBe(getPlanAnsweredPrompt("claude-code", {}, vars));
+    expect(result).not.toContain("NOT APPROVED");
+    expect(result).toContain("ExitPlanMode");
+    expect(result).toContain("## Answers to your questions");
+    expect(result).not.toContain("{{");
+  });
+
+  test("without answersOnly it is exactly the denied prompt", () => {
+    const denied = getPlanDeniedPrompt("claude-code", {}, vars);
+    expect(composePlanDeniedMessage("claude-code", {}, vars)).toBe(denied);
+    expect(composePlanDeniedMessage("claude-code", {}, vars, {})).toBe(denied);
+    expect(composePlanDeniedMessage("claude-code", {}, vars, { answersOnly: false })).toBe(denied);
+  });
+
+  test("the default teaches the resubmit convention and keeps the plan file rule", () => {
+    // The [x] = settled convention is what makes an answer survive the resubmit.
+    expect(DEFAULT_PLAN_ANSWERED_PROMPT).toContain("- [x]");
+    expect(DEFAULT_PLAN_ANSWERED_PROMPT).toContain("{{planFileRule}}");
+    const result = getPlanAnsweredPrompt("pi", {}, { ...vars, planFileRule: buildPlanFileRule("plannotator_submit_plan", "/p/plan.md") });
+    expect(result).toContain("/p/plan.md");
+  });
+
+  test("prompts.plan.answered and its runtime override are honored", () => {
+    const config = {
+      prompts: {
+        plan: {
+          answered: "ANSWERED via {{toolName}}: {{feedback}}",
+          runtimes: { opencode: { answered: "OC {{feedback}}" } },
+        },
+      },
+    };
+    expect(composePlanDeniedMessage("claude-code", config, vars, { answersOnly: true }))
+      .toBe("ANSWERED via ExitPlanMode: ## Answers to your questions");
+    expect(composePlanDeniedMessage("opencode", config, vars, { answersOnly: true }))
+      .toBe("OC ## Answers to your questions");
+  });
+
+  test("a custom plan.denied does not replace the answered prompt", () => {
+    const config = { prompts: { plan: { denied: "REJECTED {{feedback}}" } } };
+    expect(composePlanDeniedMessage("claude-code", config, vars, { answersOnly: true }))
+      .toBe(getPlanAnsweredPrompt("claude-code", {}, vars));
+    expect(composePlanDeniedMessage("claude-code", config, vars)).toBe("REJECTED ## Answers to your questions");
+  });
+});
 
 describe("getPlanDeniedPrompt", () => {
   test("falls back to built-in default when no config", () => {
@@ -292,6 +354,50 @@ describe("getAnnotateMessageFeedbackPrompt", () => {
   });
 });
 
+// Unsubstituted template getters — shipped to the browser via the annotate
+// /api/plan payload so clipboard Copy can reproduce the Send Feedback wrap
+// (including config overrides) client-side (#1107).
+describe("getAnnotateFileFeedbackTemplate / getAnnotateMessageFeedbackTemplate", () => {
+  test("returns the default templates with placeholders intact", () => {
+    expect(getAnnotateFileFeedbackTemplate("claude-code", {})).toBe(
+      DEFAULT_ANNOTATE_FILE_FEEDBACK_PROMPT,
+    );
+    expect(getAnnotateMessageFeedbackTemplate("claude-code", {})).toBe(
+      DEFAULT_ANNOTATE_MESSAGE_FEEDBACK_PROMPT,
+    );
+    expect(getAnnotateFileFeedbackTemplate("claude-code", {})).toContain("{{feedback}}");
+  });
+
+  test("returns configured overrides without variable substitution", () => {
+    const config = {
+      prompts: {
+        annotate: {
+          fileFeedback: "Review {{filePath}}: {{feedback}}",
+          messageFeedback: "Notes: {{feedback}}",
+        },
+      },
+    };
+    expect(getAnnotateFileFeedbackTemplate("opencode", config)).toBe(
+      "Review {{filePath}}: {{feedback}}",
+    );
+    expect(getAnnotateMessageFeedbackTemplate("opencode", config)).toBe(
+      "Notes: {{feedback}}",
+    );
+  });
+
+  test("runtime-specific override wins over generic", () => {
+    const result = getAnnotateFileFeedbackTemplate("pi", {
+      prompts: {
+        annotate: {
+          fileFeedback: "Generic: {{feedback}}",
+          runtimes: { pi: { fileFeedback: "Pi: {{feedback}}" } },
+        },
+      },
+    });
+    expect(result).toBe("Pi: {{feedback}}");
+  });
+});
+
 describe("getAnnotateApprovedPrompt", () => {
   test("returns default approved message", () => {
     expect(getAnnotateApprovedPrompt("claude-code", {})).toBe("The user approved.");
@@ -304,25 +410,147 @@ describe("getAnnotateApprovedPrompt", () => {
   });
 });
 
+describe("getAnnotateApprovedWithNotesPrompt", () => {
+  test("frames approved file notes as non-blocking guidance with target context", () => {
+    const result = getAnnotateApprovedWithNotesPrompt("opencode", {}, {
+      context: "File: /src/app.ts",
+      feedback: "Keep the retry bounded.",
+    });
+
+    expect(result).toContain("artifact is approved");
+    expect(result).toContain("non-blocking guidance");
+    expect(result).toContain("not a request for another revision");
+    expect(result).toContain("File: /src/app.ts");
+    expect(result).toContain("Keep the retry bounded.");
+    expect(result).toContain(
+      "Do not revise or reopen the artifact solely because of these notes unless the user explicitly requests it",
+    );
+    expect(result).toContain("Carry the notes into subsequent work where applicable");
+    expect(result).not.toMatch(/\baddress\b/i);
+    expect(result).toBe(
+      resolveTemplate(DEFAULT_ANNOTATE_APPROVED_WITH_NOTES_PROMPT, {
+        contextBlock: "File: /src/app.ts\n\n",
+        feedback: "Keep the retry bounded.",
+      }),
+    );
+  });
+
+  test("omits target context for approved message notes", () => {
+    const result = getAnnotateApprovedWithNotesPrompt("pi", {}, {
+      feedback: "Retain this caveat.",
+    });
+
+    expect(result).toContain("Retain this caveat.");
+    expect(result).not.toContain("{{context}}");
+    expect(result).not.toContain("File:");
+  });
+
+  test("resolves {{context}} to empty in custom templates for message annotations", () => {
+    // The OpenCode CLI-bridge message path passes `context: undefined`
+    // (there is no target file); the key being present must not leave a
+    // literal `{{context}}` in a custom template.
+    const result = getAnnotateApprovedWithNotesPrompt("opencode", {
+      prompts: {
+        annotate: {
+          approvedWithNotes: "APPROVED {{context}}\n\nGuidance: {{feedback}}",
+        },
+      },
+    }, {
+      context: undefined,
+      feedback: "Retain this caveat.",
+    });
+
+    expect(result).toBe("APPROVED \n\nGuidance: Retain this caveat.");
+    expect(result).not.toContain("{{context}}");
+  });
+
+  test("uses the single configurable approvedWithNotes override", () => {
+    const result = getAnnotateApprovedWithNotesPrompt("pi", {
+      prompts: {
+        annotate: {
+          approvedWithNotes: "APPROVED {{context}}\n\nGuidance: {{feedback}}",
+        },
+      },
+    }, {
+      context: "Folder: /src",
+      feedback: "Keep names stable.",
+    });
+
+    expect(result).toBe("APPROVED Folder: /src\n\nGuidance: Keep names stable.");
+  });
+
+  test("preserves configured template whitespace", () => {
+    const result = getAnnotateApprovedWithNotesPrompt("pi", {
+      prompts: {
+        annotate: {
+          approvedWithNotes: "Approved.\n\n\n{{feedback}}",
+        },
+      },
+    }, {
+      feedback: "Keep names stable.",
+    });
+
+    expect(result).toBe("Approved.\n\n\nKeep names stable.");
+  });
+});
+
 // ─── A4b. Review denied suffix ───────────────────────────────────────────────
 
 describe("getReviewDeniedSuffix", () => {
-  test("returns default suffix for claude-code", () => {
-    const result = getReviewDeniedSuffix("claude-code", {});
-    expect(result).toContain("identified issues");
+  test("every runtime gets the same verification-only default", () => {
+    const runtimes = ["claude-code", "opencode", "pi", "amp", "droid", "codex", "copilot-cli", "gemini-cli", "kiro-cli"] as const;
+    for (const runtime of runtimes) {
+      expect(getReviewDeniedSuffix(runtime, {})).toBe(DEFAULT_REVIEW_DENIED_SUFFIX);
+    }
   });
 
-  test("opencode and pi use softer runtime default", () => {
-    const oc = getReviewDeniedSuffix("opencode", {});
-    const pi = getReviewDeniedSuffix("pi", {});
-    expect(oc).toBe("\n\nPlease address this feedback.");
-    expect(pi).toBe("\n\nPlease address this feedback.");
+  test("requires verdicts backed by code evidence for every incoming finding", () => {
+    expect(DEFAULT_REVIEW_DENIED_SUFFIX).toContain(
+      "Inspect every finding against the actual code",
+    );
+    expect(DEFAULT_REVIEW_DENIED_SUFFIX).toContain(
+      "do not assume automated feedback is correct",
+    );
+    expect(DEFAULT_REVIEW_DENIED_SUFFIX).toContain(
+      "Confirmed / Partly / Not a bug / Intended",
+    );
+    expect(DEFAULT_REVIEW_DENIED_SUFFIX).toContain("with concise code evidence");
+    expect(DEFAULT_REVIEW_DENIED_SUFFIX).toContain(
+      "introduced by the current changes, was pre-existing, or reflects deliberate scope",
+    );
+  });
+
+  test("limits review to submitted findings", () => {
+    expect(DEFAULT_REVIEW_DENIED_SUFFIX).toContain("Review only the incoming findings");
+    expect(DEFAULT_REVIEW_DENIED_SUFFIX).toContain(
+      "Do not independently review the rest of the diff or search for issues that were not submitted",
+    );
+    expect(DEFAULT_REVIEW_DENIED_SUFFIX).not.toMatch(
+      /independently review the current diff yourself|start (?:a|an) (?:independent|new) review|surface what it missed|(?:find|search for) additional findings|actively look for/i,
+    );
+  });
+
+  test("keeps code changes blocked until after discussion", () => {
+    expect(DEFAULT_REVIEW_DENIED_SUFFIX).toContain(
+      "Do not change any code until we have discussed the verdicts and validated findings",
+    );
   });
 
   test("uses configured override", () => {
     expect(getReviewDeniedSuffix("claude-code", {
       prompts: { review: { denied: "\nFix everything." } },
     })).toBe("\nFix everything.");
+  });
+
+  test("runtime-specific override wins over the generic suffix", () => {
+    expect(getReviewDeniedSuffix("pi", {
+      prompts: {
+        review: {
+          denied: "Generic review suffix.",
+          runtimes: { pi: { denied: "Pi review suffix." } },
+        },
+      },
+    })).toBe("Pi review suffix.");
   });
 });
 
@@ -366,10 +594,11 @@ describe("mergePromptConfig (expanded)", () => {
   test("merges annotate section", () => {
     const merged = mergePromptConfig(
       { annotate: { approved: "A" } },
-      { annotate: { fileFeedback: "F" } },
+      { annotate: { fileFeedback: "F", approvedWithNotes: "N" } },
     );
     expect(merged?.annotate?.approved).toBe("A");
     expect(merged?.annotate?.fileFeedback).toBe("F");
+    expect(merged?.annotate?.approvedWithNotes).toBe("N");
   });
 
   test("deep merges runtimes within plan section", () => {
@@ -379,6 +608,52 @@ describe("mergePromptConfig (expanded)", () => {
     );
     expect(merged?.plan?.runtimes?.pi?.denied).toBe("Pi deny");
     expect(merged?.plan?.runtimes?.opencode?.denied).toBe("OC deny");
+  });
+});
+
+// ─── Approve-with-notes composition (PR5, spec §6.4) ─────────────────────────
+
+describe("composeReviewApprovedMessage", () => {
+  // The one shared composer the four agent-facing review consumers (§6.3)
+  // emit approvals through. Bare approvals must stay byte-identical to the
+  // pre-notes output — every consumer's approved branch depends on it.
+  test("bare approvals emit the approved prompt alone", () => {
+    expect(composeReviewApprovedMessage("opencode", undefined, {})).toBe(DEFAULT_REVIEW_APPROVED_PROMPT);
+    expect(composeReviewApprovedMessage("opencode", "", {})).toBe(DEFAULT_REVIEW_APPROVED_PROMPT);
+    expect(composeReviewApprovedMessage("opencode", "  \n ", {})).toBe(DEFAULT_REVIEW_APPROVED_PROMPT);
+  });
+
+  // Stage-review M0: the bare prompt says "no changes requested" and the
+  // feedback export opens with its own change-request-shaped heading, so
+  // naive concatenation reads as a contradiction — the agent starts fixing
+  // post-approval or discards the guidance. Notes must land inside the
+  // approved-WITH-NOTES template, which frames them as non-blocking.
+  test("approve-time feedback is delivered in the with-notes framing, not appended to the bare prompt", () => {
+    const note = "Rename the flag before merging.";
+    const message = composeReviewApprovedMessage("opencode", note, {});
+    expect(message).toBe(
+      resolveTemplate(DEFAULT_REVIEW_APPROVED_WITH_NOTES_PROMPT, { feedback: note }),
+    );
+    expect(message).toContain(note);
+    expect(message).not.toContain("{{feedback}}");
+    expect(message).not.toBe(`${DEFAULT_REVIEW_APPROVED_PROMPT}\n\n${note}`);
+  });
+
+  test("prompts.review.approvedWithNotes overrides the framing template", () => {
+    expect(
+      composeReviewApprovedMessage("opencode", "the note", {
+        prompts: { review: { approvedWithNotes: "APPROVED. Notes: {{feedback}}" } },
+      }),
+    ).toBe("APPROVED. Notes: the note");
+  });
+
+  // Compatibility (new consumer / old built client): the pre-PR5 client sent
+  // this exact placeholder on every approval; framing it as reviewer guidance
+  // would add filler the reviewer never wrote to every mixed-build approval.
+  test("the legacy LGTM placeholder is filtered, never framed as guidance", () => {
+    expect(
+      composeReviewApprovedMessage("opencode", LEGACY_REVIEW_APPROVAL_PLACEHOLDER, {}),
+    ).toBe(DEFAULT_REVIEW_APPROVED_PROMPT);
   });
 });
 
@@ -481,6 +756,9 @@ describe("getPlanToolName", () => {
     expect(getPlanToolName("copilot-cli")).toBe("exit_plan_mode");
     expect(getPlanToolName("pi")).toBe("plannotator_submit_plan");
     expect(getPlanToolName("gemini-cli")).toBe("exit_plan_mode");
+    // oh-my-pi has no planning integration yet; this entry only keeps the
+    // Claude Code convention as its fallback until one lands.
+    expect(getPlanToolName("oh-my-pi")).toBe("ExitPlanMode");
   });
 
   test("defaults to ExitPlanMode for null/undefined", () => {
