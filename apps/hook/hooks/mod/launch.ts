@@ -22,6 +22,7 @@
 
 import type { SessionKind } from './delivery'
 import { splitShellWords } from './shell-words'
+import { PLAN_APPROVALS_DIR } from './plan'
 import { looksLikeFilePath, plannotatorBundleSubject, plannotatorTargetSubject, type PlannotatorTarget } from './tool'
 
 /** The wrapper. `$1` is the launch directory; the CLI argv follows. */
@@ -359,6 +360,18 @@ export const STOP_SCRIPT = [
 
 export function stopArgv(pid: string, decidedFiles: readonly string[]): string[] {
   return ['/bin/sh', '-c', STOP_SCRIPT, 'plannotator-stop', pid, ...decidedFiles]
+}
+
+/** Where the session's approved ExitPlanMode calls are recorded for the classic hook (plan.ts, #2007). */
+export function planApprovalPathOf(dataDir: string, sessionId: string, toolUseId: string): { dir: string; path: string } {
+  const safe = (value: string) => value.replace(/[^A-Za-z0-9._-]/g, '_')
+  const dir = `${dataDir}/claude-code-mod/${safe(sessionId)}/${PLAN_APPROVALS_DIR}`
+  return { dir, path: `${dir}/${safe(toolUseId)}.json` }
+}
+
+/** Removes one file the mod wrote; nothing else. */
+export function removeFileArgv(path: string): string[] {
+  return ['/bin/sh', '-c', 'rm -f "$1"', 'plannotator-rm', path]
 }
 
 export function launchDirOf(dataDir: string, sessionId: string, launchId: string): string {
