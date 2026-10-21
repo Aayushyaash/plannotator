@@ -414,6 +414,19 @@ export interface InboxMessage {
    */
   supersedes?: string[];
   /**
+   * On an agent's message: the to-dos it said it saw done (send_message's
+   * `done`, as sent: `<message id>` for every open to-do of that message, or
+   * `<message id>/<key>` for one). The to-do records carry the result
+   * (`action_result` with `by: "agent"`). Absent otherwise and on older records.
+   */
+  done?: string[];
+  /**
+   * On a person's reply that reports to-dos (Done, Can't do it): the to-dos
+   * it reports (`<message id>/<key>`), sent once the Undo window passed.
+   * Absent on every other message.
+   */
+  actions?: string[];
+  /**
    * On a thread's root whose subject the agent did not give: the question
    * (`<message id>/<key>`) the subject was derived from, so the thread's
    * subject follows that question's `superseded_by` chain. Null when the
@@ -714,8 +727,18 @@ export interface InboxQuestionRecord {
   project_id: string;
   message_id: string;
   key: string;
+  /**
+   * The block's place among the message's blocks of its kind: questions are
+   * numbered Q1, Q2… and to-dos (`kind: "action"`) A1, A2… separately.
+   */
   position: number;
-  kind: QuestionKind;
+  /**
+   * The question's kind, or `"action"` for a to-do (an Inbox-only `:::action`
+   * block: something only the person can go and do). Read it through
+   * `readInboxQuestionKind`: a kind a reader does not know is not answerable.
+   */
+  kind: InboxQuestionKind;
+  /** The question's prompt, or a to-do's first line (what to do). */
   prompt: string;
   parsed: InboxQuestionFacts;
   stopped: string | null;
@@ -741,6 +764,65 @@ export interface InboxQuestionRecord {
    * Absent or null while it stands. Added for Mark read: older records lack it.
    */
   set_aside?: InboxQuestionSetAside | null;
+  /**
+   * On a to-do (`kind: "action"`): where to do it, the command to run, and
+   * what the agent watches for. Absent on a question and on older records.
+   */
+  action?: InboxActionFacts | null;
+  /**
+   * On a to-do: what came of it. The person's Done or Can't do it (`by:
+   * "person"`), sent to the agent once the Undo window passes (then
+   * `sent_revision === revision` and `sent_reply_id` names the reply), or
+   * the agent's own `done` (`by: "agent"`: it saw it happen; nothing is
+   * sent). Null while the to-do is open, and after an Undo.
+   */
+  action_result?: InboxActionResult | null;
+}
+
+/**
+ * A question's kind as the Inbox stores it: Plannotator's question kinds,
+ * plus `"action"` for a to-do (approval "inbox-next-actions").
+ */
+export type InboxQuestionKind = QuestionKind | "action";
+
+/** The kinds this build knows, for `readInboxQuestionKind`. */
+const INBOX_QUESTION_KINDS: readonly InboxQuestionKind[] = ["single", "multi", "text", "action"];
+
+/**
+ * A question record's kind, read fail-closed: a kind this build does not
+ * know (a newer Inbox's) reads as `"unknown"`, which no reader may answer or
+ * pick; draw it read-only.
+ */
+export function readInboxQuestionKind(value: unknown): InboxQuestionKind | "unknown" {
+  return typeof value === "string" && (INBOX_QUESTION_KINDS as readonly string[]).includes(value) ? (value as InboxQuestionKind) : "unknown";
+}
+
+/** A to-do: a question record of kind `"action"`. */
+export function isInboxAction(question: { kind: unknown }): boolean {
+  return readInboxQuestionKind(question.kind) === "action";
+}
+
+/** What a to-do's block says besides what to do and why (`InboxQuestionRecord.action`). */
+export interface InboxActionFacts {
+  /** `Where:` in words (a place, or the link's name), or null. */
+  where: string | null;
+  /** `Where:`'s link, http(s) only, or null: the card's "Open" button. */
+  where_url: string | null;
+  /** `Run:`, a command for the person to copy, or null. */
+  run: string | null;
+  /** `Watching:`, what the agent watches to notice it done by itself, or null. */
+  watching: string | null;
+}
+
+/** What came of a to-do (`InboxQuestionRecord.action_result`). */
+export interface InboxActionResult {
+  outcome: "done" | "cant";
+  /** The person's note with Done, or the reason with Can't do it; null for none. */
+  note: string | null;
+  at: string;
+  by: "person" | "agent";
+  /** With `by: "agent"`: the agent's message whose `done` named it. */
+  message_id?: string | null;
 }
 
 /** A question Mark read closed (`InboxQuestionRecord.set_aside`). */
@@ -754,7 +836,7 @@ export interface InboxQuestionSetAside {
    * `person_read_at`).
    */
   read_seq?: number;
-  previous: Pick<InboxQuestionRecord, "answer" | "revision" | "sent_revision" | "picked_by" | "picked_at">;
+  previous: Pick<InboxQuestionRecord, "answer" | "revision" | "sent_revision" | "picked_by" | "picked_at" | "action_result">;
 }
 
 /**
@@ -773,7 +855,8 @@ export type InboxQuestionState = "open" | "picked" | "sent" | "closed" | "supers
 export interface InboxQuestion {
   key: string;
   position: number;
-  kind: QuestionKind;
+  /** `"action"` for a to-do; read it with `readInboxQuestionKind` (fail-closed). */
+  kind: InboxQuestionKind;
   prompt: string;
   context: string | null;
   choices: InboxQuestionChoice[];
@@ -798,15 +881,22 @@ export interface InboxQuestion {
    * answer a skip), or null. Absent from an older Inbox.
    */
   set_aside_at?: string | null;
+  /** On a to-do (`kind: "action"`): where, run and watching. Absent on a question and from an older Inbox. */
+  action?: InboxActionFacts | null;
+  /** On a to-do: what came of it, or null while open. Absent on a question and from an older Inbox. */
+  action_result?: InboxActionResult | null;
 }
 
 /** Workspaces' `NotificationQuestionSummary`: a row's questions, summed. */
 export interface InboxQuestionSummary {
+  /** Open questions and to-dos together: a to-do counts like a question for every list rule. */
   open: number;
   picked: number;
   stopped: boolean;
   holds_up: string[];
   prompt: string | null;
+  /** How many of `open` are to-dos (`kind: "action"`): the row reads "1 to do". Absent from an older Inbox. */
+  actions?: number;
 }
 
 export interface InboxMessageWire extends InboxMessage {
