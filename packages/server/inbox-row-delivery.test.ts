@@ -140,6 +140,27 @@ describe("the row's delivery through the server", () => {
     expect(typeof delivered.at).toBe("string");
   }, 20_000);
 
+  test("a turn that ends and starts again between two looks of the delivery watch still tells the windows", async () => {
+    const { server, client, project } = await setup();
+    await client.callTool({
+      name: "send_message",
+      arguments: { body: "Shipped. Anything else?", project_path: project, agent_session: "ses-b", agent_host: "claude-code" },
+      _meta: { [INBOX_WAKES_META_KEY]: true },
+    });
+    const window = stream(server, "cursor=0&window=win-fedcba9876543210&permission=granted&origin=http%3A%2F%2Flocalhost");
+    await until(() => window.events.includes("hello"));
+    await bridge(server, INBOX_BRIDGE_POLL_PATH, { session: "ses-b", host: "claude-code", project_path: project, waitMs: 0, busy: true, [INBOX_SEND_NOW_POLL_FIELD]: true });
+    // Let the watch see the session as busy, and tell the window about it.
+    await until(() => window.events.includes("deliveries"));
+    await Bun.sleep(1_500);
+    const before = window.events.filter((e) => e === "deliveries").length;
+    // Idle, then busy again, well inside one second: a window that read the list in between saw "sending",
+    // so it must be told to read again even though the session looks as it did at the last look.
+    await bridge(server, INBOX_BRIDGE_EVENT_PATH, { session: "ses-b", host: "claude-code", type: "state", busy: false });
+    await bridge(server, INBOX_BRIDGE_EVENT_PATH, { session: "ses-b", host: "claude-code", type: "state", busy: true });
+    await until(() => window.events.filter((e) => e === "deliveries").length > before, 3_000);
+  }, 20_000);
+
   test("a reply to an MCP agent (no waking connection) reads saved", async () => {
     const { server, client, project } = await setup();
     const sent = (

@@ -276,6 +276,9 @@ test('an MCP-only agent: "Saved for … It sees it when it next reads this threa
   const line = pane.locator('[data-delivery]');
   await expect(line).toHaveText('Saved for Claude Code. It sees it when it next reads this thread.');
   await expect(pane.locator('[data-send-now]')).toHaveCount(0);
+  // The list holds still while the thread is open: when its first read came after the look, the row sits in
+  // Quiet (folded), where the reply shows in place.
+  if ((await page.locator('[data-section-id="quiet"] .ib-band').count()) > 0) await openQuiet(page);
   const row = page.locator(`.ib-lbody [data-thread-id="${sent.thread_id}"]`).first();
   await expect(row.locator('.ib-tick')).toHaveAttribute('data-tick', 'saved');
   await expect(row.locator('.ib-st')).toHaveText('Docs pass done');

@@ -207,14 +207,28 @@ export function createInboxLiveSessions(options: {
     return options.resolveRoot(path).catch(() => null);
   };
 
+  /**
+   * How many times a session's busy or Send now flag changed. Part of the
+   * delivery signature: the signature is only compared once a second, so a
+   * turn that ends and starts again between two looks (idle, then busy again)
+   * left it unchanged, while a window that read the list in between kept the
+   * idle state ("Sending") with no event to read it again.
+   */
+  let deliveryChanges = 0;
+  const setDeliveryFlags = (entry: SeenSession, busy: boolean | null, sendNow: boolean) => {
+    if (entry.busy !== busy || entry.sendNow !== sendNow) deliveryChanges += 1;
+    entry.busy = busy;
+    entry.sendNow = sendNow;
+  };
+
   const applyState = (entry: SeenSession, body: Record<string, unknown>, at: number) => {
     if (typeof body.busy !== "boolean") return;
     if (body.busy) {
-      entry.busy = true;
+      setDeliveryFlags(entry, true, entry.sendNow);
       entry.idleSince = null;
     } else {
       entry.idleSince = entry.busy === false && entry.idleSince !== null ? entry.idleSince : (finiteMs(body.idle_since) ?? at);
-      entry.busy = false;
+      setDeliveryFlags(entry, false, entry.sendNow);
     }
   };
 
@@ -238,7 +252,7 @@ export function createInboxLiveSessions(options: {
       tags: false,
     };
     entry.host = host;
-    entry.sendNow = body[INBOX_SEND_NOW_POLL_FIELD] === true;
+    setDeliveryFlags(entry, entry.busy, body[INBOX_SEND_NOW_POLL_FIELD] === true);
     entry.tags = body[INBOX_TAGS_POLL_FIELD] === true;
     // What the session loaded (additive poll fields; an older connection sends neither).
     entry.plugin = parseLoadedPlugin(body.plugin);
@@ -266,7 +280,7 @@ export function createInboxLiveSessions(options: {
     entry.host = host;
     entry.lastSeen = at;
     applyState(entry, body, at);
-    if (typeof body[INBOX_SEND_NOW_POLL_FIELD] === "boolean") entry.sendNow = body[INBOX_SEND_NOW_POLL_FIELD] === true;
+    if (typeof body[INBOX_SEND_NOW_POLL_FIELD] === "boolean") setDeliveryFlags(entry, entry.busy, body[INBOX_SEND_NOW_POLL_FIELD] === true);
   };
 
   const isLive = (entry: SeenSession) => entry.holding > 0 || now() - entry.lastSeen <= INBOX_SESSION_LIVE_MS;
@@ -507,7 +521,7 @@ export function createInboxLiveSessions(options: {
    */
   const deliverySignature = (): string => {
     const t = now();
-    const parts: string[] = [now() - startedAt <= INBOX_ASKER_GRACE_MS ? "g" : ""];
+    const parts: string[] = [now() - startedAt <= INBOX_ASKER_GRACE_MS ? "g" : "", String(deliveryChanges)];
     for (const [id, entry] of sessions) {
       const recent = entry.holding > 0 || t - entry.lastSeen <= INBOX_ASKER_GRACE_MS;
       if (!recent) continue;
