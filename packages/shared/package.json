@@ -37,6 +37,7 @@
     "./review-draft": "./review-draft.ts",
     "./annotate-draft": "./annotate-draft.ts",
     "./annotate-history": "./annotate-history.ts",
+    "./annotate-live-version": "./annotate-live-version.ts",
     "./feedback-archive": "./feedback-archive.ts",
     "./html-diff": "./html-diff.ts",
     "./integrations-common": "./integrations-common.ts",

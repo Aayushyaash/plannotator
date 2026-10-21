@@ -245,6 +245,7 @@ import {
   usePlanDiffViewAutoExit,
 } from './hooks/usePlanDiffViewAutoExit';
 import { AppHeader } from './components/AppHeader';
+import { useLiveAnnotateVersion, type LiveAnnotateVersion } from './hooks/useLiveAnnotateVersion';
 import { useHtmlRefresh, type HtmlRefreshedDocument } from './hooks/useHtmlRefresh';
 import { useAnnotationJump } from './hooks/useAnnotationJump';
 import { planRevisionBlocker, usePlanRevisions, type PlanRevisionSnapshot } from './hooks/usePlanRevisions';
@@ -783,6 +784,12 @@ const App: React.FC = () => {
   const [initialPlanRevision, setInitialPlanRevision] = useState<number | null>(null);
   // The last revision loaded in place; keys the diff base so it re-seeds.
   const [appliedPlanRevision, setAppliedPlanRevision] = useState<number | null>(null);
+  // The version an agent's edit to the open file became (#2037): a new diff
+  // identity, so the diff base re-seeds from that version's own previous one.
+  const [liveSavedVersion, setLiveSavedVersion] = useState<number | null>(null);
+  // The editable-document key of the session's own file (single-file
+  // annotate), so a reload of THAT file, not of a linked one, saves a version.
+  const rootSourceKeyRef = useRef<string | null>(null);
   const [aiSessionEnabled, setAISessionEnabled] = useState(false);
   const [aiAvailable, setAiAvailable] = useState(false);
   const [aiProviders, setAiProviders] = useState<Array<{ id: string; name: string; capabilities?: Record<string, boolean>; models?: Array<{ id: string; label: string; default?: boolean }> }>>([]);
@@ -1491,7 +1498,11 @@ const App: React.FC = () => {
     activeDocDiffFetchers,
     // A revision loaded in place is a new root identity: the diff base
     // re-seeds from the revision's own previous version.
-    activeDocFilepath ?? (appliedPlanRevision !== null ? `plan-revision:${appliedPlanRevision}` : null),
+    activeDocFilepath ?? (
+      liveSavedVersion !== null
+        ? `live-version:${liveSavedVersion}`
+        : appliedPlanRevision !== null ? `plan-revision:${appliedPlanRevision}` : null
+    ),
   );
   // Exit diff view when the active document switches to one with no diff
   // baseline (e.g. a history-less folder file) — otherwise the stale active
@@ -3532,6 +3543,20 @@ const App: React.FC = () => {
 
   const sourceReconcileSeqRef = useRef<Map<string, number>>(new Map());
 
+  // An agent's edit to the open file becomes a version once the file settles
+  // (#2037), so the +N/-M badge and the Version Browser show that edit in this
+  // session. Only while the session keeps version history (versionInfo is set
+  // from /api/plan only when PLANNOTATOR_ANNOTATE_HISTORY allows it).
+  const liveVersion = useLiveAnnotateVersion({
+    enabled: annotateMode && versionInfo !== null && !submitted && !archive.archiveMode,
+    onSaved: useCallback((saved: LiveAnnotateVersion) => {
+      setPreviousPlan(saved.previousPlan);
+      setVersionInfo(saved.versionInfo);
+      setLiveSavedVersion(saved.versionInfo.version);
+    }, []),
+  });
+  const scheduleLiveVersion = liveVersion.schedule;
+
   const reconcileOpenSourceDocuments = useCallback(async (changedDir?: string) => {
     const activeKey = editableDocuments.getActiveKey();
     if (isEditingMarkdownRef.current && activeKey) {
@@ -3561,6 +3586,9 @@ const App: React.FC = () => {
       }
 
       if (event.type === 'clean-updated') {
+        if (result.record.key === rootSourceKeyRef.current && result.record.sourceSave?.enabled) {
+          scheduleLiveVersion(result.record.sourceSave.hash);
+        }
         if (result.record.key === editableDocuments.getActiveKey()) {
           const remapped = applyEditedDocument(result.record.currentText);
           repaintHighlights(remapped);
@@ -3597,7 +3625,7 @@ const App: React.FC = () => {
       onEvent: handleReconcileEvent,
     });
     if (changed) scheduleDraftSave();
-  }, [applyEditedDocument, editableDocuments, repaintHighlights, scheduleDraftSave]);
+  }, [applyEditedDocument, editableDocuments, repaintHighlights, scheduleDraftSave, scheduleLiveVersion]);
   const reconcileOpenSourceDocumentsRef = useRef(reconcileOpenSourceDocuments);
   useEffect(() => {
     reconcileOpenSourceDocumentsRef.current = reconcileOpenSourceDocuments;
@@ -3831,6 +3859,7 @@ const App: React.FC = () => {
           if (data.mode === 'annotate' && data.sourceSave?.enabled) {
             const key = editableDocumentKey(data.sourceSave, `file:${data.sourceSave.path}`);
             editableDocuments.openDocument({ key, text: normalizedPlan, sourceSave: data.sourceSave });
+            rootSourceKeyRef.current = key;
           }
         }
         setIsApiMode(true);

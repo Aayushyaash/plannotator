@@ -298,6 +298,7 @@ jobs:
           packages/editor/App.htmlLinkDraft.test.tsx
           packages/editor/App.decisionControl.test.tsx
           packages/editor/App.planRevision.test.tsx
+          packages/editor/App.liveVersion.test.tsx
           packages/editor/askSessionDrafts.test.tsx
           packages/review-editor/App.decisionControl.test.tsx
           packages/ui/components/TerminalToolsAnnouncementDialog.test.tsx

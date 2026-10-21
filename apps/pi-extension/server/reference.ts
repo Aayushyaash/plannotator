@@ -72,7 +72,7 @@ import { preloadFile } from "@pierre/diffs/ssr";
  * included, for legacy shape parity — see serverAnnotate.ts). Mirrors
  * packages/server/reference-handlers.ts.
  */
-export type FolderAnnotateHistory = Omit<AnnotateHistoryResult, "diffCurrent">;
+export type FolderAnnotateHistory = Omit<AnnotateHistoryResult, "diffCurrent" | "isNew">;
 
 type Res = ServerResponse;
 

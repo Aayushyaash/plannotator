@@ -27,6 +27,7 @@ import { annotateDraftFilePath, createAnnotateDraftSession } from "@plannotator/
 import { isPathAllowed } from "@plannotator/shared/doc-resolve";
 import { getPlanVersion, getVersionCount, listVersions } from "@plannotator/shared/storage";
 import { computeAnnotateHistory, deriveAnnotateHistorySlug, persistAnnotateSubmission, type AnnotateHistoryResult } from "@plannotator/shared/annotate-history";
+import { ANNOTATE_LIVE_VERSION_PATH, saveAnnotateLiveVersion } from "@plannotator/shared/annotate-live-version";
 import { htmlDiff } from "@plannotator/shared/html-diff";
 import {
   disabledSourceSave,
@@ -687,6 +688,9 @@ export async function startAnnotateServer(
   const initialSingleFileSourceSave = singleFileSourceSaveEligible
     ? createSourceSaveCapability("single-file", filePath)
     : null;
+  // The file a live version save (#2037) reads and keys history by: the same
+  // resolved path the open-time save used, so both land in one history.
+  const liveVersionFilePath = singleFileSourceSaveEligible && singleFileLocalAnnotate ? resolvePath(filePath) : null;
   const initialSingleFileSourcePath = singleFileSourceSaveEligible
     ? initialSingleFileSourceSave?.enabled
       ? initialSingleFileSourceSave.path
@@ -1079,6 +1083,32 @@ export async function startAnnotateServer(
               slug: annotateHistory.slug,
               versions: listVersions(annotateProjectName, annotateHistory.slug),
             });
+          }
+
+          // API: save the file as it is on disk now as a version (#2037).
+          // The editor posts here once an agent's edit to the open file has
+          // settled, naming the source hash of the text it shows; the server
+          // reads the file itself and saves it only when the bytes still have
+          // that hash. Single local Markdown/text sessions only, and never
+          // with PLANNOTATOR_ANNOTATE_HISTORY=0 (annotate-live-version.ts).
+          if (url.pathname === ANNOTATE_LIVE_VERSION_PATH && req.method === "POST") {
+            // A body that is not JSON reads as {} (Pi's parseBody does the
+            // same), so both runtimes answer it with one 400.
+            let body: unknown;
+            try {
+              body = await req.json();
+            } catch {
+              body = {};
+            }
+            const outcome = saveAnnotateLiveVersion(body, {
+              serverSession,
+              historyEnabled: annotateHistoryEnabled,
+              resolvedFilePath: liveVersionFilePath,
+              project: annotateProjectName,
+            });
+            // Later /api/plan reads (a tab reload) describe the new version.
+            if (outcome.status === 200) annotateHistory = outcome.history;
+            return Response.json(outcome.body, { status: outcome.status });
           }
 
           if (url.pathname === "/api/share-html" && req.method === "GET") {
