@@ -2279,8 +2279,9 @@ export class InboxStore {
       thread_id: threadId ?? id,
       reply_to: replyTo,
       author: input.author,
-      subject: threadId ? null : (agentSubject || deriveInboxSubject(body, parsed)),
-      ...(threadId ? {} : { subject_question: !agentSubject && parsed[0] ? `${id}/${parsed[0].key}` : null }),
+      // A message that asks nothing but carries a to-do is named by the to-do: it is what waits on the person.
+      subject: threadId ? null : (agentSubject || deriveInboxSubject(body, parsed.length > 0 ? parsed : actions)),
+      ...(threadId ? {} : { subject_question: !agentSubject && (parsed[0] ?? actions[0]) ? `${id}/${(parsed[0] ?? actions[0])!.key}` : null }),
       ...(supersedes.length > 0 ? { supersedes } : {}),
       ...(done.length > 0 ? { done } : {}),
       body,

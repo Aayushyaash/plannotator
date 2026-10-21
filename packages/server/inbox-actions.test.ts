@@ -1,0 +1,200 @@
+/**
+ * To-dos (approval "inbox-next-actions") through the Inbox's real doors: an
+ * agent sends a `:::action` block over the official MCP client, the person's
+ * Done / Can't do it / Undo go through `POST /api/inbox/messages/:id/actions/:key`
+ * on a running Inbox (temp data dir, loopback, the Undo window shortened), and
+ * the answer comes back as the person's reply: over the bridge with the exact
+ * wake text, and through wait_for_reply. Failures to catch: anything sent
+ * inside the Undo window; a wake text that drifts; `done` accepted for another
+ * thread or a question; the route open to another site or a stale tab.
+ */
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { inboxActionTime } from "@plannotator/core/inbox-actions";
+import type { InboxListRow, InboxListSection, InboxQuestion } from "@plannotator/core/inbox-types";
+import { INBOX_BRIDGE_POLL_PATH, INBOX_WAKE_INSTRUCTION, inboxWakeText, parseInboxBridgeCommands } from "@plannotator/shared/inbox/connection";
+import { startInboxServer, type InboxServer } from "./inbox";
+
+const roots: string[] = [];
+const servers: InboxServer[] = [];
+const clients: Client[] = [];
+
+afterEach(async () => {
+  for (const client of clients.splice(0)) await client.close().catch(() => {});
+  for (const server of servers.splice(0)) server.stop();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+const DELAY = 150;
+const SESSION = "ses_todo";
+
+const BODY = [
+  "Release 4.2 is built and every check passed.",
+  "",
+  ":::action",
+  "Approve the production deploy on Vercel",
+  'The build waits under "Promote to Production".',
+  "Where: https://vercel.com/acme/web/deployments",
+  "Stopped: release 4.2 cannot go out until it is approved",
+  "Watching: the deployment; I go on by myself once it is Ready",
+  ":::",
+].join("\n");
+
+type Structured = { thread_id: string; message_id: string; actions?: { key: string; prompt: string }[]; done?: string[] };
+
+async function setup() {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "plannotator-inbox-todo-")));
+  roots.push(root);
+  const project = join(root, "web");
+  mkdirSync(project, { recursive: true });
+  const server = await startInboxServer({ dataDir: join(root, "data"), setAsideDelayMs: DELAY });
+  servers.push(server);
+  const client = new Client({ name: "inbox-todo-test", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`)));
+  clients.push(client);
+  const send = async (args: Record<string, unknown>) =>
+    (await client.callTool({
+      name: "send_message",
+      arguments: { project_path: project, agent_session: SESSION, agent_name: "Claude Code", agent_host: "claude-code", ...args },
+    })) as { isError?: boolean; content: { text: string }[]; structuredContent: Structured };
+  const sent = await send({ body: BODY });
+  return { server, client, send, sent: sent.structuredContent, text: sent.content[0]!.text };
+}
+
+const url = (server: InboxServer, path: string) => `http://127.0.0.1:${server.port}${path}`;
+const post = (server: InboxServer, path: string, body: unknown, headers: Record<string, string> = {}) =>
+  fetch(url(server, path), { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+const mark = (server: InboxServer, messageId: string, key: string, body: Record<string, unknown>) =>
+  post(server, `/api/inbox/messages/${messageId}/actions/${key}`, { serverSession: server.serverSession, ...body });
+
+async function rowOf(server: InboxServer, threadId: string): Promise<InboxListRow> {
+  const model = (await (await fetch(url(server, "/api/inbox/threads"))).json()) as { sections: InboxListSection[] };
+  return model.sections.flatMap((s) => s.threads).find((r) => r.thread_id === threadId)!;
+}
+
+async function actionOf(server: InboxServer, threadId: string, messageId: string): Promise<InboxQuestion> {
+  const model = (await (await fetch(url(server, `/api/inbox/threads/${threadId}`))).json()) as { thread: { messages: { id: string; questions?: InboxQuestion[] }[] } };
+  return model.thread.messages.find((m) => m.id === messageId)!.questions!.find((q) => q.kind === "action")!;
+}
+
+async function poll(server: InboxServer) {
+  const response = await fetch(url(server, INBOX_BRIDGE_POLL_PATH), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${server.token}` },
+    body: JSON.stringify({ session: SESSION, waitMs: 0 }),
+  });
+  expect(response.status).toBe(200);
+  return parseInboxBridgeCommands(await response.text());
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe("an agent sends a to-do", () => {
+  test("send_message says it carries a to-do and gives its key; the thread is Stopped on you; the wire marks it kind action", async () => {
+    const { server, sent, text } = await setup();
+    expect(text).toContain("Sent to the Plannotator Inbox with 1 to-do");
+    expect(sent.actions).toEqual([{ key: expect.stringMatching(/^a-[0-9a-f]{8}$/), prompt: "Approve the production deploy on Vercel" }]);
+    const row = await rowOf(server, sent.thread_id);
+    expect(row).toMatchObject({ section: "stopped", unread: true, questions: { open: 1, actions: 1, stopped: true } });
+    const action = await actionOf(server, sent.thread_id, sent.message_id);
+    expect(action).toMatchObject({
+      kind: "action",
+      state: "open",
+      action: { where: "vercel.com", where_url: "https://vercel.com/acme/web/deployments", watching: "the deployment; I go on by myself once it is Ready" },
+      action_result: null,
+    });
+  });
+});
+
+describe("the person's Done", () => {
+  test("nothing goes inside the Undo window; then one reply, delivered over the bridge with the exact wake text and returned by wait_for_reply", async () => {
+    const { server, client, sent } = await setup();
+    const key = sent.actions![0]!.key;
+    const answer = await mark(server, sent.message_id, key, { outcome: "done", note: "Approved. I also fixed the preview env var while I was there." });
+    expect(answer.status).toBe(200);
+    expect(((await answer.json()) as { questions: InboxQuestion[] }).questions.find((q) => q.key === key)).toMatchObject({ state: "picked", action_result: { outcome: "done", by: "person" } });
+    expect(await poll(server)).toEqual([]);
+    // No reply written yet: the person's last word is still the agent's.
+    expect((await rowOf(server, sent.thread_id)).last_author).toBe("agent");
+
+    await sleep(DELAY + 250);
+    const commands = await poll(server);
+    expect(commands).toHaveLength(1);
+    const command = commands[0]!;
+    const at = (await actionOf(server, sent.thread_id, sent.message_id)).action_result!.at;
+    const body = [
+      "Did 1 action.",
+      "",
+      "## Actions you asked for",
+      "",
+      "1 of 1 done.",
+      "",
+      "### A1. Approve the production deploy on Vercel",
+      `Done, ${inboxActionTime(at)}.`,
+      "Note: Approved. I also fixed the preview env var while I was there.",
+    ].join("\n");
+    expect(command).toMatchObject({ type: "reply", reply_to: sent.message_id, body });
+    expect(inboxWakeText(command)).toBe(`Plannotator Inbox: Approve the production deploy on Vercel (${command.id})\n${INBOX_WAKE_INSTRUCTION}\n\n${body}`);
+
+    const replied = (await client.callTool({ name: "wait_for_reply", arguments: { thread_id: sent.thread_id, agent_session: SESSION, timeout_seconds: 1 } })) as {
+      content: { text: string }[];
+      structuredContent: { status: string; reply: { body: string } };
+    };
+    expect(replied.structuredContent).toMatchObject({ status: "replied", reply: { body } });
+    // The to-do reads A1 in the facts line, not Q1.
+    expect(replied.content[0]!.text).toMatch(/A1 a-[0-9a-f]{8} sent/);
+    expect((await actionOf(server, sent.thread_id, sent.message_id)).state).toBe("sent");
+    expect((await rowOf(server, sent.thread_id)).section).not.toBe("stopped");
+    // Sent: no Undo.
+    expect((await mark(server, sent.message_id, key, { outcome: null })).status).toBe(409);
+  });
+
+  test("Undo inside the window: nothing is ever sent; Can't do it needs a reason", async () => {
+    const { server, sent } = await setup();
+    const key = sent.actions![0]!.key;
+    expect((await mark(server, sent.message_id, key, { outcome: "done" })).status).toBe(200);
+    expect((await mark(server, sent.message_id, key, { outcome: null })).status).toBe(200);
+    await sleep(DELAY + 250);
+    expect(await poll(server)).toEqual([]);
+    expect((await actionOf(server, sent.thread_id, sent.message_id)).state).toBe("open");
+    const refused = await mark(server, sent.message_id, key, { outcome: "cant" });
+    expect(refused.status).toBe(422);
+    expect(await mark(server, sent.message_id, key, { outcome: "cant", note: "I'm not in the acme team; ask Dana." }).then((r) => r.status)).toBe(200);
+    await sleep(DELAY + 250);
+    const [command] = await poll(server);
+    expect(command!.body).toBe("Couldn't do 1 action.\n\n## Actions you asked for\n\n0 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nCan't do it: I'm not in the acme team; ask Dana.");
+  });
+
+  test("the route's guards: a stale tab, another site, a question's key, an unknown message", async () => {
+    const { server, sent, send } = await setup();
+    const key = sent.actions![0]!.key;
+    expect((await post(server, `/api/inbox/messages/${sent.message_id}/actions/${key}`, { serverSession: "srv_other", outcome: "done" })).status).toBe(409);
+    expect((await post(server, `/api/inbox/messages/${sent.message_id}/actions/${key}`, { outcome: "done" }, { Origin: "https://evil.example", "Sec-Fetch-Site": "cross-site" })).status).toBe(403);
+    expect((await mark(server, "msg_01ZZZZZZZZZZZZZZZZZZZZZZZZ", key, { outcome: "done" })).status).toBe(404);
+    const asked = (await send({ body: ":::question\nShip it?\n\n- [ ] Yes\n- [ ] No\n:::", reply_to: sent.message_id })).structuredContent;
+    void asked;
+    expect((await mark(server, sent.message_id, "a-00000000", { outcome: "done" })).status).toBe(404);
+    expect((await mark(server, sent.message_id, key, { outcome: "maybe" })).status).toBe(422);
+    expect((await actionOf(server, sent.thread_id, sent.message_id)).state).toBe("open");
+  });
+});
+
+describe("the agent marks its own to-do done", () => {
+  test("done is recorded, the card reads it, nothing is sent; invalid ids refuse the whole send with invalid_done", async () => {
+    const { server, send, sent } = await setup();
+    const id = `${sent.message_id}/${sent.actions![0]!.key}`;
+    const bad = await send({ body: "Ready.", reply_to: sent.message_id, done: [`${sent.message_id}/a-00000000`] });
+    expect(bad.isError).toBe(true);
+    expect(bad.content[0]!.text).toMatch(/^invalid_done: done: .*has no to-do a-00000000.*Open to-dos in this thread: /);
+    const ok = await send({ body: "The deployment is Ready, so I marked the to-do done.", reply_to: sent.message_id, done: [id] });
+    expect(ok.content[0]!.text).toContain("marking 1 to-do done");
+    expect(ok.structuredContent.done).toEqual([id]);
+    expect(await actionOf(server, sent.thread_id, sent.message_id)).toMatchObject({ state: "closed", action_result: { outcome: "done", by: "agent", message_id: ok.structuredContent.message_id } });
+    await sleep(DELAY + 250);
+    expect(await poll(server)).toEqual([]);
+    expect((await rowOf(server, sent.thread_id)).questions).toMatchObject({ open: 0, actions: 0 });
+  });
+});

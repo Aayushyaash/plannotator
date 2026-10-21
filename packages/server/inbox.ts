@@ -365,6 +365,10 @@ const ERROR_STATUS: Record<string, number> = {
   ack_after_reply: 409,
   question_open: 409,
   idempotency_key_reused: 409,
+  // To-dos (approval "inbox-next-actions"): a Done already sent (no Undo), a to-do no longer open, an agent's `done` that names no open to-do.
+  action_already_sent: 409,
+  action_closed: 409,
+  invalid_done: 422,
   // The project menu: a batch_id already answered another project or action.
   batch_id_reused: 409,
   config_not_saved: 500,

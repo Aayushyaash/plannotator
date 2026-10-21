@@ -327,7 +327,12 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string, calle
     : `The person replied in thread ${reply.thread_id}${subject ? ` (${subject})` : ""}:`;
   const url = threadUrl(base, reply.thread_id);
   // The facts the structured content holds, in words, so the text is complete.
-  const numbered = (id: string) => new Map([...store.questionsOf(id)].sort((a, b) => a.position - b.position).map((q, i) => [q.key, i + 1]));
+  // Questions Q1, Q2…; to-dos (`kind: "action"`) numbered on their own, A1, A2…
+  const numbered = (id: string) => {
+    const all = store.questionsOf(id);
+    const rank = (list: typeof all) => [...list].sort((a, b) => a.position - b.position).map((q, i) => [q.key, i + 1] as const);
+    return new Map([...rank(all.filter((q) => q.kind !== "action")), ...rank(all.filter((q) => q.kind === "action"))]);
+  };
   const facts = [
     `reply ${reply.id}`,
     reply.reply_to ? `to ${reply.reply_to}` : null,

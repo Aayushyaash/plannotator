@@ -715,6 +715,23 @@ describe("the device door, on the binary", () => {
     expect([gone.status, ((await gone.json()) as Json).code]).toEqual([409, "session_not_live"]);
   });
 
+  test("7.62: a to-do's Done and its Undo, forwarded unchanged and replayed by key; a question's key is not a door route", async () => {
+    const sent = await agent.send({ project_path: w.project, thread: "door-todo", body: ":::action\nApprove the deploy on Vercel\nWhere: https://vercel.com/acme\n:::" });
+    const listed = (await (await door(`threads/${sent.thread_id}`)).json()) as Json;
+    const todo = listed.thread.messages[0].questions.find((q: Json) => q.kind === "action");
+    expect(todo).toMatchObject({ state: "open", action: { where_url: "https://vercel.com/acme" } });
+    const route = `messages/${sent.message_id}/actions/${todo.key}`;
+    const key = keys();
+    const done = await door(route, { body: { idempotency_key: key, outcome: "done", note: "Approved." } });
+    expect(done.status).toBe(200);
+    expect(((await done.json()) as Json).questions.find((q: Json) => q.key === todo.key)).toMatchObject({ state: "picked", action_result: { outcome: "done", note: "Approved.", by: "person" } });
+    const again = await door(route, { body: { idempotency_key: key, outcome: "cant", note: "changed" } });
+    expect(again.headers.get("idempotent-replayed")).toBe("true");
+    const undone = await door(route, { body: { idempotency_key: keys(), outcome: null } });
+    expect(((await undone.json()) as Json).questions.find((q: Json) => q.key === todo.key)).toMatchObject({ state: "open", action_result: null });
+    expect((await door(`messages/${sent.message_id}/actions/q-00000000`, { body: { idempotency_key: keys(), outcome: "done" } })).status).toBe(404);
+  });
+
   test("7.12 and 7.13: resolve, then delete the thread", async () => {
     const resolved = await door(`messages/${threadId}/resolve`, { body: { idempotency_key: keys(), resolved: true } });
     expect(((await resolved.json()) as Json).thread.resolved_at).toBeTruthy();
