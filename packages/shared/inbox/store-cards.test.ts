@@ -79,8 +79,11 @@ describe("cards: create", () => {
 
   test("a default title from a thread's subject drops the bidi controls a title refuses (the agent never wrote them)", () => {
     const { store, project } = world();
-    const sent = store.sendMessage({ project_id: project.id, author: AGENT, body: "body", subject: "Fix \u202eevil\u202c thing\u2066" });
-    expect(store.threadSubject(sent.message.thread_id)).toContain("\u202e");
+    // A subject the agent sends with bidi controls is refused now; one derived from the body keeps them on disk.
+    const sent = store.sendMessage({ project_id: project.id, author: AGENT, body: "Fix \u202eevil\u202c thing\u2066" });
+    expect(store.message(sent.message.id)!.subject).toContain("\u202e");
+    // Served as shown (displayInboxSubject): no bidi controls.
+    expect(store.threadSubject(sent.message.thread_id)).toBe("Fix evil thing");
     expect(store.createCard({ project_id: project.id, by: AGENT, threads: [sent.message.id] }).card.title).toBe("Fix evil thing");
     // A title the agent writes itself is still refused, so it learns.
     expect(refusal(() => store.createCard({ project_id: project.id, by: AGENT, title: "Fix \u202eevil" }))).toBe("validation_error");
