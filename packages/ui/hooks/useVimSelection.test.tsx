@@ -114,6 +114,55 @@ describe.if(hasDom)('useVimSelection', () => {
     act(() => root.unmount());
   });
 
+  test('never reads the page selection on a mount where vim was never on', () => {
+    // window.getSelection() forces a layout; a document open with vim off
+    // must not pay for a reset there is nothing to reset.
+    const original = window.getSelection.bind(window);
+    let reads = 0;
+    window.getSelection = () => {
+      reads += 1;
+      return original();
+    };
+    try {
+      const { root, host } = mountHarness({ enabled: false, onRange: () => {} });
+      act(() => {
+        root.render(<VimHarness enabled={false} onRange={() => {}} />);
+      });
+      expect(host.querySelector('article')?.dataset.phase).toBe('inactive');
+      expect(reads).toBe(0);
+      act(() => root.unmount());
+    } finally {
+      window.getSelection = original;
+    }
+  });
+
+  test('turning vim off after it was on still clears the document selection', () => {
+    const { article, root } = mountHarness({ enabled: true, onRange: () => {} });
+    act(() => article.focus());
+    expect(article.dataset.phase).toBe('block');
+
+    const range = document.createRange();
+    range.selectNodeContents(article.querySelector('p') as HTMLElement);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    expect(window.getSelection()?.rangeCount).toBe(1);
+
+    act(() => {
+      root.render(<VimHarness enabled={false} onRange={() => {}} />);
+    });
+    expect(article.dataset.phase).toBe('inactive');
+    expect(window.getSelection()?.rangeCount).toBe(0);
+
+    // Off again with the selection back: a later run while off resets nothing.
+    selection?.addRange(range);
+    act(() => {
+      root.render(<VimHarness enabled={false} onRange={() => {}} />);
+    });
+    expect(window.getSelection()?.rangeCount).toBe(1);
+    act(() => root.unmount());
+  });
+
   test('does not retain handled commands when the optional HUD is disabled', () => {
     const { article, root } = mountHarness({
       enabled: true,

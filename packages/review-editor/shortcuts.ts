@@ -2,7 +2,9 @@ import {
   createDoubleTapShortcutsHook,
   createShortcutRegistry,
   createShortcutScopeHook,
+  decisionControlShortcuts,
   defineShortcutScope,
+  historyShortcuts,
   reviewAiShortcuts,
   reviewAllFilesDiffShortcuts,
   reviewAnnotationToolbarShortcuts,
@@ -10,6 +12,7 @@ import {
   reviewPrCommentsShortcuts,
   reviewSuggestionModalShortcuts,
   reviewTourDialogShortcuts,
+  reviewMarkdownPreviewShortcuts,
   type ShortcutSurface,
 } from '@plannotator/ui/shortcuts';
 
@@ -18,9 +21,10 @@ export const reviewEditorShortcuts = defineShortcutScope({
   title: 'Review Editor',
   shortcuts: {
     submit: {
-      description: 'Approve / Send feedback',
+      description: 'Approve / Send feedback, whichever the header shows',
       bindings: ['Mod+Enter'],
       section: 'Actions',
+      hint: 'Fires the adaptive header primary: Approve with no annotations, Send Feedback otherwise.',
       displayOrder: 10,
     },
     copyFeedback: {
@@ -109,8 +113,11 @@ export const useReviewEditorDoubleTap = createDoubleTapShortcutsHook(reviewEdito
 
 export const reviewSettingsShortcutRegistry = createShortcutRegistry([
   reviewEditorShortcuts,
+  decisionControlShortcuts,
+  historyShortcuts,
   reviewFileTreeShortcuts,
   reviewAllFilesDiffShortcuts,
+  reviewMarkdownPreviewShortcuts,
   reviewAnnotationToolbarShortcuts,
   reviewSuggestionModalShortcuts,
   reviewAiShortcuts,

@@ -1,16 +1,22 @@
+import type { UpdateCheckSetting } from '@plannotator/ui/hooks/useUpdateCheckSetting';
 import React from 'react';
 import type { Origin } from '@plannotator/shared/agents';
 import type { Agent } from '@plannotator/ui/hooks/useAgents';
 import type { UpdateInfo } from '@plannotator/ui/hooks/useUpdateCheck';
 import { FeedbackButton, ApproveButton, ExitButton } from '@plannotator/ui/components/ToolbarButtons';
 import { ApproveDropdown } from '@plannotator/ui/components/ApproveDropdown';
+import { DecisionControl, type DecisionHandler } from '@plannotator/ui/components/DecisionControl';
+import { QuestionProgressChip } from '@plannotator/ui/components/QuestionProgressChip';
+import type { DecisionActionId, DecisionSpec } from '@plannotator/ui/utils/decisionSpec';
 import { Settings } from '@plannotator/ui/components/Settings';
 import { PlanHeaderMenu } from '@plannotator/ui/components/PlanHeaderMenu';
 import type { CallbackConfig } from '@plannotator/ui/utils/callback';
 import type { UIPreferences } from '@plannotator/ui/utils/uiPreferences';
+import type { AgentToolSetting } from '@plannotator/ui/utils/agentToolSetting';
 import { SparklesIcon } from '@plannotator/ui/components/SparklesIcon';
 import type { CompactPlanAction } from '@plannotator/ui/components/PlanHeaderMenu';
 import { HtmlSurfaceControls } from '@plannotator/ui/components/HtmlSurfaceControls';
+import { BundleSwitcher, type BundleSwitcherProps } from './BundleSwitcher';
 
 /** Plannotator's refresh strings for the published control: the document
  * is a file on disk, so the refresh says so. */
@@ -37,6 +43,11 @@ interface AppHeaderProps {
   canRefreshHtml?: boolean;
   isRefreshingHtml?: boolean;
   onRefreshHtml?: () => void;
+  /** Leave a linked HTML document. Passed only while one is open; the sidebar's
+   *  own "Back to …" header is not reachable when the sidebar stays closed. */
+  onHtmlLinkedDocBack?: () => void;
+  /** "Back to <root file name>" for the control's tooltip and accessible name. */
+  htmlLinkedDocBackDescription?: string;
   /** Compact touch layouts replace the brand mark with a task-focused entry
    * into the full-stage document navigator. Desktop never receives it. */
   compactTouchLayout?: boolean;
@@ -46,6 +57,10 @@ interface AppHeaderProps {
   compactDocumentTitle?: string;
   compactSessionActions?: CompactPlanAction[];
   compactDocumentActions?: CompactPlanAction[];
+  /** A review of several files: the "2 of 3 · mock.html ‹ ›" switcher beside
+   *  the logo. Desktop only; the compact shell names the position in its
+   *  title and offers previous/next in its Options menu. */
+  bundleSwitcher?: BundleSwitcherProps;
   // Mode flags (stable after mount)
   isApiMode: boolean;
   annotateMode: boolean;
@@ -54,7 +69,6 @@ interface AppHeaderProps {
   goalSetupCanSubmit: boolean;
   goalSetupIsSubmitting: boolean;
   goalSetupSubmitLabel: string;
-  gate: boolean;
   isSharedSession: boolean;
   origin: Origin | null;
 
@@ -65,7 +79,6 @@ interface AppHeaderProps {
   aiAvailable: boolean;
   isAIChatOpen: boolean;
   aiHasMessages: boolean;
-  hasAnyAnnotations: boolean;
   annotationCount: number;
   linkedDocIsActive: boolean;
   callbackShareUrlReady: boolean;
@@ -73,8 +86,23 @@ interface AppHeaderProps {
   agentName: string;
   availableAgents: Agent[];
   showAnnotationsWarning: boolean;
-  annotateApproveLabel: string;
-  annotateApproveTitle: string;
+  /** `:::question` progress: the "N/M answered" chip beside the decision
+   *  control. Absent (or total 0): no chip. */
+  questionProgress?: { done: number; total: number; hasOpen: boolean; onJump: () => void };
+  /** Plan review's primary feedback label ("Send Feedback" by default;
+   *  "Send answers" when the only feedback is question answers). */
+  feedbackLabel?: string;
+  /** The unified annotate decision control (spec + handlers + close title).
+   *  App owns the spec derivation and every handler; the header only mounts
+   *  the control beside the ghost Close. Absent outside annotate mode. */
+  annotateDecision?: {
+    spec: DecisionSpec;
+    handlers: Record<DecisionActionId, DecisionHandler>;
+    closeTitle: string;
+    /** Framed surfaces (raw-HTML srcdoc / live-app proxy): iframe focus
+     *  dismisses the popover since clicks never reach the parent document. */
+    dismissOnIframeFocus?: boolean;
+  };
 
   // Callback config (null when no bot callback)
   callbackConfig: CallbackConfig | null;
@@ -83,6 +111,12 @@ interface AppHeaderProps {
   taterMode: boolean;
   mobileSettingsOpen: boolean;
   gitUser: string | undefined;
+  /** Present when the server advertises the auto-update setting; Settings shows its switch. */
+  autoUpdateSetting?: { env?: boolean };
+  updateCheckSetting?: UpdateCheckSetting;
+  /** The `plannotator` agent tool switch (parseAgentToolSetting of serverConfig); Settings shows its row. */
+  agentToolSetting?: AgentToolSetting;
+  onAgentToolChange?: (enabled: boolean) => Promise<void>;
   /** This session offers the Agent TUI, so Settings shows its Position row. */
   agentTerminalAvailable: boolean;
   /** The browser exposes WebMCP, so Settings shows the "Agent tools" opt-out.
@@ -98,8 +132,6 @@ interface AppHeaderProps {
   onAnnotateExit: () => void;
   onGoalSetupExit: () => void;
   onGoalSetupSubmit: () => void;
-  onAnnotateFeedback: () => void;
-  onAnnotateApprove: () => void;
   onFeedback: () => void;
   onApprove: () => void;
   onAnnotationPanelToggle: () => void;
@@ -141,6 +173,8 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   canRefreshHtml,
   isRefreshingHtml,
   onRefreshHtml,
+  onHtmlLinkedDocBack,
+  htmlLinkedDocBackDescription,
   compactTouchLayout = false,
   compactNavigatorAvailable = false,
   compactNavigatorOpen = false,
@@ -148,6 +182,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   compactDocumentTitle,
   compactSessionActions,
   compactDocumentActions,
+  bundleSwitcher,
   isApiMode,
   annotateMode,
   archiveMode,
@@ -155,7 +190,6 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   goalSetupCanSubmit,
   goalSetupIsSubmitting,
   goalSetupSubmitLabel,
-  gate,
   isSharedSession,
   origin,
   isSubmitting,
@@ -164,7 +198,6 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   aiAvailable,
   isAIChatOpen,
   aiHasMessages,
-  hasAnyAnnotations,
   annotationCount,
   linkedDocIsActive,
   callbackShareUrlReady,
@@ -172,12 +205,17 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   agentName,
   availableAgents,
   showAnnotationsWarning,
-  annotateApproveLabel,
-  annotateApproveTitle,
+  questionProgress,
+  feedbackLabel = 'Send Feedback',
+  annotateDecision,
   callbackConfig,
   taterMode,
   mobileSettingsOpen,
   gitUser,
+  autoUpdateSetting,
+  updateCheckSetting,
+  agentToolSetting,
+  onAgentToolChange,
   agentTerminalAvailable,
   webmcpAvailable = false,
   agentConnected = false,
@@ -186,8 +224,6 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   onAnnotateExit,
   onGoalSetupExit,
   onGoalSetupSubmit,
-  onAnnotateFeedback,
-  onAnnotateApprove,
   onFeedback,
   onApprove,
   onAnnotationPanelToggle,
@@ -232,7 +268,10 @@ export const AppHeader = React.memo<AppHeaderProps>(({
             <span className="block h-11 w-11" aria-hidden="true" />
           )
         ) : (
-          <AppHeaderLogo />
+          <>
+            <AppHeaderLogo />
+            {bundleSwitcher && <BundleSwitcher {...bundleSwitcher} />}
+          </>
         )}
       </div>
 
@@ -311,20 +350,30 @@ export const AppHeader = React.memo<AppHeaderProps>(({
 
         {!compactTouchLayout && isApiMode && (!linkedDocIsActive || annotateMode) && !archiveMode && !goalSetupMode && (
           <>
+            {questionProgress && questionProgress.total > 0 && (
+              <QuestionProgressChip
+                done={questionProgress.done}
+                total={questionProgress.total}
+                hasOpen={questionProgress.hasOpen}
+                onJump={questionProgress.onJump}
+              />
+            )}
             {annotateMode ? (
               <>
                 <ExitButton
+                  appearance="ghost"
                   onClick={onAnnotateExit}
                   disabled={isSubmitting || isExiting}
                   isLoading={isExiting}
+                  title={annotateDecision?.closeTitle}
                 />
-                {hasAnyAnnotations && (
-                  <FeedbackButton
-                    onClick={onAnnotateFeedback}
-                    disabled={isSubmitting || isExiting}
+                {annotateDecision && (
+                  <DecisionControl
+                    spec={annotateDecision.spec}
+                    handlers={annotateDecision.handlers}
+                    busy={isSubmitting || isExiting}
                     isLoading={isSubmitting}
-                    label="Send Feedback"
-                    title="Send Feedback"
+                    dismissOnIframeFocus={annotateDecision.dismissOnIframeFocus}
                   />
                 )}
               </>
@@ -333,13 +382,13 @@ export const AppHeader = React.memo<AppHeaderProps>(({
                 onClick={onFeedback}
                 disabled={isSubmitting}
                 isLoading={isSubmitting}
-                label="Send Feedback"
-                title="Send Feedback"
+                label={feedbackLabel}
+                title={feedbackLabel}
               />
             )}
 
-            {(!annotateMode || gate) && (
-              origin === 'opencode' && !annotateMode && availableAgents.length > 0 ? (
+            {!annotateMode && (
+              origin === 'opencode' && availableAgents.length > 0 ? (
                 <ApproveDropdown
                   onApprove={onApprove}
                   agents={availableAgents}
@@ -350,14 +399,11 @@ export const AppHeader = React.memo<AppHeaderProps>(({
                 <div className="relative group/approve">
                   <ApproveButton
                     onClick={onApprove}
-                    disabled={isSubmitting || (annotateMode && isExiting)}
+                    disabled={isSubmitting}
                     isLoading={isSubmitting}
-                    dimmed={!annotateMode && (origin === 'claude-code' || origin === 'gemini-cli') && showAnnotationsWarning}
-                    label={annotateMode ? annotateApproveLabel : undefined}
-                    mobileLabel={annotateMode ? annotateApproveLabel : undefined}
-                    title={annotateMode ? annotateApproveTitle : undefined}
+                    dimmed={(origin === 'claude-code' || origin === 'gemini-cli') && showAnnotationsWarning}
                   />
-                  {!annotateMode && (origin === 'claude-code' || origin === 'gemini-cli') && showAnnotationsWarning && (
+                  {(origin === 'claude-code' || origin === 'gemini-cli') && showAnnotationsWarning && (
                     <div className="absolute top-full right-0 mt-2 px-3 py-2 bg-popover border border-border rounded-lg shadow-xl text-xs text-foreground w-56 text-center opacity-0 invisible group-hover/approve:opacity-100 group-hover/approve:visible transition-all pointer-events-none z-50">
                       <div className="absolute bottom-full right-4 border-4 border-transparent border-b-border" />
                       <div className="absolute bottom-full right-4 mt-px border-4 border-transparent border-b-popover" />
@@ -372,13 +418,14 @@ export const AppHeader = React.memo<AppHeaderProps>(({
           </>
         )}
 
-        {/* HTML and live-app surfaces only: the eye (show/hide tools, the
-            only way back from hidden), the refresh, and the Interact/Annotate
-            pen, in that order. The published control carries the markup;
-            the compact touch shell offers the same three actions in its
-            Options menu instead (compactDocumentActions in App: Show/Hide
-            tools, Interact/Annotate, Refresh from disk). */}
-        {htmlSurface && (onToggleHtmlTools || onToggleHtmlAnnotate) && (
+        {/* HTML and live-app surfaces only: back (while a linked document is
+            open), the eye (show/hide tools, the only way back from hidden),
+            the refresh, and the Interact/Annotate pen, in that order. The
+            published control carries the markup; the compact touch shell
+            offers the same actions in its Options menu instead
+            (compactDocumentActions in App: Back to <file>, Show/Hide tools,
+            Interact/Annotate, Refresh from disk). */}
+        {htmlSurface && (onToggleHtmlTools || onToggleHtmlAnnotate || onHtmlLinkedDocBack) && (
           <HtmlSurfaceControls
             compact={compactTouchLayout}
             armed={!!htmlAnnotateArmed}
@@ -388,6 +435,8 @@ export const AppHeader = React.memo<AppHeaderProps>(({
             canRefresh={!!canRefreshHtml && !!onRefreshHtml}
             onRefresh={() => onRefreshHtml?.()}
             isRefreshing={!!isRefreshingHtml}
+            onBack={onHtmlLinkedDocBack}
+            backDescription={htmlLinkedDocBackDescription}
             labels={PLANNOTATOR_HTML_REFRESH_LABELS}
           />
         )}
@@ -454,10 +503,15 @@ export const AppHeader = React.memo<AppHeaderProps>(({
             onIdentityChange={onIdentityChange}
             origin={origin}
             mode={annotateMode ? 'annotate' : 'plan'}
+            annotateParity
             onUIPreferencesChange={onUIPreferencesChange}
             externalOpen={mobileSettingsOpen}
             onExternalClose={onCloseSettings}
             gitUser={gitUser}
+            autoUpdateSetting={autoUpdateSetting}
+            updateCheckSetting={updateCheckSetting}
+            agentToolSetting={agentToolSetting}
+            onAgentToolChange={onAgentToolChange}
             agentTerminalAvailable={agentTerminalAvailable}
             webmcpAvailable={webmcpAvailable}
           />

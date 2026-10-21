@@ -18,6 +18,12 @@ const BLOCKING_OVERLAY_SELECTOR = [
   // Vim from focusing the obscured document underneath those full-screen
   // overlays while they are brought onto the shared dialog primitive.
   '.fixed.inset-0',
+  // An open dismissable popover (ActionMenu, ApproveDropdown, DecisionControl)
+  // owns Escape through useDismissablePopover. Without this, the vim handler
+  // runs first (it registered earlier on document), preventDefaults while
+  // reclaiming focus, and the popover's own Escape handler then skips the
+  // defaultPrevented event — the menu never closes.
+  '[data-pn-dismissable-popover]',
 ].join(',');
 
 /** Inputs for restoring keyboard ownership to a Vim-enabled document. */
@@ -32,7 +38,8 @@ function pageFocusIsNeutral(): boolean {
   return document.activeElement === document.body || document.activeElement === null;
 }
 
-function hasBlockingOverlay(): boolean {
+/** True while a dialog, modal overlay, or dismissable popover owns the page. */
+export function hasBlockingOverlay(): boolean {
   return document.querySelector(BLOCKING_OVERLAY_SELECTOR) !== null;
 }
 

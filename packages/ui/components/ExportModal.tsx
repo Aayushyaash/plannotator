@@ -12,6 +12,7 @@ import { getBearSettings } from '../utils/bear';
 import { getOctarineSettings } from '../utils/octarine';
 import { wrapFeedbackForAgent } from '../utils/parser';
 import { copyTextToClipboard } from '../utils/clipboard';
+import { noteServerSessionMismatch, withServerSession } from '../utils/serverSession';
 import { OverlayScrollArea } from './OverlayScrollArea';
 
 /** POST body shape sent to the notes endpoint (mirrors what the Notes tab builds today). */
@@ -31,8 +32,12 @@ async function defaultSaveToNotes(body: SaveToNotesPayload): Promise<SaveToNotes
   const res = await fetch('/api/save-notes', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    // The stale-tab guard (a no-op for a host that never adopted a session).
+    body: JSON.stringify(withServerSession(body)),
   });
+  if (await noteServerSessionMismatch(res)) {
+    return { results: Object.fromEntries(Object.keys(body).map((k) => [k, { success: false, error: 'This review was replaced. Reload the page.' }])) };
+  }
   return res.json();
 }
 
@@ -136,7 +141,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     await handleCopy(wrapCopiedAnnotations(annotationsOutput), 'annotations');
   };
 
-  // Whether the hash URL is large enough to warrant a short URL option
+  // Warn when the hash URL may be too long for messaging apps
   const urlIsLarge = shareUrl.length > 2048;
   // Hash-based sharing unavailable (e.g. HTML render mode) — show only short link
   const hashUnavailable = !shareUrl && !!onGenerateShortUrl;
@@ -327,9 +332,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   </svg>
                   Generating short link...
                 </div>
-              ) : (urlIsLarge || hashUnavailable) && onGenerateShortUrl ? (
-                <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
-                  {!hashUnavailable && (
+              ) : onGenerateShortUrl ? (
+                <div className={`p-3 rounded-lg border ${
+                  urlIsLarge
+                    ? 'bg-amber-500/10 border-amber-500/20'
+                    : 'bg-muted/50 border-border'
+                }`}>
+                  {urlIsLarge && (
                     <p className="text-xs text-amber-600 dark:text-amber-400 mb-2">
                       This URL may be too long for some messaging apps.
                     </p>

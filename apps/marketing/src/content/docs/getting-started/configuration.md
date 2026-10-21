@@ -15,10 +15,12 @@ Plannotator is configured through environment variables, hook/plugin configurati
 | `PLANNOTATOR_REMOTE` | auto-detect | Set to `1` or `true` to force remote mode, `0` or `false` to force local mode, or leave unset to auto-detect via `SSH_TTY` / `SSH_CONNECTION`. Uses a fixed port in remote mode; browser-opening behavior depends on the environment. |
 | `PLANNOTATOR_PORT` | random (local) / `19432` (remote) | Fixed server port. Useful for port forwarding in remote environments. |
 | `PLANNOTATOR_URL_HOST` | unset (`localhost`) | Display-only hostname for advertised session URLs in remote mode (e.g. a Tailscale MagicDNS name). The runtime-chosen port is always appended; binding is unaffected and local sessions ignore the override. Can also be set via `~/.plannotator/config.json` (`{ "urlHost": "host" }`). |
-| `PLANNOTATOR_BROWSER` | system default | Custom browser or script to open the UI. |
+| `PLANNOTATOR_BROWSER` | system default | Custom browser or script to open the UI. `none` opens no browser. |
 | `PLANNOTATOR_AI` | enabled | Set to `disabled` to disable Ask AI, Review Agents, and Guided Review. External agents can still open reviews and submit annotations; the annotate agent terminal is separate. |
 | `PLANNOTATOR_SHARE` | enabled | Set to `disabled` to turn off URL sharing entirely. Can also be set via `~/.plannotator/config.json` (`{ "share": "disabled" }`). |
 | `PLANNOTATOR_SHARE_URL` | `https://share.plannotator.ai` | Point share links at a self-hosted portal. |
+| `PLANNOTATOR_CLAUDE_MOD` | on | Set to `0` to turn off the [Plannotator mod](/docs/guides/claude-code/#the-plannotator-mod) for Claude Code and use the classic hook, where Claude waits for your decision. Can also be set via `~/.plannotator/config.json` (`{ "claudeCodeMod": false }`). |
+| `PLANNOTATOR_AGENT_TOOL` | on for Claude Code and Oh My Pi, off on Pi and OpenCode 2 | Set to `1` to give the agent a `plannotator` tool, `0` to keep it out of the tool list (the slash commands are unchanged). Read when a session starts. Can also be set via `~/.plannotator/config.json` (`{ "agentTool": true }`). |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Respected by the install script when placing hooks. |
 
 See the [environment variables reference](/docs/reference/environment-variables/) for full details, port resolution order, and examples.
@@ -103,6 +105,14 @@ Approved and denied plans are saved to `~/.plannotator/plans/` by default. You c
 
 Plannotator reads `~/.plannotator/config.json` for persistent settings. This includes display name, diff options, conventional comment labels, and feedback message customization.
 
+The review open-state flags (`plannotator review --base <ref>` / `--diff-type <type>`) seed a single session and never change the saved `defaultDiffType` — Settings → Git remains the only writer.
+
+To turn off the Claude Code mod (non-blocking plan review, code review and annotate, plus Ask this session), add `"claudeCodeMod": false`. It is on by default, `PLANNOTATOR_CLAUDE_MOD` wins over it, and Claude Code reads it when it starts. See [Claude Code](/docs/guides/claude-code/#turning-the-mod-off).
+
+```json
+{ "claudeCodeMod": false }
+```
+
 You can customize the messages Plannotator sends to the agent when you approve, deny, or annotate plans and documents. See the [custom feedback guide](/docs/guides/custom-feedback/) for the full config shape, template variables, and runtime-specific overrides.
 
 ## Remote mode
@@ -122,7 +132,12 @@ export PLANNOTATOR_BROWSER="/usr/bin/firefox"
 
 # Custom script
 export PLANNOTATOR_BROWSER="/path/to/my-open-script.sh"
+
+# Never open a browser
+export PLANNOTATOR_BROWSER=none
 ```
+
+`none` (also `false`, `0`, `off`, `no`, `true`, `1` or `:`, any case) opens no browser at all, in local and remote sessions: no VS Code tab, no Glimpse window, no `BROWSER`, no system opener. Every session prints its URL, so you open it when you want. `BROWSER` is different: hosts set it for their own reasons (Claude Code's agent view sets `BROWSER=true`), so those values on `BROWSER` are ignored and the default browser still opens.
 
 For one-off overrides without changing your shell profile, use the `--browser` flag:
 

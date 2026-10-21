@@ -3,7 +3,8 @@
  *
  * Extracted from Viewer.tsx so the same markup can render in two places:
  *   - layout="column": original location at the top-left of the plan card (absolute)
- *   - layout="row":   inside the sticky header lane when the user scrolls
+ *   - layout="row":   compact context inside the legacy sticky header lane
+ *   - layout="header": complete context inside Viewer's in-flow shared header
  *
  * In row layout, the demo badge and linked-doc breadcrumb are dropped —
  * everything else is decorative top-of-doc context except the plan-diff
@@ -22,14 +23,16 @@ import { OpenInAppButton } from './OpenInAppButton';
 
 export interface LinkedDocBadgeInfo {
   filepath: string;
-  onBack: () => void;
+  /** Leave the document. Optional for `folder-file`: absent shows no Close
+   *  (a file of a review of several files, which the switcher moves between). */
+  onBack?: () => void;
   label?: string;
   backLabel?: string;
   variant?: 'breadcrumb' | 'folder-file';
 }
 
 export interface DocBadgesProps {
-  layout: 'column' | 'row';
+  layout: 'column' | 'row' | 'header';
   repoInfo?: { display: string; branch?: string } | null;
   planDiffStats?: PlanDiffStats | null;
   isPlanDiffActive?: boolean;
@@ -68,6 +71,7 @@ export const DocBadges: React.FC<DocBadgesProps> = ({
   openInAppPath,
 }) => {
   const isRow = layout === 'row';
+  const isHorizontal = layout !== 'column';
   const canOpenInApp =
     !!openInAppPath && !/^https?:\/\//i.test(openInAppPath);
   const openInButton = canOpenInApp ? (
@@ -85,15 +89,16 @@ export const DocBadges: React.FC<DocBadgesProps> = ({
   if (!anything) return null;
 
   // Row layout: single horizontal line. Column layout: stacked rows.
-  const outerClass = isRow
-    ? 'flex flex-row items-center gap-1.5 text-[9px] text-muted-foreground/70 font-mono'
+  const outerClass = isHorizontal
+    ? `flex flex-row items-center gap-1.5 text-[9px] text-muted-foreground/70 font-mono ${layout === 'header' ? 'flex-wrap' : ''}`
     : 'flex flex-col items-start gap-1 text-[9px] text-muted-foreground/50 font-mono';
 
   return (
     <div className={outerClass}>
-      {/* Row layout (sticky lane) omits repo/branch to keep the bar compact —
+      {/* Legacy row layout omits repo/branch to keep the ghost bar compact —
           they'd otherwise push the container wide enough to visually extend
-          under the action buttons. Plan-diff badge still renders below. */}
+          under the action buttons. The Viewer-owned header measures and wraps
+          the complete badge set, so its `header` layout keeps this context. */}
       {repoInfo && !linkedDocInfo && !isRow && (
         <div className="flex items-center gap-1.5">
           <span
@@ -195,13 +200,15 @@ export const DocBadges: React.FC<DocBadgesProps> = ({
       {!isRow && linkedDocInfo && (
         linkedDocInfo.variant === 'folder-file' ? (
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={linkedDocInfo.onBack}
-              className="rounded-sm text-[9px] font-medium text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-            >
-              Close
-            </button>
+            {linkedDocInfo.onBack && (
+              <button
+                type="button"
+                onClick={linkedDocInfo.onBack}
+                className="rounded-sm text-[9px] font-medium text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              >
+                Close
+              </button>
+            )}
             <span
               className="truncate rounded bg-muted/50 px-1.5 py-0.5 text-[9px] text-muted-foreground max-w-[220px]"
               title={linkedDocInfo.filepath}

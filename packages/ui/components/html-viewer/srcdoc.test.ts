@@ -11,7 +11,9 @@
  * These tests are the mutation guard: reintroducing any bare-token injection
  * for non-opted-in documents must go red here.
  */
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { parseHtmlElementContext } from "@plannotator/core/html-anchor";
+import { exportAnnotations } from "../../utils/parser";
 import { ANNOTATION_HIGHLIGHT_CSS, BRIDGE_SCRIPT } from "./bridge-script";
 import {
   DIFF_HIGHLIGHT_CSS,
@@ -1061,6 +1063,73 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
     document.body.replaceChildren();
   });
 
+  // An EMBEDDED local document is one element from the outer page's point of
+  // view: the bridge is never injected into a nested frame, so a click inside
+  // it lands in another document and annotates nothing. Armed pinpoint makes
+  // frames transparent to the pointer so the click pins the <iframe> itself;
+  // Interact hands the embed back so it can be used natively.
+  test("armed pinpoint makes nested frames pointer-transparent and Interact restores them", async () => {
+    document.body.innerHTML = '<iframe src="about:blank"></iframe>';
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "pinpoint" });
+    postBridge({ type: "plannotator-bridge-set-annotate-mode", active: true });
+    expect(document.body.hasAttribute("data-plannotator-frame-inert")).toBe(true);
+
+    postBridge({ type: "plannotator-bridge-set-annotate-mode", active: false });
+    expect(document.body.hasAttribute("data-plannotator-frame-inert")).toBe(false);
+
+    // Re-arming, then switching input method away, also clears it.
+    postBridge({ type: "plannotator-bridge-set-annotate-mode", active: true });
+    expect(document.body.hasAttribute("data-plannotator-frame-inert")).toBe(true);
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
+    expect(document.body.hasAttribute("data-plannotator-frame-inert")).toBe(false);
+
+    // String-level guard: happy-dom honors neither pointer-events nor :is(),
+    // so the attribute alone would pass with a typo'd rule. The rule that
+    // actually makes the embed pinnable must ship in the annotation CSS.
+    expect(ANNOTATION_HIGHLIGHT_CSS).toContain(
+      "body[data-plannotator-frame-inert] :is(iframe, frame, embed, object) {",
+    );
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "pinpoint" });
+    document.body.replaceChildren();
+  });
+
+  // Consequence of making frames pointer-transparent: hit-testing passes
+  // THROUGH the embed to the container painted behind it, so without the
+  // frame preference an armed click on an embed would pin its wrapper div —
+  // the reviewer's comment would name the wrong element.
+  test("an armed click inside an embed's box pins the frame, not the container behind it", async () => {
+    document.body.innerHTML = '<div class="frame"><iframe title="Prototype"></iframe></div>';
+    const wrapper = document.querySelector<HTMLElement>("div.frame")!;
+    const frame = document.querySelector<HTMLElement>("iframe")!;
+    frame.getBoundingClientRect = () => rectOf(0, 0, 600, 400);
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "pinpoint" });
+    postBridge({ type: "plannotator-bridge-set-annotate-mode", active: true });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const messages: Array<Record<string, unknown>> = [];
+    const collect = (event: MessageEvent) => {
+      const data = bridgeMessageData(event);
+      if (data?.type === "plannotator-bridge-selection") messages.push(data);
+    };
+    window.addEventListener("message", collect);
+    wrapper.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true, clientX: 100, clientY: 100 }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    window.removeEventListener("message", collect);
+
+    expect(messages.length).toBe(1);
+    const context = messages[0]!.context as { tag?: string; path?: string } | undefined;
+    expect(context?.tag).toBe("iframe");
+    expect(context?.path).toContain("> iframe");
+    // The pin box covers the embed, not the wrapper.
+    expect(messages[0]!.rect).toMatchObject({ width: 600, height: 400 });
+
+    postBridge({ type: "plannotator-bridge-cancel-selection" });
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "pinpoint" });
+    document.body.replaceChildren();
+  });
+
   test("deeply nested targets get no anchor instead of a quadratic selector walk", async () => {
     // Each ancestor step costs a document-wide uniqueness query against a
     // growing selector, so unbounded depth freezes the tab on one click
@@ -1195,7 +1264,8 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
     }));
   }
 
-  async function clickAndCollectSelection(el: Element, x: number, y: number) {
+  /** `init`: modifiers; a link pins only with Cmd or Ctrl held (a plain click follows it). */
+  async function clickAndCollectSelection(el: Element, x: number, y: number, init: MouseEventInit = {}) {
     await new Promise((resolve) => setTimeout(resolve, 0));
     const messages: Array<Record<string, unknown>> = [];
     const collect = (event: MessageEvent) => {
@@ -1208,6 +1278,7 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
       cancelable: true,
       clientX: x,
       clientY: y,
+      ...init,
     });
     el.dispatchEvent(click);
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1342,6 +1413,8 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
       '<div id="l-container"><span>This text is far too long to serve as a hover label for anything</span></div>',
       '<div id="l-long" class="extraverboseclasstokennameone extraverboseclasstokennametwo">x</div>',
       "<p id=\"l-known\">Paragraph text</p>",
+      '<video id="l-video-aria" aria-label="Product demo"></video>',
+      '<video id="l-video"></video>',
       "</div>",
     ].join("");
     postBridge({ type: "plannotator-bridge-set-vim-mode", enabled: false });
@@ -1358,6 +1431,10 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
       // Class-token labels obey the 40-char cap like every other rung.
       ["#l-long", "extraverboseclasstokennameone extraverbo"],
       ["#l-known", "Paragraph"], // known tags keep their names
+      // A media element's accessible name beats its kind; the kind only
+      // replaces "container" when the page names nothing.
+      ["#l-video-aria", "Product demo"],
+      ["#l-video", "Video"],
     ];
     let x = 10;
     for (const [selector, expected] of cases) {
@@ -1430,6 +1507,122 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
     document.body.replaceChildren();
   });
 
+  // Failure to catch: a pinpoint on one of several images quoting only
+  // "[element: Image]", so the agent cannot tell which image was meant.
+  test("a text-less pinpoint names WHICH element: alt, else the source file, never a query or data payload", async () => {
+    document.body.innerHTML = [
+      '<div class="gallery">',
+      '<img id="i-alt" alt="Team photo" src="https://cdn.test/img/team.jpg?sig=SECRET#frag">',
+      '<img id="i-file" src="/assets/avatars/jane%20doe.png?v=3">',
+      '<img id="i-data" src="data:image/png;base64,iVBORw0KGgoSECRETPAYLOAD">',
+      '<img id="i-lazy" src="data:image/gif;base64,R0lGOD" data-src="/img/hero-banner.webp">',
+      '<img id="i-bracket" alt="Chart [Q3] &quot;final&quot;" src="chart.svg">',
+      '<button id="b-icon" aria-label="Open menu"><svg></svg></button>',
+      '<video id="v-title" title="Product demo"><source src="/media/demo.mp4?t=1"></video>',
+      '<iframe id="f-src" src="prototype.html?step=2"></iframe>',
+      '<video id="v-aria" aria-label="Launch clip" src="/media/launch.mp4"></video>',
+      '<img id="i-srcset" srcset="small.png, large.png 2x">',
+      '<img id="i-srcset-w" srcset="hero-480.jpg 480w, hero-960.jpg 960w">',
+      "</div>",
+    ].join("");
+    postBridge({ type: "plannotator-bridge-set-vim-mode", enabled: false });
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "pinpoint" });
+
+    const cases: Array<[string, string]> = [
+      ["#i-alt", '[element: Image "Team photo" (team.jpg)]'],
+      ["#i-file", "[element: Image (jane doe.png)]"],
+      ["#i-data", "[element: Image (data:image/png)]"],
+      ["#i-lazy", "[element: Image (hero-banner.webp)]"],
+      // Brackets and double quotes cannot break the one-token placeholder.
+      ["#i-bracket", "[element: Image \"Chart (Q3) 'final'\" (chart.svg)]"],
+      ["#b-icon", '[element: Button "Open menu"]'],
+      ["#v-title", '[element: Video "Product demo" (demo.mp4)]'],
+      ["#f-src", "[element: Frame (prototype.html)]"],
+      // The aria-label is the label, so it is not repeated as the name.
+      ["#v-aria", "[element: Launch clip (launch.mp4)]"],
+      // srcset candidates split on commas first: no trailing comma.
+      ["#i-srcset", "[element: Image (small.png)]"],
+      ["#i-srcset-w", "[element: Image (hero-480.jpg)]"],
+    ];
+    let x = 10;
+    for (const [selector, expected] of cases) {
+      const el = document.querySelector<HTMLElement>(selector)!;
+      hoverAt(el, (x += 40), 40);
+      const { messages } = await clickAndCollectSelection(el, x, 40);
+      expect(messages.length).toBe(1);
+      expect(messages[0]!.text).toBe(expected);
+      postBridge({ type: "plannotator-bridge-cancel-selection" });
+    }
+
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
+    document.body.replaceChildren();
+  });
+
+  // Failure to catch (0.28.1 smoke): the composer quote naming the real file
+  // while the exported heading said only "<img> element" or "(data:image/gif)",
+  // because the export read the src attribute alone. The context now carries
+  // the bridge's own resolution, so quote and heading name the same file.
+  test("the exported heading names the same file the composer quote does, whatever attribute carries it", async () => {
+    document.body.innerHTML = [
+      "<div>",
+      '<img id="p-srcset" srcset="hero-480.jpg 480w, hero-960.jpg 960w">',
+      '<img id="p-lazy" src="data:image/gif;base64,R0lGOD" data-src="/img/real.png?v=2">',
+      '<picture><source srcset="/img/pic.avif 1x, /img/pic@2x.avif 2x"><img id="p-picture"></picture>',
+      '<video id="p-poster" poster="/media/cover.jpg?sig=x"></video>',
+      '<video id="p-source"><source src="/media/clip.mp4"></video>',
+      '<img id="p-src" alt="Team" src="https://cdn.test/team.jpg?sig=SECRET">',
+      "</div>",
+    ].join("");
+    postBridge({ type: "plannotator-bridge-set-vim-mode", enabled: false });
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "pinpoint" });
+
+    const cases: Array<[string, string, string]> = [
+      ["#p-srcset", "[element: Image (hero-480.jpg)]", "Feedback on the <img> element (hero-480.jpg)"],
+      ["#p-lazy", "[element: Image (real.png)]", "Feedback on the <img> element (real.png)"],
+      ["#p-picture", "[element: Image (pic.avif)]", "Feedback on the <img> element (pic.avif)"],
+      ["#p-poster", "[element: Video (cover.jpg)]", "Feedback on the <video> element (cover.jpg)"],
+      ["#p-source", "[element: Video (clip.mp4)]", "Feedback on the <video> element (clip.mp4)"],
+      ["#p-src", '[element: Image "Team" (team.jpg)]', 'Feedback on the <img> element — "Team" (team.jpg)'],
+    ];
+    let x = 10;
+    for (const [selector, quote, heading] of cases) {
+      const el = document.querySelector<HTMLElement>(selector)!;
+      hoverAt(el, (x += 40), 40);
+      const { messages } = await clickAndCollectSelection(el, x, 40);
+      expect(messages.length).toBe(1);
+      expect(messages[0]!.text).toBe(quote);
+      // Through the parent's trust boundary, then the export.
+      const elementContext = parseHtmlElementContext(messages[0]!.context);
+      expect(JSON.stringify(elementContext)).not.toContain("SECRET");
+      const out = exportAnnotations([], [{
+        id: "a", blockId: "", startOffset: 0, endOffset: 0, type: "COMMENT", text: "note",
+        originalText: quote, createdA: 1, elementContext,
+      }]);
+      expect(out).toContain(`## 1. ${heading}\n`);
+      postBridge({ type: "plannotator-bridge-cancel-selection" });
+    }
+
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
+    document.body.replaceChildren();
+  });
+
+  test("an image pin saved with the old bare placeholder still restores through its anchor", async () => {
+    // Restore never reads the quote for a text-less element: the anchor binds
+    // it. Drafts saved before the description grew must keep their marker.
+    document.body.innerHTML = '<div><img id="hero" alt="Hero" src="hero.png"><p>Body</p></div>';
+    postBridge({
+      type: "plannotator-bridge-find-and-mark",
+      id: "old-image-pin",
+      originalText: "[element: Image]",
+      annotationType: "comment",
+      anchor: { selector: "#hero", tagName: "img", text: "" },
+    });
+    await flushOverlay();
+    expect(markersFor("old-image-pin").length).toBe(1);
+    postBridge({ type: "plannotator-bridge-clear-marks" });
+    document.body.replaceChildren();
+  });
+
   test("identical text-less siblings fail closed instead of rebinding (D1)", async () => {
     // Two structurally identical icons: any structure-derived signature
     // (tag/classes/child count/size) is identical across them, so a
@@ -1472,6 +1665,238 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
     expect(visibleMarkers().length).toBe(0);
     expect(document.querySelector("[data-bind-id]")).toBeNull();
 
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
+    document.body.replaceChildren();
+  });
+
+  // Failure to catch: a pin on an <img> with no id or data-* identity never
+  // restoring, because it got no anchor at all (every screenshot in an HTML
+  // report, every chart in a generated page). The D1 contract must survive
+  // the fix: a source two elements share, or an inline data:/blob: source,
+  // gives no anchor, and a crafted source anchor never binds an ambiguous
+  // match.
+  test("a media pin without stable identity restores by its source; shared and inline sources fail closed", async () => {
+    document.body.innerHTML = [
+      '<div class="gallery">',
+      '<img src="charts/a.png">',
+      '<img src="charts/b.png?sig=SECRET#frag">',
+      '<img src="charts/dup.png"><img src="charts/dup.png">',
+      '<img src="data:image/png;base64,iVBORw0KGgo=">',
+      "</div>",
+    ].join("");
+    postBridge({ type: "plannotator-bridge-set-vim-mode", enabled: false });
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "pinpoint" });
+
+    type Anchor = { selector: string; tagName: string; text?: string };
+    const images = () => document.querySelectorAll<HTMLElement>("div.gallery > img");
+    const pin = async (el: HTMLElement, x: number): Promise<Anchor | undefined> => {
+      hoverAt(el, x, 40);
+      const { messages } = await clickAndCollectSelection(el, x, 40);
+      expect(messages.length).toBe(1);
+      postBridge({ type: "plannotator-bridge-cancel-selection" });
+      return messages[0]!.anchor as Anchor | undefined;
+    };
+    const restore = async (id: string, anchor: Anchor) => {
+      postBridge({
+        type: "plannotator-bridge-find-and-mark",
+        id,
+        originalText: "[element: Image]",
+        annotationType: "comment",
+        anchor,
+      });
+      await flushOverlay();
+      return markersFor(id).length;
+    };
+
+    // The anchor checks the image by its path; the signed query reaches it
+    // only as a digest, never in plain text.
+    const anchor = await pin(images()[1]!, 80);
+    expect(anchor?.text).toMatch(/^src:charts\/b\.png\?[0-9a-f]{8}$/);
+    expect(JSON.stringify(anchor)).not.toContain("SECRET");
+    expect(await restore("b", anchor!)).toBe(1);
+    postBridge({ type: "plannotator-bridge-clear-marks" });
+
+    // A sibling inserted in front moves the positional selector onto charts/a.png;
+    // the source check rejects that element and finds charts/b.png by its source.
+    const inserted = document.createElement("img");
+    inserted.setAttribute("src", "charts/new.png");
+    images()[0]!.before(inserted);
+    expect(await restore("b-moved", anchor!)).toBe(1);
+    postBridge({ type: "plannotator-bridge-clear-marks" });
+    // Once no element shows charts/b.png, nothing binds, at any position.
+    images()[2]!.setAttribute("src", "charts/c.png");
+    expect(await restore("b-gone", anchor!)).toBe(0);
+
+    // Shared and inline sources: no anchor at all.
+    expect(await pin(images()[3]!, 120)).toBeUndefined();
+    expect(await pin(images()[5]!, 160)).toBeUndefined();
+    // A crafted anchor naming the shared source binds neither copy.
+    expect(await restore("dup", { selector: "div.gallery > img:nth-of-type(9)", tagName: "img", text: "src:charts/dup.png" })).toBe(0);
+    expect(visibleMarkers().length).toBe(0);
+    expect(document.querySelector("[data-bind-id]")).toBeNull();
+
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
+    document.body.replaceChildren();
+  });
+
+  // Failures to catch: (1) a source told apart only by its query
+  // (/_next/image?url=…, /thumb?id=…) binding a pin to a DIFFERENT image once
+  // the query changes, because the key dropped the query; (2) a pin saved in
+  // one session not restoring in the next because the key carried the
+  // session's asset route (port + token) instead of the author's path.
+  test("a media source anchor tells queries apart and survives a re-rooted base", async () => {
+    const baseEl = document.createElement("base");
+    baseEl.setAttribute("href", "http://127.0.0.1:41111/api/html-assets/TOKEN-ONE/");
+    document.head.prepend(baseEl);
+    try {
+      document.body.innerHTML = '<div class="gallery"><p>Report</p><img src="thumb?id=1"><img src="charts/a.png"></div>';
+      postBridge({ type: "plannotator-bridge-set-vim-mode", enabled: false });
+      postBridge({ type: "plannotator-bridge-set-input-method", method: "pinpoint" });
+
+      type Anchor = { selector: string; tagName: string; text?: string };
+      const images = () => document.querySelectorAll<HTMLElement>("div.gallery > img");
+      const pin = async (el: HTMLElement, x: number): Promise<Anchor | undefined> => {
+        hoverAt(el, x, 40);
+        const { messages } = await clickAndCollectSelection(el, x, 40);
+        expect(messages.length).toBe(1);
+        postBridge({ type: "plannotator-bridge-cancel-selection" });
+        return messages[0]!.anchor as Anchor | undefined;
+      };
+      const restore = async (id: string, anchor: Anchor) => {
+        postBridge({ type: "plannotator-bridge-find-and-mark", id, originalText: "[element: Image]", annotationType: "comment", anchor });
+        await flushOverlay();
+        const count = markersFor(id).length;
+        postBridge({ type: "plannotator-bridge-clear-marks" });
+        return count;
+      };
+
+      const thumb = await pin(images()[0]!, 80);
+      const chart = await pin(images()[1]!, 120);
+      expect(thumb).toBeDefined();
+      expect(chart?.text).toBe("src:charts/a.png");
+
+      // The next session serves the same file under another port and token.
+      baseEl.setAttribute("href", "http://127.0.0.1:42222/api/html-assets/TOKEN-TWO/");
+      expect(await restore("chart-next-session", chart!)).toBe(1);
+
+      // Same path, another query: a different image, at the same position.
+      images()[0]!.setAttribute("src", "thumb?id=2");
+      expect(await restore("thumb-other-query", thumb!)).toBe(0);
+      images()[0]!.setAttribute("src", "thumb?id=1");
+      expect(await restore("thumb-same-query", thumb!)).toBe(1);
+    } finally {
+      postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
+      baseEl.remove();
+      document.body.replaceChildren();
+    }
+  });
+
+  // --- Element context: the agent-facing description a pinpoint carries ---
+  // Failures to catch: silent regression to label-only capture; secrets or
+  // handlers leaking into feedback on disk; unbounded growth on a container
+  // click; the skeleton dropping the grep keys (id/class) an agent needs.
+
+  const CONTEXT_MARKUP = [
+    '<div id="root"><header class="site-header"><h1>Acme Analytics</h1>',
+    '<nav id="site-nav" class="site-nav sticky" aria-label="Primary" data-component="AppNav">',
+    '<ul class="nav-list"><li><a href="https://acme.test/home?token=abc#frag">Home</a></li>',
+    '<li><a href="/about?tab=2">About</a></li></ul>',
+    '<button class="nav-toggle" aria-label="Open menu" onclick="steal()" style="color:red" data-secret="s3cr3t"><svg></svg></button>',
+    "<script>var secret = 'do-not-export';</script>",
+    "</nav></header><main><h2>Usage</h2><p>Body</p></main></div>",
+  ].join("");
+
+  test("a pinpointed <nav> carries an element context: identity, path, role, name, hooks, skeleton, surroundings", async () => {
+    document.body.innerHTML = CONTEXT_MARKUP;
+    postBridge({ type: "plannotator-bridge-set-vim-mode", enabled: false });
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "pinpoint" });
+    const nav = document.querySelector<HTMLElement>("nav#site-nav")!;
+    hoverAt(nav, 30, 30);
+    const { messages } = await clickAndCollectSelection(nav, 30, 30);
+    expect(messages.length).toBe(1);
+    const context = messages[0]!.context as Record<string, unknown>;
+    expect(context).toBeDefined();
+    expect(context.tag).toBe("nav");
+    expect(context.id).toBe("site-nav");
+    expect(context.classes).toEqual(["site-nav", "sticky"]);
+    expect(context.path).toBe("body > div#root > header.site-header > nav#site-nav");
+    expect(context.role).toBe("navigation"); // implicit role, no role attribute
+    expect(context.name).toBe("Primary"); // aria-label wins the accessible name
+    expect(context.attrs).toEqual([["aria-label", "Primary"], ["data-component", "AppNav"]]);
+    expect(context.component).toBe("data-component=AppNav");
+    expect(context.landmark).toBe("header.site-header");
+    expect(context.heading).toBe('h1 "Acme Analytics"');
+    expect(context.children).toBe(2); // ul + button; the <script> is skipped
+    const outline = String(context.outline);
+    // The root tag prints its grep keys and its allowlisted attributes.
+    expect(outline.startsWith('<nav id="site-nav" class="site-nav sticky" aria-label="Primary" data-component="AppNav">')).toBe(true);
+    // Children as bare tags, leaves with their short text.
+    expect(outline).toContain('<ul class="nav-list">');
+    expect(outline).toContain("<li>Home</li>");
+    expect(outline).toContain('<button class="nav-toggle">');
+    expect(outline.endsWith("</nav>")).toBe(true);
+    // Never: script text, inline handlers, style, non-allowlisted data-*.
+    expect(JSON.stringify(context)).not.toContain("do-not-export");
+    expect(JSON.stringify(context)).not.toContain("steal");
+    expect(JSON.stringify(context)).not.toContain("color:red");
+    expect(JSON.stringify(context)).not.toContain("s3cr3t");
+    // Srcdoc sessions carry no page identity (that is live-mode only).
+    expect(context.page).toBeUndefined();
+    postBridge({ type: "plannotator-bridge-cancel-selection" });
+
+    // A text-less icon button: the quote stays the placeholder the export
+    // rewrites, and the context names the element the placeholder cannot.
+    const toggle = document.querySelector<HTMLElement>("button.nav-toggle")!;
+    hoverAt(toggle, 60, 30);
+    const button = await clickAndCollectSelection(toggle, 60, 30);
+    expect(button.messages[0]!.text).toBe('[element: Button "Open menu"]');
+    const buttonContext = button.messages[0]!.context as Record<string, unknown>;
+    expect(buttonContext.name).toBe("Open menu");
+    expect(buttonContext.role).toBe("button");
+    expect(buttonContext.landmark).toBe('nav#site-nav "Primary"');
+    expect(buttonContext.attrs).toEqual([["aria-label", "Open menu"]]);
+    postBridge({ type: "plannotator-bridge-cancel-selection" });
+
+    // URLs lose their query and fragment (tokens live there) and keep their
+    // path, in every form: absolute and relative alike.
+    const home = document.querySelector<HTMLElement>('a[href^="https://acme.test"]')!;
+    hoverAt(home, 10, 10);
+    const link = await clickAndCollectSelection(home, 10, 10, { metaKey: true });
+    const linkContext = link.messages[0]!.context as { attrs: Array<[string, string]>; role: string };
+    expect(linkContext.attrs).toEqual([["href", "https://acme.test/home?…"]]);
+    expect(linkContext.role).toBe("link");
+    expect(JSON.stringify(linkContext)).not.toContain("token=abc");
+    postBridge({ type: "plannotator-bridge-cancel-selection" });
+    // Fresh coordinates: the hover hit-test is keyed on the pointer position.
+    const about = document.querySelector<HTMLElement>('a[href="/about?tab=2"]')!;
+    hoverAt(about, 90, 12);
+    const rel = await clickAndCollectSelection(about, 90, 12, { metaKey: true });
+    expect((rel.messages[0]!.context as { attrs: Array<[string, string]> }).attrs).toEqual([["href", "/about?…"]]);
+    expect(JSON.stringify(rel.messages[0]!.context)).not.toContain("tab=2");
+    postBridge({ type: "plannotator-bridge-cancel-selection" });
+
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
+    document.body.replaceChildren();
+  });
+
+  test("a container with hundreds of children stays under the byte budget and collapses its skeleton", async () => {
+    const items: string[] = [];
+    for (let i = 0; i < 400; i++) items.push(`<li class="row">Row number ${i} with some words in it</li>`);
+    document.body.innerHTML = `<main><ul id="big" class="list">${items.join("")}</ul></main>`;
+    postBridge({ type: "plannotator-bridge-set-vim-mode", enabled: false });
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "pinpoint" });
+    const list = document.querySelector<HTMLElement>("ul#big")!;
+    hoverAt(list, 30, 30);
+    const { messages } = await clickAndCollectSelection(list, 30, 30);
+    const context = messages[0]!.context as Record<string, unknown>;
+    expect(context.children).toBe(400);
+    expect(new TextEncoder().encode(JSON.stringify(context)).length).toBeLessThanOrEqual(2048);
+    const outline = String(context.outline);
+    expect(outline.length).toBeLessThanOrEqual(600);
+    // The adaptive skeleton shows a few children and counts the rest.
+    expect(outline).toContain("more: li×");
+    expect(String(context.text).length).toBeLessThanOrEqual(301); // 300 + ellipsis
+    postBridge({ type: "plannotator-bridge-cancel-selection" });
     postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
     document.body.replaceChildren();
   });
@@ -1596,6 +2021,41 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
     keys.set("alpha", primaryKey);
     return { primaryKey, keys };
   }
+
+  test("shift-click additional targets carry their own (smaller) element context", async () => {
+    document.body.innerHTML = MULTI_MARKUP;
+    const { keys } = await startMultiDraft();
+    const beta = document.querySelector<HTMLElement>("p.beta")!;
+    const added = await collectMessages(
+      ["plannotator-bridge-multi-target-added"],
+      () => clickAt(beta, 40, 40, true),
+    );
+    expect(added.length).toBe(1);
+    const context = added[0]!.context as Record<string, unknown>;
+    expect(context.tag).toBe("p");
+    expect(context.path).toBe("body > div#hero > p.beta");
+    expect(context.text).toBe("Beta text");
+    expect(new TextEncoder().encode(JSON.stringify(context)).length).toBeLessThanOrEqual(1024);
+    expect(keys.get("alpha")).toBeTruthy();
+    postBridge({ type: "plannotator-bridge-cancel-selection" });
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
+    document.body.replaceChildren();
+  });
+
+  test("a shift-clicked image names which image it is, like the primary", async () => {
+    document.body.innerHTML = MULTI_MARKUP + '<img id="extra" alt="Pricing chart" src="/img/pricing.png?x=1">';
+    await startMultiDraft();
+    const img = document.querySelector<HTMLElement>("img#extra")!;
+    const added = await collectMessages(
+      ["plannotator-bridge-multi-target-added"],
+      () => clickAt(img, 60, 60, true),
+    );
+    expect(added.length).toBe(1);
+    expect(added[0]!.text).toBe('[element: Image "Pricing chart" (pricing.png)]');
+    postBridge({ type: "plannotator-bridge-cancel-selection" });
+    postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
+    document.body.replaceChildren();
+  });
 
   test("shift-click adds targets to the SAME draft and toggles them off again", async () => {
     document.body.innerHTML = MULTI_MARKUP;
@@ -3778,6 +4238,475 @@ describe.if(hasDom)("bridge theme handler (DOM)", () => {
     });
     postBridge({ type: "plannotator-bridge-clear-marks" });
     document.body.replaceChildren();
+  });
+
+  // --- Local-site link navigation -----------------------------------------
+  // A srcdoc document's base URL is the PARENT page's, so an unhandled link
+  // resolves onto the Plannotator server and its catch-all answers with the
+  // app itself: the whole editor rendered inside the annotated document.
+  // The bridge must therefore never let this frame navigate.
+  describe("link navigation", () => {
+    let capturedLinkPosts: Array<Record<string, unknown>> = [];
+    let stopCapture: (() => void) | null = null;
+
+    function startCapture() {
+      capturedLinkPosts = [];
+      const capture = (event: MessageEvent) => {
+        const data = bridgeMessageData(event);
+        if (data && data.type === "plannotator-bridge-link-click") capturedLinkPosts.push(data);
+      };
+      window.addEventListener("message", capture);
+      stopCapture = () => window.removeEventListener("message", capture);
+    }
+
+    /** postMessage delivery is queued; one macrotask turn settles it. */
+    const flushPosts = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    /** A person's click: `isTrusted`, which only the browser sets (a page script's a.click() is untrusted). */
+    function trusted<T extends Event>(event: T): T {
+      Object.defineProperty(event, "isTrusted", { value: true });
+      return event;
+    }
+
+    function clickLink(selector: string): MouseEvent {
+      const el = document.querySelector<HTMLElement>(selector);
+      if (!el) throw new Error("missing link " + selector);
+      const event = trusted(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      el.dispatchEvent(event);
+      return event;
+    }
+
+    function setUp(html: string, armed: boolean) {
+      document.body.innerHTML = html;
+      postBridge({ type: "plannotator-bridge-set-input-method", method: "pinpoint" });
+      postBridge({ type: "plannotator-bridge-set-annotate-mode", active: armed });
+      startCapture();
+    }
+
+    afterEach(() => {
+      stopCapture?.();
+      stopCapture = null;
+      postBridge({ type: "plannotator-bridge-set-annotate-mode", active: true });
+      postBridge({ type: "plannotator-bridge-set-input-method", method: "drag" });
+      document.body.replaceChildren();
+    });
+
+    test("Interact: a relative document link is swallowed and reported, never navigated", async () => {
+      setUp('<a id="rel" href="01-entry-point.html">Entry</a>', false);
+      const event = clickLink("#rel");
+      await flushPosts();
+      // The default action is what would load the app into this frame.
+      expect(event.defaultPrevented).toBe(true);
+      expect(capturedLinkPosts.map((p) => p.href)).toEqual(["01-entry-point.html"]);
+    });
+
+    test("Interact: the RAW href travels — resolution belongs to the parent", async () => {
+      setUp('<a id="rel" href="./sub/02-detail.html?v=2#top">Detail</a>', false);
+      clickLink("#rel");
+      await flushPosts();
+      expect(capturedLinkPosts[0]?.href).toBe("./sub/02-detail.html?v=2#top");
+    });
+
+    test("Interact: a click on a child of the link still resolves to the link", async () => {
+      setUp('<a id="rel" href="a.html"><span id="inner">deep</span></a>', false);
+      const event = clickLink("#inner");
+      await flushPosts();
+      expect(event.defaultPrevented).toBe(true);
+      expect(capturedLinkPosts[0]?.href).toBe("a.html");
+    });
+
+    test("Interact: an off-origin link is reported too — the parent opens the tab", async () => {
+      setUp('<a id="ext" href="https://example.com">Example</a>', false);
+      const event = clickLink("#ext");
+      await flushPosts();
+      expect(event.defaultPrevented).toBe(true);
+      expect(capturedLinkPosts[0]?.href).toBe("https://example.com");
+    });
+
+    test("an in-page #fragment scrolls locally and is never reported", async () => {
+      setUp('<a id="frag" href="#target">Jump</a><h2 id="target">Target</h2>', false);
+      const target = document.querySelector<HTMLElement>("#target")!;
+      let scrolled = 0;
+      target.scrollIntoView = () => { scrolled += 1; };
+      const event = clickLink("#frag");
+      await flushPosts();
+      // Still prevented: in a srcdoc document the browser treats #target as a
+      // cross-document navigation to the PARENT's URL.
+      expect(event.defaultPrevented).toBe(true);
+      expect(scrolled).toBe(1);
+      expect(capturedLinkPosts).toEqual([]);
+    });
+
+    test("scroll-to-fragment replays a linked document's fragment after load", () => {
+      setUp('<h2 id="deep">Deep</h2>', false);
+      const target = document.querySelector<HTMLElement>("#deep")!;
+      let scrolled = 0;
+      target.scrollIntoView = () => { scrolled += 1; };
+      postBridge({ type: "plannotator-bridge-scroll-to-fragment", fragment: "deep" });
+      expect(scrolled).toBe(1);
+    });
+
+    function collectSelections() {
+      const selections: Array<Record<string, unknown>> = [];
+      const collect = (event: MessageEvent) => {
+        const data = bridgeMessageData(event);
+        if (data?.type === "plannotator-bridge-selection") selections.push(data);
+      };
+      window.addEventListener("message", collect);
+      return { selections, stop: () => window.removeEventListener("message", collect) };
+    }
+
+    function clickWith(selector: string, init: MouseEventInit): MouseEvent {
+      const el = document.querySelector<HTMLElement>(selector)!;
+      const event = trusted(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ...init }));
+      el.dispatchEvent(event);
+      return event;
+    }
+
+    for (const armed of [false, true]) {
+      test(`${armed ? "armed" : "Interact"}: the page's own script clicking its link on a timer never follows it`, async () => {
+        setUp('<a id="rel" href="next.html">Next</a>', armed);
+        await flushPosts();
+        let prevented: boolean | null = null;
+        const link = document.querySelector<HTMLAnchorElement>("#rel")!;
+        link.addEventListener("click", (e) => { prevented = e.defaultPrevented; });
+        // What a page would do: a.click() from its own script, later.
+        await new Promise<void>((resolve) => setTimeout(() => { link.click(); resolve(); }, 5));
+        await flushPosts();
+        expect(prevented).toBe(true); // the frame still never navigates itself
+        expect(capturedLinkPosts).toEqual([]);
+      });
+    }
+
+    for (const [label, markup] of [
+      ['href="#"', '<a id="go" href="#" class="btn">Save</a>'],
+      ['href=""', '<a id="go" href="" class="btn">Save</a>'],
+      ["javascript:", '<a id="go" href="javascript:void 0" class="btn">Save</a>'],
+      ["no href", '<a id="go" class="btn">Save</a>'],
+    ] as const) {
+      test(`armed pinpoint: a link that goes nowhere (${label}) pins on a plain click, as before`, async () => {
+        setUp(`<p>Intro</p>${markup}`, true);
+        await flushPosts();
+        const { selections, stop } = collectSelections();
+        const event = clickLink("#go");
+        await flushPosts();
+        stop();
+        expect(event.defaultPrevented).toBe(true);
+        expect(capturedLinkPosts).toEqual([]);
+        expect(selections.length).toBe(1);
+        expect(selections[0]!.pinpoint).toBe(true);
+        postBridge({ type: "plannotator-bridge-cancel-selection" });
+      });
+    }
+
+    test("armed pinpoint: no pin outline over a link a click follows, until Cmd/Ctrl is held (key or pointer)", () => {
+      setUp('<p id="intro">Intro</p><a id="rel" href="next.html">Next</a><a id="btn" href="#">Button</a>', true);
+      postBridge({ type: "plannotator-bridge-set-vim-mode", enabled: false });
+      let at = 0;
+      const box = () => document.querySelector<HTMLElement>("[data-plannotator-pinpoint-box]")?.style.display ?? "none";
+      const move = (selector: string, init: MouseEventInit = {}) =>
+        document.querySelector(selector)!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, cancelable: true, clientX: 5 + (at += 7), clientY: 5, ...init }));
+      move("#intro");
+      expect(box()).toBe("block");
+      move("#rel");
+      expect(box()).toBe("none");
+      expect(document.body.hasAttribute("data-plannotator-pin-modifier")).toBe(false);
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Meta", metaKey: true, bubbles: true }));
+      expect(document.body.hasAttribute("data-plannotator-pin-modifier")).toBe(true);
+      expect(box()).toBe("block");
+      document.dispatchEvent(new KeyboardEvent("keyup", { key: "Meta", bubbles: true }));
+      expect(box()).toBe("none");
+      // Held during the move itself (focus elsewhere when the key went down).
+      move("#rel", { ctrlKey: true });
+      expect(box()).toBe("block");
+      move("#rel");
+      expect(box()).toBe("none");
+      // A link that goes nowhere outlines like any element.
+      move("#btn");
+      expect(box()).toBe("block");
+    });
+
+    // One rule while armed (owner's ruling html-link-click, 2026-10-20): a plain click follows, the modifier pins.
+    test("armed pinpoint: a plain click on a link follows it, exactly as in Interact, and pins nothing", async () => {
+      setUp('<a id="rel" href="./sub/02-detail.html#top">Entry</a>', true);
+      await flushPosts();
+      const { selections, stop } = collectSelections();
+      const event = clickLink("#rel");
+      await flushPosts();
+      stop();
+      expect(event.defaultPrevented).toBe(true);
+      expect(capturedLinkPosts.map((p) => p.href)).toEqual(["./sub/02-detail.html#top"]);
+      expect(selections).toEqual([]);
+    });
+
+    test("armed pinpoint: a click on a child of the link follows the link too", async () => {
+      setUp('<a id="rel" href="a.html"><span id="inner">deep</span></a>', true);
+      clickLink("#inner");
+      await flushPosts();
+      expect(capturedLinkPosts.map((p) => p.href)).toEqual(["a.html"]);
+    });
+
+    for (const [name, init] of [["Cmd", { metaKey: true }], ["Ctrl", { ctrlKey: true }]] as const) {
+      test(`armed pinpoint: ${name}-click pins the link for a comment, with its anchor, and never follows it`, async () => {
+        setUp('<p>Intro</p><a id="rel" href="01-entry-point.html">Entry point</a>', true);
+        await flushPosts();
+        const { selections, stop } = collectSelections();
+        const event = clickWith("#rel", init);
+        await flushPosts();
+        stop();
+        expect(event.defaultPrevented).toBe(true);
+        expect(capturedLinkPosts).toEqual([]);
+        expect(selections.length).toBe(1);
+        expect(selections[0]!.pinpoint).toBe(true);
+        const anchor = selections[0]!.anchor as { selector: string; tagName: string };
+        expect(anchor.tagName).toBe("a");
+        expect(document.querySelector(anchor.selector)).toBe(document.querySelector("#rel"));
+        postBridge({ type: "plannotator-bridge-cancel-selection" });
+      });
+    }
+
+    test("Interact: Cmd-click still follows (the modifier pins only while armed)", async () => {
+      setUp('<a id="rel" href="a.html">A</a>', false);
+      clickWith("#rel", { metaKey: true });
+      await flushPosts();
+      expect(capturedLinkPosts.map((p) => p.href)).toEqual(["a.html"]);
+    });
+
+    test("armed pinpoint: a #fragment link scrolls on a plain click and pins on a Cmd-click", async () => {
+      setUp('<a id="frag" href="#target">Jump</a><h2 id="target">Target</h2>', true);
+      const target = document.querySelector<HTMLElement>("#target")!;
+      let scrolled = 0;
+      target.scrollIntoView = () => { scrolled += 1; };
+      clickLink("#frag");
+      expect(scrolled).toBe(1);
+      await flushPosts();
+      const { selections, stop } = collectSelections();
+      clickWith("#frag", { metaKey: true });
+      await flushPosts();
+      stop();
+      expect(scrolled).toBe(1);
+      expect(selections.length).toBe(1);
+      postBridge({ type: "plannotator-bridge-cancel-selection" });
+    });
+
+    test("armed pinpoint: a drag that selected text and ended on a link neither follows nor pins", async () => {
+      setUp('<p id="p">Read <a id="rel" href="a.html">the detail page</a> next.</p>', true);
+      await flushPosts();
+      const { selections, stop } = collectSelections();
+      const text = document.querySelector("#rel")!.firstChild!;
+      // A real drag: mousedown, a move past the 4 px threshold, a selection, mouseup, then the trailing click.
+      document.querySelector("#rel")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+      document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, buttons: 1, clientX: 40, clientY: 10 }));
+      const range = document.createRange();
+      range.setStart(text, 0);
+      range.setEnd(text, 8);
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(range);
+      document.querySelector("#rel")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, clientX: 40, clientY: 10 }));
+      const event = clickLink("#rel");
+      await new Promise((r) => setTimeout(r, 30));
+      stop();
+      expect(event.defaultPrevented).toBe(true);
+      expect(capturedLinkPosts).toEqual([]);
+      // The drag's own text comment may post; the link element is never pinned.
+      expect(selections.filter((s) => s.pinpoint === true)).toEqual([]);
+      window.getSelection()!.removeAllRanges();
+    });
+
+    // Touch (owner's amendment to html-link-click, 2026-10-20): a tap follows, press-and-hold pins.
+    function touch(type: string, selector: string, x: number, y: number, live = true): Event {
+      const el = document.querySelector(selector)!;
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      const point = { identifier: 1, clientX: x, clientY: y, target: el };
+      Object.defineProperty(event, "touches", { value: live ? [point] : [] });
+      Object.defineProperty(event, "changedTouches", { value: [point] });
+      el.dispatchEvent(event);
+      return event;
+    }
+    const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+    test("touch, armed: a tap on a link follows it and pins nothing", async () => {
+      setUp('<p>Intro</p><a id="rel" href="next.html">Next</a>', true);
+      await flushPosts();
+      const { selections, stop } = collectSelections();
+      touch("touchstart", "#rel", 10, 10);
+      await wait(60);
+      const end = touch("touchend", "#rel", 10, 10, false);
+      clickLink("#rel");
+      await wait(600);
+      stop();
+      expect(end.defaultPrevented).toBe(false);
+      expect(capturedLinkPosts.map((p) => p.href)).toEqual(["next.html"]);
+      expect(selections).toEqual([]);
+      expect(document.body.hasAttribute("data-plannotator-touch")).toBe(true);
+      document.body.removeAttribute("data-plannotator-touch");
+    });
+
+    test("touch, armed: press-and-hold pins the link for a comment, and the release never follows it", async () => {
+      setUp('<p>Intro</p><a id="rel" href="next.html">Entry point</a>', true);
+      await flushPosts();
+      const { selections, stop } = collectSelections();
+      touch("touchstart", "#rel", 10, 10);
+      await wait(400);
+      expect(selections).toEqual([]); // not yet: the hold is 500 ms
+      await wait(200);
+      await flushPosts();
+      expect(selections.length).toBe(1);
+      expect(selections[0]!.pinpoint).toBe(true);
+      const anchor = selections[0]!.anchor as { selector: string; tagName: string };
+      expect(anchor.tagName).toBe("a");
+      expect(document.querySelector(anchor.selector)).toBe(document.querySelector("#rel"));
+      // The same pin a Cmd-click makes: the link's words as a text range, not a bare element.
+      expect(selections[0]!.text).toBe("Entry point");
+      expect(selections[0]!.element).toBeUndefined();
+      // Selection is off on links only while the finger is down.
+      expect(document.body.hasAttribute("data-plannotator-link-hold")).toBe(true);
+      // The release: cancelled, so no click is synthesized; one that arrives anyway is swallowed.
+      const end = touch("touchend", "#rel", 10, 10, false);
+      expect(end.defaultPrevented).toBe(true);
+      const click = clickLink("#rel");
+      await flushPosts();
+      stop();
+      expect(click.defaultPrevented).toBe(true);
+      expect(capturedLinkPosts).toEqual([]);
+      expect(selections.length).toBe(1);
+      expect(document.body.hasAttribute("data-plannotator-link-hold")).toBe(false);
+      // The next tap is a tap again.
+      touch("touchstart", "#rel", 10, 10);
+      touch("touchend", "#rel", 10, 10, false);
+      clickLink("#rel");
+      await flushPosts();
+      expect(capturedLinkPosts.map((p) => p.href)).toEqual(["next.html"]);
+      postBridge({ type: "plannotator-bridge-cancel-selection" });
+      document.body.removeAttribute("data-plannotator-touch");
+    });
+
+    function pointer(type: string, selector: string, pointerType: string, pointerId = 1): Event {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "pointerType", { value: pointerType });
+      Object.defineProperty(event, "pointerId", { value: pointerId });
+      document.querySelector(selector)!.dispatchEvent(event);
+      return event;
+    }
+
+    for (const [label, next] of [
+      ["a mouse press", () => pointer("pointerdown", "#rel", "mouse", 9)],
+      ["a key", () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }))],
+      ["a new touch", () => { touch("touchstart", "#rel", 10, 10); touch("touchend", "#rel", 10, 10, false); }],
+    ] as const) {
+      test(`touch, armed: after a hold's release with no click, ${label} ends the swallow, so its click follows`, async () => {
+        setUp('<a id="rel" href="next.html">Next</a>', true);
+        await flushPosts();
+        touch("touchstart", "#rel", 10, 10);
+        await wait(560);
+        touch("touchend", "#rel", 10, 10, false);
+        postBridge({ type: "plannotator-bridge-cancel-selection" });
+        await flushPosts();
+        next();
+        const click = clickLink("#rel");
+        await flushPosts();
+        expect(click.defaultPrevented).toBe(true); // the frame never navigates itself
+        expect(capturedLinkPosts.map((p) => p.href)).toEqual(["next.html"]);
+        document.body.removeAttribute("data-plannotator-touch");
+      });
+    }
+
+    test("touch, armed: a hold whose release was never seen (the page stopped touchend) does not eat the next tap", async () => {
+      setUp('<a id="rel" href="next.html">Next</a>', true);
+      await flushPosts();
+      touch("touchstart", "#rel", 10, 10);
+      await wait(560);
+      postBridge({ type: "plannotator-bridge-cancel-selection" });
+      // No touchend reached the bridge. The next tap is a tap.
+      touch("touchstart", "#rel", 10, 10);
+      touch("touchend", "#rel", 10, 10, false);
+      clickLink("#rel");
+      await flushPosts();
+      expect(capturedLinkPosts.map((p) => p.href)).toEqual(["next.html"]);
+      document.body.removeAttribute("data-plannotator-touch");
+    });
+
+    test("touch, armed: a tap never turns selection off, so link text stays quotable by a drag", async () => {
+      setUp('<p>Start with <a id="rel" href="next.html">the detail page</a> today.</p>', true);
+      await flushPosts();
+      touch("touchstart", "#rel", 10, 10);
+      expect(document.body.hasAttribute("data-plannotator-link-hold")).toBe(true);
+      touch("touchend", "#rel", 10, 10, false);
+      expect(document.body.hasAttribute("data-plannotator-link-hold")).toBe(false);
+      clickLink("#rel");
+      await flushPosts();
+      // The only rule that turns link selection off is scoped to a hold in progress.
+      const css = ANNOTATION_HIGHLIGHT_CSS.replace(/\/\*[\s\S]*?\*\//g, "");
+      const rules = css.split("}").filter((r) => /user-select:\s*none/.test(r));
+      expect(rules.length).toBeGreaterThan(0);
+      for (const rule of rules) {
+        const selectors = rule.slice(0, rule.indexOf("{"));
+        if (/:is\(a, area\)/.test(selectors)) {
+          for (const sel of selectors.split(/,\s*\n/)) expect(sel).toContain("data-plannotator-link-hold");
+        }
+      }
+      document.body.removeAttribute("data-plannotator-touch");
+    });
+
+    test("touch, armed: a finger that moves past the slop (a scroll) cancels the hold", async () => {
+      setUp('<a id="rel" href="next.html">Next</a>', true);
+      await flushPosts();
+      const { selections, stop } = collectSelections();
+      touch("touchstart", "#rel", 10, 10);
+      await wait(100);
+      touch("touchmove", "#rel", 10, 34);
+      await wait(550);
+      const end = touch("touchend", "#rel", 10, 34, false);
+      await flushPosts();
+      stop();
+      expect(selections).toEqual([]);
+      expect(end.defaultPrevented).toBe(false);
+      document.body.removeAttribute("data-plannotator-touch");
+    });
+
+    test("touch, armed: Android's long-press contextmenu fires the hold at once and shows no menu", async () => {
+      setUp('<a id="rel" href="next.html">Next</a>', true);
+      await flushPosts();
+      const { selections, stop } = collectSelections();
+      touch("touchstart", "#rel", 10, 10);
+      await wait(50);
+      const menu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 });
+      document.querySelector("#rel")!.dispatchEvent(menu);
+      await flushPosts();
+      expect(menu.defaultPrevented).toBe(true);
+      expect(selections.length).toBe(1);
+      await wait(500); // the timer does not pin a second time
+      touch("touchend", "#rel", 10, 10, false);
+      await flushPosts();
+      stop();
+      expect(selections.length).toBe(1);
+      postBridge({ type: "plannotator-bridge-cancel-selection" });
+      document.body.removeAttribute("data-plannotator-touch");
+    });
+
+    test("touch, Interact: a hold pins nothing (the platform's own long-press), a tap follows", async () => {
+      setUp('<a id="rel" href="next.html">Next</a>', false);
+      await flushPosts();
+      const { selections, stop } = collectSelections();
+      touch("touchstart", "#rel", 10, 10);
+      await wait(600);
+      const end = touch("touchend", "#rel", 10, 10, false);
+      clickLink("#rel");
+      await flushPosts();
+      stop();
+      expect(selections).toEqual([]);
+      expect(end.defaultPrevented).toBe(false);
+      expect(capturedLinkPosts.map((p) => p.href)).toEqual(["next.html"]);
+      document.body.removeAttribute("data-plannotator-touch");
+    });
+
+    test("javascript: hrefs stay the page's own scripting", async () => {
+      setUp('<a id="js" href="javascript:void 0">Run</a>', false);
+      const event = clickLink("#js");
+      await flushPosts();
+      expect(event.defaultPrevented).toBe(false);
+      expect(capturedLinkPosts).toEqual([]);
+    });
   });
 });
 

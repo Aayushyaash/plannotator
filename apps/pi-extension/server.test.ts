@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
@@ -228,6 +228,15 @@ function reservePort(): Promise<number> {
     });
   });
 }
+
+// Sandbox every test's data dir so a contributor's ~/.plannotator/config.json
+// (e.g. reviewAnalysis.semanticDiff: false) can never change server behavior.
+// The root bunfig preload does this too, but not when bun runs from this
+// package directory (its own `bun test` script). Tests that need a specific
+// dir still override it; afterEach restores the original value.
+beforeEach(() => {
+  process.env.PLANNOTATOR_DATA_DIR = makeTempDir("plannotator-pi-server-data-");
+});
 
 afterEach(() => {
   process.chdir(originalCwd);
@@ -1270,6 +1279,8 @@ describe("pi review server", () => {
         `${server.url}/api/image?path=${encodeURIComponent(uploadPayload.path)}`,
       );
       expect(imageResponse.status).toBe(200);
+      expect(imageResponse.headers.get("content-security-policy")).toStartWith("sandbox;");
+      expect(imageResponse.headers.get("x-content-type-options")).toBe("nosniff");
       expect(await imageResponse.text()).toBe("png-bytes");
 
       const draftDelete = await fetch(`${server.url}/api/draft`, { method: "DELETE" });
@@ -1786,11 +1797,32 @@ describe("pi review server", () => {
       expect(last.diffType).toBe("jj-last");
       expect(last.rawPatch).toContain("last.txt");
 
+      const automaticLineResponse = await fetch(`${server.url}/api/diff/switch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ diffType: "jj-line" }),
+      });
+      expect(automaticLineResponse.status).toBe(200);
+      const automaticLine = await automaticLineResponse.json() as {
+        diffType: string;
+        gitContext?: { diffFallback?: { requestedDiffType: string; effectiveDiffType: string } };
+      };
+      expect(automaticLine.diffType).toBe("jj-current");
+      // Deliberate copy pin: the sentence is the only discriminator between
+      // the root-fork and ambiguous-fork fallback branches on the wire.
+      expect(automaticLine.gitContext?.diffFallback).toEqual({
+        requestedDiffType: "jj-line",
+        effectiveDiffType: "jj-current",
+        message: "The line of work starts at the repository root. Showing Current change instead.",
+      });
+
       for (const nextType of ["jj-line", "jj-all"] as const) {
         const response = await fetch(`${server.url}/api/diff/switch`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ diffType: nextType }),
+          body: JSON.stringify(nextType === "jj-line"
+            ? { diffType: nextType, base: expectedJjBase, explicitBase: true }
+            : { diffType: nextType }),
         });
         expect(response.status).toBe(200);
         const payload = await response.json() as { diffType: string; rawPatch: string };

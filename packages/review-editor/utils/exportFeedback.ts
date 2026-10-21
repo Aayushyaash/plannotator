@@ -1,8 +1,20 @@
-import type { CodeAnnotation, ConventionalLabel, ConventionalDecoration, CommentAnnotation, Annotation, ArtifactAnnotationMeta } from '@plannotator/ui/types';
+import type { CodeAnnotation, ConventionalLabel, ConventionalDecoration, CommentAnnotation, Annotation, ArtifactAnnotationMeta, MarkdownPreviewAnchor } from '@plannotator/ui/types';
 import type { PRMetadata } from '@plannotator/shared/pr-types';
 import { getMRLabel, getMRNumberLabel, getDisplayRepo } from '@plannotator/shared/pr-types';
 import { exportAnnotations, parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 import { artifactAnchorLabel } from './artifactAnnotations';
+import { codeFenceFor } from '@plannotator/core/markdown-structure';
+
+/**
+ * Quoted code in a fence longer than any backtick run in it (CommonMark), so
+ * a ``` line in the code can never close the quote early. Unchanged (three
+ * backticks) for code without such a run. The Inbox's guideCommentEntry
+ * writes the same (packages/inbox/guideFeedback.test.ts keeps them equal).
+ */
+function fenced(code: string): string {
+  const fence = codeFenceFor(code);
+  return `${fence}\n${code}\n${fence}\n`;
+}
 
 /**
  * Format a conventional comment prefix per the Conventional Comments spec:
@@ -30,15 +42,22 @@ export interface FeedbackDiffContext {
   worktreePath?: string | null;
   /** Subject of the active commit when mode is `commit:<sha>` — header readability only. */
   commitSubject?: string;
+  /** Display id of the active commit (the short CHANGE id in a jj session). */
+  commitShortId?: string;
   /** Exact server snapshot for providers whose line anchors can outlive a refresh. */
   snapshotId?: string;
 }
 
-/** The sha when a `commit:<sha>` diff is (or was) the anchor, else undefined.
- *  Shared with App's annotation-stamping context so the stamp and the export
- *  comparison can never parse the mode differently. */
+/** The sha when a `commit:<sha>` diff (or a jj session's `jj-commit:<commit
+ *  id>`) is or was the anchor, else undefined. Shared with App's
+ *  annotation-stamping context and every other "is a commit detour on
+ *  screen?" check, so they can never parse the mode differently. */
 export function commitShaFromMode(mode: string | undefined): string | undefined {
-  return mode?.startsWith('commit:') ? mode.slice('commit:'.length) : undefined;
+  if (!mode) return undefined;
+  for (const prefix of ['commit:', 'jj-commit:']) {
+    if (mode.startsWith(prefix)) return mode.slice(prefix.length) || undefined;
+  }
+  return undefined;
 }
 
 function describeDiff(ctx: FeedbackDiffContext): string {
@@ -47,7 +66,9 @@ function describeDiff(ctx: FeedbackDiffContext): string {
   const commitSha = commitShaFromMode(mode);
   if (commitSha) {
     const subject = ctx.commitSubject ? ` — ${ctx.commitSubject}` : '';
-    return `Commit \`${commitSha.slice(0, 7)}\`${subject} (diff vs its parent)${worktreePath ? ` _(worktree: ${worktreePath})_` : ''}`;
+    // jj users read change ids; git keeps its 7-char sha.
+    const shown = mode.startsWith('jj-commit:') && ctx.commitShortId ? ctx.commitShortId : commitSha.slice(0, 7);
+    return `Commit \`${shown}\`${subject} (diff vs its parent)${worktreePath ? ` _(worktree: ${worktreePath})_` : ''}`;
   }
   if (mode === 'gitbutler:workspace') {
     label = 'GitButler workspace (all applied changes)';
@@ -65,6 +86,7 @@ function describeDiff(ctx: FeedbackDiffContext): string {
   }
   switch (mode) {
     case "uncommitted":  label = "Uncommitted changes"; break;
+    case "local-vs-remote": label = "Local vs remote branch (committed + uncommitted + untracked)"; break;
     case "staged":       label = "Staged changes"; break;
     case "unstaged":     label = "Unstaged changes"; break;
     case "last-commit":  label = "Last commit"; break;
@@ -112,6 +134,18 @@ function commitMismatchNote(ann: CodeAnnotation, currentCommitSha?: string): str
   return '';
 }
 
+/**
+ * Outdated label (#1590): a restored PR comment whose anchored lines no
+ * longer read the same. Its line numbers refer to an earlier version of the
+ * PR, so the agent must not read them against the diff above. The label text
+ * is deliberately fixed (maintainer-specified wording).
+ */
+export const OUTDATED_ANNOTATION_LABEL = '[Outdated — the code changed after this comment]';
+
+function outdatedNote(ann: CodeAnnotation): string {
+  return ann.outdated ? `${OUTDATED_ANNOTATION_LABEL}\n` : '';
+}
+
 function gitButlerMismatchNote(ann: CodeAnnotation, current?: FeedbackDiffContext): string {
   if (!ann.gitButlerDiffType) return '';
   const sameSnapshot = !ann.gitButlerSnapshotId || ann.gitButlerSnapshotId === current?.snapshotId;
@@ -151,6 +185,26 @@ export function formatCallFlowAnnotationTargets(annotation: CodeAnnotation): str
   return `\n\n**Selected call-flow steps:**\n${rows.join('\n')}`;
 }
 
+const MARKDOWN_PREVIEW_CONTEXT_LABEL: Record<NonNullable<MarkdownPreviewAnchor['diffContext']>, string> = {
+  added: 'in added text',
+  removed: 'in removed text',
+  modified: 'in changed text',
+  unchanged: 'in unchanged text',
+};
+
+/**
+ * The quoted text of a comment made in a Markdown file's rendered preview,
+ * as a Markdown quote, plus where in the rendered diff it was when that says
+ * something (removed text no longer exists in the file).
+ */
+export function markdownPreviewQuote(anchor: MarkdownPreviewAnchor): string {
+  const quote = anchor.originalText.trim().split('\n').map((line) => `> ${line}`).join('\n');
+  const where = anchor.diffContext && anchor.diffContext !== 'unchanged'
+    ? `\n_(${MARKDOWN_PREVIEW_CONTEXT_LABEL[anchor.diffContext]})_`
+    : '';
+  return `${quote}${where}\n`;
+}
+
 function formatFileAnnotations(fileAnnotations: CodeAnnotation[], headingLevel = '###', currentDiff?: FeedbackDiffContext): string {
   let output = '';
 
@@ -166,6 +220,17 @@ function formatFileAnnotations(fileAnnotations: CodeAnnotation[], headingLevel =
   for (const ann of sorted) {
     const scope = ann.scope ?? 'line';
     const prefix = formatConventionalPrefix(ann.conventionalLabel, ann.decorations);
+
+    if (scope === 'file' && ann.markdownPreview) {
+      output += `${headingLevel} Comment on the rendered Markdown\n`;
+      output += commitMismatchNote(ann, commitShaFromMode(currentDiff?.mode));
+      output += gitButlerMismatchNote(ann, currentDiff);
+      output += `${markdownPreviewQuote(ann.markdownPreview)}\n`;
+      if (ann.text) output += `${prefix}${ann.text}\n`;
+      else if (prefix) output += `${prefix.trimEnd()}\n`;
+      output += '\n';
+      continue;
+    }
 
     if (scope === 'file') {
       output += `${headingLevel} File Comment\n`;
@@ -189,6 +254,7 @@ function formatFileAnnotations(fileAnnotations: CodeAnnotation[], headingLevel =
       ? ` — \`\`${ann.tokenText.replace(/`/g, '\\`')}\`\`${ann.charStart != null ? ` (chars ${ann.charStart}-${ann.charEnd})` : ''}`
       : '';
     output += `${headingLevel} ${lineRange} (${ann.side})${tokenSuffix}\n`;
+    output += outdatedNote(ann);
     output += commitMismatchNote(ann, commitShaFromMode(currentDiff?.mode));
     output += gitButlerMismatchNote(ann, currentDiff);
 
@@ -222,7 +288,7 @@ function formatSelectedTextBlock(ann: CodeAnnotation): string {
   if (ann.selectedTextFromEdits) {
     output += `_The highlighted text below includes the reviewer's in-progress edits; the line range above anchors to the current file lines that region replaces (approximate)._\n`;
   }
-  output += `\n**Highlighted text:**\n\`\`\`\n${ann.selectedText}\n\`\`\`\n`;
+  output += `\n**Highlighted text:**\n${fenced(ann.selectedText)}`;
   return output;
 }
 
@@ -240,10 +306,10 @@ function formatSelectedTextBlock(ann: CodeAnnotation): string {
 function formatSuggestionBlocks(ann: CodeAnnotation): string {
   let output = '';
   if ((ann.suggestedCode || ann.text) && ann.originalCode) {
-    output += `\n**Replaces:**\n\`\`\`\n${ann.originalCode}\n\`\`\`\n`;
+    output += `\n**Replaces:**\n${fenced(ann.originalCode)}`;
   }
   if (ann.suggestedCode) {
-    output += `\n**Suggested code:**\n\`\`\`\n${ann.suggestedCode}\n\`\`\`\n`;
+    output += `\n**Suggested code:**\n${fenced(ann.suggestedCode)}`;
   }
   return output;
 }

@@ -60,6 +60,59 @@ body[data-plannotator-pinpoint-cursor],
 body[data-plannotator-pinpoint-cursor] * {
   cursor: crosshair !important;
 }
+/* A plain click on a link with a real destination follows it while armed
+ * (Cmd/Ctrl-click pins it), so such a link keeps the pointer that says so,
+ * until the modifier is held. A link that goes nowhere (no href, "", "#",
+ * javascript:) is not followed and keeps the crosshair. SVG links may carry
+ * only xlink:href, hence the any-namespace attribute. */
+body[data-plannotator-pinpoint-cursor]:not([data-plannotator-pin-modifier]) :is(a, area)[href]:not([href=""]):not([href="#"]):not([href^="javascript:" i]),
+body[data-plannotator-pinpoint-cursor]:not([data-plannotator-pin-modifier]) :is(a, area)[href]:not([href=""]):not([href="#"]):not([href^="javascript:" i]) *,
+body[data-plannotator-pinpoint-cursor]:not([data-plannotator-pin-modifier]) svg a:not([href])[*|href]:not([*|href=""]):not([*|href="#"]):not([*|href^="javascript:" i]),
+body[data-plannotator-pinpoint-cursor]:not([data-plannotator-pin-modifier]) svg a:not([href])[*|href]:not([*|href=""]):not([*|href="#"]):not([*|href^="javascript:" i]) * {
+  cursor: pointer !important;
+}
+/* Touch, armed: a tap on a link follows it and a press-and-hold pins it for
+ * a comment. iOS's link callout would take that hold, so it is off on links
+ * while armed, once a touch is seen (data-plannotator-touch) or on screens
+ * without hover. The callout is all: link text stays selectable, so a drag
+ * across a link (a trackpad, a touchscreen laptop) still quotes its words.
+ * Only while a hold on a link is in progress (data-plannotator-link-hold,
+ * from its touchstart to its release) is selection off too, so the platform's
+ * long-press does not start a native text selection under the finger. */
+body[data-plannotator-pinpoint-cursor][data-plannotator-touch] :is(a, area),
+body[data-plannotator-pinpoint-cursor][data-plannotator-touch] :is(a, area) *,
+body[data-plannotator-pinpoint-cursor][data-plannotator-touch] svg a,
+body[data-plannotator-pinpoint-cursor][data-plannotator-touch] svg a * {
+  -webkit-touch-callout: none !important;
+}
+@media (hover: none) {
+  body[data-plannotator-pinpoint-cursor] :is(a, area),
+  body[data-plannotator-pinpoint-cursor] :is(a, area) *,
+  body[data-plannotator-pinpoint-cursor] svg a,
+  body[data-plannotator-pinpoint-cursor] svg a * {
+    -webkit-touch-callout: none !important;
+  }
+}
+body[data-plannotator-link-hold] :is(a, area),
+body[data-plannotator-link-hold] :is(a, area) *,
+body[data-plannotator-link-hold] svg a,
+body[data-plannotator-link-hold] svg a * {
+  -webkit-touch-callout: none !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+/* Armed pinpoint over an EMBEDDED local document: the embed is one element
+ * from the outer page's point of view, and the bridge is never injected into a
+ * nested frame, so a click inside it would simply vanish into another document.
+ * Making frames transparent to the pointer while armed is what lets that click
+ * pin the <iframe>/<embed>/<object> itself. Interact (Esc, the header pen or
+ * Mod+Shift+A) restores native interaction inside the embed — which is also
+ * the only state a link inside it can be followed from.
+ * Live-app sessions never set this attribute: they annotate a real app whose
+ * own nested frames belong to it. */
+body[data-plannotator-frame-inert] :is(iframe, frame, embed, object) {
+  pointer-events: none !important;
+}
 @media (prefers-reduced-motion: reduce) {
   [data-plannotator-pinpoint-box].pn-pin-enter {
     animation: none;
@@ -320,17 +373,89 @@ export const BRIDGE_SCRIPT = `(function() {
   });
 
   // --- Resize ---
-  var lastHeight = 0;
+  // The last child of el whose bottom margin could collapse through el's
+  // bottom edge: out-of-flow children (display:none, absolute/fixed, floats)
+  // never do, which also skips the bridge's own fixed overlay elements and a
+  // trailing script element.
+  function lastInFlowChild(el) {
+    for (var child = el.lastElementChild; child; child = child.previousElementSibling) {
+      var cs = window.getComputedStyle(child);
+      if (cs.display === 'none' || cs.display === 'contents') continue;
+      if (cs.position === 'absolute' || cs.position === 'fixed') continue;
+      if (cs.float && cs.float !== 'none') continue;
+      return child;
+    }
+    return null;
+  }
+
+  // Height the auto-sized frame needs to show the whole document.
+  // Not body.scrollHeight alone: when body has no top padding or border, a
+  // first child's top margin collapses THROUGH body and moves body's box down
+  // without making it taller (the same holds at the bottom), so the page was
+  // cut short by those margins. Not documentElement.scrollHeight either: it
+  // never reports less than the frame's own viewport, so the frame could grow
+  // but never shrink back, and an html{height:100%} page would pin it at
+  // whatever height it had. Instead body's box is placed in document
+  // coordinates (its top already includes a collapsed top margin), and the
+  // bottom margins that can collapse through body's bottom edge are added by
+  // walking the last in-flow child chain. Nothing here reads the frame's own
+  // height, so the measure cannot feed back on itself.
+  function measureContentHeight() {
+    var body = document.body;
+    var scrollY = window.pageYOffset || 0;
+    var bodyRect = body.getBoundingClientRect();
+    var bottom = Math.max(bodyRect.bottom, bodyRect.top + (body.clientTop || 0) + body.scrollHeight) + scrollY;
+    var el = body;
+    for (var depth = 0; el && depth < 64; depth++) {
+      var cs = window.getComputedStyle(el);
+      var marginBottom = parseFloat(cs.marginBottom) || 0;
+      if (marginBottom > 0) bottom = Math.max(bottom, el.getBoundingClientRect().bottom + scrollY + marginBottom);
+      // A child's bottom margin only collapses through a plain block parent
+      // with no bottom padding or border that does not clip (flex/grid
+      // containers, flow-root and scroll containers keep it inside).
+      if (cs.display !== 'block' && cs.display !== 'list-item') break;
+      if (cs.overflowY && cs.overflowY !== 'visible') break;
+      if ((parseFloat(cs.paddingBottom) || 0) > 0 || (parseFloat(cs.borderBottomWidth) || 0) > 0) break;
+      el = lastInFlowChild(el);
+    }
+    var rootStyle = window.getComputedStyle(document.documentElement);
+    bottom += (parseFloat(rootStyle.paddingBottom) || 0) + (parseFloat(rootStyle.borderBottomWidth) || 0);
+    return Math.max(0, Math.ceil(bottom));
+  }
+
+  // Feedback guard. Content sized by the frame itself (html,body{height:100%},
+  // min-height:100vh, a 100vh section) plus anything around it (a collapsed
+  // margin, body's own margin) always measures taller than the frame, so every
+  // grow would ask for another: the frame would grow forever. The first
+  // measure after the parent applied a GROW we asked for decides: if the page
+  // still overflows by at least as much as it did before the grow, it grew
+  // with the frame, and the frame stays where it is. Later content changes
+  // post as usual (and re-run the check on their own grow). Pure, so the
+  // test can drive it: returns the height to post, or null for none.
+  function nextResizeHeight(state, h, viewport) {
+    var applied = state.awaiting && Math.abs(viewport - state.last) <= 1;
+    if (applied) state.awaiting = false;
+    if (h === state.last) return null;
+    if (applied && state.excess > 0 && h > viewport && h - viewport >= state.excess - 1) {
+      state.last = h; // held: report nothing until the content measures differently
+      return null;
+    }
+    state.excess = h - viewport;
+    state.awaiting = true;
+    state.last = h;
+    return h;
+  }
+
+  var resizeState = { last: 0, excess: 0, awaiting: false };
   function postResize() {
     if (LIVE) return; // live surfaces render full-viewport; the parent ignores height
     if (!document.body) return;
-    var h = document.body.scrollHeight;
-    if (h !== lastHeight) {
-      lastHeight = h;
-      postToParent({ type: PREFIX + 'resize', height: h });
-    }
+    var h = nextResizeHeight(resizeState, measureContentHeight(), window.innerHeight);
+    if (h !== null) postToParent({ type: PREFIX + 'resize', height: h });
   }
   window.addEventListener('load', postResize);
+  // The frame resizing is what tells the guard its last grow was applied.
+  window.addEventListener('resize', postResize, { passive: true });
 
   // --- Selection ---
   var pendingSelection = null;
@@ -340,6 +465,7 @@ export const BRIDGE_SCRIPT = `(function() {
   var pendingPinKey = null; // target key for the primary pinpoint target (multi-select)
   var pendingPinLabel = null; // semantic label captured for the primary target
   var pendingPinPoint = null; // normalized {x,y} click point inside the pinned element's rect
+  var pendingPinContext = null; // agent-facing element context for the primary target (see buildElementContext)
   var pendingPinViaPinpoint = false; // pinpoint drafts survive scroll-out (see postSelectionRect)
   // Multi-select is ARMED EXPLICITLY by the parent (arm-multi-select), and only
   // when the comment composer owns the draft. The bridge must never accept a
@@ -376,12 +502,16 @@ export const BRIDGE_SCRIPT = `(function() {
   // marker buttons keep their own clicks. BOTH surface kinds start ARMED —
   // Esc (or the header pen) drops to Interact.
   var annotateModeActive = true;
+  // A native host decides link navigations itself (HtmlViewer hostNavigates).
+  var hostNavigates = false;
   function updatePinpointCursor() {
     if (!document.body) return;
     if (annotateModeActive && currentInputMethod === 'pinpoint') {
       document.body.setAttribute('data-plannotator-pinpoint-cursor', '');
+      if (!LIVE) document.body.setAttribute('data-plannotator-frame-inert', '');
     } else {
       document.body.removeAttribute('data-plannotator-pinpoint-cursor');
+      document.body.removeAttribute('data-plannotator-frame-inert');
     }
   }
   var pinpointHover = null;
@@ -466,6 +596,7 @@ export const BRIDGE_SCRIPT = `(function() {
       pinpoint: (extras && extras.pinpoint) || undefined,
       targetKey: (extras && extras.targetKey) || undefined,
       targetLabel: (extras && extras.targetLabel) || undefined,
+      context: (extras && extras.context) || undefined,
       rect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height }
     });
     renderAnnotationOverlay(); // draft selection highlight (overlay-projected)
@@ -678,6 +809,21 @@ export const BRIDGE_SCRIPT = `(function() {
       flashMultiTarget(typeof e.data.key === 'string' ? e.data.key : '');
     }
 
+    else if (type === PREFIX + 'step-pin') {
+      // A host's Parent or Child (a phone's comment sheet): move the pinned
+      // draft to the element around it, or back in. Re-pins through
+      // annotateElement, so the parent sees an ordinary pinpoint selection.
+      stepPin(e.data.direction === 'child' ? 'child' : 'parent');
+    }
+
+    else if (type === PREFIX + 'reveal-pin') {
+      // A host whose own panel covers the page's lower part (a phone's comment
+      // sheet) shrank the frame: bring the pinned draft back into view.
+      if (pendingPinEl && pendingPinEl.isConnected) {
+        try { pendingPinEl.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (ex) {}
+      }
+    }
+
     else if (type === PREFIX + 'scroll-to') {
       // Selecting an annotation scrolls its first resolved target into view
       // and flashes the overlay focus highlight over EVERY rect of EVERY
@@ -686,6 +832,13 @@ export const BRIDGE_SCRIPT = `(function() {
       // behavior lets the parent pass its reduced-motion preference across
       // the boundary; absent means smooth, as before.
       scrollToAnnotation(e.data.id, e.data.behavior === 'auto' ? 'auto' : 'smooth');
+    }
+
+    else if (type === PREFIX + 'scroll-to-fragment') {
+      // A linked document opened from an in-page link carried a #fragment.
+      // The srcdoc document has no URL of its own, so the parent cannot set
+      // one: it replays the fragment here once the new document is ready.
+      scrollToLocalFragment(typeof e.data.fragment === 'string' ? e.data.fragment : '');
     }
 
     else if (type === PREFIX + 'focus-mark') {
@@ -712,6 +865,10 @@ export const BRIDGE_SCRIPT = `(function() {
       }
       updatePinpointCursor(); // cursor affordance is mode-gated: never in Interact
       if (vimEnabled) updateVimUi();
+    }
+
+    else if (type === PREFIX + 'set-host-navigates') {
+      hostNavigates = e.data.active === true;
     }
 
     else if (type === PREFIX + 'set-annotate-mode') {
@@ -903,8 +1060,31 @@ export const BRIDGE_SCRIPT = `(function() {
       var svgGroup = node.closest('g');
       if (svgGroup) node = svgGroup;
     }
+    node = preferInertFrameAt(node, x, y);
     node = promoteTinyTarget(node);
     if (node === document.body || node === document.documentElement) return null;
+    return node;
+  }
+
+  // While frames are pointer-transparent (armed pinpoint, srcdoc sessions),
+  // hit-testing passes THROUGH an embedded document to the container painted
+  // behind it — so a click on an embed would pin its wrapper div. The embed is
+  // what the reviewer is pointing at and what the anchor must name, so a point
+  // inside a frame's own rect resolves to that frame. Bounded to the frames
+  // inside the element already resolved, so it costs nothing on ordinary pages.
+  var FRAME_SELECTOR = 'iframe,frame,embed,object';
+  function framesArePointerInert() {
+    return !LIVE && annotateModeActive && currentInputMethod === 'pinpoint';
+  }
+  function preferInertFrameAt(node, x, y) {
+    if (!framesArePointerInert() || !node.querySelectorAll) return node;
+    if (node.matches && node.matches(FRAME_SELECTOR)) return node;
+    var frames = node.querySelectorAll(FRAME_SELECTOR);
+    for (var i = 0; i < frames.length && i < 64; i++) {
+      var r = frames[i].getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return frames[i];
+    }
     return node;
   }
 
@@ -1098,6 +1278,10 @@ export const BRIDGE_SCRIPT = `(function() {
 
   // Floating label naming the element under the cursor (like the markdown overlay).
   var PINPOINT_LABELS = { H1:'Heading', H2:'Heading', H3:'Heading', H4:'Heading', H5:'Heading', H6:'Heading', P:'Paragraph', UL:'List', OL:'List', LI:'List item', A:'Link', BUTTON:'Button', IMG:'Image', TABLE:'Table', THEAD:'Table', TBODY:'Table', TR:'Row', TD:'Cell', TH:'Header cell', SECTION:'Section', NAV:'Navigation', HEADER:'Header', FOOTER:'Footer', ARTICLE:'Article', ASIDE:'Sidebar', BLOCKQUOTE:'Quote', PRE:'Code', CODE:'Code', FIGURE:'Figure', FIGCAPTION:'Caption', MAIN:'Main', FORM:'Form', INPUT:'Input', LABEL:'Label' };
+  // Media kinds name themselves only when the page gives no accessible name:
+  // unlike the semantic tags above, an aria-label on a <video> is a better
+  // label than "Video", and it keeps winning exactly as it did before.
+  var MEDIA_PINPOINT_LABELS = { VIDEO:'Video', AUDIO:'Audio', IFRAME:'Frame', CANVAS:'Canvas' };
 
   var MAX_HOVER_LABEL = 40;
   function truncateLabel(text) {
@@ -1133,6 +1317,8 @@ export const BRIDGE_SCRIPT = `(function() {
     if (known) return known;
     var aria = el.getAttribute && el.getAttribute('aria-label');
     if (aria && aria.trim()) return truncateLabel(aria.trim());
+    var media = MEDIA_PINPOINT_LABELS[el.tagName];
+    if (media) return media;
     var role = el.getAttribute && el.getAttribute('role');
     if (role && role.trim()) return truncateLabel(role.trim());
     var tokens = meaningfulClassTokens(el);
@@ -1212,6 +1398,14 @@ export const BRIDGE_SCRIPT = `(function() {
   // changes); shared by mousemove and the scroll/resize reconcile pass.
   // Per-event hit-testing only — never builds the semantic graph.
   function updatePinpointHover(x, y, fallbackNode) {
+    // A link a plain click follows shows no pin outline unless Cmd/Ctrl is
+    // held: the outline always matches what a click there will do.
+    if (!pinModifierHeld && !pendingPinEl && (followableLinkAt(fallbackNode) || followableLinkAt(deepElementFromPoint(x, y)))) {
+      pinpointHover = null;
+      hidePinpointBox();
+      hidePinpointLabel();
+      return;
+    }
     var el = pinpointLeafAt(x, y, fallbackNode);
     // The 25px marker bubble owns clicks over it (they select its comment),
     // so hover must advertise the MARKER's own identity — no annotate box,
@@ -1242,9 +1436,36 @@ export const BRIDGE_SCRIPT = `(function() {
     positionPinpointLabel(el, pinpointHoverLabel(el));
   }
 
+  // Cmd or Ctrl held (the pin modifier): a link under the pointer shows the
+  // pin outline and the crosshair instead of the follow pointer. Read from
+  // the key itself (as the token-hover gate does) and from every pointer
+  // move, so a key pressed with focus outside this frame still counts.
+  var pinModifierHeld = false;
+  function setPinModifier(held) {
+    if (held === pinModifierHeld) return;
+    pinModifierHeld = held;
+    if (document.body) {
+      if (held) document.body.setAttribute('data-plannotator-pin-modifier', '');
+      else document.body.removeAttribute('data-plannotator-pin-modifier');
+    }
+    if (annotateModeActive && currentInputMethod === 'pinpoint' && lastPointer && !(vimEnabled && vimPhase !== 'inactive')) {
+      updatePinpointHover(lastPointer.x, lastPointer.y, lastPointerNode || pinpointHover);
+    }
+  }
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Meta' || e.key === 'Control') setPinModifier(true);
+  }, true);
+  document.addEventListener('keyup', function(e) {
+    if (e.key === 'Meta' || e.key === 'Control') setPinModifier(e.metaKey || e.ctrlKey);
+  }, true);
+  window.addEventListener('blur', function() { setPinModifier(false); });
+
   var lastPointer = null;
+  var lastPointerNode = null;
   document.addEventListener('mousemove', function(e) {
     lastPointer = { x: e.clientX, y: e.clientY };
+    lastPointerNode = e.target && e.target.nodeType === 1 ? e.target : null;
+    if (!!(e.metaKey || e.ctrlKey) !== pinModifierHeld) setPinModifier(!!(e.metaKey || e.ctrlKey));
     updateDragYield(e);
     if (!annotateModeActive) return; // Interact mode: no hover affordances
     if (currentInputMethod !== 'pinpoint') {
@@ -2569,7 +2790,86 @@ export const BRIDGE_SCRIPT = `(function() {
 
   function anchorTextSnapshot(el) {
     var text = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+    if (!text) return anchorSourceSnapshot(el);
     return text.length > 180 ? text.slice(0, 180) : text;
+  }
+
+  // Media snapshots. An image, video or frame has no text to verify a weak
+  // selector against, but its source says what it shows the way text says
+  // what a paragraph says, and unlike the structure-derived signatures D1
+  // ruled out, two siblings showing different files never share it. The key
+  // is the author's reference to the resource: relative to the document's
+  // base when it lies under it (a host may re-root assets per session, through
+  // a <base> on its own asset route or by rewriting attributes to a session
+  // host), else its root-relative path on the document's own origin (a live
+  // app's proxy port changes per session), else origin and path. The query
+  // and the fragment are part of what a source shows (/_next/image?url=a.jpg,
+  // proto.html?step=2, icons.svg#close), so they count, but only as a digest:
+  // they can carry per-visit state (signed URLs, tokens) that must never be
+  // stored in plain text in an annotation. A source whose query changes per
+  // load therefore does not restore, which fails closed. Inline sources
+  // (data:, blob:) name no resource and get no key.
+  var ANCHOR_SOURCE_PREFIX = 'src:';
+  var ANCHOR_SOURCE_MAX = 176;
+
+  // FNV-1a, 32 bits, as 8 hex digits: an identity check, not a secret.
+  function anchorDigest(value) {
+    var hash = 0x811c9dc5;
+    for (var i = 0; i < value.length; i++) {
+      hash ^= value.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return ('0000000' + hash.toString(16)).slice(-8);
+  }
+
+  function anchorSourceKey(el) {
+    var raw = descRawSource(el);
+    if (!raw || /^(data|blob):/i.test(raw)) return '';
+    var path = raw;
+    var variant = '';
+    var url = null;
+    try { url = new URL(raw, document.baseURI); } catch (ex) {}
+    if (!url || !/^https?:$/i.test(url.protocol)) {
+      var mark = raw.search(/[?#]/);
+      if (mark >= 0) {
+        path = raw.slice(0, mark);
+        variant = raw.slice(mark);
+      }
+    } else {
+      variant = url.search + url.hash;
+      var base = null;
+      try { base = new URL('.', document.baseURI); } catch (ex2) {}
+      if (base && url.origin === base.origin && url.pathname.indexOf(base.pathname) === 0) {
+        path = url.pathname.slice(base.pathname.length);
+      } else if (base && url.origin === base.origin) {
+        path = url.pathname;
+      } else {
+        path = url.origin + url.pathname;
+      }
+    }
+    if (!path) return '';
+    return variant ? path + '?' + anchorDigest(variant) : path;
+  }
+
+  function sourceSnapshotOf(el) {
+    var key = anchorSourceKey(el);
+    if (!key) return '';
+    // A long key keeps its head for readability and a digest of the whole,
+    // so two sources that differ only past the cut never compare equal.
+    if (key.length > ANCHOR_SOURCE_MAX) key = key.slice(0, ANCHOR_SOURCE_MAX - 9) + '~' + anchorDigest(key);
+    return ANCHOR_SOURCE_PREFIX + key;
+  }
+
+  // A source that another element of the same kind shares cannot tell the two
+  // apart, which is the D1 failure again: no snapshot, so no anchor.
+  function anchorSourceSnapshot(el) {
+    var snapshot = sourceSnapshotOf(el);
+    if (!snapshot) return '';
+    var sameKind = document.getElementsByTagName(el.tagName);
+    for (var i = 0; i < sameKind.length; i++) {
+      if (sameKind[i] !== el && sourceSnapshotOf(sameKind[i]) === snapshot) return '';
+    }
+    return snapshot;
   }
 
   function uniquelySelects(selector, el) {
@@ -2670,12 +2970,13 @@ export const BRIDGE_SCRIPT = `(function() {
     if (!selector) return null;
     var snapshot = anchorTextSnapshot(el);
     // Text-less elements anchor ONLY through a stable-identity rung (#id or
-    // an author-controlled data-* identity attribute). A weak (positional /
-    // class) selector has nothing to verify against — identical siblings
-    // share every structural trait, so any derived signature would validate
-    // the WRONG element after a sibling is inserted or removed. A
-    // wrong-binding anchor is worse than no anchor: ship none and fail
-    // closed (the pin simply doesn't restore).
+    // an author-controlled data-* identity attribute), or, for media, through
+    // a source no other element of its kind shows (anchorSourceSnapshot).
+    // Otherwise a weak (positional / class) selector has nothing to verify
+    // against — identical siblings share every structural trait, so any
+    // derived signature would validate the WRONG element after a sibling is
+    // inserted or removed. A wrong-binding anchor is worse than no anchor:
+    // ship none and fail closed (the pin simply doesn't restore).
     if (!snapshot && !anchorHasStableIdentity(selector, el)) return null;
     return {
       selector: selector,
@@ -2708,6 +3009,26 @@ export const BRIDGE_SCRIPT = `(function() {
 
   function resolveAnchorElement(anchor) {
     if (!anchor || typeof anchor.selector !== 'string' || !anchor.selector || typeof anchor.tagName !== 'string') return null;
+    return resolveAnchorSelector(anchor) || relocateBySource(anchor);
+  }
+
+  // A media anchor whose selector no longer lands on its element (a sibling
+  // was inserted or removed, a refresh reordered the page) finds it again by
+  // its source, the way a text annotation falls back to searching for its
+  // text. Exactly one element may match: two resolve nothing.
+  function relocateBySource(anchor) {
+    if (typeof anchor.text !== 'string' || anchor.text.indexOf(ANCHOR_SOURCE_PREFIX) !== 0) return null;
+    var found = null;
+    var candidates = document.getElementsByTagName(anchor.tagName);
+    for (var i = 0; i < candidates.length; i++) {
+      if (sourceSnapshotOf(candidates[i]) !== anchor.text) continue;
+      if (found) return null;
+      found = candidates[i];
+    }
+    return found;
+  }
+
+  function resolveAnchorSelector(anchor) {
     var matches;
     try {
       matches = document.querySelectorAll(anchor.selector);
@@ -2728,8 +3049,467 @@ export const BRIDGE_SCRIPT = `(function() {
     return el;
   }
 
+  // --- Element context: a bounded, agent-facing description of a pinpointed
+  // element, captured at click time (only the bridge can see the DOM). It is
+  // purely descriptive and NEVER consulted by restore (that is the anchor's
+  // job): the exported feedback prints it so an agent working in the app's
+  // source can find the element without having the page. Everything here is
+  // page-controlled, so the parent re-validates and re-caps it all at the
+  // trust boundary; this side keeps the wire payload honest.
+  //
+  // Constraints (the "smart" part is that they adapt to the element):
+  // - attributes are an ALLOWLIST (a page cannot add a key); no form values,
+  //   no on* handlers, no style, no script/style/template contents ever;
+  // - href/src URLs lose their query and fragment (tokens live there),
+  //   relative ones included, and data: URIs keep only their media-type
+  //   prefix;
+  // - the outline tries two levels of children, falls back to one, then to a
+  //   per-tag count, whichever first fits CTX_MAX_OUTLINE, so a click on a
+  //   whole <main> costs the same bytes as a click on a chip;
+  // - text is innerText (rendered words, not the DOM soup), word-boundary
+  //   truncated;
+  // - the serialized context stays under a byte budget by shedding the
+  //   expendable fields in a fixed order; tag/id/role/name/page never shed.
+  var CTX_MAX_BYTES = 2048;        // primary target
+  var CTX_MAX_BYTES_EXTRA = 1024;  // each shift-click additional target
+  var CTX_MAX_TEXT = 300;
+  var CTX_MAX_OUTLINE = 600;
+  var CTX_MAX_PATH_SEGMENTS = 8;
+  var CTX_MAX_CLASSES = 8;
+  var CTX_MAX_ATTRS = 10;
+  var CTX_MAX_ATTR_VALUE = 120;
+  var CTX_MAX_CHILDREN = 6;
+  var CONTEXT_ATTRS = ['href', 'src', 'alt', 'title', 'type', 'name', 'role', 'placeholder', 'for', 'target', 'rel',
+    'aria-label', 'aria-labelledby', 'aria-describedby', 'aria-current', 'aria-expanded', 'aria-hidden', 'aria-controls',
+    'data-annotate', 'data-testid', 'data-test', 'data-test-id', 'data-cy', 'data-qa', 'data-component', 'data-id'];
+  var CONTEXT_SKIP_TAGS = { SCRIPT: 1, STYLE: 1, TEMPLATE: 1, NOSCRIPT: 1 };
+  var CONTEXT_IMPLICIT_ROLE = { NAV: 'navigation', MAIN: 'main', HEADER: 'banner', FOOTER: 'contentinfo', ASIDE: 'complementary',
+    ARTICLE: 'article', SECTION: 'region', FORM: 'form', BUTTON: 'button', A: 'link', IMG: 'img', TABLE: 'table', UL: 'list',
+    OL: 'list', LI: 'listitem', H1: 'heading', H2: 'heading', H3: 'heading', H4: 'heading', H5: 'heading', H6: 'heading',
+    DIALOG: 'dialog', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox', SUMMARY: 'button', PROGRESS: 'progressbar' };
+  var CONTEXT_LANDMARK_SELECTOR = 'main,nav,header,footer,aside,article,section,form,dialog,[role]';
+
+  // Collapse control characters and whitespace runs; the parent does it again.
+  function ctxCollapse(value, max) {
+    var s = String(value == null ? '' : value).replace(/[\\x00-\\x1f\\x7f]+/g, ' ').replace(/\\s+/g, ' ').trim();
+    return max ? ctxTruncate(s, max) : s;
+  }
+
+  // Word-boundary truncation with an ellipsis, never splitting a surrogate pair.
+  function ctxTruncate(s, max) {
+    if (s.length <= max) return s;
+    var cut = s.lastIndexOf(' ', max - 1);
+    if (cut < max * 0.6) cut = max - 1;
+    var last = s.charCodeAt(cut - 1);
+    if (last >= 0xd800 && last <= 0xdbff) cut -= 1;
+    return s.slice(0, cut) + '…';
+  }
+
+  function ctxBytes(value) {
+    var json = JSON.stringify(value);
+    try { return new TextEncoder().encode(json).length; } catch (ex) {}
+    try { return unescape(encodeURIComponent(json)).length; } catch (ex2) { return json.length * 2; }
+  }
+
+  // URL attribute values: keep what locates the element in source, drop
+  // what identifies the user. The path survives in every form; the query and
+  // the fragment never do — a relative URL carries the same per-visit state an
+  // absolute one does (session ids, and the implicit-flow tokens that live in
+  // the fragment specifically), so it is scrubbed the same way.
+  function ctxScrubUrl(value) {
+    var v = String(value).trim();
+    if (/^javascript:/i.test(v)) return null;
+    // Srcdoc sessions serve a document's relative assets through the
+    // session's own asset route (/api/html-assets/<token>/<path>). The token
+    // means nothing outside this session; the path after it is the author's
+    // own, relative to the document, which is what an agent can find.
+    if (!LIVE) {
+      var asset = v.match(/^\\/api\\/html-assets\\/[^\\/?#]+\\/([^?#]*)/);
+      if (asset && asset[1]) {
+        // The route percent-encodes each segment; show the name the author
+        // wrote (jane doe.png, not jane%20doe.png). A malformed escape, or one
+        // that decodes to ? or # (which the query scrub below would cut), keeps
+        // the raw text.
+        var authored = asset[1];
+        try {
+          var decoded = decodeURIComponent(authored);
+          if (!/[?#]/.test(decoded)) authored = decoded;
+        } catch (ex) {}
+        v = authored + v.slice(asset[0].length);
+      }
+    }
+    if (/^data:/i.test(v)) {
+      var comma = v.indexOf(',');
+      return (comma > 0 ? v.slice(0, Math.min(comma, 40)) : v.slice(0, 40)) + ',…';
+    }
+    if (/^https?:\\/\\//i.test(v)) {
+      try {
+        var u = new URL(v);
+        return u.origin + u.pathname + (u.search || u.hash ? '?…' : '');
+      } catch (ex) { return ctxTruncate(v, CTX_MAX_ATTR_VALUE); }
+    }
+    var mark = v.search(/[?#]/);
+    if (mark >= 0) return v.slice(0, mark) + '?…';
+    return v;
+  }
+
+  function ctxAttrs(el) {
+    var out = [];
+    if (!el.getAttribute) return out;
+    for (var i = 0; i < CONTEXT_ATTRS.length && out.length < CTX_MAX_ATTRS; i++) {
+      var name = CONTEXT_ATTRS[i];
+      var value = el.getAttribute(name);
+      if (value == null) continue;
+      if (name === 'href' || name === 'src') {
+        value = ctxScrubUrl(value);
+        if (value == null) continue;
+      }
+      out.push([name, ctxCollapse(value, CTX_MAX_ATTR_VALUE)]);
+    }
+    return out;
+  }
+
+  function ctxClasses(el) {
+    var out = [];
+    if (!el.classList) return out;
+    for (var i = 0; i < el.classList.length && out.length < CTX_MAX_CLASSES; i++) {
+      var cls = String(el.classList[i]);
+      if (!cls || isLikelyGeneratedClass(cls)) continue;
+      out.push(ctxTruncate(cls, 48));
+    }
+    if (el.classList.length > out.length && out.length === CTX_MAX_CLASSES) out.push('+' + (el.classList.length - out.length) + ' more');
+    return out;
+  }
+
+  function ctxFirstClass(el) {
+    if (!el.classList) return null;
+    for (var i = 0; i < el.classList.length; i++) {
+      var cls = String(el.classList[i]);
+      if (cls && !isLikelyGeneratedClass(cls)) return ctxTruncate(cls, 48);
+    }
+    return null;
+  }
+
+  function ctxRole(el) {
+    var explicit = el.getAttribute && el.getAttribute('role');
+    if (explicit && explicit.trim()) return ctxCollapse(explicit, 32);
+    if (el.tagName === 'A' && !(el.getAttribute && el.getAttribute('href'))) return null;
+    return CONTEXT_IMPLICIT_ROLE[el.tagName] || null;
+  }
+
+  function ctxText(el) {
+    var raw = typeof el.innerText === 'string' && el.innerText ? el.innerText : (el.textContent || '');
+    return ctxCollapse(raw, CTX_MAX_TEXT);
+  }
+
+  // Accessible name, in the practical order: aria-label, aria-labelledby,
+  // alt, title, a <label for>, then the element's own short text.
+  function ctxName(el) {
+    if (!el.getAttribute) return null;
+    var aria = el.getAttribute('aria-label');
+    if (aria && aria.trim()) return ctxCollapse(aria, 120);
+    var by = el.getAttribute('aria-labelledby');
+    if (by && by.trim()) {
+      var ids = by.trim().split(/\\s+/);
+      var parts = [];
+      for (var i = 0; i < ids.length && i < 4; i++) {
+        var ref = document.getElementById(ids[i]);
+        if (ref) parts.push(ref.textContent || '');
+      }
+      var joined = ctxCollapse(parts.join(' '), 120);
+      if (joined) return joined;
+    }
+    var alt = el.getAttribute('alt');
+    if (alt && alt.trim()) return ctxCollapse(alt, 120);
+    var title = el.getAttribute('title');
+    if (title && title.trim()) return ctxCollapse(title, 120);
+    if (el.id && typeof CSS !== 'undefined' && CSS.escape) {
+      var label = null;
+      try { label = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); } catch (ex) {}
+      if (label) {
+        var labelText = ctxCollapse(label.textContent, 120);
+        if (labelText) return labelText;
+      }
+    }
+    var own = ctxCollapse(el.textContent, 120);
+    return own && own.length <= 80 ? own : null;
+  }
+
+  // One path segment: tag, then the strongest cheap identity it carries, and
+  // a position only when a same-tag sibling would otherwise read the same.
+  function ctxSegment(el) {
+    var seg = el.tagName.toLowerCase();
+    if (el.id) return seg + '#' + ctxCollapse(el.id, 60);
+    var cls = ctxFirstClass(el);
+    if (cls) seg += '.' + cls;
+    var hook = el.getAttribute && (el.getAttribute('data-testid') || el.getAttribute('data-component'));
+    if (hook) seg += '[' + (el.getAttribute('data-testid') ? 'data-testid' : 'data-component') + '="' + ctxCollapse(hook, 40) + '"]';
+    // A position only when a same-tag sibling would read identically (same
+    // first class, same hook): p.beta among p.alpha / p.gamma needs none,
+    // the fourth of forty identical <li class="row"> does.
+    var parent = el.parentElement;
+    if (parent) {
+      var same = 0;
+      var index = 0;
+      var typeIndex = 0;
+      var typeCount = 0;
+      for (var i = 0; i < parent.children.length; i++) {
+        var sibling = parent.children[i];
+        if (sibling.tagName !== el.tagName) continue;
+        typeCount++;
+        if (sibling === el) typeIndex = typeCount;
+        if (sibling.id) continue;
+        if (ctxFirstClass(sibling) === cls && !!(sibling.getAttribute && (sibling.getAttribute('data-testid') || sibling.getAttribute('data-component'))) === !!hook) {
+          same++;
+          if (sibling === el) index = same;
+        }
+      }
+      if (same > 1) seg += ':nth-of-type(' + typeIndex + ')';
+    }
+    return seg;
+  }
+
+  function ctxPath(el) {
+    var parts = [];
+    var current = el;
+    while (current && current.nodeType === 1 && current !== document.documentElement) {
+      if (parts.length >= CTX_MAX_PATH_SEGMENTS) { parts.unshift('…'); break; }
+      parts.unshift(ctxSegment(current));
+      if (current === document.body) break;
+      current = current.parentElement;
+    }
+    return parts.join(' > ');
+  }
+
+  function ctxIsSkipped(node) {
+    return !node || node.nodeType !== 1 || CONTEXT_SKIP_TAGS[node.tagName] || isViewerOverlayNode(node);
+  }
+
+  function ctxElementChildren(el) {
+    var kids = [];
+    for (var i = 0; i < el.children.length; i++) {
+      if (!ctxIsSkipped(el.children[i])) kids.push(el.children[i]);
+    }
+    return kids;
+  }
+
+  function ctxTagCounts(nodes) {
+    var counts = {};
+    var order = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var tag = nodes[i].tagName.toLowerCase();
+      if (!counts[tag]) { counts[tag] = 0; order.push(tag); }
+      counts[tag]++;
+    }
+    var out = [];
+    for (var j = 0; j < order.length && j < 4; j++) out.push(order[j] + '×' + counts[order[j]]);
+    if (order.length > 4) out.push('…');
+    return out.join(', ');
+  }
+
+  function ctxAttrString(pairs) {
+    var s = '';
+    for (var i = 0; i < pairs.length; i++) s += ' ' + pairs[i][0] + '="' + pairs[i][1].replace(/"/g, '&quot;') + '"';
+    return s;
+  }
+
+  // id and up to four author classes on an opening tag: the grep keys, first.
+  function ctxIdentityString(el) {
+    var s = '';
+    if (el.id) s += ' id="' + ctxCollapse(el.id, 60) + '"';
+    var classes = [];
+    if (el.classList) {
+      for (var i = 0; i < el.classList.length && classes.length < 4; i++) {
+        var cls = String(el.classList[i]);
+        if (cls && !isLikelyGeneratedClass(cls)) classes.push(ctxTruncate(cls, 48));
+      }
+    }
+    if (classes.length) s += ' class="' + classes.join(' ') + '"';
+    return s;
+  }
+
+  // A child rendered inside the outline: its tag with one identity hook, its
+  // own short text when it has no element children, an ellipsis otherwise.
+  function ctxChildTag(child, depth) {
+    var tag = child.tagName.toLowerCase();
+    var open = '<' + tag;
+    if (child.id) open += ' id="' + ctxCollapse(child.id, 60) + '"';
+    else {
+      var cls = ctxFirstClass(child);
+      if (cls) open += ' class="' + cls + '"';
+    }
+    var hook = child.getAttribute && child.getAttribute('data-testid');
+    if (hook) open += ' data-testid="' + ctxCollapse(hook, 40) + '"';
+    if (tag === 'a' && child.getAttribute('href')) {
+      var href = ctxScrubUrl(child.getAttribute('href'));
+      if (href) open += ' href="' + ctxCollapse(href, 60) + '"';
+    }
+    open += '>';
+    var kids = ctxElementChildren(child);
+    if (!kids.length) {
+      var own = ctxCollapse(child.textContent, 40);
+      return open + own + '</' + tag + '>';
+    }
+    if (depth <= 1) {
+      var leafText = ctxCollapse(child.textContent, 40);
+      return open + (leafText || '…') + '</' + tag + '>';
+    }
+    var lines = [open];
+    var shown = kids.slice(0, CTX_MAX_CHILDREN);
+    for (var i = 0; i < shown.length; i++) lines.push('  ' + ctxChildTag(shown[i], depth - 1));
+    if (kids.length > shown.length) lines.push('  <!-- +' + (kids.length - shown.length) + ' more: ' + ctxTagCounts(kids.slice(shown.length)) + ' -->');
+    lines.push('</' + tag + '>');
+    return lines.join('\\n');
+  }
+
+  function ctxOutlineAtDepth(el, attrs, kids, depth) {
+    var tag = el.tagName.toLowerCase();
+    var open = '<' + tag + ctxIdentityString(el) + ctxAttrString(attrs) + '>';
+    if (!kids.length) {
+      var own = ctxCollapse(el.textContent, 80);
+      return open + own + '</' + tag + '>';
+    }
+    if (depth <= 0) return open + '<!-- ' + kids.length + ' children: ' + ctxTagCounts(kids) + ' -->' + '</' + tag + '>';
+    var lines = [open];
+    var shown = kids.slice(0, CTX_MAX_CHILDREN);
+    for (var i = 0; i < shown.length; i++) {
+      var rendered = ctxChildTag(shown[i], depth);
+      var childLines = rendered.split('\\n');
+      for (var j = 0; j < childLines.length; j++) lines.push('  ' + childLines[j]);
+    }
+    if (kids.length > shown.length) lines.push('  <!-- +' + (kids.length - shown.length) + ' more: ' + ctxTagCounts(kids.slice(shown.length)) + ' -->');
+    lines.push('</' + tag + '>');
+    return lines.join('\\n');
+  }
+
+  // Adaptive depth: two levels, then one, then a per-tag count — the first
+  // that fits the outline cap. A whole-page container never costs more than a chip.
+  function ctxOutline(el, attrs) {
+    var kids = ctxElementChildren(el);
+    var depths = [2, 1, 0];
+    for (var i = 0; i < depths.length; i++) {
+      var out = ctxOutlineAtDepth(el, attrs, kids, depths[i]);
+      if (out.length <= CTX_MAX_OUTLINE) return out;
+    }
+    return ctxTruncate(ctxOutlineAtDepth(el, attrs, kids, 0), CTX_MAX_OUTLINE);
+  }
+
+  function ctxLandmark(el) {
+    var parent = el.parentElement;
+    if (!parent || !parent.closest) return null;
+    var region = null;
+    try { region = parent.closest(CONTEXT_LANDMARK_SELECTOR); } catch (ex) { return null; }
+    if (!region || region === document.body) return null;
+    var seg = ctxSegment(region);
+    var name = region.getAttribute('aria-label');
+    if (name && name.trim()) seg += ' "' + ctxCollapse(name, 60) + '"';
+    return ctxTruncate(seg, 80);
+  }
+
+  // The nearest heading ABOVE the element in document order (or one that
+  // contains it): the section it sits in, which often names the source file.
+  function ctxHeading(el) {
+    var headings = document.querySelectorAll('h1,h2,h3,h4,h5,h6');
+    var best = null;
+    for (var i = 0; i < headings.length && i < 500; i++) {
+      var h = headings[i];
+      var pos = el.compareDocumentPosition(h);
+      if (pos & 2 || pos & 8) best = h; // PRECEDING or CONTAINS
+      else if (pos & 4) break;          // FOLLOWING: every later heading follows too
+    }
+    if (!best) return null;
+    var text = ctxCollapse(best.textContent, 120);
+    return text ? best.tagName.toLowerCase() + ' "' + text + '"' : null;
+  }
+
+  // The cheapest safe framework hint: an author-placed component marker on
+  // the element or a near ancestor. Deliberately no React fiber reads.
+  function ctxComponent(el) {
+    var current = el;
+    for (var depth = 0; current && current.nodeType === 1 && depth < 6; depth++) {
+      var attrs = ['data-component', 'data-testid', 'data-qa'];
+      for (var i = 0; i < attrs.length; i++) {
+        var value = current.getAttribute && current.getAttribute(attrs[i]);
+        if (value && value.trim()) return attrs[i] + '=' + ctxCollapse(value, 60);
+      }
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function ctxRect(el) {
+    var r = el.getBoundingClientRect();
+    return {
+      x: Math.round(r.left), y: Math.round(r.top),
+      w: Math.round(r.width), h: Math.round(r.height),
+      vw: Math.round(window.innerWidth || 0), vh: Math.round(window.innerHeight || 0)
+    };
+  }
+
+  // Shed order when over budget: the fields an agent can live without first.
+  // Mirrors ELEMENT_CONTEXT_SHED_ORDER in @plannotator/core/html-anchor.
+  var CTX_SHED_ORDER = ['outline', 'text', 'attrs', 'classes', 'path', 'heading', 'landmark', 'component', 'sourceName'];
+
+  function buildElementContext(el, maxBytes) {
+    if (!el || el.nodeType !== 1) return null;
+    try {
+      var attrs = ctxAttrs(el);
+      var context = { tag: el.tagName.toLowerCase() };
+      if (el.id) context.id = ctxCollapse(el.id, 100);
+      var classes = ctxClasses(el);
+      if (classes.length) context.classes = classes;
+      context.path = ctxPath(el);
+      var role = ctxRole(el);
+      if (role) context.role = role;
+      var name = ctxName(el);
+      if (name) context.name = name;
+      if (attrs.length) context.attrs = attrs;
+      var text = ctxText(el);
+      if (text) context.text = text;
+      context.outline = ctxOutline(el, attrs);
+      context.children = ctxElementChildren(el).length;
+      context.rect = ctxRect(el);
+      var landmark = ctxLandmark(el);
+      if (landmark) context.landmark = landmark;
+      var heading = ctxHeading(el);
+      if (heading) context.heading = heading;
+      var component = ctxComponent(el);
+      if (component) context.component = component;
+      // The media file this element shows, resolved exactly as the composer
+      // quote resolves it (src, a lazy data-src, srcset, <picture>/<source>,
+      // poster; see descRawSource), so the exported heading can name the file
+      // even when the element has no usable src attribute.
+      var sourceName = descSourceName(el);
+      if (sourceName) context.sourceName = sourceName;
+      if (LIVE) {
+        context.page = { url: currentPageUrl() };
+        var title = ctxCollapse(document.title, 200);
+        if (title) context.page.title = title;
+      }
+      // Byte budget: shed whole fields in order; a shed attrs/classes array
+      // first loses entries from the end before the field goes entirely.
+      for (var s = 0; s < CTX_SHED_ORDER.length && ctxBytes(context) > maxBytes; s++) {
+        var field = CTX_SHED_ORDER[s];
+        if (context[field] === undefined) continue;
+        if ((field === 'attrs' || field === 'classes') && context[field].length > 1) {
+          while (context[field].length > 1 && ctxBytes(context) > maxBytes) context[field].pop();
+          if (ctxBytes(context) <= maxBytes) break;
+        }
+        if (field === 'text' && context.text.length > 80) {
+          context.text = ctxTruncate(context.text, 80);
+          if (ctxBytes(context) <= maxBytes) break;
+        }
+        delete context[field];
+      }
+      return context;
+    } catch (ex) {
+      return null;
+    }
+  }
+
   function clearPendingPin() {
     pendingPinEl = null;
+    pendingPinContext = null;
     pendingPinAnchor = null;
     pendingPinKey = null;
     pendingPinLabel = null;
@@ -2813,11 +3593,95 @@ export const BRIDGE_SCRIPT = `(function() {
     }
   }
 
-  // Element text for an additional target: same capping and text-less
-  // description used by the primary element path in annotateElement.
+  // --- Text-less element descriptions ---
+  // A pinpoint on an element with no text quotes a description instead
+  // ("[element: …]"). The hover label alone ("Image") cannot tell one image
+  // from the next, so the description adds what identifies THIS element: its
+  // accessible name (aria-label, alt, title, ...) and, for media, the source
+  // file name. The source goes through the same scrub the element context
+  // uses (no query, no fragment, data: reduced to its media type). Square
+  // brackets become parentheses and double quotes single ones, so the whole
+  // description stays one "[element: …]" token the export recognizes.
+  var DESC_MAX_NAME = 80;
+  var DESC_MAX_FILE = 60;
+  var DESC_SRC_ATTR = { IMG: 'src', VIDEO: 'src', AUDIO: 'src', IFRAME: 'src', EMBED: 'src', SOURCE: 'src', TRACK: 'src', INPUT: 'src', OBJECT: 'data' };
+
+  function descClean(value, max) {
+    return ctxCollapse(String(value).replace(/\\[/g, '(').replace(/\\]/g, ')').replace(/"/g, "'"), max);
+  }
+
+  // Candidates are comma-separated ("a.png, b.png 2x"); the URL is the
+  // first candidate's first word. A data: URL carries its own comma, so it is
+  // taken up to whitespace instead.
+  function descFirstSrcsetUrl(value) {
+    var srcset = String(value || '').trim();
+    if (!srcset) return '';
+    return (/^data:/i.test(srcset) ? srcset : srcset.split(',')[0]).trim().split(/\\s+/)[0] || '';
+  }
+
+  function descRawSource(el) {
+    var tag = el.tagName;
+    if (tag === 'INPUT' && String(el.getAttribute('type') || '').toLowerCase() !== 'image') return '';
+    var attr = DESC_SRC_ATTR[tag];
+    var src = '';
+    if (attr) src = (el.getAttribute(attr) || '').trim();
+    else if (el.ownerSVGElement && tag.toLowerCase() === 'image') src = (el.getAttribute('href') || el.getAttribute('xlink:href') || '').trim();
+    else return '';
+    // Lazy loaders put a data: placeholder in src and the real file in data-src.
+    var lazy = (el.getAttribute('data-src') || '').trim();
+    if (lazy && (!src || /^data:/i.test(src))) src = lazy;
+    if (!src && tag === 'IMG') {
+      src = descFirstSrcsetUrl(el.getAttribute('srcset'));
+      // <picture><source srcset="…"><img></picture>: the img itself may carry
+      // no source at all; the first <source> candidate names the file.
+      var picture = el.parentElement;
+      if (!src && picture && picture.tagName === 'PICTURE' && picture.querySelector) {
+        var pictureSource = picture.querySelector('source[srcset]');
+        if (pictureSource) src = descFirstSrcsetUrl(pictureSource.getAttribute('srcset'));
+      }
+    }
+    if (!src && (tag === 'VIDEO' || tag === 'AUDIO')) {
+      var child = el.querySelector && el.querySelector('source[src]');
+      if (child) src = (child.getAttribute('src') || '').trim();
+      if (!src && tag === 'VIDEO') src = (el.getAttribute('poster') || '').trim();
+    }
+    return src;
+  }
+
+  // The file name a source points at: "team.jpg" for
+  // https://cdn.test/img/team.jpg?sig=…, "data:image/png" for an inline image.
+  function descSourceName(el) {
+    var src = descRawSource(el);
+    if (!src) return '';
+    var scrubbed = ctxScrubUrl(src);
+    if (!scrubbed) return '';
+    if (/^data:/i.test(scrubbed)) {
+      var media = scrubbed.slice(5).split(/[;,]/)[0];
+      return descClean('data:' + (media || 'unknown'), DESC_MAX_FILE);
+    }
+    if (/^blob:/i.test(scrubbed)) return 'blob';
+    var path = scrubbed.replace(/\\?…$/, '').replace(/\\/+$/, '');
+    var name = path.slice(path.lastIndexOf('/') + 1);
+    try { name = decodeURIComponent(name); } catch (ex) {}
+    if (!name || /^[a-z][a-z0-9+.-]*:$/i.test(name)) name = path;
+    return descClean(name, DESC_MAX_FILE);
+  }
+
+  function describeTextlessElement(el, label) {
+    var out = descClean(label, DESC_MAX_NAME) || 'element';
+    var name = ctxName(el);
+    name = name ? descClean(name, DESC_MAX_NAME) : '';
+    if (name && name !== out) out += ' "' + name + '"';
+    var file = descSourceName(el);
+    if (file && file !== name) out += ' (' + file + ')';
+    return out;
+  }
+
+  // Element text for a pinpoint target (primary or additional): the
+  // element's own text, or for a text-less element its description.
   function elementTargetText(el, label) {
     var text = capSelectionText((el.textContent || '').trim());
-    if (!text) text = capSelectionText('[element: ' + label + ']');
+    if (!text) text = capSelectionText('[element: ' + describeTextlessElement(el, label) + ']');
     return text;
   }
 
@@ -2850,6 +3714,7 @@ export const BRIDGE_SCRIPT = `(function() {
       pendingPinKey = next.key;
       pendingPinLabel = next.label;
       pendingPinPoint = next.point || null;
+      pendingPinContext = next.context || null;
       // A promoted primary commits as an element pin: the original text
       // selection belonged to the removed element and no longer applies.
       pendingSelection = { element: true };
@@ -2908,15 +3773,17 @@ export const BRIDGE_SCRIPT = `(function() {
     if (anchor && point) anchor.point = point;
     var label = pinpointHoverLabel(el);
     var text = elementTargetText(el, label);
+    var context = buildElementContext(el, CTX_MAX_BYTES_EXTRA);
     var key = makeTargetKey();
     var box = createMultiTargetBox(el);
-    pendingMultiTargets.push({ key: key, el: el, anchor: anchor, label: label, text: text, point: point, box: box });
+    pendingMultiTargets.push({ key: key, el: el, anchor: anchor, label: label, text: text, point: point, context: context, box: box });
     postToParent({
       type: PREFIX + 'multi-target-added',
       key: key,
       label: label,
       text: text,
-      anchor: anchor || undefined
+      anchor: anchor || undefined,
+      context: context || undefined
     });
   }
 
@@ -2990,6 +3857,41 @@ export const BRIDGE_SCRIPT = `(function() {
     });
   }
 
+  // Parent and Child for a pinned draft. The trail holds the elements stepped
+  // out of, so Child goes back the way Parent came; past it, Child takes the
+  // first element child. A new pin by click starts a new trail.
+  var pinStepTrail = [];
+  var steppingPin = false;
+  function stepPin(direction) {
+    if (!pendingPinEl || !pendingPinEl.isConnected) return;
+    var from = pendingPinEl;
+    var next = null;
+    if (direction === 'parent') {
+      var up = from.parentElement;
+      if (up && up !== document.body && up !== document.documentElement) next = up;
+    } else {
+      var back = pinStepTrail[pinStepTrail.length - 1];
+      if (back && back.isConnected && from.contains(back)) next = back;
+      else {
+        for (var child = from.firstElementChild; child; child = child.nextElementSibling) {
+          if (isViewerOverlayNode(child)) continue;
+          if (/^(SCRIPT|STYLE|TEMPLATE|NOSCRIPT)$/.test(child.tagName)) continue;
+          next = child;
+          break;
+        }
+      }
+    }
+    if (!next) return;
+    var trail = pinStepTrail.slice();
+    if (direction === 'parent') trail.push(from);
+    else if (trail[trail.length - 1] === next) trail.pop();
+    else trail = [];
+    steppingPin = true;
+    try { annotateElement(next, undefined, pendingPinViaPinpoint, null); }
+    finally { steppingPin = false; }
+    pinStepTrail = trail;
+  }
+
   // Pin an element: select its text if possible (so a <mark> can wrap it), else
   // post its text + box directly so the toolbar still anchors (e.g. an SVG node,
   // whose <text> doesn't select like HTML text). Either way the element stays
@@ -2997,6 +3899,7 @@ export const BRIDGE_SCRIPT = `(function() {
   // rides along so the annotation can restore to this exact element later.
   function annotateElement(el, modeOverride, viaPinpoint, clickPoint) {
     if (!el) return false;
+    if (!steppingPin) pinStepTrail = [];
     pinpointHover = null;
     hidePinpointLabel();
     clearMultiTargets(); // a new primary starts a fresh draft
@@ -3017,11 +3920,15 @@ export const BRIDGE_SCRIPT = `(function() {
     pendingPinPoint = normalizePointInElement(el, clickPoint);
     if (pendingPinAnchor && pendingPinPoint) pendingPinAnchor.point = pendingPinPoint;
     pendingPinViaPinpoint = !!viaPinpoint;
+    // Agent-facing description, captured now while the element is in hand
+    // (an SPA re-render or navigation may have replaced it by submit time).
+    pendingPinContext = buildElementContext(el, CTX_MAX_BYTES);
     var extras = {
       anchor: pendingPinAnchor,
       pinpoint: !!viaPinpoint,
       targetKey: pendingPinKey,
-      targetLabel: pendingPinLabel
+      targetLabel: pendingPinLabel,
+      context: pendingPinContext
     };
     // Pinned outline: stronger accent box that tracks the element until the
     // composer resolves (create-mark or cancel-selection).
@@ -3049,10 +3956,10 @@ export const BRIDGE_SCRIPT = `(function() {
       if (!posted) clearPendingPin();
       return posted;
     }
-    var elText = capSelectionText((el.textContent || '').trim());
-    // Text-less elements (icon buttons, decorative chips, empty containers)
-    // are still annotatable: describe the element instead of quoting it.
-    if (!elText) elText = capSelectionText('[element: ' + pinpointHoverLabel(el) + ']');
+    // Text-less elements (images, icon buttons, decorative chips, empty
+    // containers) are still annotatable: describe the element instead of
+    // quoting it, naming WHICH one it is where the page says so.
+    var elText = elementTargetText(el, pinpointHoverLabel(el));
     var r = el.getBoundingClientRect();
     pendingSelection = { element: true };
     pendingRange = null;
@@ -3063,8 +3970,340 @@ export const BRIDGE_SCRIPT = `(function() {
       pinpoint: !!viaPinpoint || undefined,
       targetKey: pendingPinKey || undefined,
       targetLabel: pendingPinLabel || undefined,
+      context: pendingPinContext || undefined,
       rect: { top: r.top, left: r.left, width: r.width, height: r.height } });
     return true;
+  }
+
+  // --- Touch: a tap on a link follows it, press-and-hold pins it ---
+  // The owner's amendment to html-link-click (2026-10-20): on a phone there is
+  // no Cmd/Ctrl, so while armed a TAP on a link follows it (the click handlers
+  // below take it as a plain click) and a PRESS-AND-HOLD of HOLD_PIN_MS opens
+  // a comment on it, pinned exactly as a Cmd-click pins it. Every surface
+  // alike: srcdoc pages (annotate, plan review's HTML, the Inbox) and live apps.
+  // A finger that moves past HOLD_SLOP_PX (a scroll), a second finger, or a
+  // scroll cancels the hold. The release of a hold that pinned never follows
+  // the link and never reaches the page: its pointerup and touchend are
+  // stopped at the window (registered before a live app's own listeners),
+  // touchend is cancelled so no click is synthesized, and a click that still
+  // arrives is swallowed once. That swallow ends at the next touch, mouse
+  // press or key, so it never eats an unrelated click.
+  // While a hold is in progress, link text is not selectable (the CSS above),
+  // so the platform's long-press starts no native selection under the finger;
+  // Android's contextmenu, its long-press signal, fires the hold at once.
+  var HOLD_PIN_MS = 500;
+  var HOLD_SLOP_PX = 10;
+  var HOLD_SWALLOW_MAX_MS = 10000; // a release never seen (an app stopped touchend)
+  var linkHold = null; // { timer, x, y, id, target }
+  // After a hold pinned: { pointerId, released, until } until its release's
+  // click (if any) is swallowed or the next gesture starts.
+  var heldGesture = null;
+  var lastTouchPointerId = null;
+  function holdArmed() {
+    return annotateModeActive && currentInputMethod === 'pinpoint' && !(vimEnabled && vimPhase !== 'inactive');
+  }
+  function setLinkHoldStyle(on) {
+    if (!document.body) return;
+    if (on) document.body.setAttribute('data-plannotator-link-hold', '');
+    else document.body.removeAttribute('data-plannotator-link-hold');
+  }
+  function cancelLinkHold() {
+    if (!linkHold) return;
+    clearTimeout(linkHold.timer);
+    linkHold = null;
+    setLinkHoldStyle(false);
+  }
+  function fireLinkHold() {
+    var hold = linkHold;
+    if (!hold) return false;
+    clearTimeout(hold.timer);
+    linkHold = null;
+    if (!holdArmed() || !hold.target.isConnected) {
+      setLinkHoldStyle(false);
+      return false;
+    }
+    var el = resolvePinpointTargetAt(hold.x, hold.y, hold.target);
+    if (!el) {
+      setLinkHoldStyle(false);
+      return false;
+    }
+    heldGesture = { pointerId: lastTouchPointerId, released: false, pointerUpSeen: false, pointerEnded: false, touchEnded: false, target: hold.target, touchId: hold.id, x: hold.x, y: hold.y, until: Date.now() + HOLD_SWALLOW_MAX_MS };
+    // The same pin a Cmd-click makes: the link's own words as a text range.
+    // Selection is back on for that, then off again until the finger lifts.
+    setLinkHoldStyle(false);
+    try { window.getSelection().removeAllRanges(); } catch (ex) {}
+    annotateElement(el, undefined, true, { x: hold.x, y: hold.y });
+    setLinkHoldStyle(true);
+    return true;
+  }
+  function endHeldGesture() {
+    heldGesture = null;
+  }
+  function touchById(list, id) {
+    for (var i = 0; list && i < list.length; i++) if (list[i].identifier === id) return list[i];
+    return null;
+  }
+  // The release of a hold is stopped, so the page never sees it end: a press
+  // library (React Aria's usePress, Motion's whileTap, dnd-kit) would keep the
+  // press open. In its place the page gets a pointercancel and a touchcancel
+  // on the element the finger went down on, which end a press without
+  // activating it. The bridge's own listeners ignore those two.
+  var bridgeSynthetic = typeof WeakSet === 'function' ? new WeakSet() : null;
+  function isBridgeSynthetic(e) {
+    return !!(bridgeSynthetic && bridgeSynthetic.has(e));
+  }
+  function dispatchSynthetic(target, event) {
+    if (bridgeSynthetic) bridgeSynthetic.add(event);
+    try { target.dispatchEvent(event); } catch (ex) {}
+  }
+  function sendPointerCancel(g, pointerId) {
+    if (g.pointerEnded || pointerId === null || pointerId === undefined) return;
+    g.pointerEnded = true;
+    var target = g.target && g.target.isConnected ? g.target : document.body;
+    if (!target) return;
+    var init = { bubbles: true, cancelable: false, composed: true, pointerId: pointerId, pointerType: 'touch', isPrimary: true, clientX: g.x, clientY: g.y };
+    var event = null;
+    try { if (typeof PointerEvent === 'function') event = new PointerEvent('pointercancel', init); } catch (ex) {}
+    if (!event) {
+      event = new Event('pointercancel', { bubbles: true, cancelable: false, composed: true });
+      try {
+        Object.defineProperty(event, 'pointerId', { value: pointerId });
+        Object.defineProperty(event, 'pointerType', { value: 'touch' });
+        Object.defineProperty(event, 'isPrimary', { value: true });
+      } catch (ex) {}
+    }
+    dispatchSynthetic(target, event);
+  }
+  function sendTouchCancel(g) {
+    if (g.touchEnded) return;
+    g.touchEnded = true;
+    var target = g.target && g.target.isConnected ? g.target : document.body;
+    if (!target) return;
+    var event = null;
+    try {
+      if (typeof TouchEvent === 'function' && typeof Touch === 'function') {
+        var t = new Touch({ identifier: g.touchId, target: target, clientX: g.x, clientY: g.y });
+        event = new TouchEvent('touchcancel', { bubbles: true, cancelable: false, composed: true, touches: [], targetTouches: [], changedTouches: [t] });
+      }
+    } catch (ex) { event = null; }
+    if (!event) {
+      event = new Event('touchcancel', { bubbles: true, cancelable: false, composed: true });
+      var point = { identifier: g.touchId, target: target, clientX: g.x, clientY: g.y };
+      try {
+        Object.defineProperty(event, 'touches', { value: [] });
+        Object.defineProperty(event, 'targetTouches', { value: [] });
+        Object.defineProperty(event, 'changedTouches', { value: [point] });
+      } catch (ex) {}
+    }
+    dispatchSynthetic(target, event);
+  }
+  // Pointer events come before touch events; the touch's pointerId names the
+  // release's pointerup.
+  window.addEventListener('pointerdown', function(e) {
+    if (isBridgeSynthetic(e)) return;
+    if (e.pointerType === 'touch') {
+      lastTouchPointerId = e.pointerId;
+      if (heldGesture && heldGesture.released) endHeldGesture();
+      return;
+    }
+    // A mouse or pen press: whatever click comes next is its own.
+    endHeldGesture();
+  }, true);
+  window.addEventListener('keydown', function() { if (heldGesture && heldGesture.released) endHeldGesture(); }, true);
+  function heldPointer(e) {
+    if (!heldGesture || e.pointerType !== 'touch') return false;
+    return heldGesture.pointerId === null || e.pointerId === heldGesture.pointerId;
+  }
+  window.addEventListener('pointerup', function(e) {
+    if (isBridgeSynthetic(e) || !heldPointer(e) || heldGesture.pointerUpSeen) return;
+    heldGesture.pointerUpSeen = true;
+    e.stopImmediatePropagation();
+    sendPointerCancel(heldGesture, e.pointerId);
+  }, true);
+  // The browser ended the held pointer itself (it took the touch): nothing to stand in for.
+  window.addEventListener('pointercancel', function(e) {
+    if (isBridgeSynthetic(e) || !heldPointer(e)) return;
+    heldGesture.pointerUpSeen = true;
+    heldGesture.pointerEnded = true;
+  }, true);
+  window.addEventListener('touchend', function(e) {
+    if (isBridgeSynthetic(e)) return;
+    if (heldGesture && !heldGesture.released) {
+      // The release of the hold that pinned: no click, no navigation, and
+      // the page's own touchend never runs on it; it gets cancels instead.
+      if (e.cancelable) e.preventDefault();
+      e.stopImmediatePropagation();
+      var g = heldGesture;
+      g.released = true;
+      g.until = Date.now() + 800;
+      setLinkHoldStyle(false);
+      // Engines that send touchend before pointerup: the pointer ends here
+      // (its own pointerup, when it comes, is still stopped).
+      sendPointerCancel(g, g.pointerId);
+      sendTouchCancel(g);
+      return;
+    }
+    cancelLinkHold(); // a tap: the click that follows it follows the link
+  }, { capture: true, passive: false });
+  window.addEventListener('touchcancel', function(e) {
+    if (isBridgeSynthetic(e)) return;
+    cancelLinkHold();
+    setLinkHoldStyle(false);
+    if (heldGesture) {
+      heldGesture.released = true;
+      heldGesture.touchEnded = true;
+      heldGesture.until = Date.now() + 800;
+    }
+  }, true);
+  document.addEventListener('touchstart', function(e) {
+    if (document.body && !document.body.hasAttribute('data-plannotator-touch')) {
+      document.body.setAttribute('data-plannotator-touch', '');
+    }
+    cancelLinkHold();
+    // A new touch: whatever click comes next is its own, even if the last
+    // hold's release was never seen.
+    endHeldGesture();
+    setLinkHoldStyle(false);
+    if (!holdArmed() || !e.touches || e.touches.length !== 1) return;
+    if (isViewerOverlayNode(e.target) || !followableLinkAt(e.target)) return;
+    var t = e.touches[0];
+    linkHold = { x: t.clientX, y: t.clientY, id: t.identifier, target: e.target, timer: 0 };
+    linkHold.timer = setTimeout(fireLinkHold, HOLD_PIN_MS);
+    setLinkHoldStyle(true);
+  }, { capture: true, passive: true });
+  document.addEventListener('touchmove', function(e) {
+    if (!linkHold) return;
+    var t = touchById(e.touches, linkHold.id);
+    if (!t || e.touches.length !== 1 || Math.abs(t.clientX - linkHold.x) > HOLD_SLOP_PX || Math.abs(t.clientY - linkHold.y) > HOLD_SLOP_PX) {
+      cancelLinkHold();
+    }
+  }, { capture: true, passive: true });
+  window.addEventListener('scroll', cancelLinkHold, true);
+  document.addEventListener('contextmenu', function(e) {
+    if (linkHold) {
+      e.preventDefault();
+      fireLinkHold();
+      return;
+    }
+    if (heldGesture && Date.now() < heldGesture.until) e.preventDefault();
+  }, true);
+  // On the window, before every other click handler of the bridge and a live
+  // app's own, so the release of a hold reaches neither the link handler nor
+  // the pinpoint one, nor the page (a live app would navigate).
+  window.addEventListener('click', function(e) {
+    if (!heldGesture) return;
+    var swallow = Date.now() < heldGesture.until;
+    endHeldGesture();
+    if (!swallow) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }, true);
+
+  // --- Local-site link navigation (srcdoc sessions only) ---
+  // A srcdoc document has no URL of its own: its base URL is the PARENT page's,
+  // which is the Plannotator server. So a plain link to 02-detail.html resolves
+  // to http://localhost:<port>/02-detail.html, the server's catch-all answers
+  // with the app itself, and the whole editor renders inside the annotated
+  // frame. An in-page #section link is a cross-document navigation for the
+  // same reason.
+  //
+  // The frame therefore never navigates itself. In-page fragments scroll here;
+  // everything else is handed to the parent, which owns resolution against the
+  // current document's directory and is the trust boundary for the href.
+  // Registered BEFORE the pinpoint handler and never stopping propagation.
+  //
+  // One rule while armed (the owner's ruling, html-link-click, 2026-10-20):
+  // a plain click on a link FOLLOWS it, exactly as in Interact; a click with
+  // the platform modifier (Cmd on macOS, Ctrl elsewhere: either is taken)
+  // PINS it for a comment through the pinpoint handler below, as does a
+  // shift-click that adds it to an open multi-select draft. A drag that ended
+  // on the link owns its click: it neither follows nor pins.
+  //
+  // Live app sessions are excluded outright: they navigate a real origin
+  // through the proxy, which is the whole point of that surface.
+  function scrollToLocalFragment(rawId) {
+    var id = typeof rawId === 'string' ? rawId : '';
+    try { id = decodeURIComponent(id); } catch (ex) {}
+    if (!id) {
+      try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (ex) { window.scrollTo(0, 0); }
+      return true;
+    }
+    var target = null;
+    try { target = document.getElementById(id); } catch (ex) {}
+    if (!target) {
+      var named = document.getElementsByName(id);
+      if (named && named.length) target = named[0];
+    }
+    if (!target) return false;
+    try { target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+    catch (ex) { target.scrollIntoView(); }
+    return true;
+  }
+
+  // While armed, whether a click on a link pins it instead of following it:
+  // the platform modifier (Cmd or Ctrl), a shift-click adding to an open
+  // multi-select draft, or the trailing click of a drag that selected text.
+  function armedClickPins(e) {
+    if (e.metaKey || e.ctrlKey || dragEndedClick) return true;
+    return !!(e.shiftKey && pendingPinEl && multiSelectArmed && pendingSelection);
+  }
+
+  // A link with a real destination: one a plain click follows while armed.
+  // No href, "", "#" and javascript: go nowhere, so a click on them pins
+  // the element as on any other (agents' mocks use <a href="#"> for buttons).
+  function isFollowableHref(raw) {
+    return !!raw && raw !== '#' && !/^javascript:/i.test(raw);
+  }
+
+  function followableLinkAt(node) {
+    return !!node && isFollowableHref(navigableLinkHref(node));
+  }
+
+  function navigableLinkHref(node) {
+    var el = node && node.nodeType === 1 ? node : node && node.parentElement;
+    if (!el || !el.closest) return '';
+    var link = el.closest('a,area');
+    if (!link) return '';
+    var raw = link.getAttribute('href');
+    // SVG anchors may only carry xlink:href.
+    if (typeof raw !== 'string') raw = link.getAttribute('xlink:href');
+    return typeof raw === 'string' ? raw.trim() : '';
+  }
+
+  if (!LIVE) {
+    document.addEventListener('click', function(e) {
+      if (e.defaultPrevented || e.button !== 0) return;
+      if (isViewerOverlayNode(e.target)) return; // markers own their clicks
+      var raw = navigableLinkHref(e.target);
+      if (!raw) return;
+      // The page's own scripting, not a navigation: leave it alone.
+      if (/^javascript:/i.test(raw)) return;
+      // Armed and pinning (a link that goes nowhere, the modifier, or a
+      // drag's trailing click): the frame never navigates, and the pinpoint
+      // handler below takes the click.
+      if (annotateModeActive && currentInputMethod === 'pinpoint' && (!isFollowableHref(raw) || armedClickPins(e))) {
+        e.preventDefault();
+        return;
+      }
+      if (raw.charAt(0) === '#') {
+        e.preventDefault();
+        scrollToLocalFragment(raw.slice(1));
+        return;
+      }
+      e.preventDefault();
+      // Only a person's click follows a link: a page's own script calling
+      // a.click() never navigates the viewer or pushes the host's history.
+      if (!e.isTrusted) return;
+      // A native host decides links itself: a person's tap opens the link as a
+      // new window, which the host's web view hands to its own delegate (the
+      // frame never navigates; the host page's CSP would refuse it anyway).
+      if (hostNavigates) {
+        var target = (e.target && e.target.closest) ? e.target.closest('a,area') : null;
+        try { window.open(target && target.href ? target.href : raw, '_blank', 'noopener'); } catch (ex) {}
+        return;
+      }
+      postToParent({ type: PREFIX + 'link-click', href: raw.slice(0, 2048) });
+    }, true);
   }
 
   document.addEventListener('click', function(e) {
@@ -3081,7 +4320,12 @@ export const BRIDGE_SCRIPT = `(function() {
     // and mousedown clears a prior pin's leftover selection, so stale
     // selection state never blocks the next plain re-pin click. One-shot:
     // only the drag's own trailing click is suppressed.
-    if (dragEndedClick) { dragEndedClick = false; return; }
+    if (dragEndedClick) {
+      dragEndedClick = false;
+      // Never a navigation either (a live app's link would otherwise follow).
+      if (navigableLinkHref(e.target)) e.preventDefault();
+      return;
+    }
     // Shift-click while an ARMED pinpoint draft is open: toggle the element
     // in/out of the SAME draft comment instead of replacing the selection.
     // Unarmed drafts (modes the parent does not mirror, e.g. quickLabel)
@@ -3095,6 +4339,9 @@ export const BRIDGE_SCRIPT = `(function() {
       if (multiEl) toggleMultiTarget(multiEl, { x: e.clientX, y: e.clientY });
       return;
     }
+    // A plain click on a link follows it (the link handler above posted it;
+    // in a live app the browser navigates for real). The modifier pins it.
+    if (isFollowableHref(navigableLinkHref(e.target)) && !armedClickPins(e)) return;
     // Click what the hover box shows: the currently hovered element is the
     // target the user aimed at. Fall back to a fresh hit-test at the click
     // point (e.g. a click with no preceding mousemove).
@@ -3122,12 +4369,36 @@ export const BRIDGE_SCRIPT = `(function() {
     window.getSelection().removeAllRanges();
     renderAnnotationOverlay();
   }
+  // An Escape in Interact that the page did not use (no handler cancelled it
+  // or stopped it on its way up, focus not in one of its text fields) is
+  // offered to the host as page-escape, after every handler had its turn: the
+  // Inbox leaves full screen with it. The page still got the key first.
+  var escapeReachedWindow = null;
+  window.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') escapeReachedWindow = e;
+  });
+  function offerUnusedEscape(e) {
+    if (e.repeat || e.isComposing || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+    var t = e.target;
+    if (t && t.nodeType === 1) {
+      var tag = t.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable) return;
+      if (t.closest && t.closest('[contenteditable]:not([contenteditable="false"])')) return;
+    }
+    // The page's own dialog closes on this Escape (the browser's default, not a handler).
+    if (document.querySelector('dialog[open]')) return;
+    setTimeout(function() {
+      if (escapeReachedWindow !== e || e.defaultPrevented) return;
+      postToParent({ type: PREFIX + 'page-escape' });
+    }, 0);
+  }
   document.addEventListener('keydown', function(e) {
     if (e.key !== 'Escape' || vimEnabled) return;
     if (!annotateModeActive) {
       // Interact mode: Esc belongs to the page — except an open drag-comment
       // draft (drag-selection stays live in Interact) still closes first.
       if (pendingSelection) closePendingDraft();
+      else offerUnusedEscape(e);
       return;
     }
     if (pendingSelection) {
@@ -3142,15 +4413,40 @@ export const BRIDGE_SCRIPT = `(function() {
     }
   });
 
-  // Mod+Shift+A toggles Interact/Annotate from inside the iframe (the parent
-  // registers the same chord, but focus usually lives in here on live apps).
-  // Capture phase so the page cannot swallow the reserved chord; the parent
-  // answers with set-annotate-mode.
+  // The two reserved header chords, mirrored from inside the iframe (the
+  // parent registers both, but focus usually lives in here on live apps):
+  // Mod+Shift+A toggles Interact/Annotate, Mod+Shift+X shows/hides the
+  // floating tools over the page. Capture phase so the page cannot swallow
+  // them; the parent owns both states and answers annotate with
+  // set-annotate-mode. Disarming tears down any pending draft through that
+  // same set-annotate-mode(false) handler, exactly as Esc does.
   document.addEventListener('keydown', function(e) {
     if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey) return;
-    if (e.key !== 'a' && e.key !== 'A') return;
+    var message = null;
+    if (e.key === 'a' || e.key === 'A') message = 'annotate-toggle';
+    else if (e.key === 'x' || e.key === 'X') message = 'tools-toggle';
+    if (!message) return;
     e.preventDefault();
-    postToParent({ type: PREFIX + 'annotate-toggle' });
+    postToParent({ type: PREFIX + message });
+  }, true);
+
+  // A plain ] or [ while armed (Annotate): the host may step to its next or
+  // previous file (the Inbox steps through a thread's attachments). Never in
+  // Interact (the page owns its keys), never while the page's focus is in a
+  // text field, with a modifier, on auto-repeat or mid-composition. The page
+  // still receives the key; a host without a step handler ignores the
+  // message. Capture phase, like the chords above.
+  document.addEventListener('keydown', function(e) {
+    if (e.key !== ']' && e.key !== '[') return;
+    if (!annotateModeActive || vimEnabled) return;
+    if (e.metaKey || e.ctrlKey || e.altKey || e.repeat || e.isComposing) return;
+    var t = e.target;
+    if (t && t.nodeType === 1) {
+      var tag = t.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable) return;
+      if (t.closest && t.closest('[contenteditable]:not([contenteditable="false"])')) return;
+    }
+    postToParent({ type: PREFIX + 'step', dir: e.key === ']' ? 1 : -1 });
   }, true);
 
   // Author opt-in: a plain click on any element tagged [data-annotate] pops the
@@ -4573,11 +5869,16 @@ export const BRIDGE_SCRIPT = `(function() {
 
   function onReady() {
     if (typeof ResizeObserver !== 'undefined' && document.body) {
-      new ResizeObserver(function() {
+      var resizeObserver = new ResizeObserver(function() {
         postResize();
         scheduleVimUiUpdate();
         schedulePinpointReconcile();
-      }).observe(document.body);
+      });
+      resizeObserver.observe(document.body);
+      // A collapsed margin changing moves body without resizing it; the root
+      // box does resize then. (An html{height:100%} root resizes with the
+      // frame instead, which re-measures the same height and posts nothing.)
+      resizeObserver.observe(document.documentElement);
     }
     watchPageMutations();
     // Armed is the default on both surfaces, and live sessions default to

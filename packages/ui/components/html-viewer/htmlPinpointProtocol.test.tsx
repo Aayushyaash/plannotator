@@ -15,6 +15,7 @@ import { createRoot } from 'react-dom/client';
 import type { Annotation } from '../../types';
 import { AnnotationType } from '../../types';
 import { BRIDGE_PROTOCOL_VERSION } from './bridge-script';
+import { THUMBS_UP_LABEL } from '../../utils/quickLabels';
 
 const hasDom = typeof document !== 'undefined';
 const hookModule = hasDom ? await import('./useHtmlAnnotation') : null;
@@ -309,6 +310,65 @@ describe.if(hasDom)('pinpoint click-to-pin flow', () => {
     expect(added[0]?.type).toBe(AnnotationType.COMMENT);
     expect(added[0]?.isQuickLabel).toBe(true);
     expect(added[0]?.text).toBe('Looks good');
+  });
+
+  function composerThumbsUp(): HTMLButtonElement | null {
+    return document.querySelector<HTMLButtonElement>(
+      '[data-comment-popover] button[aria-label="Looks good"]',
+    );
+  }
+
+  test('the pinpoint composer thumbs-up labels the pinned element in one click', async () => {
+    // A pinpoint click opens the composer, never the toolbar, so without
+    // this button an element cannot get a one-click thumbs-up at all. It
+    // must mint the same labeled comment the toolbar 👍 does, on the pinned
+    // element, carrying the anchor and element context a typed comment would.
+    const added: Annotation[] = [];
+    const { postSelection } = await mountViewer({ mode: 'selection', onAdd: (ann) => added.push(ann) });
+    await postSelection({
+      ...selectionMessage,
+      pinpoint: true,
+      context: { tag: 'p', path: 'body > p' },
+    });
+    const thumbs = composerThumbsUp();
+    if (!thumbs) throw new Error('composer thumbs-up missing');
+    // Emoji only: the "Looks good" name lives in aria-label / tooltip.
+    expect(thumbs.textContent).toBe('👍');
+    await act(async () => thumbs.click());
+    expect(added).toHaveLength(1);
+    expect(added[0]!.type).toBe(AnnotationType.COMMENT);
+    expect(added[0]!.isQuickLabel).toBe(true);
+    expect(added[0]!.text).toBe(THUMBS_UP_LABEL.text);
+    expect(added[0]!.quickLabelTip).toBe(THUMBS_UP_LABEL.tip);
+    expect(added[0]!.originalText).toBe('Pinpoint target');
+    expect(added[0]!.htmlAnchor).toEqual(selectionMessage.anchor);
+    expect(added[0]!.elementContext).toMatchObject({ tag: 'p', path: 'body > p' });
+    expect(document.querySelector('[data-comment-popover]')).toBeNull();
+  });
+
+  test('Mod+Enter still saves the typed comment; the thumbs-up takes no key and disables once typed', async () => {
+    const added: Annotation[] = [];
+    const { postSelection } = await mountViewer({ mode: 'selection', onAdd: (ann) => added.push(ann) });
+    await postSelection({ ...selectionMessage, pinpoint: true });
+    const textarea = document.querySelector<HTMLTextAreaElement>('[data-comment-popover] textarea');
+    if (!textarea) throw new Error('composer textarea missing');
+    const pressModEnter = async () => {
+      await act(async () => {
+        textarea.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Enter', metaKey: true, ctrlKey: true, bubbles: true, cancelable: true,
+        }));
+      });
+    };
+    // Empty composer: Mod+Enter is not routed to the thumbs-up.
+    await pressModEnter();
+    expect(added).toHaveLength(0);
+
+    await typeComment('the spacing is off here');
+    expect(composerThumbsUp()?.disabled).toBe(true);
+    await pressModEnter();
+    expect(added).toHaveLength(1);
+    expect(added[0]!.text).toBe('the spacing is off here');
+    expect(added[0]!.isQuickLabel).toBeUndefined();
   });
 
   test('redline mode is CLAMPED on HTML surfaces: a pinpoint selection opens the composer instead of auto-deleting', async () => {
@@ -904,18 +964,21 @@ describe.if(hasDom)('multi-target composer flow (chips, promotion, submit)', () 
     await save();
     expect(added[0]!.htmlAdditionalTargets!.length).toBe(3);
 
-    // The composer's one-click "Looks good" path submits under the same cap.
+    // The composer's one-click 👍 submits the shift-click targets too, under
+    // the same cap.
     await post(primarySelection({ targetKey: 'ht-2' }));
     for (let i = 0; i < 8; i++) {
       await post(addedTarget(`host-cap-b-${i}`, `Target ${i}`));
     }
-    const looksGood = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('[data-comment-popover] button'),
-    ).find((b) => b.title.startsWith('Add "Looks good"'));
-    if (!looksGood) throw new Error('Looks good button missing');
-    await act(async () => { looksGood.click(); });
+    const thumbs = document.querySelector<HTMLButtonElement>(
+      '[data-comment-popover] button[aria-label="Looks good"]',
+    );
+    if (!thumbs) throw new Error('composer thumbs-up missing');
+    await act(async () => { thumbs.click(); });
     expect(added[1]!.isQuickLabel).toBe(true);
-    expect(added[1]!.htmlAdditionalTargets!.length).toBe(3);
+    expect(added[1]!.htmlAdditionalTargets!.map((t) => t.text)).toEqual([
+      'Target 0', 'Target 1', 'Target 2',
+    ]);
   });
 
   test('without maxAdditionalTargets the arm message and the 16 cap are unchanged', async () => {
@@ -1423,6 +1486,8 @@ describe.if(hasDom)('Interact/Annotate mode on static (srcdoc) surfaces', () => 
     annotateModeActive?: boolean;
     onAnnotateModeExit?: () => void;
     onAnnotateModeToggle?: () => void;
+    onStep?: (dir: 1 | -1) => void;
+    onPageEscape?: () => void;
   } = {}) {
     if (!htmlViewerModule) throw new Error('DOM test environment is not registered');
     const HtmlViewer = htmlViewerModule.HtmlViewer;
@@ -1443,6 +1508,8 @@ describe.if(hasDom)('Interact/Annotate mode on static (srcdoc) surfaces', () => 
           annotateModeActive={options.annotateModeActive}
           onAnnotateModeExit={options.onAnnotateModeExit}
           onAnnotateModeToggle={options.onAnnotateModeToggle}
+          onStep={options.onStep}
+          onPageEscape={options.onPageEscape}
         />,
       );
     });
@@ -1522,5 +1589,144 @@ describe.if(hasDom)('Interact/Annotate mode on static (srcdoc) surfaces', () => 
     });
     await post({ type: 'plannotator-bridge-annotate-toggle' });
     expect(toggles).toBe(1);
+  });
+
+  test('a bridge step message (a plain ] or [ in the page) reaches the host only while armed, with the frame focused, at most once per 150 ms', async () => {
+    // The Inbox steps through a thread's attachments on it. The page can post
+    // the message itself, so a page posting in a loop without the person's
+    // focus must not move anything, and a loop with focus is throttled.
+    const armed: number[] = [];
+    const { post } = await mountModeViewer({ annotateModeActive: true, onStep: (dir) => armed.push(dir) });
+    const iframe = document.querySelector<HTMLIFrameElement>('iframe')!;
+    // Not focused: a page posting every 50 ms moves nothing.
+    for (let i = 0; i < 5; i++) {
+      await post({ type: 'plannotator-bridge-step', dir: 1 });
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    }
+    expect(armed).toEqual([]);
+    // Focused: one step, then nothing until 150 ms have passed; only 1 or -1.
+    await act(async () => { iframe.focus(); });
+    expect(document.activeElement).toBe(iframe);
+    await post({ type: 'plannotator-bridge-step', dir: 2 });
+    await post({ type: 'plannotator-bridge-step', dir: '1' });
+    await post({ type: 'plannotator-bridge-step', dir: 1 });
+    await post({ type: 'plannotator-bridge-step', dir: 1 });
+    await post({ type: 'plannotator-bridge-step', dir: -1 });
+    expect(armed).toEqual([1]);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, htmlViewerModule!.STEP_MESSAGE_MIN_INTERVAL_MS + 20)); });
+    await post({ type: 'plannotator-bridge-step', dir: -1 });
+    expect(armed).toEqual([1, -1]);
+
+    // In Interact the page owns its keys: nothing reaches the host.
+    const interact: number[] = [];
+    const second = await mountModeViewer({ annotateModeActive: false, onStep: (dir) => interact.push(dir) });
+    const frames = document.querySelectorAll<HTMLIFrameElement>('iframe');
+    await act(async () => { frames[frames.length - 1]!.focus(); });
+    await second.post({ type: 'plannotator-bridge-step', dir: 1 });
+    expect(interact).toEqual([]);
+  });
+
+  test('a bridge page-escape (an Escape the page did not use, in Interact) reaches the host only in Interact, with the frame focused, at most once per 150 ms', async () => {
+    // The Inbox leaves full screen on it. The page can post it itself, so it
+    // is honored only for a key the person pressed in the frame, never in
+    // Annotate (whose Escape is annotate-exit), and a loop is throttled.
+    const seen: string[] = [];
+    const { post } = await mountModeViewer({ annotateModeActive: false, onPageEscape: () => seen.push('escape') });
+    const iframe = document.querySelector<HTMLIFrameElement>('iframe')!;
+    await post({ type: 'plannotator-bridge-page-escape' });
+    expect(seen).toEqual([]);
+    await act(async () => { iframe.focus(); });
+    await post({ type: 'plannotator-bridge-page-escape' });
+    await post({ type: 'plannotator-bridge-page-escape' });
+    expect(seen).toEqual(['escape']);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, htmlViewerModule!.STEP_MESSAGE_MIN_INTERVAL_MS + 20)); });
+    await post({ type: 'plannotator-bridge-page-escape' });
+    expect(seen).toEqual(['escape', 'escape']);
+
+    const armed: string[] = [];
+    const second = await mountModeViewer({ annotateModeActive: true, onPageEscape: () => armed.push('escape') });
+    const frames = document.querySelectorAll<HTMLIFrameElement>('iframe');
+    await act(async () => { frames[frames.length - 1]!.focus(); });
+    await second.post({ type: 'plannotator-bridge-page-escape' });
+    expect(armed).toEqual([]);
+  });
+});
+
+describe.if(hasDom)('parseHtmlElementContext (validated DTO)', () => {
+  // Failures to catch: a hostile page's newlines becoming markdown structure
+  // in agent-read feedback, a non-allowlisted attribute (a form value, an
+  // inline handler) surviving the boundary, unknown keys reaching React
+  // state, an oversized context landing in drafts, and a malformed context
+  // taking the whole selection message down with it.
+  const parse = () => hookModule!.parseHtmlElementContext;
+
+  test('accepts a well-formed context and lowercases the tag', () => {
+    expect(parse()({
+      tag: 'NAV', id: 'site-nav', classes: ['site-nav'], path: 'body > nav#site-nav',
+      role: 'navigation', name: 'Primary', attrs: [['aria-label', 'Primary']],
+      text: 'Home About', outline: '<nav id="site-nav">\n  <ul>…</ul>\n</nav>',
+      children: 2, rect: { x: 0, y: 0, w: 1280, h: 64, vw: 1280, vh: 800 },
+      landmark: 'header.site-header', heading: 'h1 "Acme"', component: 'data-component=AppNav',
+      page: { url: '/dashboard?tab=2', title: 'Acme — Dashboard' },
+    })).toEqual({
+      tag: 'nav', id: 'site-nav', classes: ['site-nav'], path: 'body > nav#site-nav',
+      role: 'navigation', name: 'Primary', attrs: [['aria-label', 'Primary']],
+      text: 'Home About', outline: '<nav id="site-nav">\n  <ul>…</ul>\n</nav>',
+      children: 2, rect: { x: 0, y: 0, w: 1280, h: 64, vw: 1280, vh: 800 },
+      landmark: 'header.site-header', heading: 'h1 "Acme"', component: 'data-component=AppNav',
+      page: { url: '/dashboard?tab=2', title: 'Acme — Dashboard' },
+    });
+  });
+
+  test('collapses newlines in every scalar, defuses fence-closing backticks in the outline', () => {
+    const context = parse()({
+      tag: 'div', name: 'Save\n## INJECTED', path: 'body >\n\n# HEADING', role: 'x\ny',
+      attrs: [['aria-label', 'a\nb']], text: 'line\n\nline',
+      outline: '<div>\n```\n# escaped fence\n</div>',
+    })!;
+    expect(context.name).toBe('Save ## INJECTED');
+    expect(context.path).toBe('body > # HEADING');
+    expect(context.role).toBe('x y');
+    expect(context.attrs).toEqual([['aria-label', 'a b']]);
+    expect(context.text).toBe('line line');
+    expect(context.outline).not.toContain('```');
+    expect(context.outline).toContain("'''");
+  });
+
+  test('drops non-allowlisted attributes and unknown keys, keeps the rest', () => {
+    const context = parse()({
+      tag: 'input', attrs: [['value', 'hunter2'], ['onfocus', 'steal()'], ['style', 'x'], ['placeholder', 'Password'], ['data-secret', 's']],
+      innerHTML: '<b>never</b>', fiber: { props: {} },
+    })!;
+    expect(context.attrs).toEqual([['placeholder', 'Password']]);
+    expect('innerHTML' in context).toBe(false);
+    expect('fiber' in context).toBe(false);
+  });
+
+  test('caps every field and sheds the expendable ones under the byte budget', () => {
+    const huge = 'x'.repeat(5000);
+    const context = parse()({ tag: 'div', text: huge, outline: huge, path: huge, classes: Array(30).fill('c'), attrs: Array(30).fill(['title', 't']) })!;
+    expect(context.text!.length).toBeLessThanOrEqual(300);
+    expect(context.classes!.length).toBeLessThanOrEqual(9);
+    expect(context.attrs!.length).toBeLessThanOrEqual(10);
+    expect(new TextEncoder().encode(JSON.stringify(context)).length).toBeLessThanOrEqual(hookModule!.MAX_ELEMENT_CONTEXT_BYTES);
+  });
+
+  test('a tag-less or non-object context is dropped, never fatal to the selection message', () => {
+    expect(parse()(null)).toBeUndefined();
+    expect(parse()('nav')).toBeUndefined();
+    expect(parse()({ id: 'x' })).toBeUndefined();
+    const message = hookModule!.parseBridgeMessage({
+      type: 'plannotator-bridge-selection', text: '[element: Navigation]',
+      rect: { top: 0, left: 0, width: 10, height: 10 }, pinpoint: true, context: 42,
+    }) as { text: string; context?: unknown };
+    expect(message.text).toBe('[element: Navigation]');
+    expect(message.context).toBeUndefined();
+  });
+
+  test('a rect with a non-finite member is dropped whole; children is floored and clamped', () => {
+    const context = parse()({ tag: 'div', rect: { x: 1, y: 2, w: NaN, h: 4, vw: 5, vh: 6 }, children: 3.7 })!;
+    expect(context.rect).toBeUndefined();
+    expect(context.children).toBe(3);
   });
 });
