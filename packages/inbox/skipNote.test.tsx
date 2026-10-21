@@ -4,7 +4,8 @@
  * person writes the note and presses Send right away, before the window's
  * copy of the thread has caught up with the saved picks: the reply must still
  * carry the note under "Answers to your questions". Cases: Skip plus a note;
- * a note alone with the default skip; a note alone with Keep open. The window
+ * a note alone with the default (Keep open, approval "inbox-explicit-skip");
+ * a note alone with Skip them. The window
  * over a REAL Inbox (tests/helpers/inbox-dom-server.ts).
  *
  * DOM-gated: runs under DOM_TESTS=1 (happy-dom), from the test.yml DOM list.
@@ -230,11 +231,12 @@ test.skipIf(!hasDom)('Skip and a note on a card, Send pressed while the note is 
   const body = await sentReply();
   expect(body).toContain('### Q1. Which layout should the invoice list use? (line 4)\nSkipped\nNote: Ask me after the design review');
   const qs = (await readThread(world.stopped)).thread.messages[0]!.questions!;
-  expect(qs.map((q) => q.state)).toEqual(['sent', 'sent']);
+  // The card's own Skip is the person's; the other question stays open (a Send never skips on its own).
+  expect(qs.map((q) => q.state)).toEqual(['sent', 'open']);
   expect(qs[0]!.answer).toMatchObject({ skipped: true, note: 'Ask me after the design review' });
 }, 20_000);
 
-test.skipIf(!hasDom)('a note alone in the reply box flow, default skip: the note goes with the Send', async () => {
+test.skipIf(!hasDom)('a note alone in the reply box flow, the default (Keep open): the note goes with the Send, the other question stays open', async () => {
   current = await openStopped();
   act(() => button(el(), 'Reply').click());
   await settle();
@@ -243,28 +245,30 @@ test.skipIf(!hasDom)('a note alone in the reply box flow, default skip: the note
   const body = await sentReply();
   expect(body).toContain('### Q1. Which layout should the invoice list use? (line 4)\nNote: Leaning to cards');
   const qs = (await readThread(world.stopped)).thread.messages[0]!.questions!;
-  expect(qs.map((q) => q.state)).toEqual(['sent', 'sent']);
+  expect(qs.map((q) => q.state)).toEqual(['sent', 'open']);
   expect(qs[0]!.answer).toMatchObject({ note: 'Leaning to cards' });
-  expect(qs[1]!.answer).toMatchObject({ skipped: true, by_reply: true });
+  expect(qs[1]!.answer).toBeNull();
+  expect(body).toContain("You have 1 other question open in this thread.");
 }, 20_000);
 
-test.skipIf(!hasDom)('a note alone, then Keep open: the note goes, the other question stays open', async () => {
+test.skipIf(!hasDom)('a note alone, then Skip them: the note goes, the other question is skipped with the reply', async () => {
   current = await openStopped();
   act(() => button(el(), 'Reply').click());
   await settle();
   note(cards(el())[0]!, 'Leaning to cards');
   await settle();
-  // The note counts as an answer, so the default skips the other question: Keep open instead.
-  expect(el().querySelector('[data-skip-chip]')?.getAttribute('data-skip-chip')).toBe('skip');
-  act(() => (el().querySelector('[data-skip-toggle]') as HTMLButtonElement).click());
+  // The default keeps the other question open whatever the Send carries: Skip them instead.
   expect(el().querySelector('[data-skip-chip]')?.getAttribute('data-skip-chip')).toBe('keep');
+  act(() => (el().querySelector('[data-skip-toggle]') as HTMLButtonElement).click());
+  expect(el().querySelector('[data-skip-chip]')?.getAttribute('data-skip-chip')).toBe('skip');
   // More of the note, and Send while it saves.
   typeNote(cards(el())[0]!, 'Leaning to cards, for now', 'Leaning to cards'.length);
   act(() => sendButton(el()).click());
   const body = await sentReply();
   expect(body).toContain('### Q1. Which layout should the invoice list use? (line 4)\nNote: Leaning to cards, for now');
   const qs = (await readThread(world.stopped)).thread.messages[0]!.questions!;
-  expect(qs.map((q) => q.state)).toEqual(['sent', 'open']);
+  expect(qs.map((q) => q.state)).toEqual(['sent', 'sent']);
+  expect(qs[1]!.answer).toMatchObject({ skipped: true, by_reply: true });
 }, 20_000);
 
 test.skipIf(!hasDom)('a pick, then Skip and a note, Send at once: the skip and the note go, not the dropped pick', async () => {

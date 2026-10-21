@@ -56,7 +56,7 @@ async function setup() {
       ].join("\n"),
     },
   })) as { structuredContent: { thread_id: string; message_id: string } };
-  return { server, client, threadId: sent.structuredContent.thread_id, messageId: sent.structuredContent.message_id };
+  return { server, client, project, threadId: sent.structuredContent.thread_id, messageId: sent.structuredContent.message_id };
 }
 
 const url = (server: InboxServer, path: string) => `http://127.0.0.1:${server.port}${path}`;
@@ -159,14 +159,15 @@ describe("POST /api/inbox/threads/:id/read and /unread", () => {
   });
 });
 
-describe("POST /api/inbox/messages/:id/reply with skip_unanswered", () => {
-  test("a words-only Send skips the question, and the row leaves the top", async () => {
+describe("POST /api/inbox/messages/:id/reply with a skip list (approval inbox-explicit-skip)", () => {
+  test("Skip them on a words-only Send skips the listed question, and the row leaves the top", async () => {
     const { server, threadId, messageId } = await setup();
+    const key = server.store.questionsOf(messageId)[0]!.key;
     const res = await post(server, `/api/inbox/messages/${messageId}/reply`, {
       idempotency_key: "k-1",
       words: "Redo the design.",
       questions: [],
-      skip_unanswered: true,
+      skip: [key],
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { reply: { body: string }; questions: InboxQuestion[] };
@@ -177,15 +178,32 @@ describe("POST /api/inbox/messages/:id/reply with skip_unanswered", () => {
     expect((await rowOf(server, threadId)).section).toBe("sent");
   });
 
-  test("a skip-only target whose questions closed meanwhile is a 200 no-op, not a refusal", async () => {
+  test("a skip-only Send whose questions closed meanwhile is a 200 no-op, not a refusal", async () => {
     const { server, threadId, messageId } = await setup();
+    const key = server.store.questionsOf(messageId)[0]!.key;
     await post(server, `/api/inbox/threads/${threadId}/read`, {});
-    const res = await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-2", questions: [], skip_unanswered: true });
+    const res = await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-2", questions: [], skip: [key] });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ reply: null, nothing_to_send: true });
     expect(server.store.thread(threadId)!.messages).toHaveLength(1);
-    // Without skip_unanswered an empty Send is still refused, as before.
+    // Without a skip list an empty Send is still refused, as before.
     expect((await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-3", questions: [] })).status).toBe(422);
+  });
+
+  test("skip_unanswered is ignored: words with it skip nothing; alone it is an empty Send (422)", async () => {
+    const { server, threadId, messageId } = await setup();
+    const res = await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-1", words: "Later.", questions: [], skip_unanswered: true });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { questions: InboxQuestion[] }).questions[0]).toMatchObject({ state: "open", answer: null });
+    expect((await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-2", questions: [], skip_unanswered: true })).status).toBe(422);
+    expect((await rowOf(server, threadId)).section).toBe("stopped");
+  });
+
+  test("a skip list that names no question of the message is refused, nothing written", async () => {
+    const { server, threadId, messageId } = await setup();
+    expect((await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-1", words: "x", skip: "all" })).status).toBe(422);
+    expect((await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-2", words: "x", skip: ["q-00000000"] })).status).toBe(404);
+    expect(server.store.thread(threadId)!.messages).toHaveLength(1);
   });
 });
 
@@ -198,7 +216,6 @@ describe("POST /api/inbox/messages/:id/reply with words only (approval inbox-wor
       idempotency_key: "k-1",
       words: "Received, I'll answer later.",
       questions: [],
-      skip_unanswered: false,
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { reply: { body: string }; questions: InboxQuestion[] };
@@ -211,10 +228,41 @@ describe("POST /api/inbox/messages/:id/reply with words only (approval inbox-wor
     expect(waited.structuredContent.reply?.body).toBe(`Received, I'll answer later.\n\n${STILL_OPEN}`);
   });
 
-  test("no skip_unanswered at all (the phone door, an older window): the same reply", async () => {
+  test("no skip list at all: the same reply", async () => {
     const { server, messageId } = await setup();
     const res = await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-1", words: "Still thinking." });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { reply: { body: string } }).reply.body).toBe(`Still thinking.\n\n${STILL_OPEN}`);
+  });
+});
+
+describe("wait_for_reply on a reply that answers several messages (approval inbox-explicit-skip)", () => {
+  test("its structured questions and its facts line name every message the reply answered or skipped on", async () => {
+    const { server, client, project, threadId, messageId } = await setup();
+    const second = (await client.callTool({
+      name: "send_message",
+      arguments: { project_path: project, agent_session: "ses_mr", agent_name: "Claude Code", reply_to: messageId, body: ":::question\nShip tonight?\n\n- [ ] Yes\n- [ ] No\n:::" },
+    })) as { structuredContent: { message_id: string } };
+    const secondId = second.structuredContent.message_id;
+    const [first] = server.store.questionsOf(messageId);
+    const [next] = server.store.questionsOf(secondId);
+    const res = await post(server, `/api/inbox/messages/${secondId}/reply`, {
+      idempotency_key: "k-1",
+      questions: [{ key: next!.key, revision: 0, answer: { v: 1, key: next!.key, kind: next!.kind, prompt: next!.prompt, selected: ["Yes"] } }],
+      skip: [{ message_id: messageId, key: first!.key }],
+    });
+    expect(res.status).toBe(200);
+    const waited = (await client.callTool({ name: "wait_for_reply", arguments: { thread_id: threadId, agent_session: "ses_mr", timeout_seconds: 1 } })) as {
+      content: { text: string }[];
+      structuredContent: { questions: { message_id: string; key: string; state: string; answer: { skipped?: boolean } | null }[] };
+    };
+    expect(waited.structuredContent.questions.map((q) => [q.message_id, q.key, q.state, q.answer?.skipped ?? false])).toEqual([
+      [messageId, first!.key, "sent", true],
+      [secondId, next!.key, "sent", false],
+    ]);
+    const text = waited.content[0]!.text;
+    expect(text).toContain(`questions of ${messageId}: Q1 ${first!.key} sent`);
+    expect(text).toContain(`questions of ${secondId}: Q1 ${next!.key} sent`);
+    expect(text).toContain("Skipped by the person");
   });
 });

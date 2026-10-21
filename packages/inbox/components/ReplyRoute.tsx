@@ -291,8 +291,8 @@ export function RouteChoice({
 /**
  * The race: the chosen session ended before the reply went. The row greys,
  * the next live row is selected, and the error says so. A Send that answers
- * several messages posts one reply each; when some went before the refusal,
- * the error says how many, never "Nothing was sent".
+ * several agent sessions posts one reply to each; when some went before the
+ * refusal, the error says how many, never "Nothing was sent".
  */
 export function routeRace(state: RouteState, ended: string, sent: { went: number; total: number } = { went: 0, total: 1 }): RouteState {
   const rows = state.rows.map((row) => (row.live.session === ended ? { ...row, ended: true } : row));
@@ -301,7 +301,7 @@ export function routeRace(state: RouteState, ended: string, sent: { went: number
   const name = gone ? hostName(gone.live.host) : 'That';
   const what =
     sent.went > 0
-      ? `That ${name} session ended before all of your reply went. Your answers to ${sent.went} of ${sent.total} messages were sent; the rest was not.`
+      ? `That ${name} session ended before all of your reply went. ${sent.went} of ${sent.total} agents got their reply; the rest did not.`
       : `That ${name} session ended before your reply went. Nothing was sent.`;
   const error = `${what} ${next ? `${hostName(next.live.host)} is selected now.` : 'Leave it for the next agent, or start a session.'}`;
   return { ...state, rows, selected: next?.live.session ?? LEAVE, error, focus: state.focus + 1 };

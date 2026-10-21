@@ -38,7 +38,7 @@ test("the answers section names a reply's skips apart from a Skip the reviewer p
     { ...BASE, kind: "single", skipped: true, by_reply: true },
     { ...BASE, key: "q-4567cdef", prompt: "Sort overdue first?", kind: "single", skipped: true },
   ] as never);
-  expect(section).toContain("0 of 2 questions answered. 1 was not answered in this reply; treat it as skipped, and ask again if you still need it.");
-  expect(section).toContain("### Q1. Cards or a table?\nSkipped (not answered in this reply)\n");
+  expect(section).toContain("0 of 2 questions answered.\n\n");
+  expect(section).toContain("### Q1. Cards or a table?\nSkipped by the person\n");
   expect(section).toContain("### Q2. Sort overdue first?\nSkipped\n");
 });
