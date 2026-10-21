@@ -277,6 +277,19 @@ export function replyQuestions(store: InboxStore, messageId: string): { key: str
   }));
 }
 
+/**
+ * The messages a reply answers questions on, in thread order: the one it
+ * replies to, and every other message of the thread holding a question this
+ * reply sent (one Send to one session is one reply, approval
+ * "inbox-explicit-skip").
+ */
+function replyAnsweredMessages(store: InboxStore, reply: InboxMessage): string[] {
+  const messages = store.thread(reply.thread_id)?.messages ?? [];
+  return messages
+    .filter((m) => m.id === reply.reply_to || store.questionsOf(m.id).some((q) => q.sent_reply_id === reply.id))
+    .map((m) => m.id);
+}
+
 function replyResult(store: InboxStore, reply: InboxMessage, base: string, caller: string | null = null): ToolResult {
   const cursor = store.messageCursor(reply.id) ?? store.cursor();
   // A reply that tags agents (approval "inbox-tag-agents") reached the caller, its owner or a session it
@@ -292,7 +305,10 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string, calle
   // The agent now has this reply (not any later one): a Sent row moves to Quiet.
   // Not for a session only tagged here: its read must not settle what the owner still waits for.
   if (!store.isTaggedGuest(reply.thread_id, caller)) store.markAgentChecked(reply.thread_id, cursor);
-  const questions = reply.reply_to ? replyQuestions(store, reply.reply_to) : [];
+  // Every question of each message the reply answers (its reply_to and any other of the session's messages
+  // it sent answers or skips on), each named by its message.
+  const answered = replyAnsweredMessages(store, reply);
+  const questions = answered.flatMap((id) => replyQuestions(store, id).map((q) => ({ message_id: id, ...q })));
   const subject = store.threadSubject(reply.thread_id);
   // The files the person attached are named with their paths, as the wake names them.
   const body = inboxBodyForAgent(reply);
@@ -304,16 +320,17 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string, calle
     : `The person replied in thread ${reply.thread_id}${subject ? ` (${subject})` : ""}:`;
   const url = threadUrl(base, reply.thread_id);
   // The facts the structured content holds, in words, so the text is complete.
-  const numbers = new Map(
-    [...(reply.reply_to ? store.questionsOf(reply.reply_to) : [])].sort((a, b) => a.position - b.position).map((q, i) => [q.key, i + 1]),
-  );
+  const numbered = (id: string) => new Map([...store.questionsOf(id)].sort((a, b) => a.position - b.position).map((q, i) => [q.key, i + 1]));
   const facts = [
     `reply ${reply.id}`,
     reply.reply_to ? `to ${reply.reply_to}` : null,
     shortTime(reply.created_at),
-    questions.length > 0
-      ? `questions of ${reply.reply_to}: ${questions.map((q) => questionWords({ key: q.key, q: numbers.get(q.key) ?? 1, state: q.state }, false, false)).join("; ")}`
-      : null,
+    ...answered.map((id) => {
+      const own = questions.filter((q) => q.message_id === id);
+      if (own.length === 0) return null;
+      const numbers = numbered(id);
+      return `questions of ${id}: ${own.map((q) => questionWords({ key: q.key, q: numbers.get(q.key) ?? 1, state: q.state }, false, false)).join("; ")}`;
+    }),
     `cursor ${cursor}`,
     url,
   ].filter((part): part is string => part !== null);

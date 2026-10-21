@@ -85,6 +85,7 @@ jobs:
           packages/review-editor/components/DiffViewer.imagePreview.test.tsx
           packages/review-editor/components/DiffViewer.headerControls.test.tsx
           packages/review-editor/components/DiffViewer.markdownPreview.test.tsx
+          packages/review-editor/components/DiffViewer.changeNavigation.test.tsx
 
       # Seam contracts + the remaining DOM-gated tests. Scoped to the DOM files
       # (not the whole ui suite) to keep this process light. Files get isolated
@@ -251,6 +252,7 @@ jobs:
           packages/review-editor/components/AllFilesCodeView.autoViewed.test.tsx
           packages/review-editor/components/AllFilesCodeView.imagePreview.test.tsx
           packages/review-editor/components/AllFilesCodeView.markdownPreview.test.tsx
+          packages/review-editor/components/AllFilesCodeView.changeNavigation.test.tsx
           packages/review-editor/components/MarkdownFilePreview.test.tsx
           packages/review-editor/hooks/useMarkdownPreview.test.tsx
           packages/review-editor/components/MarkdownViewMenu.test.tsx
@@ -265,6 +267,7 @@ jobs:
           packages/review-editor/components/TokenHoverCard.test.tsx
           packages/review-editor/components/TokenHoverAnnouncementDialog.test.tsx
           packages/review-editor/utils/stitchTokenIdentifier.test.ts
+          packages/review-editor/utils/diffSelection.test.ts
           packages/review-editor/hooks/useAutoViewed.test.tsx
           packages/review-editor/hooks/useReviewProgress.test.tsx
           packages/review-editor/hooks/useCallFlowAnalysis.test.tsx

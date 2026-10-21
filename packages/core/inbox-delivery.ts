@@ -191,11 +191,13 @@ type AskingQuestionState = "open" | "picked" | "sent" | "closed" | "superseded";
 
 /**
  * Whether a Send skips the questions it leaves unanswered, by default (no
- * choice made on the chip): only when it carries an answer, i.e. some
- * question in the thread holds a saved pick not yet sent.
+ * choice made on the chip): never (approval "inbox-explicit-skip",
+ * 2026-10-21). A question is skipped only when the person presses a Skip:
+ * on its card, or "Skip them" on the chip for one Send. Kept, with its
+ * arguments, for the callers that ask (the list row's delivery reads it).
  */
-export function inboxDefaultSkip<M>(messages: readonly M[], statesOf: (message: M) => readonly AskingQuestionState[]): boolean {
-  return messages.some((message) => statesOf(message).includes("picked"));
+export function inboxDefaultSkip<M>(_messages: readonly M[], _statesOf: (message: M) => readonly AskingQuestionState[]): boolean {
+  return false;
 }
 
 /**

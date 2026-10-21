@@ -342,7 +342,8 @@ test.skipIf(!hasDom)('the reply box: a pasted image alone is sent as a words-onl
   await until(() => el.querySelector('.ib-rbox') === null, 'the Send');
   const replies = posted.filter((p) => p.path.endsWith('/reply'));
   expect(replies).toHaveLength(1);
-  expect(replies[0]!.body).toMatchObject({ words: '', questions: [], skip_unanswered: false });
+  expect(replies[0]!.body).toMatchObject({ words: '', questions: [] });
+  expect(replies[0]!.body.skip).toBeUndefined();
   expect((replies[0]!.body.uploads as string[]).length).toBe(1);
   const model = JSON.parse((await loopback(`/api/inbox/threads/${world.waiting}`)).text) as { thread: { messages: (InboxMessage & { questions?: { state: string }[] })[] } };
   expect(model.thread.messages[0]!.questions!.map((q) => q.state)).toEqual(['open']);

@@ -204,16 +204,16 @@ function type(el: HTMLElement, words: string) {
   });
 }
 
-test.skipIf(!hasDom)('the reply box says what a Send does with the questions; switched to skip, a words-only Send skips them, and the row moves only after the thread is left', async () => {
+test.skipIf(!hasDom)('the reply box says what a Send does with the questions; after Skip them, a words-only Send skips them, and the row moves only after the thread is left', async () => {
   const el = await renderApp(`#thread=${ids.stopped}`);
   act(() => button(el, 'Reply').click());
   await settle();
-  // No pick in this Send: the questions stay open unless the person says otherwise.
+  // The questions stay open unless the person says otherwise (approval "inbox-explicit-skip").
   const chip = el.querySelector('[data-skip-chip]') as HTMLElement;
   expect(chip.getAttribute('data-skip-chip')).toBe('keep');
-  expect(chip.textContent).toContain('2 unanswered questions stay open');
+  expect(chip.textContent).toContain('2 questions stay open');
   act(() => button(chip, 'Skip them').click());
-  expect(el.querySelector('[data-skip-chip]')?.textContent).toContain('2 unanswered questions will be skipped');
+  expect(el.querySelector('[data-skip-chip]')?.textContent).toContain('2 questions will be skipped');
   act(() => button(el.querySelector('[data-skip-chip]')!, 'Keep open').click());
   expect(el.querySelector('[data-skip-chip]')?.getAttribute('data-skip-chip')).toBe('keep');
   act(() => button(el.querySelector('[data-skip-chip]')!, 'Skip them').click());
@@ -223,7 +223,9 @@ test.skipIf(!hasDom)('the reply box says what a Send does with the questions; sw
   act(() => button(el, 'Send').click());
   await until(() => el.querySelector('textarea') === null, 'the Send');
   const reply = posted.find((p) => p.path.endsWith('/reply'))!;
-  expect(reply.body).toMatchObject({ words: 'Redo the design.', questions: [], skip_unanswered: true });
+  expect(reply.body).toMatchObject({ words: 'Redo the design.', questions: [] });
+  expect((reply.body.skip as unknown[]).length).toBe(2);
+  expect(reply.body.skip_unanswered).toBeUndefined();
   const questions = await questionStates(ids.stopped);
   expect(questions.map((q) => q.state)).toEqual(['sent', 'sent']);
   expect(questions.every((q) => q.answer?.skipped && q.answer.by_reply)).toBe(true);
@@ -245,7 +247,7 @@ test.skipIf(!hasDom)('words only: Keep open by default; the Send leaves the ques
   expect(el.querySelector('[data-skip-chip]')?.getAttribute('data-skip-chip')).toBe('keep');
   act(() => button(el, 'Send').click());
   await until(() => el.querySelector('textarea') === null, 'the Send');
-  expect(posted.find((p) => p.path.endsWith('/reply'))!.body.skip_unanswered).toBe(false);
+  expect(posted.find((p) => p.path.endsWith('/reply'))!.body.skip).toBeUndefined();
   expect((await questionStates(ids.stopped)).map((q) => q.state)).toEqual(['open', 'open']);
   const mine = await personMessages(ids.stopped);
   expect(mine.map((m) => m.body)).toEqual([
@@ -255,7 +257,7 @@ test.skipIf(!hasDom)('words only: Keep open by default; the Send leaves the ques
   expect(await serverSection(ids.stopped)).toBe('stopped');
 });
 
-test.skipIf(!hasDom)('a pick in the Send turns the default to skip; the person can still keep the rest open', async () => {
+test.skipIf(!hasDom)('a pick never turns the default to skip (approval "inbox-explicit-skip"): the rest stay open and the agent is told so', async () => {
   const el = await renderApp(`#thread=${ids.stopped}`);
   act(() => button(el, 'Reply').click());
   await settle();
@@ -263,14 +265,15 @@ test.skipIf(!hasDom)('a pick in the Send turns the default to skip; the person c
   // Pick the first question's first choice.
   act(() => (el.querySelector('fieldset[data-question-key] [data-question-option] input') as HTMLInputElement).click());
   await settle();
-  await until(() => el.querySelector('[data-skip-chip]')?.getAttribute('data-skip-chip') === 'skip', 'the chip turned to skip');
-  expect(el.querySelector('[data-skip-chip]')?.textContent).toContain('1 unanswered question will be skipped');
-  act(() => button(el.querySelector('[data-skip-chip]')!, 'Keep open').click());
-  expect(el.querySelector('[data-skip-chip]')?.textContent).toContain('1 unanswered question stays open');
+  await until(() => el.querySelector('[data-skip-chip]')?.textContent?.includes('1 question stays open') === true, 'the chip counts the other one');
+  expect(el.querySelector('[data-skip-chip]')?.getAttribute('data-skip-chip')).toBe('keep');
   act(() => button(el, 'Send').click());
   await until(() => el.querySelector('textarea') === null, 'the Send');
   const reply = posted.find((p) => p.path.endsWith('/reply'))!;
-  expect(reply.body.skip_unanswered).toBe(false);
+  expect(reply.body.skip).toBeUndefined();
+  expect((await personMessages(ids.stopped))[0]!.body).toContain(
+    "You have 1 other question open in this thread. It stays open; the person will answer it in the Inbox. Don't re-ask it.",
+  );
   expect((reply.body.questions as unknown[]).length).toBe(1);
   expect((await questionStates(ids.stopped)).map((q) => q.state)).toEqual(['sent', 'open']);
 });
@@ -446,7 +449,7 @@ test.skipIf(!hasDom)('session A asked, session B posted a later update: the skip
   await until(() => el.querySelector('textarea') === null, 'the Send');
   const replies = posted.filter((p) => p.path.endsWith('/reply'));
   expect(replies.map((p) => p.path)).toEqual([`/api/inbox/messages/${ids.mixed}/reply`, `/api/inbox/messages/${ids.update}/reply`]);
-  expect(replies[0]!.body).toMatchObject({ words: '', skip_unanswered: true });
+  expect(replies[0]!.body).toMatchObject({ words: '', skip: [{ key: expect.any(String) }] });
   expect(replies[1]!.body).toMatchObject({ words: 'Thanks, carry on.', questions: [] });
   // On the server: the words are a reply to B's message, which is what hands them to B's session.
   const model = await api<{ thread: { messages: { author: { kind: string }; reply_to: string | null; body: string }[] } }>(`/api/inbox/threads/${ids.mixed}`);
@@ -459,19 +462,19 @@ type ThreadMessages = { thread: { messages: { id: string; author: { kind: string
 const personMessages = async (threadId: string) =>
   (await api<ThreadMessages>(`/api/inbox/threads/${threadId}`)).thread.messages.filter((m) => m.author.kind === 'person');
 
-test.skipIf(!hasDom)('one session asked, then posted a later update: a words-only Send switched to skip is ONE reply, carrying the skip and the words', async () => {
+test.skipIf(!hasDom)('one session asked, then posted a later update: a words-only Send after Skip it is ONE reply, carrying the skip and the words', async () => {
   const el = await renderApp(`#thread=${ids.same}`);
   act(() => button(el, 'Reply').click());
   await settle();
-  expect(el.querySelector('[data-skip-chip]')?.textContent).toContain('1 unanswered question stays open');
+  expect(el.querySelector('[data-skip-chip]')?.textContent).toContain('1 question stays open');
   act(() => button(el.querySelector('[data-skip-chip]')!, 'Skip it').click());
-  expect(el.querySelector('[data-skip-chip]')?.textContent).toContain('1 unanswered question will be skipped');
+  expect(el.querySelector('[data-skip-chip]')?.textContent).toContain('1 question will be skipped');
   type(el, 'Ship it as it is.');
   act(() => button(el, 'Send').click());
   await until(() => el.querySelector('textarea') === null, 'the Send');
   const replies = posted.filter((p) => p.path.endsWith('/reply'));
   expect(replies.map((p) => p.path)).toEqual([`/api/inbox/messages/${ids.same}/reply`]);
-  expect(replies[0]!.body).toMatchObject({ words: 'Ship it as it is.', questions: [], skip_unanswered: true });
+  expect(replies[0]!.body).toMatchObject({ words: 'Ship it as it is.', questions: [], skip: [{ key: expect.any(String) }] });
   // On the server: one person message, the skip and the words together.
   const mine = await personMessages(ids.same);
   expect(mine).toHaveLength(1);
@@ -488,7 +491,8 @@ test.skipIf(!hasDom)('one session, a pick waiting: a picks-only Send is one repl
   await settle();
   const replies = posted.filter((p) => p.path.endsWith('/reply'));
   expect(replies.map((p) => p.path)).toEqual([`/api/inbox/messages/${ids.picked}/reply`]);
-  expect(replies[0]!.body).toMatchObject({ words: '', skip_unanswered: true });
+  expect(replies[0]!.body).toMatchObject({ words: '' });
+  expect(replies[0]!.body.skip).toBeUndefined();
   expect((replies[0]!.body.questions as unknown[]).length).toBe(1);
   expect(await personMessages(ids.picked)).toHaveLength(1);
   expect((await questionStates(ids.picked)).map((q) => q.state)).toEqual(['sent']);
@@ -504,7 +508,8 @@ test.skipIf(!hasDom)('one session, words only (Keep open by default): the words 
   await until(() => el.querySelector('textarea') === null, 'the Send');
   const replies = posted.filter((p) => p.path.endsWith('/reply'));
   expect(replies.map((p) => p.path)).toEqual([`/api/inbox/messages/${ids.sameUpdate}/reply`]);
-  expect(replies[0]!.body).toMatchObject({ words: 'Still deciding.', questions: [], skip_unanswered: false });
+  expect(replies[0]!.body).toMatchObject({ words: 'Still deciding.', questions: [] });
+  expect(replies[0]!.body.skip).toBeUndefined();
   expect((await questionStates(ids.same)).map((q) => q.state)).toEqual(['open']);
   // The reply the session gets (on its update) still says its question is open.
   const mine = await personMessages(ids.same);

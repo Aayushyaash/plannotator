@@ -112,8 +112,8 @@ describe('shortcuts', () => {
       'Search',
       'Layout',
       'File Actions',
-      'History',
       'File Navigation',
+      'History',
       'All-Files View',
       'Markdown Files',
       'Annotations',
@@ -137,6 +137,20 @@ describe('shortcuts', () => {
         .map(entry => `${entry.scopeId}.${entry.actionId}`);
       expect(claimants).toEqual(['document-view.toggleFocusMode']);
     }
+  });
+
+  // Change navigation (#1543) is N / Shift+N in both review views. `P` is the
+  // Markdown view key, so previous-change must never be P; and with no
+  // cross-scope arbitration a second claimant on either key would double-fire.
+  it('binds next / previous change once, to N and Shift+N, clear of the Markdown P', () => {
+    expect(getShortcut(reviewSettingsShortcutRegistry, 'review-editor', 'nextChange')?.bindings).toEqual(['N']);
+    expect(getShortcut(reviewSettingsShortcutRegistry, 'review-editor', 'prevChange')?.bindings).toEqual(['Shift+N']);
+    const claimants = (binding: string) => listRegistryShortcuts(reviewSettingsShortcutRegistry)
+      .filter(entry => entry.bindings.includes(binding))
+      .map(entry => `${entry.scopeId}.${entry.actionId}`);
+    expect(claimants('N')).toEqual(['review-editor.nextChange']);
+    expect(claimants('Shift+N')).toEqual(['review-editor.prevChange']);
+    expect(claimants('P')).toEqual(['review-markdown-preview.cycleMarkdownView']);
   });
 
   // The two HTML-surface chords are the only way back into annotate mode after

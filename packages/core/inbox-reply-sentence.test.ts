@@ -87,3 +87,43 @@ describe('a reply that answers nothing (approval inbox-words-only-reply)', () =>
     expect(composeInboxReplyBody({ questions: [gone], sent: [], earlier: [], words: 'Later.' })).toBe('Later.');
   });
 });
+
+describe('a reply that answers some (approval inbox-explicit-skip)', () => {
+  const open = (key: string, message_id = 'msg_a'): InboxQuestionRecord =>
+    ({ ...question(key), message_id, answer: null, revision: 0, sent_revision: 0, superseded_by: null }) as unknown as InboxQuestionRecord;
+  test('says how many other questions stay open, never counting the ones it sends', () => {
+    const text = composeInboxReplyBody({ questions: [open('q0'), open('q1'), open('q2')], sent: [answer('q0', { selected: ['Yes'] })], earlier: [], words: undefined });
+    const line = text.split('\n\n')[1]!;
+    expect(line).toBe("You have 2 other questions open in this thread. They stay open; the person will answer them in the Inbox. Don't re-ask them.");
+    expect(INBOX_STILL_OPEN_LINE.test(line)).toBe(true);
+  });
+  test('one left: singular; none left: no line', () => {
+    expect(composeInboxReplyBody({ questions: [open('q0'), open('q1')], sent: [answer('q0', { selected: ['Yes'] })], earlier: [], words: undefined }).split('\n\n')[1]).toBe(
+      "You have 1 other question open in this thread. It stays open; the person will answer it in the Inbox. Don't re-ask it.",
+    );
+    expect(composeInboxReplyBody({ questions: [open('q0')], sent: [answer('q0', { selected: ['Yes'] })], earlier: [], words: undefined })).not.toContain('open in this thread');
+  });
+  test('answers on several messages: one section, a heading per message id; the still-open line counts the rest of the session', () => {
+    const a = [open('q0', 'msg_a'), open('q1', 'msg_a')];
+    const b = [open('q0', 'msg_b')];
+    const text = composeInboxReplyBody({
+      questions: [],
+      sent: [],
+      earlier: [],
+      words: 'Go.',
+      replyTo: 'msg_b',
+      messages: [
+        { message_id: 'msg_a', questions: a, sent: [answer('q0', { selected: ['No'] })], earlier: [] },
+        { message_id: 'msg_b', questions: b, sent: [answer('q0', { selected: ['Yes'] })], earlier: [] },
+      ],
+      stillOpen: [...a, ...b, open('q0', 'msg_c')],
+    });
+    expect(text.split('\n\n').slice(0, 3)).toEqual([
+      'Answered 2 questions.',
+      'Go.',
+      "You have 2 other questions open in this thread. They stay open; the person will answer them in the Inbox. Don't re-ask them.",
+    ]);
+    expect(text).toContain('## Answers to your questions\n\n### Your message msg_a\n\n1 of 2 questions answered.');
+    expect(text).toContain('### Your message msg_b\n\n1 of 1 question answered.\n\n#### Q1.');
+  });
+});

@@ -33,8 +33,13 @@ export interface ReaskTarget {
   open: number;
   /** Picked and not sent: they go with the note (or the plain reply) as answers. */
   picked: number;
-  /** For `picks`: one plain reply per message holding picks, as a Send carries them. */
-  replies: { message: InboxMessageWire; questions: { key: string; revision: number }[] }[];
+  /**
+   * For `picks`: the one plain reply that carries them, as a Send does (one
+   * reply per session, approval "inbox-explicit-skip"): it answers the
+   * session's latest message holding a pick, and names the message of every
+   * pick on another one.
+   */
+  replies: { message: InboxMessageWire; questions: { message_id?: string; key: string; revision: number }[] }[];
 }
 
 const isReaskNote = (m: InboxMessageWire): boolean => m.author.kind === 'person' && (m.reask?.length ?? 0) > 0;
@@ -96,11 +101,13 @@ export function reaskTargets(messages: readonly InboxMessageWire[], live: (messa
     const open = waiting.filter((q) => q.state === 'open').length;
     const base = { message: target, session: own.session, host: own.host, name: agentName(first.author), open, picked: waiting.length - open };
     if (open === 0) {
-      // Only picks: a plain reply per message carries them (owner's rule: picks go, never stranded).
-      const replies = holders
-        .map((m) => ({ message: m, questions: (m.questions ?? []).filter((q) => q.state === 'picked').map((q) => ({ key: q.key, revision: q.revision })) }))
-        .filter((r) => r.questions.length > 0);
-      targets.push({ ...base, kind: 'picks', replies });
+      // Only picks: one plain reply carries them all (owner's rule: picks go, never stranded).
+      const questions = holders.flatMap((m) =>
+        (m.questions ?? [])
+          .filter((q) => q.state === 'picked')
+          .map((q) => (m.id === target.id ? { key: q.key, revision: q.revision } : { message_id: m.id, key: q.key, revision: q.revision })),
+      );
+      targets.push({ ...base, kind: 'picks', replies: questions.length > 0 ? [{ message: target, questions }] : [] });
       continue;
     }
     // Just answered a note: everything still waiting is in that one message,
