@@ -3400,7 +3400,6 @@ const App: React.FC = () => {
   const savedFileChangesVerb = savedFileChanges.length === 1 ? 'is' : 'are';
   const savedFileChangesPronoun = savedFileChanges.length === 1 ? 'it' : 'them';
   const savedFileChangesOnDiskMessage = <>Your {savedFileChangesLabel} {savedFileChangesVerb} already on disk.</>;
-  const savedFileAwarenessOnlyMessage = <>{savedFileChangesOnDiskMessage} The agent won't be told about {savedFileChangesPronoun}.</>;
   const savedFileAwarenessMixedMessage = hasSavedFileChanges
     ? <> Your {savedFileChangesLabel} will stay on disk, but the agent won't be told about {savedFileChangesPronoun}.</>
     : null;
