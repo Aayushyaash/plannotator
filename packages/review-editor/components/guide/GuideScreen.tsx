@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentJobInfo, AgentCapabilities } from '@plannotator/ui/types';
 import { jobMatchesReviewContext } from '@plannotator/ui/hooks/useAgentJobs';
 import type { AgentLaunchParams } from '@plannotator/ui/hooks/useAgentJobs';
@@ -14,6 +14,7 @@ import { GuideSectionSkeleton } from '@plannotator/guide-viewer/GuideSkeleton';
 import { GuideView } from '@plannotator/guide-viewer/GuideView';
 import { ReviewGuideHost } from './ReviewGuideHost';
 import { GuideExportButton } from './GuideExportButton';
+import { filesViewedByTickingSection } from '../../utils/guideReviewedViewed';
 
 interface GuideScreenProps {
   /** Latest completed guide job id (or the demo guide id in standalone mode).
@@ -33,6 +34,9 @@ interface GuideScreenProps {
    *  receives the `saved:{id}` pseudo job id (#1112). Wired to the same
    *  handler as onOpenFixedGuide; ids are opaque to this screen. */
   onOpenSavedGuide?: (jobId: string) => void;
+  /** Mark files viewed, as the per-file Viewed checkbox does (#1786). Called
+   *  when ticking a section "Reviewed" completes every chapter of a file. */
+  onMarkFilesViewed?: (paths: string[]) => void;
 }
 
 /**
@@ -54,6 +58,7 @@ export const GuideScreen: React.FC<GuideScreenProps> = ({
   onClose,
   onOpenFixedGuide,
   onOpenSavedGuide,
+  onMarkFilesViewed,
 }) => {
   const [cancelling, setCancelling] = useState(false);
   // GuideScreen renders inside ReviewStateProvider (ActiveGuide below already
@@ -162,6 +167,7 @@ export const GuideScreen: React.FC<GuideScreenProps> = ({
         launchJob={launchJob}
         onOpenFixedGuide={onOpenFixedGuide}
         onOpenSavedGuide={onOpenSavedGuide}
+        onMarkFilesViewed={onMarkFilesViewed}
       />
     );
   }
@@ -207,6 +213,7 @@ function ActiveGuide({
   launchJob,
   onOpenFixedGuide,
   onOpenSavedGuide,
+  onMarkFilesViewed,
 }: {
   jobId: string;
   jobs: AgentJobInfo[];
@@ -218,10 +225,25 @@ function ActiveGuide({
   launchJob: (params: AgentLaunchParams) => Promise<AgentJobInfo | null>;
   onOpenFixedGuide?: (jobId: string) => void;
   onOpenSavedGuide?: (jobId: string) => void;
+  onMarkFilesViewed?: (paths: string[]) => void;
 }) {
   const { guide, loading, error, reviewed, toggleReviewed, retry } = useGuideData(jobId);
   const [focusedFile, setFocusedFile] = useState<string | null>(null);
   const state = useReviewState();
+  // Ticking a section "Reviewed" also marks its files viewed (#1786) once every
+  // chapter that shows a file is ticked; un-ticking leaves viewed marks alone.
+  // See filesViewedByTickingSection for the rule.
+  const filesInDiff = useMemo(() => new Set(state.files.map((f) => f.path)), [state.files]);
+  const handleToggleReviewed = useCallback(
+    (index: number) => {
+      if (guide && onMarkFilesViewed) {
+        const paths = filesViewedByTickingSection(guide.sections, reviewed, index, filesInDiff);
+        if (paths.length > 0) onMarkFilesViewed(paths);
+      }
+      toggleReviewed(index);
+    },
+    [guide, reviewed, filesInDiff, onMarkFilesViewed, toggleReviewed],
+  );
   // Shared guide-launch defaults, for the outdated-saved-guide "Regenerate"
   // hint (#1112) — same params GuideEmptyState's Generate button would send.
   // Only an outdated guide offers Regenerate, so only then load the model
@@ -381,7 +403,7 @@ function ActiveGuide({
         <GuideView
           guide={guide}
           reviewed={reviewed}
-          onToggleReviewed={toggleReviewed}
+          onToggleReviewed={handleToggleReviewed}
           engineLabel={engine ? `${REVIEW_ENGINE_LABEL[engine as ReviewEngine] ?? engine}${model ? ` · ${model}` : ''}` : undefined}
           focusedFile={focusedFile}
           onFocusFile={setFocusedFile}
