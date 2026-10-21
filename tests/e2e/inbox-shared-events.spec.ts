@@ -208,16 +208,20 @@ async function handover(browser: Browser, how: 'close' | 'reload' | 'crash' | 'f
     }
   })();
   // Another tab leads: when its log says so.
+  let takeoverHow: string | undefined;
   const takeover = await waitFor(
     async () => {
       for (const page of others) {
         const lead = (await logOf(page)).find((e) => e.type === 'lead' && e.at >= at);
-        if (lead) return lead.at - at;
+        if (lead) {
+          takeoverHow = lead.how;
+          return lead.at - at;
+        }
       }
       return null;
     },
     (v) => v !== null,
-    how === 'stall' ? 10_000 : 5000,
+    10_000,
   );
   // A stalled leader stays stopped for eight seconds in all (the reviewer's probe), the agent writing throughout.
   await new Promise((done) => setTimeout(done, how === 'stall' ? Math.max(1500, 8000 - (Date.now() - at)) : 1500));
@@ -256,15 +260,21 @@ async function handover(browser: Browser, how: 'close' | 'reload' | 'crash' | 'f
   const checked = await expectEveryRecordOnce(w, w.pages, { exact: false });
   await expect.poll(() => streams(w)).toBe(1);
   expect(await leaders(w.pages)).toHaveLength(1);
-  // A leader that is gone or frozen hands over within a second; a stalled one, after the follower's check (3 s) and wait (2 s).
-  expect(takeover.value!).toBeLessThan(how === 'stall' ? 6500 : 1000);
-  expect(frontLongestGapMs).toBeLessThan(how === 'stall' ? 6500 : 1500);
-  expect(Math.max(...streamSamples)).toBeLessThanOrEqual(how === 'stall' ? 2 : 1);
+  // A leader that closes or reloads frees its lock at once: the next tab leads within a second. A frozen one steps
+  // down at its freeze event (2 s on a slow machine). A crashed one frees its lock when the browser notices the
+  // renderer died: at once on macOS (2 ms), 2.6 s on GitHub's Linux runners, where the tab in front may take it first
+  // (its check every 3 s, no answer in 2 s); either way within the takeover a stalled leader gets.
+  const bound = how === 'stall' || how === 'crash' ? 7000 : how === 'freeze' ? 2000 : 1000;
+  expect(takeover.value!).toBeLessThan(bound);
+  expect(frontLongestGapMs).toBeLessThan(bound + 500);
+  // A crashed tab's connection can outlive its lock for a moment (the tab in front may lead first): two then.
+  expect(Math.max(...streamSamples)).toBeLessThanOrEqual(how === 'stall' || how === 'crash' ? 2 : 1);
   // A crashed target answers nothing more: never wait on it.
   if (cdp && how !== 'crash') await cdp.detach().catch(() => {});
   if (how === 'crash') void leader!.close().catch(() => {});
   return {
     takeoverMs: takeover.value,
+    takeoverHow,
     frontLongestGapMs,
     streamsPeak: Math.max(...streamSamples),
     streamSamples: streamSamples.length,
@@ -283,7 +293,7 @@ test('the leader reloads while an agent writes: one stream, every tab (the reloa
   results.reloadLeader = await handover(browser, 'reload');
 });
 
-test('the leader crashes (renderer crash, no unload) while an agent writes: another tab leads within a second', async ({ browser }) => {
+test('the leader crashes (renderer crash, no unload) while an agent writes: another tab leads once the browser frees its lock, or the tab in front takes it', async ({ browser }) => {
   results.crashLeader = await handover(browser, 'crash');
 });
 
@@ -389,7 +399,8 @@ test('notify_reach follows the tabs: open, a follower closes, a follower crashes
   // A new tab joins.
   await openTab(w);
   timeline.tabOpenedMs = (await waitFor(windows, (r) => r.windows === 2)).ms;
-  for (const ms of Object.values(timeline)) expect(ms).toBeLessThan(3000);
+  // A crashed tab is seen when the browser frees its lock: at once on macOS, seconds later on GitHub's Linux runners.
+  for (const [step, ms] of Object.entries(timeline)) expect(ms).toBeLessThan(step === 'followerCrashedMs' ? 8000 : 3000);
   results.reach = timeline;
 });
 

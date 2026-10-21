@@ -305,13 +305,18 @@ class World {
       catchUp: async (c) => {
         // The server answers with the lines as they are when the request reaches it; the answer can then be slow.
         await tick();
-        if (this.catchUpFails) {
+        if (this.catchUpFails && this.catchUpDelayMs === 0) {
           this.catchUps.push({ tab: id, cursor: c });
           throw new Error('down');
         }
         this.catchUps.push({ tab: id, cursor: c });
         const frames = this.server.lines.filter((line) => line.seq > c).map((line) => this.server.frameOf(line));
         if (this.catchUpDelayMs > 0) await new Promise((done) => setTimeout(done, this.catchUpDelayMs));
+        // A slow answer fails at its end (the Inbox went away meanwhile).
+        if (this.catchUpFails) {
+          this.catchUps.push({ tab: id, cursor: c });
+          throw new Error('down');
+        }
         return frames;
       },
       dispatch: dispatchInboxFrame,
@@ -829,6 +834,37 @@ test('a catch-up that fails keeps the gap: the frames that came meanwhile wait, 
   expectAll(a, 0, 4);
 });
 
+test('a tab that comes to lead while its catch-up runs, and the catch-up then fails, handles its own stream (it holds nothing back)', async () => {
+  const w = world();
+  const a = w.open();
+  await settle();
+  const f = w.open();
+  await settle(8);
+  // F sleeps; when it wakes its catch-up is slow and will fail.
+  f.doc.dispatchEvent(new Event('freeze'));
+  w.server.write(2);
+  w.catchUpDelayMs = 60;
+  w.catchUpFails = true;
+  f.doc.dispatchEvent(new Event('resume'));
+  await settle(4);
+  // The leader goes while F's catch-up is in flight: F leads.
+  w.kill(a);
+  await settle(10);
+  expect(w.leader()).toBe(f.id);
+  // The catch-up fails; F's own stream replays from its last seq.
+  await new Promise((done) => setTimeout(done, 120));
+  w.catchUpDelayMs = 0;
+  w.server.write(5);
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline && f.records.length < 7) await new Promise((done) => setTimeout(done, 5));
+  expectAll(f, 0, 7);
+  // It keeps going: a later record reaches it too, and nobody else leads.
+  w.server.write(1);
+  await settle(8);
+  expectAll(f, 0, 8);
+  expect(w.server.streams.size).toBe(1);
+});
+
 test('discardPreparedInboxEvents closes the early channel when no subscription follows', async () => {
   const g = globalThis as unknown as Record<string, unknown>;
   const saved = { BroadcastChannel: g.BroadcastChannel, EventSource: g.EventSource, navigator: g.navigator };
@@ -963,7 +999,11 @@ test('a random life with leaders stopping (no freeze) and tabs shown and hidden:
         const one = live[Math.floor(random() * live.length)]!;
         one.tab.visible = !one.tab.visible;
         one.tab.doc.dispatchEvent(new Event('visibilitychange'));
-      } else if (roll < 0.82) {
+      } else if (roll < 0.86) {
+        // The Inbox goes away and comes back: catch-ups fail (some at the end of a slow answer), then work again.
+        w.catchUpFails = !w.catchUpFails;
+        w.catchUpDelayMs = random() < 0.5 ? 0 : 30;
+      } else if (roll < 0.92) {
         const one = live[Math.floor(random() * live.length)]!;
         if (one.tab !== paused) {
           one.tab.doc.dispatchEvent(new Event(one.frozen ? 'resume' : 'freeze'));
@@ -974,9 +1014,12 @@ test('a random life with leaders stopping (no freeze) and tabs shown and hidden:
       expect(w.server.streams.size).toBeLessThanOrEqual(2);
     }
     if (paused) w.resume(paused);
+    w.catchUpFails = false;
+    w.catchUpDelayMs = 0;
     for (const one of live) if (one.frozen) one.tab.doc.dispatchEvent(new Event('resume'));
     w.server.write(2);
-    await new Promise((done) => setTimeout(done, 200));
+    // Retries back off to 80 ms here.
+    await new Promise((done) => setTimeout(done, 300));
     await settle(30);
     steals += w.locks.steals;
     expect(w.server.streams.size).toBe(1);

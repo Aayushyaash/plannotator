@@ -46,6 +46,8 @@ export interface LogEntry {
   via?: 'stream' | 'channel' | 'catch-up';
   cursor?: number;
   window?: string;
+  /** For `lead`: the lock came in line (`queue`) or was taken from a leader that did not answer (`steal`). */
+  how?: 'queue' | 'steal';
 }
 
 declare global {

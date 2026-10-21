@@ -385,7 +385,7 @@ export function subscribeSharedInboxEvents(
       failed = true;
     } finally {
       catching = false;
-      if (failed && !stopped) {
+      if (failed && !stopped && !leading) {
         // Keep holding: delivering the held frames now would move the last seq past the gap, and the gap would never be fetched.
         behind = true;
         again = false;
@@ -395,10 +395,13 @@ export function subscribeSharedInboxEvents(
           if (behind && !leading) void catchUp();
         }, retryDelay);
         retryDelay = Math.min(retryDelay * 2, retryMaxMs);
-      } else if (again && !stopped) {
+      } else if (again && !stopped && !leading) {
         again = false;
         void catchUp();
       } else if (!stopped) {
+        // Done, or this tab leads now: its own stream replays every line after its last seq, so nothing is owed.
+        again = false;
+        if (leading) behind = false;
         const waiting = held;
         held = [];
         for (const item of waiting) deliver(item.frame, item.via);
@@ -442,16 +445,17 @@ export function subscribeSharedInboxEvents(
     watched.clear();
   };
 
-  const lead = () => {
+  const lead = (how: 'queue' | 'steal') => {
     leading = true;
     leader = win.id;
     ledFrom = lastSeq;
-    // This tab's own stream replays every line after its last seq: nothing owed, and the held records come again.
+    // This tab's own stream replays every line after its last seq: nothing owed, and what it held (another
+    // leader's frames) comes again in order. Kept, they could move the last seq past lines its stream has yet to replay.
     behind = false;
     clearRetry();
-    if (!catching) held = [];
+    held = [];
     cancelCheck();
-    trace({ type: 'lead', from: ledFrom });
+    trace({ type: 'lead', from: ledFrom, how });
     post({ v: 1, type: 'leader', window: win.id, from: ledFrom });
     closeStream = env.open(lastSeq, (frame) => {
       if (!leading) return;
@@ -494,7 +498,7 @@ export function subscribeSharedInboxEvents(
         if (steal) stealing = false;
         if (stopped || suspended || abort?.signal.aborted || leading) return undefined;
         tenure = token;
-        lead();
+        lead(steal ? 'steal' : 'queue');
         return new Promise<void>((release) => {
           releaseLeader = release;
         });

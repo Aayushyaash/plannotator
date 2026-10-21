@@ -163,6 +163,9 @@ test("createInboxWindows: after the whole browser goes, its followers stop count
   // One grace, never two (the old rule kept them through the leader's drop and then their own).
   expect(after).toBeGreaterThanOrEqual(110);
   expect(after).toBeLessThan(220);
+  // The pages hear it when the expiry timer fires (one ms past the grace): wait for that, with a little slack.
+  const heardBy = Date.now() + 100;
+  while (heard.at(-1) !== 0 && Date.now() < heardBy) await Bun.sleep(5);
   expect(heard.at(-1)).toBe(0);
   windows.stop();
 });
