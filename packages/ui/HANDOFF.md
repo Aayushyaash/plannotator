@@ -2370,6 +2370,15 @@ For a host that records no decisions; the Plannotator Inbox passes it since its 
 - **Core:** `parseQuestionBlock(kind, body, options?)` and `indexQuestionBlocks(blocks, options?)` take an optional **`ParseQuestionBlockOptions`** with **`decisionLines?: boolean`** (default true, the old parse). False: a `Decision:` line is kept as context, and the result never carries `decisionOnAnswer` or `decision`. A line the default parse reads still ends the choice, bullet or recommendation above it, so the prompt, `questionKey`, numbering and choices are the default parse's, and an answer stored against one parse matches the other.
 - **ui:** `Viewer` **`questionDecisionLines?: boolean`** (default true) passes that option to its question index, so with `false` no card gets a decision tag or row from a `Decision:` line. Absent: unchanged.
 
+## Enter saves a comment (#1934; additive, no core change)
+
+An opt-in key for every comment composer. Default off, so a host that does nothing sees no change: comments save with Cmd/Ctrl+Enter, Enter adds a new line.
+
+- **`utils/commentSubmitKey`** (new): **`isCommentSubmitKey(event, enterSaves)`**, the one check every comment composer asks. Cmd/Ctrl+Enter always saves; with `enterSaves` a plain Enter saves too (not with Shift or Alt); an Enter that belongs to an IME composition never saves (`isComposing`, or `keyCode` 229, read off the event or React's `nativeEvent`). Also **`isImeCompositionKey(event)`**. Callers offer the key to their skill / mention menu first, so an arrowed-to row still takes Enter.
+- **Setting `enterSavesComment`** (`config/settings.ts`, cookie-only `plannotator-enter-saves-comment`, default false). Read with `useConfigValue('enterSavesComment')`. Each tab reads it at load (a change in another tab, or on another localhost port, applies after a reload). Composers that follow it: `CommentPopover`, `AnnotationPanel`'s two edit boxes, `CodeFilePopout`'s edit box. `DiagramComposer` saves on Enter whatever the setting says, as it always has.
+- **`DecisionNoteField`** gains **`enterSubmits?: boolean`** (default false: only Mod+Enter submits, the decision control's note composer). True: `isCommentSubmitKey(event, true)`, for a field used as a comment (Plannotator's review sidebar passes the setting's value).
+- **`Settings`**: General gets an **"Enter saves a comment"** switch row, so a host that renders `Settings` gets the row too. **`hideEnterSavesComment?: boolean`** (default false) hides it.
+
 ## The law (guardrails for anyone editing `@plannotator/ui`)
 
 These are enforced socially and, where possible, by CI. They exist because a prior from-scratch reimplementation of this UI broke the app and was reverted.

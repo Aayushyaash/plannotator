@@ -111,6 +111,26 @@ describe('CommentPopover with the skill menu open', () => {
   });
 });
 
+describe('CommentPopover with the skill menu open and no row active', () => {
+  test.skipIf(skip)('on: Enter saves (the menu takes Enter only for an arrowed-to row)', async () => {
+    try {
+      await setEnterSavesComment(true);
+      setSkillCatalogTransport(async () => [{ name: 'animate', root: 'claude', humanOnly: false }]);
+      let saves = 0;
+      await mountPopover('use /an', () => { saves++; }, true);
+      const el = must<HTMLTextAreaElement>('[data-comment-popover] textarea');
+      await act(async () => {});
+      expect(document.querySelector('[data-skill-menu]')).not.toBeNull();
+      expect(document.querySelector('[data-skill-item-active]')).toBeNull();
+      const enter = await pressKey(el, 'Enter');
+      expect(enter.defaultPrevented).toBe(true);
+      expect(saves).toBe(1);
+    } finally {
+      await setEnterSavesComment(false);
+    }
+  });
+});
+
 // --- The annotation panel's edit boxes ---
 
 const ANNOTATION: Annotation = {
@@ -172,6 +192,36 @@ describe('AnnotationPanel edit box with the mention menu open', () => {
       // With the row inserted and the menu closed, the next Enter saves.
       await pressKey(el, 'Enter');
       expect(edits.length).toBe(1);
+    } finally {
+      await setEnterSavesComment(false);
+    }
+  });
+});
+
+describe('AnnotationPanel edit box with the mention menu open and no row active', () => {
+  test.skipIf(skip)('on: Enter saves', async () => {
+    try {
+      await setEnterSavesComment(true);
+      const edits: unknown[] = [];
+      await render(
+        <AnnotationPanel
+          isOpen
+          blocks={[]}
+          annotations={[ANNOTATION]}
+          selectedId={null}
+          onSelect={() => {}}
+          onDelete={() => {}}
+          onEdit={(_id, updates) => { edits.push(updates); }}
+          mentionSource={{ people: [{ id: 'u1', label: 'Marcus Chen', kind: 'user', detail: null, canOpen: true }] }}
+        />,
+      );
+      await act(async () => must<HTMLButtonElement>('button[title="Edit annotation"]').click());
+      const el = must<HTMLTextAreaElement>('[data-annotation-id] textarea');
+      await typeInto(el, 'ping @ma');
+      expect(document.querySelector('[data-mention-picker]')).not.toBeNull();
+      expect(el.hasAttribute('aria-activedescendant')).toBe(false);
+      await pressKey(el, 'Enter');
+      expect(edits).toEqual([{ text: 'ping @ma' }]);
     } finally {
       await setEnterSavesComment(false);
     }
@@ -323,4 +373,10 @@ describe('Settings → General → "Enter saves a comment"', () => {
       }
     });
   }
+
+  test.skipIf(skip)('a host that passes hideEnterSavesComment gets no row', async () => {
+    await render(<Settings taterMode={false} onTaterModeChange={() => {}} mode="plan" externalOpen hideEnterSavesComment />);
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.querySelector('[data-enter-saves-comment-setting]')).toBeNull();
+  });
 });
