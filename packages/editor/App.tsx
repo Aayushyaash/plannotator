@@ -330,6 +330,7 @@ import { fetchSourceDocumentSnapshot, probeSourceSave } from './sourceDocumentCl
 import { reconcileSourceDocuments, type SourceDocumentReconcileEvent } from './sourceDocumentReconciliation';
 import {
   buildSourceWatchSubscription,
+  dirnameBrowserPath,
   normalizeBrowserPath,
   pathIsInsideDir,
 } from './sourceDocumentPaths';
@@ -1542,7 +1543,7 @@ const App: React.FC = () => {
   // these would silently re-introduce the demote-correct-link bug.
   const activeDocBaseDir = useMemo(
     () => linkedDocHook.filepath
-      ? linkedDocHook.filepath.replace(/\/[^/]+$/, '')
+      ? dirnameBrowserPath(linkedDocHook.filepath)
       : imageBaseDir?.includes('/') ? imageBaseDir : undefined,
     [linkedDocHook.filepath, imageBaseDir],
   );
@@ -7502,7 +7503,7 @@ const App: React.FC = () => {
                           }
                         : null
                     }
-                    imageBaseDir={imageBaseDir}
+                    imageBaseDir={linkedDocHook.isActive ? activeDocBaseDir : imageBaseDir}
                     codePathBaseDir={activeDocBaseDir}
                     copyLabel={annotateSource === 'message' ? 'Copy message' : annotateSource === 'file' || annotateSource === 'folder' ? 'Copy file' : undefined}
                     archiveInfo={archive.currentInfo}
