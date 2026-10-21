@@ -7,6 +7,7 @@ import { CommentPopover } from './CommentPopover';
 import { ImageThumbnail } from './ImageThumbnail';
 import type { CodeAnnotation, ImageAttachment } from '../types';
 import { copyTextToClipboard } from '../utils/clipboard';
+import { whenCodeLineRendered } from '../utils/codeLineScroll';
 
 export interface CodeFileAnnotationInput {
   filePath: string;
@@ -397,16 +398,17 @@ export const CodeFileView: React.FC<CodeFileViewProps> = ({
     return () => clearTimeout(timer);
   }, [selectedAnnotationId, filepath]);
 
+  // Bring the referenced line into view once Pierre has drawn it. Runs again
+  // only when the file or the line changes; a selected comment scrolls itself.
+  const selectedAnnotationIdRef = useRef(selectedAnnotationId);
+  selectedAnnotationIdRef.current = selectedAnnotationId;
   useEffect(() => {
-    if (line == null || selectedAnnotationId || !fileAreaRef.current) return;
-    const timer = setTimeout(() => {
-      const lineEl =
-        fileAreaRef.current?.querySelector(`[data-line="${line}"]`) ||
-        fileAreaRef.current?.querySelector('diffs-container')?.shadowRoot?.querySelector(`[data-line="${line}"]`);
-      lineEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }, 100);
-    return () => clearTimeout(timer);
-  }, [line, filepath, selectedAnnotationId]);
+    const area = fileAreaRef.current;
+    if (line == null || !area || selectedAnnotationIdRef.current) return;
+    return whenCodeLineRendered(area, line, (lineEl) => {
+      lineEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  }, [line, filepath]);
 
   const openCommentForRange = useCallback((
     range: { start: number; end: number },
