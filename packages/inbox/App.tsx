@@ -59,6 +59,7 @@ import { useShortcutScope } from '@plannotator/ui/shortcuts';
 import { inboxThreadShortcuts } from './shortcuts/thread.shortcuts';
 import { isComposingKey, isEditableTarget, isRepeatKey } from './shortcuts/guards';
 import { EmptyState } from './components/EmptyState';
+import { ThreadWait } from './components/ThreadWait';
 import { AgentNoteDialog } from './components/AgentNoteDialog';
 import { cardReport, noteQuestionRows } from './agents';
 import type { InboxAgentRow, InboxAgentsModel, InboxConnectReport } from '@plannotator/core/inbox-types';
@@ -145,6 +146,18 @@ const SEEN_RETRY_MS = 1000;
 /** The What's new page asks again this often while the server fetches the notes (its request gives up after 10 s). */
 const WHATS_NEW_RETRIES = 15;
 const WHATS_NEW_RETRY_MS = 1000;
+/**
+ * Opening a thread whose read failed (a dropped connection, a 5xx; not a 404): read it again after
+ * these waits, then every last one, while it stays open. Before this the pane stayed blank until some
+ * agent wrote anywhere in the Inbox (the event stream re-reads the open thread), seconds or forever.
+ */
+export const THREAD_READ_RETRY_MS = [250, 1000, 2000, 4000, 5000] as const;
+/** Why the open thread is not on screen yet: its read failed (read again soon), or the server has no such thread. */
+interface ThreadLoad {
+  threadId: string;
+  state: 'failed' | 'missing';
+  error: string;
+}
 
 interface Route {
   page: 'inbox' | 'settings' | 'whats-new' | 'drafts';
@@ -375,6 +388,15 @@ function Inbox() {
   const [thread, setThread] = useState<InboxThread | null>(null);
   /** The open thread's own list row, from its read: an archived thread has none in the list. */
   const [threadRow, setThreadRow] = useState<InboxListRow | null>(null);
+  /** The open thread's read when it has not landed: failed (read again soon) or missing (a 404). */
+  const [threadLoad, setThreadLoadState] = useState<ThreadLoad | null>(null);
+  const threadLoadRef = useRef<ThreadLoad | null>(null);
+  const setThreadLoad = useCallback((next: ThreadLoad | null) => {
+    threadLoadRef.current = next;
+    setThreadLoadState(next);
+  }, []);
+  /** Try again on the placeholder: the open effect reads the thread at once. */
+  const [threadRetry, setThreadRetry] = useState(0);
   /**
    * The open thread's "new since you looked" boundary (folding.ts), from
    * before this look, and `through`: what the window's looks this visit cover
@@ -690,16 +712,21 @@ function Inbox() {
       if (routeRef.current.thread === threadId) {
         setThread(next.thread);
         setThreadRow(next.row ?? null);
+        setThreadLoad(null);
         // What is new since the last look, from the first read of this thread:
         // it lands before the window records the look, and is kept until the person leaves the thread.
         setLook((current) => (current?.threadId === threadId ? current : { threadId, seq: lookBoundary(next.thread), through: latestAgentSeq(next.thread) }));
       }
       return next.thread;
     } catch (cause) {
-      if (cause instanceof InboxApiError && cause.status === 404 && routeRef.current.thread === threadId) setThread(null);
+      if (routeRef.current.thread === threadId) {
+        const missing = cause instanceof InboxApiError && cause.status === 404;
+        if (missing) setThread(null);
+        setThreadLoad({ threadId, state: missing ? 'missing' : 'failed', error: cause instanceof Error ? cause.message : String(cause) });
+      }
       return null;
     }
-  }, []);
+  }, [setThreadLoad]);
 
   const refreshSettings = useCallback(async () => {
     try {
@@ -855,12 +882,27 @@ function Inbox() {
       setThread(null);
       setThreadRow(null);
       setLook(null);
+      setThreadLoad(null);
       return;
     }
     let cancelled = false;
+    let retry: ReturnType<typeof setTimeout> | null = null;
     void (async () => {
-      const opened = await refreshThread(threadId);
-      if (cancelled || !opened) return;
+      let opened: InboxThread | null = null;
+      // A read that fails is read again (THREAD_READ_RETRY_MS) while the thread stays open; a 404 is not.
+      for (let attempt = 0; !opened; attempt++) {
+        opened = await refreshThread(threadId);
+        if (cancelled) return;
+        if (opened) break;
+        // Another thread opened meanwhile, or the server said this one is not there.
+        if (routeRef.current.thread !== threadId || (threadLoadRef.current?.threadId === threadId && threadLoadRef.current.state === 'missing')) return;
+        const waitMs = THREAD_READ_RETRY_MS[Math.min(attempt, THREAD_READ_RETRY_MS.length - 1)]!;
+        await new Promise<void>((done) => {
+          retry = setTimeout(done, waitMs);
+        });
+        retry = null;
+        if (cancelled) return;
+      }
       closing.current = null;
       if (listCovered() && COVERED_LIST_SETTLES === 'while-covered') settleList('own', false);
       // The look covers what this read showed, not a message that lands before the server takes it.
@@ -869,8 +911,9 @@ function Inbox() {
     })();
     return () => {
       cancelled = true;
+      if (retry) clearTimeout(retry);
     };
-  }, [route.thread, refreshThread, refreshList, settleList]);
+  }, [route.thread, threadRetry, refreshThread, refreshList, settleList]);
 
   // When the list on screen catches up as the route changes (settle.ts).
   // Another page or folder: the list there is drawn as it is now. A thread
@@ -2206,6 +2249,15 @@ function Inbox() {
             ) : null
           }
         />
+        )}
+        {/* Beside the list, the thread's place says it is opening (or why not) until its read lands; a phone
+            and a stacked window keep the list until there is a thread to show. */}
+        {route.thread && !(thread && thread.thread_id === route.thread) && !phone && !stack.thread && (
+          <ThreadWait
+            load={threadLoad?.threadId === route.thread ? threadLoad : null}
+            onRetry={() => setThreadRetry((n) => n + 1)}
+            onClose={() => close({ ...route, thread: null, file: null })}
+          />
         )}
         {route.thread && thread && thread.thread_id === route.thread && (
           <ThreadPane
