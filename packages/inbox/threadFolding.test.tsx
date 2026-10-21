@@ -182,6 +182,20 @@ async function settle() {
   });
 }
 
+/**
+ * Let `ms` pass inside act. The live region and a jump land from timers the
+ * pane sets (the announcement 30 ms after the click, the jump on the next
+ * frame); inside act their state updates are flushed before act returns. A
+ * plain wait outside act only works when the runner keeps up: under load both
+ * timers fire in one turn and the test reads the DOM before React renders the
+ * update the first one queued.
+ */
+async function waitInAct(ms: number) {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  });
+}
+
 function pane(thread: InboxThread, lookSeq?: number | null) {
   return (
     <div className="pn-inbox">
@@ -287,7 +301,7 @@ test.skipIf(!hasDom)('the middle fold opens to lines and focuses the first; Expa
   expect(shown(el)).toEqual(['msg_A1:line', 'msg_P1:line', 'msg_A2:line', 'msg_P2:line', 'msg_A3:line', 'msg_P3:line', 'divider', 'msg_A4:open']);
   expect(focusedArticle()?.getAttribute('data-message-article')).toBe('msg_P1');
   await settle();
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  await waitInAct(40);
   expect(el.querySelector('[data-fold-live]')!.textContent).toBe('3 earlier messages shown');
 
   act(() => (el.querySelector('[data-expand-all]') as HTMLButtonElement).click());
@@ -487,7 +501,7 @@ test.skipIf(!hasDom)('a link to a replaced card in a folded message opens the me
   const link = article(el, 'msg_A4')!.querySelector<HTMLButtonElement>('[data-replaces-line] .ib-q-link')!;
   act(() => link.click());
   await settle();
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  await waitInAct(40);
   expect(article(el, ROOT)!.hasAttribute('data-open')).toBe(true);
   expect(document.activeElement?.getAttribute('data-question-key')).toBe(index!.key);
 });
