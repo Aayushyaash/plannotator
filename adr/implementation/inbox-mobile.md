@@ -1213,7 +1213,7 @@ A list row carries `unsent` (additive, approval "inbox-reply-drafts"): `{ reply_
 curl -sS "$INBOX/api/inbox/device/threads/msg_01K70000000000000000000010/draft" -H "Authorization: Bearer $TOKEN"
 ```
 
-`{ "serverSession": "…", "draft": { "v": 1, "thread_id": "msg_01K70000000000000000000010", "body": "Cards, but keep the totals column", "created_at": "…", "updated_at": "…" } }`. The door writes no reply draft in v1: the phone composes its own reply, and a Send from the phone leaves the computer's draft alone (the window's own Send clears it). A later row can add writes with the window's compare-and-set (`base` = the `updated_at` read; `409 draft_conflict` with the newer draft).
+`{ "serverSession": "…", "draft": { "v": 1, "thread_id": "msg_01K70000000000000000000010", "body": "Cards, but keep the totals column", "created_at": "…", "updated_at": "…" } }`. The door writes no reply draft in v1: the phone composes its own reply, and a Send from the phone leaves the computer's draft alone (the window's own Send clears it). The door forwards a reply's `clear_draft` unchanged, so the phone must not send it for words it did not prefill from this draft: `clear_draft` names the draft's `updated_at` (a compare-and-set, so a stale value clears nothing), and only a reply carrying that draft's own words may name it. A later row can add writes with the window's compare-and-set (`base` = the `updated_at` read; `409 draft_conflict` with the newer draft).
 
 ## 8. What this contract leaves out
 

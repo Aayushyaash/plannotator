@@ -42,7 +42,7 @@ export function conflictText(sentElsewhere: boolean): string {
 /**
  * Both windows hold words for this reply: this window's save was refused, and
  * its words are in the box, not saved. Keep mine saves them over the other's;
- * Discard drops only this window's words (the other's draft stays).
+ * Discard mine drops only this window's words (the other's draft stays).
  */
 export interface DraftConflict {
   /** The line's id: the reply box names it in aria-describedby. */
@@ -77,7 +77,7 @@ export function DraftHead({
             Keep mine
           </button>
           <button type="button" className="ib-draft-discard" data-draft-discard="" onClick={conflict.onDiscard}>
-            Discard
+            Discard mine
           </button>
         </span>
       </div>

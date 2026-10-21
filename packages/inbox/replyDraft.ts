@@ -44,9 +44,14 @@ export interface ReplyDraftState {
 
 /** Saves waiting or in flight anywhere on the page, and words left unsaved by a conflict (the restart guard reads them). */
 let unsaved = 0;
-const unsavedConflicts = new Set<string>();
+/**
+ * Per thread, the words a refused save carried (both windows hold words), not
+ * saved. Module-level, not the hook's: the thread pane unmounts when the thread
+ * closes or another opens, and these words must come back when it reopens.
+ */
+const conflictWords = new Map<string, string>();
 export function replyDraftUnsaved(): boolean {
-  return unsaved > 0 || unsavedConflicts.size > 0;
+  return unsaved > 0 || conflictWords.size > 0;
 }
 
 /** Told when replyDraftUnsaved() may have changed (unsent.ts keeps the page's beforeunload question in step). */
@@ -59,14 +64,11 @@ function unsavedChanged(): void {
   for (const listener of unsavedListeners) listener();
 }
 
-let hooks = 0;
 
 export function useReplyDraft(threadId: string) {
   const [state, setState] = useState<ReplyDraftState>({ loadedFor: null, draft: null, conflict: null });
   const stateRef = useRef(state);
   stateRef.current = state;
-  const hookId = useRef(0);
-  if (hookId.current === 0) hookId.current = ++hooks;
   const chain = useRef<Promise<void>>(Promise.resolve());
   const pending = useRef<{ threadId: string; text: string } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -78,8 +80,8 @@ export function useReplyDraft(threadId: string) {
   const generations = useRef(new Map<string, number>());
   /** Threads a Send has claimed: no save of theirs runs until it ends or fails. */
   const claimed = useRef(new Set<string>());
-  /** Per thread: the words a refused save carried, kept here (not saved). */
-  const conflicts = useRef(new Map<string, string>());
+  /** The words refused saves left unsaved, per thread (module-level: they outlive the pane). */
+  const conflicts = useRef(conflictWords);
   /** Per thread: the words the server held as this window last saved or read them (null: no draft). */
   const synced = useRef(new Map<string, string | null>());
   /** The words the last save queued here carries (or the draft read): the page's last save names them (`base_body`). */
@@ -88,15 +90,9 @@ export function useReplyDraft(threadId: string) {
   const generationOf = (target: string) => generations.current.get(target) ?? 0;
   const bump = (target: string) => generations.current.set(target, generationOf(target) + 1);
   const baseOf = (target: string) => bases.current.get(target) ?? null;
-  const conflictKey = (target: string) => `${hookId.current}:${target}`;
   const setConflict = (target: string, words: string | null) => {
-    if (words === null) {
-      conflicts.current.delete(target);
-      unsavedConflicts.delete(conflictKey(target));
-    } else {
-      conflicts.current.set(target, words);
-      unsavedConflicts.add(conflictKey(target));
-    }
+    if (words === null) conflicts.current.delete(target);
+    else conflicts.current.set(target, words);
     unsavedChanged();
   };
   /** The server holds this draft for the thread now: its base and words, as this window knows them. */
@@ -176,15 +172,6 @@ export function useReplyDraft(threadId: string) {
       flush();
     };
   }, [threadId, flush]);
-
-  // Words left unsaved by a conflict stop counting when the window goes.
-  useEffect(() => {
-    const id = hookId.current;
-    return () => {
-      for (const key of [...unsavedConflicts]) if (key.startsWith(`${id}:`)) unsavedConflicts.delete(key);
-      unsavedChanged();
-    };
-  }, []);
 
   // A reload or a closed tab while a save waits: sent as the page goes (keepalive).
   useEffect(() => {

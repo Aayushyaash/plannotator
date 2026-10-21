@@ -762,6 +762,17 @@ export function AckPill({
   );
 }
 
+/**
+ * Per thread, a Send whose reply carrying the words went out and may have gone
+ * (its answer was lost): the exact requests it made, kept so that Send again
+ * with the same words posts them unchanged (the same keys and targets, the
+ * same comments and `clear_draft`) and the server replays what went instead of
+ * taking a second reply. Module-level so it outlives the pane (leaving the
+ * thread and coming back); dropped when the words change and after a Send
+ * that went.
+ */
+const retryPlans = new Map<string, { words: string; requests: { messageId: string; input: Parameters<typeof inboxApi.reply>[1] }[] }>();
+
 export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged = 0, onClose, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
   // "Open in" (OpenIn.tsx): apps on this computer; a new tab only through the tailnet or on a phone.
   const openIn: OpenInSurface | undefined = phone || remote === true ? 'tab' : remote === null ? undefined : 'apps';
@@ -1854,6 +1865,9 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     /** The reply that carries the box's words, once its POST went out (its idempotency key), and why the Send stopped. */
     let wordsKey: string | null = null;
     let failure: unknown = null;
+    /** This Send's words and the requests it posts (kept as a retry plan when they may have gone). */
+    let sendWords = '';
+    let requests: { messageId: string; input: Parameters<typeof inboxApi.reply>[1] }[] = [];
     try {
       await pickChain.current;
       const current = threadRef.current;
@@ -1879,80 +1893,93 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
         words = kept?.body.trim() ?? '';
         draftSavedAs = kept?.updated_at ?? null;
       }
-      // A pick saved just now, or still being saved when Send was pressed, counts as an answer.
-      const skip = skipsUnanswered(skipChoice, sendAnswersAny(current) || sendAnswersAny(thread, pending));
-      const pendingAnnotations = records;
-      const uploads = box.open ? replyUploads : [];
+      sendWords = words;
       // The tiles this Send carries: a file pasted while it is in flight stays for the next one.
       const sentFiles = new Set(box.open ? replyFiles.files.filter((f) => f.state === 'done' && f.upload).map((f) => f.key) : []);
-      const carries = words !== '' || pendingAnnotations.length > 0 || uploads.length > 0;
-      // The latest agent message rides last only to carry the words, the
-      // annotations and the pasted files; with none, a target with nothing to send is left out.
-      const plain = sendTargetsOf(current, skip).filter((t, index, all) => t.questions.length > 0 || t.skips || (carries && index === all.length - 1));
-      // A comment on another session's message rides a reply to that message (routeSendAnnotations).
-      const { targets, carried } = routeSendAnnotations(current, plain, pendingAnnotations);
-      total = targets.length;
-      if (targets.length === 0) {
-        setError('Write a reply or pick an answer first.');
-        return;
-      }
-      const lastId = targets.at(-1)!.message.id;
-      // Every tag of this Send (the words' and every carried comment's), once each, on the last reply.
-      const sendTags = sendTagsByTarget(
-        targets.map((t) => ({ id: t.message.id, owner: t.message.author.kind === 'agent' ? (t.message.author.session ?? null) : null })),
-        taggedIds,
-        new Map(targets.map((t) => [t.message.id, (carried.get(t.message.id) ?? []).flatMap((r) => commentTags(r))])),
-        tagOpts,
-      );
-      if (!sendKeys.current) sendKeys.current = new Map();
-      for (const t of targets) if (!sendKeys.current.has(t.message.id)) sendKeys.current.set(t.message.id, crypto.randomUUID());
-      // A retry whose words, files or annotations changed: each reply carrying them is a new one.
-      const contents = new Map(
-        targets.map((t) => [
-          t.message.id,
-          JSON.stringify([
-            t.message.id === lastId ? [words, uploads, sendTags.get(lastId) ?? []] : [],
-            (carried.get(t.message.id) ?? []).map((r) => [r.id, r.updated_at]),
+      // The same words as a Send that may have gone: its requests again, unchanged, so the server replays them.
+      const kept = retryPlans.get(current.thread_id);
+      const replay = kept && kept.words === words ? kept : null;
+      retryPlans.delete(current.thread_id);
+      if (replay) {
+        requests = replay.requests;
+      } else {
+        // A pick saved just now, or still being saved when Send was pressed, counts as an answer.
+        const skip = skipsUnanswered(skipChoice, sendAnswersAny(current) || sendAnswersAny(thread, pending));
+        const pendingAnnotations = records;
+        const uploads = box.open ? replyUploads : [];
+        const carries = words !== '' || pendingAnnotations.length > 0 || uploads.length > 0;
+        // The latest agent message rides last only to carry the words, the
+        // annotations and the pasted files; with none, a target with nothing to send is left out.
+        const plain = sendTargetsOf(current, skip).filter((t, index, all) => t.questions.length > 0 || t.skips || (carries && index === all.length - 1));
+        // A comment on another session's message rides a reply to that message (routeSendAnnotations).
+        const { targets, carried } = routeSendAnnotations(current, plain, pendingAnnotations);
+        if (targets.length === 0) {
+          setError('Write a reply or pick an answer first.');
+          return;
+        }
+        const lastId = targets.at(-1)!.message.id;
+        // Every tag of this Send (the words' and every carried comment's), once each, on the last reply.
+        const sendTags = sendTagsByTarget(
+          targets.map((t) => ({ id: t.message.id, owner: t.message.author.kind === 'agent' ? (t.message.author.session ?? null) : null })),
+          taggedIds,
+          new Map(targets.map((t) => [t.message.id, (carried.get(t.message.id) ?? []).flatMap((r) => commentTags(r))])),
+          tagOpts,
+        );
+        if (!sendKeys.current) sendKeys.current = new Map();
+        for (const t of targets) if (!sendKeys.current.has(t.message.id)) sendKeys.current.set(t.message.id, crypto.randomUUID());
+        // A retry whose words, files or annotations changed: each reply carrying them is a new one.
+        const contents = new Map(
+          targets.map((t) => [
+            t.message.id,
+            JSON.stringify([
+              t.message.id === lastId ? [words, uploads, sendTags.get(lastId) ?? []] : [],
+              (carried.get(t.message.id) ?? []).map((r) => [r.id, r.updated_at]),
+            ]),
           ]),
-        ]),
-      );
-      if (sendContents.current) {
-        for (const [id, value] of contents) if (sendContents.current.has(id) && sendContents.current.get(id) !== value) sendKeys.current.set(id, crypto.randomUUID());
+        );
+        if (sendContents.current) {
+          for (const [id, value] of contents) if (sendContents.current.has(id) && sendContents.current.get(id) !== value) sendKeys.current.set(id, crypto.randomUUID());
+        }
+        sendContents.current = contents;
+        // The words and the annotations ride the last reply, after its picks;
+        // a comment on another session's message rides the reply to it. The
+        // skills each reply's words and comments reference ride it too, as one
+        // block at its end (skills.ts: a human-only skill's SKILL.md pasted in, its folder named).
+        for (const [index, target] of targets.entries()) {
+          const last = index === targets.length - 1;
+          const own = carried.get(target.message.id) ?? [];
+          const annotationsFeedback = own.length > 0 ? await buildFeedback(own) : '';
+          const skills = await inboxSkillsBlock([last ? words : '', ...annotationSkillTexts(own)], INBOX_REPLY_SKILL_AUDIENCE);
+          const feedback = withSkillsBlock(annotationsFeedback, skills);
+          // The agents tagged anywhere in this Send ride the last reply (a tag in a file comment sends the whole reply).
+          const tags = sendTags.get(target.message.id) ?? [];
+          requests.push({ messageId: target.message.id, input: {
+            idempotency_key: sendKeys.current.get(target.message.id) ?? crypto.randomUUID(),
+            words: last ? words : '',
+            questions: target.questions,
+            skip_unanswered: skip,
+            ...(feedback ? { feedback } : {}),
+            ...(own.length > 0 ? { annotation_ids: own.map((r) => r.id) } : {}),
+            // The pasted files ride the reply that carries the words, as attachments.
+            ...(last && uploads.length > 0 ? { uploads } : {}),
+            ...(tags.length > 0 ? { tags } : {}),
+            // The reply that carries the box's words: their draft goes with the Send (that draft only).
+            ...(last && words !== '' && draftSavedAs !== null ? { clear_draft: draftSavedAs } : {}),
+            // Only a message the ended session asked goes to the session picked;
+            // an answer to another session's message still goes to that session.
+            ...(to && target.message.author.kind === 'agent' && target.message.author.session === asking?.session ? { to } : {}),
+          } });
+        }
       }
-      sendContents.current = contents;
-      // The words and the annotations ride the last reply, after its picks;
-      // a comment on another session's message rides the reply to it. The
-      // skills each reply's words and comments reference ride it too, as one
-      // block at its end (skills.ts: a human-only skill's SKILL.md pasted in, its folder named).
-      for (const [index, target] of targets.entries()) {
-        const last = index === targets.length - 1;
-        const own = carried.get(target.message.id) ?? [];
-        const annotationsFeedback = own.length > 0 ? await buildFeedback(own) : '';
-        const skills = await inboxSkillsBlock([last ? words : '', ...annotationSkillTexts(own)], INBOX_REPLY_SKILL_AUDIENCE);
-        const feedback = withSkillsBlock(annotationsFeedback, skills);
-        // The agents tagged anywhere in this Send ride the last reply (a tag in a file comment sends the whole reply).
-        const tags = sendTags.get(target.message.id) ?? [];
-        if (last && words !== '') wordsKey = sendKeys.current.get(target.message.id) ?? null;
-        await inboxApi.reply(target.message.id, {
-          idempotency_key: sendKeys.current.get(target.message.id) ?? crypto.randomUUID(),
-          words: last ? words : '',
-          questions: target.questions,
-          skip_unanswered: skip,
-          ...(feedback ? { feedback } : {}),
-          ...(own.length > 0 ? { annotation_ids: own.map((r) => r.id) } : {}),
-          // The pasted files ride the reply that carries the words, as attachments.
-          ...(last && uploads.length > 0 ? { uploads } : {}),
-          ...(tags.length > 0 ? { tags } : {}),
-          // The reply that carries the box's words: their draft goes with the Send (that draft only).
-          ...(last && words !== '' && draftSavedAs !== null ? { clear_draft: draftSavedAs } : {}),
-          // Only a message the ended session asked goes to the session picked;
-          // an answer to another session's message still goes to that session.
-          ...(to && target.message.author.kind === 'agent' && target.message.author.session === asking?.session ? { to } : {}),
-        });
+      total = requests.length;
+      for (const request of requests) {
+        if (request.input.words) wordsKey = request.input.idempotency_key;
+        await inboxApi.reply(request.messageId, request.input);
         went += 1;
       }
       sendKeys.current = null;
       sendContents.current = null;
+      retryPlans.delete(threadRef.current.thread_id);
       setRoute(CLOSED_ROUTE);
       setSkipChoice('auto');
       // Only the files this Send carried go; one pasted while it was in flight keeps the box open.
@@ -2004,10 +2031,19 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
           }
         }
         if (wentAnyway !== 'no') {
-          // The draft is treated as sent: never saved again by itself. The box keeps the words and the
-          // error stays, so Send again replays the same reply (its key) and changed words go as a new one.
-          replyDraft.sent();
-          if (wentAnyway === 'yes') setError('Your reply went, but its answer was lost. Send again to be sure: it is not sent twice.');
+          // The box keeps the words and Send again posts these same requests (retryPlans: the same keys,
+          // targets, comments and clear_draft), so the server replays what went and never takes it twice.
+          retryPlans.set(threadRef.current.thread_id, { words: sendWords, requests });
+          if (wentAnyway === 'yes') {
+            // It went, and its clear_draft with it: the draft is never saved again by itself.
+            replyDraft.sent();
+            setError('Your reply went, but its answer was lost. Send again to be sure: it is not sent twice.');
+          } else {
+            // Not known (the Inbox may be down): the draft stays as it is on the server, and the retry's
+            // clear_draft names it, so it goes with the reply whenever that lands.
+            replyDraft.release();
+            setError('The reply may not have gone. Send again: if it went, it is not sent twice.');
+          }
           void onChanged();
         } else {
           replyDraft.release();

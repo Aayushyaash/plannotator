@@ -57,7 +57,7 @@ function loopback(path: string, method = 'GET', body?: string): Promise<{ status
   });
 }
 
-const TESTS = 20;
+const TESTS = 23;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -448,8 +448,9 @@ test.skipIf(!hasDom)('another window sent the words: this window\'s next save is
 /** Open the waiting thread's box with words saved there; answers the draft as the server holds it. */
 async function openWithSaved(words: string) {
   const el = await renderApp(`#thread=${world.waiting}`);
-  await until(() => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Reply'), 'the foot');
-  act(() => button(el, 'Reply').click());
+  const opener = () => [...el.querySelectorAll('.ib-pfoot button')].find((b) => ['Reply', 'Edit draft'].includes(b.textContent?.replace(/\s+/g, ' ').trim() ?? '')) as HTMLButtonElement | undefined;
+  await until(() => opener() !== undefined, 'the foot');
+  act(() => opener()!.click());
   await settle();
   type(el, words);
   await until(async () => (await serverDraft(world.waiting))?.body === words, 'the words saved');
@@ -524,7 +525,7 @@ test.skipIf(!hasDom)('event: drafts, the other window typed while this box has e
   expect(box(el)!.value).toBe('Mine, and more.');
   // Two choices only, and their hit areas apart (the gap is wider than both ::after reaches).
   const acts = el.querySelector('[data-draft-conflict] .ib-draft-acts')!;
-  expect([...acts.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Keep mine', 'Discard']);
+  expect([...acts.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Keep mine', 'Discard mine']);
   act(() => (el.querySelector('[data-draft-conflict] [data-draft-discard]') as HTMLButtonElement).click());
   await settle();
   expect(box(el)!.value).toBe('Theirs.');
@@ -588,3 +589,74 @@ test.skipIf(!hasDom)('a Send whose answer is lost after it went is treated as se
   expect(model.thread.messages.filter((m) => m.author.kind === 'person' && m.body.startsWith('Went, answer lost.'))).toHaveLength(1);
   expect(await serverDraft(world.waiting)).toBeNull();
 });
+
+test.skipIf(!hasDom)('a Send carrying a comment whose answer is lost after it went: Send again replays it (the same key), never a second reply', async () => {
+  // A comment on the agent's message waits for the Send, beside the words.
+  const made = await loopback(
+    `/api/inbox/messages/${world.waiting}/annotations`,
+    'POST',
+    JSON.stringify({ annotation: { id: 'ann-lost-answer', blockId: 'block-1', startOffset: 0, endOffset: 13, type: 'COMMENT', text: 'Pagefind, please.', originalText: 'The docs site', createdA: 1 } }),
+  );
+  expect(made.status).toBe(200);
+  const { el } = await openWithSaved('Went with a comment.');
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const answer = await real(input, init);
+    if ((init?.method ?? 'GET') === 'POST' && String(input).endsWith('/reply')) throw new TypeError('Failed to fetch');
+    return answer;
+  }) as typeof fetch;
+  act(() => button(el, 'Send').click());
+  await until(() => !!el.textContent?.includes('Your reply went, but its answer was lost.'), 'the error saying it went');
+  globalThis.fetch = real;
+  await settle();
+  act(() => button(el, 'Send').click());
+  await until(() => box(el) === null, 'the retry');
+  const replies = posted.filter((p) => p.path.endsWith('/reply'));
+  // The retry posted the first Send's requests unchanged: the same key, the comment with it.
+  expect(replies.at(-1)!.body.idempotency_key).toBe(replies.at(-2)!.body.idempotency_key);
+  expect(replies.at(-1)!.body.annotation_ids).toEqual(['ann-lost-answer']);
+  const model = JSON.parse((await loopback(`/api/inbox/threads/${world.waiting}`)).text) as { thread: { messages: { author: { kind: string }; body: string }[] } };
+  expect(model.thread.messages.filter((m) => m.author.kind === 'person' && m.body.startsWith('Went with a comment.'))).toHaveLength(1);
+}, 30_000);
+
+test.skipIf(!hasDom)('a Send while the Inbox is down: the draft stays, and the retry clears it with the Send (no draft of the sent words)', async () => {
+  const { el, saved } = await openWithSaved('Sent while it was down.');
+  const real = globalThis.fetch;
+  // The reply and the thread read both fail before reaching the Inbox.
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (((init?.method ?? 'GET') === 'POST' && path.endsWith('/reply')) || /\/api\/inbox\/threads\/[^/]+$/.test(path)) throw new TypeError('Failed to fetch');
+    return real(input, init);
+  }) as typeof fetch;
+  act(() => button(el, 'Send').click());
+  await until(() => !!el.textContent?.includes('The reply may not have gone.'), 'the error');
+  globalThis.fetch = real;
+  // Nothing reached the Inbox: the draft is still there.
+  expect((await serverDraft(world.waiting))?.updated_at).toBe(saved.updated_at);
+  act(() => button(el, 'Send').click());
+  await until(() => box(el) === null, 'the retry');
+  const reply = posted.filter((p) => p.path.endsWith('/reply')).at(-1)!;
+  expect(reply.body.clear_draft).toBe(saved.updated_at);
+  await settle(200);
+  expect(await serverDraft(world.waiting)).toBeNull();
+}, 30_000);
+
+test.skipIf(!hasDom)('words a conflict left unsaved come back when the thread is left and opened again', async () => {
+  const { el, saved } = await openWithSaved('Mine.');
+  type(el, 'Mine, kept through a switch.');
+  await loopback(`/api/inbox/threads/${world.waiting}/draft`, 'POST', JSON.stringify({ body: 'Theirs.', base: saved.updated_at }));
+  await act(async () => emit('drafts', { thread_id: world.waiting }));
+  await until(() => el.querySelector('[data-draft-conflict]') !== null, 'the conflict');
+  // Leave the thread (the pane goes), then open it again.
+  leave();
+  expect(unsentReply()).not.toBeNull();
+  const again = await renderApp(`#thread=${world.waiting}`);
+  await until(() => box(again)?.value === 'Mine, kept through a switch.', 'the unsaved words back');
+  await until(() => again.querySelector('[data-draft-conflict]') !== null, 'the conflict line back');
+  expect((await serverDraft(world.waiting))?.body).toBe('Theirs.');
+  // Keep mine still works from here.
+  act(() => (again.querySelector('[data-draft-keep-mine]') as HTMLButtonElement).click());
+  await until(async () => (await serverDraft(world.waiting))?.body === 'Mine, kept through a switch.', 'kept');
+  // Nothing of this thread is left unsaved: the line is gone (other threads' unsaved words are kept as they are).
+  expect(again.querySelector('[data-draft-conflict]')).toBeNull();
+}, 30_000);
