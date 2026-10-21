@@ -10,7 +10,7 @@ import { trimWhitespaceOnlyBoundaryNodes, type SelectedNodeLike } from './select
 // lose their inter-node spacing.
 //
 // Lives here rather than in useAnnotationHighlighter.test.tsx because that suite
-// is DOM-gated (skipped unless DOM_TESTS=1) and so guards nothing in CI.
+// runs only with the browser test environment switched on and so guards nothing in CI.
 
 const nodes = (...texts: (string | null)[]): SelectedNodeLike[] =>
   texts.map((textContent) => ({ $node: { textContent } }));
