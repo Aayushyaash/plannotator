@@ -715,7 +715,7 @@ describe("the device door, on the binary", () => {
     expect([gone.status, ((await gone.json()) as Json).code]).toEqual([409, "session_not_live"]);
   });
 
-  test("7.62: a to-do's Done and its Undo, forwarded unchanged and replayed by key; a question's key is not a door route", async () => {
+  test("7.63: a to-do's Done and its Undo, forwarded unchanged and replayed by key; a question's key is not a door route", async () => {
     const sent = await agent.send({ project_path: w.project, thread: "door-todo", body: ":::action\nApprove the deploy on Vercel\nWhere: https://vercel.com/acme\n:::" });
     const listed = (await (await door(`threads/${sent.thread_id}`)).json()) as Json;
     const todo = listed.thread.messages[0].questions.find((q: Json) => q.kind === "action");
