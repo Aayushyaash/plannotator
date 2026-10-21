@@ -27,7 +27,7 @@ import { createRequestHostGuard } from "./request-host-guard.ts";
 import { refuseCrossOriginWrite } from "./request-origin-guard.ts";
 import { getPlanVersion, getVersionCount, listVersions } from "../generated/storage.ts";
 import { computeAnnotateHistory, deriveAnnotateHistorySlug, persistAnnotateSubmission, type AnnotateHistoryResult } from "../generated/annotate-history.ts";
-import { ANNOTATE_LIVE_VERSION_PATH, saveAnnotateLiveVersion } from "../generated/annotate-live-version.ts";
+import { ANNOTATE_LIVE_VERSION_PATH, annotateLiveVersionFilePath, saveAnnotateLiveVersion } from "../generated/annotate-live-version.ts";
 import { htmlDiff } from "../generated/html-diff.ts";
 import { agentToolSaveFailed, saveConfig, detectGitUser, getServerConfig, isAgentTerminalSide, loadConfig, resolveAIEnabled, resolveSharingEnabled, resolveAnnotateHistory, resolveFeedbackHistory, type PromptRuntime } from "../generated/config.ts";
 import { currentPiHost } from "../pi-host.ts";
@@ -777,15 +777,18 @@ export async function startAnnotateServer(options: {
 	const initialSingleFileSourceSave = singleFileSourceSaveEligible
 		? createSourceSaveCapability("single-file", options.filePath)
 		: null;
-	// The file a live version save (#2037) reads and keys history by: the same
-	// resolved path the open-time save used, so both land in one history.
-	const liveVersionFilePath =
-		singleFileSourceSaveEligible && singleFileLocalAnnotate ? resolvePath(options.filePath) : null;
 	const initialSingleFileSourcePath = singleFileSourceSaveEligible
 		? initialSingleFileSourceSave?.enabled
 			? initialSingleFileSourceSave.path
 			: resolveUserPath(options.filePath)
 		: null;
+	// The file a live version save (#2037) reads and keys history by: the same
+	// resolved path the open-time save used, so both land in one history.
+	const liveVersionFilePath = annotateLiveVersionFilePath({
+		sourceSaveEligible: singleFileSourceSaveEligible && singleFileLocalAnnotate,
+		resolvedFilePath: resolvePath(options.filePath),
+		realFilePath: initialSingleFileSourcePath,
+	});
 	// A review of several files: Edit Mode may write exactly the bundle's own
 	// files (real paths, captured now, as a single-file session captures its
 	// one file), never a document they link to.
@@ -989,6 +992,9 @@ export async function startAnnotateServer(options: {
 							diffCurrent: servedIsSnapshot || !servedHtml ? annotateHistory.diffCurrent : servedHtml,
 					  }
 					: {}),
+				// The editor may save a disk change as a version (#2037); absent
+				// when history is off or the file is not Markdown/text.
+				...(liveVersionFilePath && annotateHistoryEnabled ? { liveVersions: true } : {}),
 				sharingEnabled,
 				shareBaseUrl,
 				pasteApiUrl,

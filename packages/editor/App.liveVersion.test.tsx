@@ -9,8 +9,13 @@
  *    diff against the version before the edit.
  *  - A burst of writes must save ONE version (the settle delay), for the last
  *    text, not one per write.
- *  - A session without version history (PLANNOTATOR_ANNOTATE_HISTORY=0: no
- *    versionInfo on /api/plan) must never post.
+ *  - A session the server does not advertise for (`liveVersions` absent:
+ *    PLANNOTATOR_ANNOTATE_HISTORY=0, a data file, an older server) must never
+ *    post.
+ *  - A file with no version yet (empty at open: no versionInfo) must still
+ *    post once text arrives, since the server makes it version 1.
+ *  - "Reload from disk" after a conflict puts the agent's text on screen
+ *    through another path; it must ask for the version too.
  *  - A refused save (the file moved on, `409 stale`) must change nothing.
  */
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
@@ -82,6 +87,8 @@ const sourceSave = (text: string) => ({
 const server = {
   disk: V1,
   history: true,
+  /** versionInfo on /api/plan (false: a file that had no version at open). */
+  opened: true,
   stale: false,
   saves: [] as Array<Record<string, unknown>>,
 };
@@ -99,7 +106,8 @@ function makeFetch(): typeof fetch {
         filePath: PATH,
         sourceSave: sourceSave(V1),
         renderAs: "markdown",
-        ...(server.history ? { previousPlan: null, versionInfo: { version: 1, totalVersions: 1, project: "demo" } } : {}),
+        ...(server.history && server.opened ? { previousPlan: null, versionInfo: { version: 1, totalVersions: 1, project: "demo" } } : {}),
+        ...(server.history ? { liveVersions: true } : {}),
         sharingEnabled: false,
         serverConfig: {},
       });
@@ -190,6 +198,7 @@ afterEach(async () => {
   streams.length = 0;
   server.disk = V1;
   server.history = true;
+  server.opened = true;
   server.stale = false;
   server.saves = [];
   memory.clear();
@@ -200,6 +209,26 @@ afterEach(async () => {
 afterAll(() => {
   resetStorageBackend();
 });
+
+function pressModE(target: EventTarget): void {
+  target.dispatchEvent(new KeyboardEvent("keydown", { key: "e", metaKey: true, bubbles: true, cancelable: true }));
+}
+
+/** CodeMirror's EditorView through its DOM back-reference. */
+function editorView(): { state: { doc: { toString(): string } }; dispatch(spec: unknown): void } {
+  const content = document.querySelector<HTMLElement>(".cm-editor .cm-content");
+  if (!content) throw new Error("CodeMirror content DOM did not render");
+  const backRef = content as unknown as {
+    cmTile?: { view?: { state: { doc: { toString(): string } }; dispatch(spec: unknown): void } };
+    cmView?: { view?: { state: { doc: { toString(): string } }; dispatch(spec: unknown): void } };
+  };
+  const view = backRef.cmTile?.view ?? backRef.cmView?.view;
+  if (!view) throw new Error("EditorView not found");
+  return view;
+}
+
+const buttonNamed = (label: string) =>
+  Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent?.trim() === label);
 
 describe.if(hasDom)("annotate: a disk change becomes a version (#2037)", () => {
   test("a burst of agent writes saves one version and the badge shows the edit", async () => {
@@ -230,6 +259,35 @@ describe.if(hasDom)("annotate: a disk change becomes a version (#2037)", () => {
     await wait(1200);
     expect(server.saves).toHaveLength(0);
     expect(badge()).toBeUndefined();
+  }, 15000);
+
+  test("a file with no version yet saves its first one", async () => {
+    server.opened = false;
+    await mount();
+    await agentWrites(V2);
+    await waitFor(() => server.saves.length === 1, 4000);
+    expect(server.saves[0]).toMatchObject({ hash: hashOf(V2) });
+  }, 15000);
+
+  test("Reload from disk after a conflict saves the agent's text as a version", async () => {
+    await mount();
+    // The reviewer has an unsaved edit in Edit Mode...
+    await act(async () => { pressModE(document.body); });
+    await waitFor(() => !!document.querySelector(".cm-editor .cm-content"));
+    const view = editorView();
+    const at = view.state.doc.toString().indexOf("sentinel");
+    await act(async () => {
+      view.dispatch({ changes: { from: at, to: at + "sentinel".length, insert: "reviewer" } });
+    });
+    // ...when the agent writes the file: a conflict, nothing saved yet.
+    await agentWrites(V2);
+    await waitFor(() => buttonNamed("Reload from disk") !== undefined, 4000);
+    await wait(1000);
+    expect(server.saves).toHaveLength(0);
+
+    await act(async () => buttonNamed("Reload from disk")!.click());
+    await waitFor(() => server.saves.length === 1, 4000);
+    expect(server.saves[0]).toMatchObject({ hash: hashOf(V2) });
   }, 15000);
 
   test("a refused save leaves the diff as it was", async () => {

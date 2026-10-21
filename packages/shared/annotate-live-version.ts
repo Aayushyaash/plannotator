@@ -25,8 +25,11 @@
  * adapter only parses the body and writes the response.
  */
 
+import { statSync } from "node:fs";
 import { computeAnnotateHistory, type AnnotateHistoryResult } from "./annotate-history";
 import { readSourceFileSnapshot } from "./source-save-node";
+import { MAX_ANNOTATABLE_FILE_BYTES } from "@plannotator/core/annotatable";
+import { isSourceSaveFilePath } from "@plannotator/core/source-save";
 import { checkServerSession, serverSessionMismatchBody } from "@plannotator/core/server-session";
 
 /** The route the editor posts to; GET on the same path lists versions. */
@@ -39,19 +42,23 @@ export interface AnnotateLiveVersionContext {
   historyEnabled: boolean;
   /**
    * The session's own file when it may save live versions: a single local
-   * Markdown/text annotate session (not raw HTML, not converted, not a URL,
-   * folder, bundle, message or live app). Null otherwise.
+   * annotate session whose file Edit Mode may write (Markdown/text:
+   * `isSourceSaveFilePath`), so not raw HTML, a converted page, a data file
+   * (.yaml, .json), a diagram source, a URL, folder, bundle, message or live
+   * app. Null otherwise. Use `annotateLiveVersionFilePath` to compute it.
    */
   resolvedFilePath: string | null;
   /** History project namespace (same one the open-time save used). */
   project: string;
   /** Test seam; defaults to the real file read. */
   readSnapshot?: (path: string) => { text: string; hash: string };
+  /** Test seam; defaults to `statSync(path).size`. */
+  sizeOf?: (path: string) => number;
 }
 
 export type AnnotateLiveVersionOutcome =
   | { status: 200; body: AnnotateLiveVersionSaved; history: AnnotateHistoryResult }
-  | { status: 400 | 404 | 409 | 500; body: { ok: false; code: string; error: string } };
+  | { status: 400 | 404 | 409 | 413 | 500; body: { ok: false; code: string; error: string } };
 
 export interface AnnotateLiveVersionSaved {
   ok: true;
@@ -61,7 +68,7 @@ export interface AnnotateLiveVersionSaved {
   versionInfo: AnnotateHistoryResult["versionInfo"];
 }
 
-function refuse(status: 400 | 404 | 409 | 500, code: string, error: string): AnnotateLiveVersionOutcome {
+function refuse(status: 400 | 404 | 409 | 413 | 500, code: string, error: string): AnnotateLiveVersionOutcome {
   return { status, body: { ok: false, code, error } };
 }
 
@@ -91,12 +98,19 @@ export function saveAnnotateLiveVersion(
     return refuse(409, "history_off", "Annotate history is turned off (PLANNOTATOR_ANNOTATE_HISTORY=0).");
   }
 
+  // The annotate cap (2 MB), checked before the read and again on the bytes
+  // read, so a file that grew past it is never read whole or saved.
+  const tooLarge = () => refuse(413, "too_large", "The file is too large to keep as a version (max 2MB).");
   let snapshot: { text: string; hash: string };
   try {
+    if ((ctx.sizeOf ?? ((path: string) => statSync(path).size))(ctx.resolvedFilePath) > MAX_ANNOTATABLE_FILE_BYTES) {
+      return tooLarge();
+    }
     snapshot = (ctx.readSnapshot ?? readSourceFileSnapshot)(ctx.resolvedFilePath);
   } catch {
     return refuse(409, "missing", "The file could not be read.");
   }
+  if (new TextEncoder().encode(snapshot.text).byteLength > MAX_ANNOTATABLE_FILE_BYTES) return tooLarge();
   if (snapshot.hash !== hash) {
     // The file moved on since the editor read it; the next change event
     // brings the newer text and asks again.
@@ -121,4 +135,22 @@ export function saveAnnotateLiveVersion(
       versionInfo: history.versionInfo,
     },
   };
+}
+
+/**
+ * The file a session may save live versions of, or null: a single local
+ * annotate session (`mode === "annotate"`, not a URL) that Edit Mode could
+ * write (not raw HTML or a converted page), whose named path and, when known,
+ * real path are Markdown/text (`isSourceSaveFilePath`). Returns the resolved
+ * named path, the same one the open-time history save keys by.
+ */
+export function annotateLiveVersionFilePath(input: {
+  sourceSaveEligible: boolean;
+  resolvedFilePath: string;
+  realFilePath: string | null;
+}): string | null {
+  if (!input.sourceSaveEligible) return null;
+  if (!isSourceSaveFilePath(input.resolvedFilePath)) return null;
+  if (input.realFilePath && !isSourceSaveFilePath(input.realFilePath)) return null;
+  return input.resolvedFilePath;
 }

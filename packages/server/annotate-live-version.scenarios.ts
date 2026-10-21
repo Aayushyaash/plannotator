@@ -44,6 +44,7 @@ const hashOf = (text: string) => hashSourceBytes(new TextEncoder().encode(text))
 
 interface PlanPayload {
   plan: string;
+  liveVersions?: boolean;
   serverSession: string;
   previousPlan?: string | null;
   versionInfo?: { version: number; totalVersions: number; project: string };
@@ -109,6 +110,7 @@ export function defineAnnotateLiveVersionScenarios(runtime: string, start: Start
       const { server, path } = await openFile("notes.md", "# Notes\n\nv1\n");
       const opened = await plan(server);
       expect(opened.versionInfo?.version).toBe(1);
+      expect(opened.liveVersions).toBe(true);
 
       writeFileSync(path, "# Notes\n\nv2\n");
       // A plain GET never writes history: the reload alone saves nothing.
@@ -162,6 +164,7 @@ export function defineAnnotateLiveVersionScenarios(runtime: string, start: Start
     test("PLANNOTATOR_ANNOTATE_HISTORY=0 writes nothing", async () => {
       process.env.PLANNOTATOR_ANNOTATE_HISTORY = "0";
       const { server, path } = await openFile("notes.md", "a\n");
+      expect((await plan(server)).liveVersions).toBeUndefined();
       writeFileSync(path, "b\n");
       const res = await saveVersion(server, { hash: hashOf("b\n") });
       expect(res.status).toBe(409);
@@ -180,6 +183,37 @@ export function defineAnnotateLiveVersionScenarios(runtime: string, start: Start
       expect(missing.status).toBe(409);
       expect((await missing.json()).code).toBe("missing");
       expect(versionFiles()).toHaveLength(1);
+    });
+
+    test("a file that was empty at open gets its first version from the first text", async () => {
+      const { server, path } = await openFile("notes.md", "");
+      const opened = await plan(server);
+      expect(opened.versionInfo).toBeUndefined();
+      expect(opened.liveVersions).toBe(true);
+      writeFileSync(path, "first\n");
+      const body = await (await saveVersion(server, { hash: hashOf("first\n") })).json();
+      expect(body).toMatchObject({ saved: true, previousPlan: null, versionInfo: { version: 1, totalVersions: 1 } });
+      expect((await plan(server)).versionInfo?.version).toBe(1);
+    });
+
+    test("a file past the 2 MB annotate cap is refused with 413", async () => {
+      const { server, path } = await openFile("notes.md", "a\n");
+      const big = "x".repeat(2 * 1024 * 1024 + 1);
+      writeFileSync(path, big);
+      const res = await saveVersion(server, { hash: hashOf(big) });
+      expect(res.status).toBe(413);
+      expect((await res.json()).code).toBe("too_large");
+      expect(versionFiles()).toHaveLength(1);
+    });
+
+    test("data files and diagram sources do not take live versions", async () => {
+      for (const [name, text] of [["config.yaml", "a: 1\n"], ["data.json", "{}\n"], ["flow.mmd", "graph TD\n  A-->B\n"]] as const) {
+        const { server } = await openFile(name, text);
+        expect((await plan(server)).liveVersions).toBeUndefined();
+        const res = await saveVersion(server, { hash: hashOf(text) });
+        expect(res.status).toBe(404);
+        expect((await res.json()).code).toBe("not_eligible");
+      }
     });
 
     test("a tab from another session, a bad body and another site are refused", async () => {
