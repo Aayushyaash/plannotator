@@ -8,6 +8,7 @@ export const reviewAnnotationToolbarShortcuts = defineShortcutScope({
     submitComment: {
       description: 'Submit comment',
       bindings: ['Mod+Enter'],
+      hint: 'With Settings → General → “Enter saves a comment” on, Enter saves too and Shift+Enter adds a new line.',
       section: 'Annotations',
       displayOrder: 10,
     },

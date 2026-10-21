@@ -8,6 +8,7 @@ import { ConfirmDialog, type ConfirmDialogProps } from './ConfirmDialog';
 import { useDismissablePopover } from '../hooks/useDismissablePopover';
 import { useCompactTouchLayout } from '../hooks/useIsMobile';
 import { cn } from '../lib/utils';
+import { isCommentSubmitKey } from '../utils/commentSubmitKey';
 import type {
   DecisionActionId,
   DecisionComposer,
@@ -98,6 +99,14 @@ export interface DecisionNoteFieldProps {
   placeholder?: string;
   disabled?: boolean;
   autoFocus?: boolean;
+  /**
+   * The field is a COMMENT composer (the review sidebar's "+ General
+   * comment"), so the "Enter saves a comment" setting applies: pass its value
+   * and a plain Enter also submits (Shift+Enter stays a new line). Default
+   * false: in the decision control's own composer a note rides a decision,
+   * and only Mod+Enter fires it.
+   */
+  enterSubmits?: boolean;
 }
 
 /**
@@ -114,6 +123,7 @@ export const DecisionNoteField: React.FC<DecisionNoteFieldProps> = ({
   placeholder = 'Add a note...',
   disabled = false,
   autoFocus = true,
+  enterSubmits = false,
 }) => {
   const ref = useAutoGrow(text);
 
@@ -132,15 +142,15 @@ export const DecisionNoteField: React.FC<DecisionNoteFieldProps> = ({
         onCancel();
         return;
       }
-      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      if (enterSubmits ? isCommentSubmitKey(event, true) : event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
         event.stopPropagation();
         if (!disabled) onSubmit();
       }
-      // Plain Enter falls through: the field is multi-line and Enter's job is
-      // a newline.
+      // Otherwise plain Enter falls through: the field is multi-line and
+      // Enter's job is a newline.
     },
-    [disabled, onCancel, onSubmit],
+    [disabled, enterSubmits, onCancel, onSubmit],
   );
 
   return (

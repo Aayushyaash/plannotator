@@ -1041,6 +1041,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
   const gridEnabled = useConfigValue('gridEnabled');
   const diagramShadow = useConfigValue('diagramShadow');
   const vimModeEnabled = useConfigValue('vimModeEnabled');
+  const enterSavesComment = useConfigValue('enterSavesComment');
   const vimHudEnabled = useConfigValue('vimHudEnabled');
   const vimHudKeyPanelEnabled = useConfigValue('vimHudKeyPanelEnabled');
   const agentTerminalSide = useConfigValue('agentTerminalSide');
@@ -1445,6 +1446,18 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
                           </button>
                         )}
                       </div>
+                    </div>
+
+                    {/* Enter saves a comment (#1934): opt-in, cookie-only.
+                        Governs every comment composer; never the decision keys. */}
+                    <div className="border-t border-border" />
+                    <div data-enter-saves-comment-setting="true">
+                      <ToggleSwitch
+                        checked={enterSavesComment}
+                        onChange={(v) => configStore.set('enterSavesComment', v)}
+                        label="Enter saves a comment"
+                        description={`Shift+Enter adds a new line. ${modKeyWord}+Enter still saves.`}
+                      />
                     </div>
 
                     {/* Update notices: on by default. Writes updateCheck to

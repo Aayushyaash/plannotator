@@ -192,6 +192,23 @@ export const SETTINGS = {
     serverKey: undefined, fromServer: undefined, toServer: undefined,
   },
 
+  /**
+   * Enter saves a comment and Shift+Enter adds a new line (#1934). Default
+   * OFF: comments save with Cmd/Ctrl+Enter only, as they always have, and
+   * Cmd/Ctrl+Enter keeps saving with it on. Read by every comment composer
+   * through `isCommentSubmitKey` (`utils/commentSubmitKey`). Cookie-only.
+   */
+  enterSavesComment: {
+    defaultValue: false as boolean,
+    fromCookie: () => {
+      const value = storage.getItem('plannotator-enter-saves-comment');
+      return value === 'true' ? true : value === 'false' ? false : undefined;
+    },
+    toCookie: (value: boolean) =>
+      storage.setItem('plannotator-enter-saves-comment', String(value)),
+    serverKey: undefined, fromServer: undefined, toServer: undefined,
+  },
+
   vimModeEnabled: {
     // Vim bindings deliberately default OFF. Unmodified letter keys must remain
     // inert for existing users until they explicitly opt into modal document

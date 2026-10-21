@@ -9,7 +9,7 @@ export const annotationPanelShortcuts = defineShortcutScope({
       description: 'Save annotation edit',
       bindings: ['Mod+Enter'],
       section: 'Annotations',
-      hint: 'Available while editing an annotation in the side panel.',
+      hint: 'Available while editing an annotation in the side panel. With Settings → General → “Enter saves a comment” on, Enter saves too.',
       displayOrder: 50,
     },
     cancelEdit: {
