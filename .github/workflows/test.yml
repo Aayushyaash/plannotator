@@ -139,7 +139,9 @@ jobs:
           packages/inbox/updates.test.tsx
           packages/inbox/whatsNewLink.test.tsx
           packages/inbox/whatsNewHeader.test.tsx
+          packages/inbox/whatsNewImages.test.tsx
           packages/inbox/replaced.test.tsx
+          packages/inbox/reask.test.tsx
           packages/inbox/threadFolding.test.tsx
           packages/inbox/pasteTarget.test.ts
           packages/inbox/seenOnSight.test.tsx
@@ -168,12 +170,14 @@ jobs:
           packages/inbox/ack.test.tsx
           packages/inbox/wordsOnlyTwoAsks.test.tsx
           packages/inbox/projectMenu.test.tsx
+          packages/inbox/rowMenu.test.tsx
           packages/inbox/fileBack.test.tsx
           packages/inbox/archived.test.tsx
           packages/inbox/openStaysPut.test.tsx
           packages/inbox/tabCountWindow.test.tsx
           packages/inbox/phoneList.test.tsx
           packages/inbox/listLabels.test.tsx
+          packages/inbox/listRowMemo.test.tsx
           packages/inbox/rowTicks.test.tsx
           packages/inbox/componentTooltips.test.tsx
           packages/inbox/toast.test.tsx

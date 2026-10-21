@@ -184,3 +184,12 @@ export function deliveryText(
 export function sentRowLine(name: string, wakes: boolean | undefined): string {
   return wakes === true ? `Queued for ${name}; it gets this as its next turn.` : `Saved for ${name}. It sees it when it next reads this thread.`;
 }
+
+/**
+ * A Sent row whose last message is the person's Re-ask note (approval
+ * "inbox-reask"): it stays Sent until the agent asks again, read or not.
+ */
+export function reaskRowLine(name: string, checkedAt: string | null, wakes: boolean | undefined): string {
+  if (checkedAt) return `Asked ${name} to re-ask; waiting for its message.`;
+  return wakes === true ? `Re-ask queued for ${name}; it gets this as its next turn.` : `Re-ask saved for ${name}. It sees it when it next reads this thread.`;
+}
