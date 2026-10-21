@@ -572,25 +572,25 @@ for (const phone of [
       expect(state.height).toBe(state.innerHeight);
     });
 
-    test("small controls keep their look and take a thumb: Keep open, the file's toolstrip, Global comment and Copy file", async () => {
+    test("small controls keep their look and take a thumb: Skip it, the file's toolstrip, Global comment and Copy file", async () => {
       const page = await open();
       await page.emulateMedia({ reducedMotion: 'reduce' });
       await page.goto(`${world.url}#thread=${world.threads.stopped}`);
       const pane = page.locator('section.ib-pane');
       await expect(pane.getByRole('heading', { name: /Stripe 409/ })).toBeVisible();
-      // One of the two questions picked: the reply box's chip offers Keep open for the other.
+      // One of the two questions picked: the reply box's chip offers Skip it for the other (approval "inbox-explicit-skip").
       await pane.getByText('Retry with the same idempotency key').click();
       await pane.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' }).click();
       const chip = pane.locator('.ib-skipchip').first();
       await expect(chip).toBeVisible();
-      const keep = chip.getByRole('button', { name: 'Keep open' });
+      const skipButton = chip.getByRole('button', { name: /^Skip/ });
       // The look is unchanged (a 22 px button inside a 26 px chip); the tap lands on it 21 px above and below its middle.
-      expect((await keep.boundingBox())!.height).toBeLessThan(30);
+      expect((await skipButton.boundingBox())!.height).toBeLessThan(30);
       const skip = await shortHitAreas(page, '.ib-skipchip button');
       expect(skip.measured).toBeGreaterThan(0);
       expect(skip.short).toEqual([]);
-      await keep.click();
-      await expect(chip.getByRole('button', { name: /^Skip/ })).toBeVisible();
+      await skipButton.click();
+      await expect(chip.getByRole('button', { name: 'Keep open' })).toBeVisible();
       await pane.locator('.ib-pfoot').getByRole('button', { name: 'Cancel' }).click();
 
       // An open file: ui's toolstrip and the viewer's Global comment and Copy file.
