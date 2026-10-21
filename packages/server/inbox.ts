@@ -155,6 +155,7 @@ import {
 } from "./inbox-agents";
 import { addInboxNote, INBOX_NOTE_BLOCK, inboxNotesDisabled, markNotesAsked, noteCandidateIds, notesAsked, noteStatus, removeInboxNote } from "./inbox-agent-notes";
 import {
+  displayInboxSubject,
   INBOX_AGENT_IDS,
   INBOX_AGENT_LABELS,
   INBOX_NOTE_AGENT_IDS,
@@ -1371,6 +1372,10 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     return inboxToolState();
   };
 
+  // A message line as served: its subject as shown (one line, no leaked tool-call text), never as stored.
+  const shownSubject = (record: InboxMessage): InboxMessage =>
+    record.subject ? { ...record, subject: displayInboxSubject(record.subject) } : record;
+
   const eventPayload = (line: InboxLine) => {
     switch (line.kind) {
       case "project":
@@ -1378,7 +1383,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         return { seq: line.seq, kind: line.kind, id: line.id, project: { ...line.record, name: store.project(line.id)?.name ?? line.record.name } };
       case "message":
         // `first` (additive): this line is the message's first, not a later rewrite (a look, a resolve, an Unarchive).
-        return { seq: line.seq, kind: line.kind, id: line.id, first: store.messageCursor(line.id) === line.seq, message: line.record };
+        return { seq: line.seq, kind: line.kind, id: line.id, first: store.messageCursor(line.id) === line.seq, message: shownSubject(line.record) };
       case "question":
         // The store's one question state: a question an agent asked after the archive line is live (notifications, the sound).
         return { seq: line.seq, kind: line.kind, id: line.id, question: store.questionWire(line.record) };
