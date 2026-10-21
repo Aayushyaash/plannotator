@@ -164,8 +164,13 @@ if ($Version -eq "latest") {
     # Drop the local token copies; GITHUB_TOKEN / GH_TOKEN themselves remain
     # in the environment exactly as the user set them.
     $ghToken = $null; $ghHeaders = $null; $apiUrl = $null
-    $latestTag = if ($release) { $release.tag_name } else { $null }
-    if ($latestTag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+') { $latestTag = $null }
+    # Only a plain vX.Y.Z tag is accepted, from the API or the redirect below:
+    # it goes into download URLs, the attestation --source-ref and git clone
+    # --branch. -cmatch: case-sensitive; \z: the very end, with no trailing
+    # newline; [0-9], not \d, which also matches non-ASCII digits.
+    $releaseTagPattern = '^v[0-9]+\.[0-9]+\.[0-9]+\z'
+    $latestTag = if ($release) { [string]$release.tag_name } else { $null }
+    if ($latestTag -cnotmatch $releaseTagPattern) { $latestTag = $null }
 
     # The API failed (anonymous rate limit of 60/hour per IP, a proxy that
     # blocks api.github.com): read the tag from the redirect that
@@ -178,7 +183,7 @@ if ($Version -eq "latest") {
             $resp = $req.GetResponse()
             $candidate = $resp.ResponseUri.Segments[-1]
             $resp.Close()
-            if ($candidate -match '^v[0-9]+\.[0-9]+\.[0-9]+') { $latestTag = $candidate }
+            if ($candidate -cmatch $releaseTagPattern) { $latestTag = $candidate }
         } catch { }
     }
 

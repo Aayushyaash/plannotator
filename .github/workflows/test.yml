@@ -899,6 +899,36 @@ jobs:
           }
           Write-Host "✓ Unknown flag rejected with exit code $($p.ExitCode) via the unknown-flag guard"
 
+      - name: install.cmd resolves latest from the release page when the API is unreachable (#1994)
+        shell: pwsh
+        run: |
+          # Point api.github.com at this machine, where nothing listens on 443:
+          # the installer's API call fails the way a rate limit or a proxy that
+          # blocks the API makes it fail, while github.com (the releases/latest
+          # redirect, the download and its checksum) stays reachable.
+          $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
+          $original = Get-Content -Raw $hostsFile
+          Add-Content -Path $hostsFile -Value "`r`n127.0.0.1 api.github.com"
+          ipconfig /flushdns | Out-Null
+          try {
+            & curl.exe -fsS --max-time 10 -o NUL https://api.github.com/
+            if ($LASTEXITCODE -eq 0) { throw "api.github.com is still reachable, so this step would not exercise the fallback" }
+            $expected = (& curl.exe -fsSLI -o NUL -w "%{url_effective}" https://github.com/backnotprop/plannotator/releases/latest).Split('/')[-1]
+            if ($expected -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "could not read the latest tag from the release page: $expected" }
+            $out = @(& cmd /c 'scripts\install.cmd --skip-attestation --skip-skills --skip-claude-plugin 2>&1')
+            $code = $LASTEXITCODE
+            $out | ForEach-Object { Write-Host $_ }
+            if ($code -ne 0) { throw "install.cmd exited $code" }
+            if (-not ($out -match [regex]::Escape("Installing plannotator $expected..."))) { throw "install.cmd did not resolve latest to $expected" }
+            if (-not ($out -match 'SHA256 verified')) { throw "install.cmd did not report the checksum check" }
+            $installed = (& "$env:USERPROFILE\.local\bin\plannotator.exe" --version) -join ' '
+            if ($installed -notmatch [regex]::Escape($expected.TrimStart('v'))) { throw "installed binary reports '$installed', expected $expected" }
+            Write-Host "✓ install.cmd resolved latest to $expected through the release page and installed it"
+          } finally {
+            Set-Content -Path $hostsFile -Value $original -NoNewline
+            ipconfig /flushdns | Out-Null
+          }
+
   install-ps1-windows:
     # End-to-end integration test for scripts/install.ps1 on real PowerShell.
     # This specifically covers PLANNOTATOR_DATA_DIR tilde expansion because
@@ -1001,3 +1031,33 @@ jobs:
           if ($left.Count -ne 0) { throw "stale renamed-aside exe not swept: $($left.Name -join ', ')" }
           if (-not (Test-Path $sentinel)) { throw "the .old sweep deleted an unrelated file" }
           Write-Host "✓ Reinstalled over a running plannotator.exe; the aside copy was swept later and nothing else was touched"
+
+      - name: install.ps1 resolves latest from the release page when the API is unreachable (#1994)
+        shell: pwsh
+        run: |
+          # Point api.github.com at this machine, where nothing listens on 443:
+          # the installer's API call fails the way a rate limit or a proxy that
+          # blocks the API makes it fail, while github.com (the releases/latest
+          # redirect, the download and its checksum) stays reachable.
+          $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
+          $original = Get-Content -Raw $hostsFile
+          Add-Content -Path $hostsFile -Value "`r`n127.0.0.1 api.github.com"
+          ipconfig /flushdns | Out-Null
+          try {
+            & curl.exe -fsS --max-time 10 -o NUL https://api.github.com/
+            if ($LASTEXITCODE -eq 0) { throw "api.github.com is still reachable, so this step would not exercise the fallback" }
+            $expected = (& curl.exe -fsSLI -o NUL -w "%{url_effective}" https://github.com/backnotprop/plannotator/releases/latest).Split('/')[-1]
+            if ($expected -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "could not read the latest tag from the release page: $expected" }
+            $out = @(& pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1 -SkipAttestation -SkipSkills -SkipClaudePlugin 2>&1)
+            $code = $LASTEXITCODE
+            $out | ForEach-Object { Write-Host $_ }
+            if ($code -ne 0) { throw "install.ps1 exited $code" }
+            if (-not ($out -match [regex]::Escape("Installing plannotator $expected..."))) { throw "install.ps1 did not resolve latest to $expected" }
+            if (-not ($out -match 'SHA256 verified')) { throw "install.ps1 did not report the checksum check" }
+            $installed = (& "$env:LOCALAPPDATA\plannotator\plannotator.exe" --version) -join ' '
+            if ($installed -notmatch [regex]::Escape($expected.TrimStart('v'))) { throw "installed binary reports '$installed', expected $expected" }
+            Write-Host "✓ install.ps1 resolved latest to $expected through the release page and installed it"
+          } finally {
+            Set-Content -Path $hostsFile -Value $original -NoNewline
+            ipconfig /flushdns | Out-Null
+          }
