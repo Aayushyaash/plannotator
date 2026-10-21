@@ -217,6 +217,7 @@ class World {
   tabs = new Map<number, Tab>();
   gone: { by: number; window: string; unloading: boolean }[] = [];
   catchUps: { tab: number; cursor: number }[] = [];
+  catchUpDelayMs = 0;
   next = 1;
 
   open(cursor = this.server.seq): Tab {
@@ -258,9 +259,12 @@ class World {
       channel: () => this.hub.open(id),
       open: (c, onFrame) => this.server.open(id, c, onFrame),
       catchUp: async (c) => {
+        // The server answers with the lines as they are when the request reaches it; the answer can then be slow.
         await tick();
         this.catchUps.push({ tab: id, cursor: c });
-        return this.server.lines.filter((line) => line.seq > c).map((line) => this.server.frameOf(line));
+        const frames = this.server.lines.filter((line) => line.seq > c).map((line) => this.server.frameOf(line));
+        if (this.catchUpDelayMs > 0) await new Promise((done) => setTimeout(done, this.catchUpDelayMs));
+        return frames;
       },
       dispatch: dispatchInboxFrame,
       sendGone: (window, unloading) => {
@@ -594,6 +598,33 @@ test('a catch-up that fails (the Inbox restarting) is tried again at the next he
   });
   await settle(12);
   expectAll(f, 0, 2);
+});
+
+test('a new leader while a catch-up is in flight: the tab fetches again before it goes on, nothing missed', async () => {
+  const w = world();
+  const a = w.open();
+  await settle();
+  w.server.write(2);
+  await settle();
+  // N is next in line for the stream.
+  const n = w.open(w.server.seq);
+  await settle(6);
+  // F subscribes behind (its list read was older); its catch-ups are slow.
+  w.catchUpDelayMs = 60;
+  const f = w.open(0);
+  await settle(4);
+  // The leader dies while F's catch-up is in flight: N leads, and F hears of it mid catch-up.
+  w.kill(a);
+  w.server.write(3);
+  await settle(6);
+  await new Promise((done) => setTimeout(done, 250));
+  w.catchUpDelayMs = 0;
+  w.server.write(1);
+  await settle(12);
+  expect(w.leader()).toBe(n.id);
+  expectAll(f, 0, 6);
+  expectAll(n, 2, 6);
+  expect(w.catchUps.filter((c) => c.tab === f.id).length).toBeGreaterThanOrEqual(2);
 });
 
 test('the channel ignores what is not its own shape', async () => {

@@ -250,6 +250,8 @@ export function subscribeSharedInboxEvents(
   let catching = false;
   /** A catch-up failed (the Inbox restarting): try again at the next hello. */
   let behind = false;
+  /** Another catch-up was asked for while one ran. */
+  let again = false;
   let held: { frame: InboxEventFrame; via: Via }[] = [];
 
   let channel: ChannelLike;
@@ -288,7 +290,12 @@ export function subscribeSharedInboxEvents(
 
   /** Fetch the lines after this tab's last seq (it slept, or its leader started past it), then what waited. */
   const catchUp = async (): Promise<void> => {
-    if (catching || stopped) return;
+    if (stopped) return;
+    if (catching) {
+      // A new reason while one runs (another leader since): fetch again once it ends, still holding.
+      again = true;
+      return;
+    }
     catching = true;
     behind = false;
     try {
@@ -298,9 +305,14 @@ export function subscribeSharedInboxEvents(
       behind = true;
     } finally {
       catching = false;
-      const waiting = held;
-      held = [];
-      for (const item of waiting) deliver(item.frame, item.via);
+      if (again && !stopped) {
+        again = false;
+        void catchUp();
+      } else {
+        const waiting = held;
+        held = [];
+        for (const item of waiting) deliver(item.frame, item.via);
+      }
     }
   };
 
