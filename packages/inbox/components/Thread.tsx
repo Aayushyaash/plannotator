@@ -1735,6 +1735,11 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
       try {
         const result = await inboxApi.pick(messageId, key, revision, answer);
         for (const q of result.questions) revisions.current.set(`${q.message_id}/${q.key}`, q.revision);
+        // A Send waiting on this chain reads the thread right after it, before
+        // React draws the saved picks: give it the saved questions now, or it
+        // sends a stale revision (refused) or leaves out a note just saved.
+        const latest = threadRef.current;
+        threadRef.current = { ...latest, messages: latest.messages.map((m) => (m.id === messageId ? { ...m, questions: result.questions } : m)) };
         onQuestions(messageId, result.questions);
       } catch (cause) {
         // The agent replaced the question meanwhile: reading the thread again redraws it as Replaced.
@@ -2277,7 +2282,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   // No Send now because that session runs an older plugin than a restart loads (the "Steps" line,
   // owner approval "restart-warning"): only while the reply waits for a working session.
   const restartName = lastTo ? hostName(lastTo.host) : repliedTo?.author.kind === 'agent' && repliedTo.author.host ? hostName(repliedTo.author.host) : asker;
-  const restart = delivered?.state === 'queued' && !last.deliver_now_at ? restartNote(restartName, recipientConnection) : null;
+  const restart = delivered?.state === 'queued' && !last.deliver_now_at ? restartNote(recipientConnection) : null;
   const [sendNowState, setSendNowState] = useState<{ id: string; busy: boolean; error: string | null } | null>(null);
   const sendNow = async () => {
     setSendNowState({ id: last.id, busy: true, error: null });
@@ -2351,10 +2356,18 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     setReasking(true);
     setError(null);
     let went = 0;
-    const total = reaskList.reduce((n, t) => n + (t.kind === 'picks' ? t.replies.length : 1), 0);
+    let total = 0;
     try {
-      // A pick still being saved goes too: wait for it.
+      // A pick still being saved goes too: wait for it, then take the targets
+      // from the thread as saved (threadRef), not as drawn when Re-ask was
+      // pressed: a note just saved has a newer revision, a question just
+      // picked is no longer open.
       await pickChain.current;
+      const targets = resolved && !cameBack ? [] : reaskTargets(threadRef.current.messages, liveMessage);
+      const freshNotes = targets.filter((t) => t.kind === 'reask');
+      // The routed note follows the session the person chose for, wherever its latest message is now.
+      const routedNote = single ? (freshNotes.find((t) => t.session === single.session) ?? null) : null;
+      total = targets.reduce((n, t) => n + (t.kind === 'picks' ? t.replies.length : 1), 0);
       if (!reaskKeys.current) reaskKeys.current = new Map();
       const keyFor = (id: string) => {
         const key = reaskKeys.current!.get(id) ?? crypto.randomUUID();
@@ -2362,14 +2375,14 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
         return key;
       };
       // A session with only picks: a plain reply carries them, so the Re-ask strands none (owner's rule 2).
-      for (const target of reaskList.filter((t) => t.kind === 'picks')) {
+      for (const target of targets.filter((t) => t.kind === 'picks')) {
         for (const reply of target.replies) {
           await inboxApi.reply(reply.message.id, { idempotency_key: keyFor(`picks:${reply.message.id}`), words: '', questions: reply.questions, skip_unanswered: false });
           went += 1;
         }
       }
-      for (const target of notes) {
-        await inboxApi.reask(target.message.id, { idempotency_key: keyFor(target.message.id), ...(to && target === single ? { to } : {}) });
+      for (const target of freshNotes) {
+        await inboxApi.reask(target.message.id, { idempotency_key: keyFor(target.message.id), ...(to && target === routedNote ? { to } : {}) });
         went += 1;
       }
       reaskKeys.current = null;
