@@ -392,6 +392,15 @@ test('soak: tabs open, close, reload and crash at random while an agent writes; 
     seed32 = (seed32 * 1103515245 + 12345) & 0x7fffffff;
     return seed32 / 0x7fffffff;
   };
+  /** A tab about to close, reload or crash: what it handled so far is in order, never twice, all real lines. */
+  let checkedBeforeLeaving = 0;
+  const sane = async (page: Page) => {
+    const got = (await logOf(page)).filter((e) => e.type === 'record').map((e) => e.seq!);
+    const known = new Set(w.reference);
+    expect(got.every((seq, i) => i === 0 || seq > got[i - 1]!), 'in order, never twice').toBe(true);
+    expect(got.every((seq) => known.has(seq) || seq > (w.reference.at(-1) ?? 0)), 'only real lines').toBe(true);
+    checkedBeforeLeaving++;
+  };
   const until = Date.now() + soakMs;
   while (Date.now() < until) {
     const roll = random();
@@ -400,16 +409,19 @@ test('soak: tabs open, close, reload and crash at random while an agent writes; 
       actions.open++;
     } else if (roll < 0.6 && w.pages.length > 1) {
       const page = w.pages[Math.floor(random() * w.pages.length)]!;
+      await sane(page);
       forget(w, page);
       await page.close();
       actions.close++;
     } else if (roll < 0.8 && w.pages.length > 0) {
       const page = w.pages[Math.floor(random() * w.pages.length)]!;
+      await sane(page);
       await page.reload();
       await expect(page.locator('.ib-lbody [data-thread-id]').first()).toBeVisible();
       actions.reload++;
     } else if (w.pages.length > 1) {
       const page = w.pages[Math.floor(random() * w.pages.length)]!;
+      await sane(page);
       forget(w, page);
       const cdp = await w.context.newCDPSession(page);
       void cdp.send('Page.crash').catch(() => {});
@@ -427,7 +439,7 @@ test('soak: tabs open, close, reload and crash at random while an agent writes; 
   const over = streamSamples.filter((n) => n > 1).length;
   expect(Math.max(...streamSamples)).toBeLessThanOrEqual(2);
   expect(over / streamSamples.length).toBeLessThan(0.05);
-  results.soak = { ms: soakMs, actions, messagesSent: sent, lines: checked.total, tabsAtEnd: w.pages.length, tabsExactlyEveryLine: `${checked.exactTabs}/${w.pages.length}`, streamSamples: streamSamples.length, samplesAboveOne: over };
+  results.soak = { ms: soakMs, actions, tabsCheckedBeforeLeaving: checkedBeforeLeaving, messagesSent: sent, lines: checked.total, tabsAtEnd: w.pages.length, tabsExactlyEveryLine: `${checked.exactTabs}/${w.pages.length}`, streamSamples: streamSamples.length, samplesAboveOne: over };
 });
 
 test('no page errors along the way', () => {

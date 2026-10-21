@@ -7,9 +7,10 @@
  * show one stream per origin.
  */
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type { InboxNotifyReach } from "@plannotator/core/inbox-types";
 import { startInboxServer, type InboxServer, type InboxServerOptions } from "./inbox";
 import { createInboxWindows } from "./inbox-windows";
@@ -164,4 +165,34 @@ test("POST /api/inbox/window: served_by and gone are additive; health counts the
 
   leader.abort();
   await until(async () => (await healthOf(server)).event_streams === 0);
+});
+
+test("GET /api/inbox/events?once=1: the hello and the lines after the cursor, then the response ends; never counted as a stream", async () => {
+  const server = await inbox();
+  const project = join(roots.at(-1)!, "billing-svc");
+  mkdirSync(project, { recursive: true });
+  const client = new Client({ name: "inbox-shared-windows-test", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`)));
+  try {
+    for (let i = 0; i < 3; i++) {
+      await client.callTool({ name: "send_message", arguments: { project_path: project, body: `Note ${i}`, agent_session: "ses_A" } });
+    }
+  } finally {
+    await client.close();
+  }
+  const read = async (cursor: number) => {
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/inbox/events?cursor=${cursor}&once=1`);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    return res.text();
+  };
+  const all = await read(0);
+  expect(all.startsWith("event: hello\n")).toBe(true);
+  const seqs = [...all.matchAll(/^id: (\d+)$/gm)].map((m) => Number(m[1]));
+  expect(seqs.length).toBeGreaterThanOrEqual(3);
+  expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+  // After a cursor: only the later lines.
+  const after = await read(seqs[1]!);
+  expect([...after.matchAll(/^id: (\d+)$/gm)].map((m) => Number(m[1]))).toEqual(seqs.slice(2));
+  // The response ended (text() resolved) and no stream stayed open.
+  expect((await healthOf(server)).event_streams).toBe(0);
 });
