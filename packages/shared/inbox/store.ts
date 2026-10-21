@@ -1331,7 +1331,7 @@ export class InboxStore {
         connection: session ? connectionOf(session) : undefined,
         ...(note ? waitOf(note, session ?? null) : {}),
       });
-      // A 👍 offers no Send now of its own (it asks nothing of the agent); it goes in by itself after the wait.
+      // A 👍 offers no Send now of its own (it asks nothing of the agent), and waits for the turn to end (INBOX_AUTO_SEND_ACK_NOTES).
       return { ...base, state: decision.state === "sending" ? "sending" : "queued", reason: decision.reason, at: null, ...waitWire(decision) };
     }
     return { ...base, state: "saved", reason: "reads", at: null };

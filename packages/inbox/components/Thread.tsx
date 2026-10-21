@@ -748,7 +748,7 @@ export function ackPillLine(
       wakes: true,
       sendingNow: !!ack.deliver_now_at,
       connection,
-      // It waits on a busy session: "Undelivered N min", and (while a 👍 does) it goes in by itself after the wait.
+      // It waits on a busy session: "Undelivered N min"; a 👍 waits for the turn to end (INBOX_AUTO_SEND_ACK_NOTES), no countdown.
       ...waitInputs(connection, ack.note_id, { wait_started_at: ack.wait_started_at, deliver_now_by: ack.deliver_now_by, deliver_now_at: ack.deliver_now_at }),
       ...(INBOX_AUTO_SEND_ACK_NOTES ? {} : { autoSendAfterMs: null }),
       now,

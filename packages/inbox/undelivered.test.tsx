@@ -343,7 +343,7 @@ test.skipIf(!hasDom)('marked to go in just before its session went away: it wait
   expect(line.textContent).not.toContain('Sending');
 });
 
-test.skipIf(!hasDom)('a 👍 waiting on a busy session says how long, and that it goes in by itself; it offers no Send now', async () => {
+test.skipIf(!hasDom)('a 👍 waiting on a busy session says how long and that it waits for the turn to end: no countdown, no Send now', async () => {
   connection = { busy: true, idle_since: null, send_now: true, auto_send_after_ms: 5 * MIN, waits: waitsFor('msg_note', ago(3.5 * MIN)) };
   const value = thread();
   const asked = value.messages[0]!;
@@ -354,10 +354,9 @@ test.skipIf(!hasDom)('a 👍 waiting on a busy session says how long, and that i
   const el = await renderThread(acked, null);
   await settle();
   const pill = el.querySelector<HTMLElement>('[data-ack-pill]')!;
-  expect(pill.textContent).toContain(
-    INBOX_AUTO_SEND_ACK_NOTES
-      ? 'Undelivered 3 min · Claude Code is working · goes in by itself in 2 min'
-      : 'Undelivered 3 min · Claude Code is working · it gets this when its turn ends',
-  );
+  // The owner's decision: a 👍 waits for the turn to end. How long it waited, no countdown.
+  expect(INBOX_AUTO_SEND_ACK_NOTES).toBe(false);
+  expect(pill.textContent).toContain('Undelivered 3 min · Claude Code is working · it gets this when its turn ends');
+  expect(pill.textContent).not.toContain('by itself');
   expect([...el.querySelectorAll('button')].some((button) => /send now/i.test(button.textContent ?? ''))).toBe(false);
 });

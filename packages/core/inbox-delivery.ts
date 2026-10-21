@@ -6,7 +6,7 @@
  */
 
 /**
- * How long a reply (a message, a 👍 note) waits on a busy session before it
+ * How long a reply (a message, a Re-ask note) waits on a busy session before it
  * goes into the running turn by itself, exactly as if the person pressed Send
  * now (owner approval "inbox-busy-agent-reply", 2026-10-21). Only where Send
  * now is possible (the session's connection says `send_now`). The server
@@ -21,11 +21,12 @@ export const INBOX_AUTO_SEND_AFTER_MS = 5 * 60_000;
 
 /**
  * Whether the note that carries a 👍 Looks good goes into a running turn by
- * itself after the wait, like a reply. The one switch: false leaves a 👍
- * waiting for the turn to end (it asks nothing of the agent), in the server's
- * marking and in every line that says what happens next.
+ * itself after the wait, like a reply. False, the owner's decision
+ * (2026-10-21, approval "inbox-busy-agent-reply": "a thumbs-up isn't worth
+ * interrupting a turn"): a 👍 waits for the turn to end, in the server's
+ * marking and in every line that says what happens next. The one switch.
  */
-export const INBOX_AUTO_SEND_ACK_NOTES = true;
+export const INBOX_AUTO_SEND_ACK_NOTES = false;
 
 /** Who asked for an item to go into the running turn: the person's Send now, or the Inbox after the wait. */
 export type InboxDeliverNowBy = "person" | "auto";

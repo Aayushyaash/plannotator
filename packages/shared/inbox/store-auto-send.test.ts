@@ -146,9 +146,10 @@ describe("autoSendDue", () => {
     expect(store.readdressMessage(other.message.id, { host: "claude-code", session: "ses_b" })).toMatchObject({ deliver_now_at: null, deliver_now_by: null });
   });
 
-  test("the Inbox's set-aside note never goes in by itself; the note carrying a 👍 follows INBOX_AUTO_SEND_ACK_NOTES", () => {
+  test("the Inbox's set-aside note never goes in by itself; nor does the note carrying a 👍 (it waits for the turn to end), and its row shows no countdown", () => {
     const { store, clock, project } = setup();
     const c = clocks();
+    expect(INBOX_AUTO_SEND_ACK_NOTES).toBe(false);
     const q = store.sendMessage({ project_id: project.id, author: AGENT, body: [":::question", "Which region?", "", "- [ ] us", "- [ ] eu", ":::"].join("\n"), wakes: true }).message;
     store.markRead(q.thread_id, true);
     clock.now += 10_000;
@@ -164,18 +165,21 @@ describe("autoSendDue", () => {
     const [settled] = store.settleAcks(10_000);
     const noteId = settled!.ack!.note_id!;
     c.start(noteId, clock.now);
-    clock.now += AFTER - 1;
-    expect(store.autoSendDue("ses_a", { afterMs: AFTER, clockOf: c.clockOf }).map((m) => m.id)).not.toContain(noteId);
-    clock.now += 1;
-    const marked = store.autoSendDue("ses_a", { afterMs: AFTER, clockOf: c.clockOf }).map((m) => m.id);
-    if (!INBOX_AUTO_SEND_ACK_NOTES) {
-      expect(marked).toEqual([]);
-      return;
-    }
-    expect(marked).toEqual([noteId]);
-    // The window's thread shows the 👍 went in by itself.
-    const ack = store.windowThread(news.thread_id)!.messages.find((m) => m.id === news.id)!.ack!;
-    expect(ack).toMatchObject({ deliver_now_by: "auto", wait_started_at: new Date(clock.now - AFTER).toISOString() });
+    store.setDeliveryPresence({
+      connection: () => ({ busy: true, send_now: true }),
+      askerLive: () => true,
+      autoSendAfterMs: AFTER,
+      waitOf: (_session, id) => {
+        const k = c.clockOf(id);
+        return k ? { since: new Date(k.since).toISOString(), autoSince: k.autoSince === null ? null : new Date(k.autoSince).toISOString() } : null;
+      },
+    });
+    clock.now += 3 * 60 * 60_000;
+    expect(store.autoSendDue("ses_a", { afterMs: AFTER, clockOf: c.clockOf })).toEqual([]);
+    expect(store.message(noteId)!.deliver_now_by ?? null).toBeNull();
+    // The row: how long it waited, no countdown, no Send now.
+    const d = store.listRow(news.thread_id)!.delivery!;
+    expect(d).toMatchObject({ kind: "ack", state: "queued", reason: "working", send_now: false, auto_send_at: null, waiting_since: new Date(c.clockOf(noteId)!.since).toISOString() });
   });
 
   test("a tagged session's own wait: marked on its tag, not the owner's", () => {

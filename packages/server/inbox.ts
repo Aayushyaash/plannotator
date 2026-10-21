@@ -294,7 +294,7 @@ export interface InboxServerOptions {
    */
   setAsideDelayMs?: number;
   /**
-   * How long a reply (a message, a 👍 note) waits on a busy session before
+   * How long a reply (a message, a Re-ask note; never a 👍 note) waits on a busy session before
    * it goes into the running turn by itself, where that session's connection
    * can take it mid-turn. Default `INBOX_AUTO_SEND_AFTER_MS` (5 minutes).
    * Tests shorten it.
