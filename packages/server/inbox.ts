@@ -83,7 +83,7 @@ import {
 } from "@plannotator/shared/config";
 import { getPlannotatorDataDir } from "@plannotator/shared/data-dir";
 import { normalizeStableVersion, readUpdateState } from "@plannotator/shared/update-check";
-import { isLoopbackHostHeader } from "@plannotator/shared/loopback-host";
+import { isLoopbackHostHeader, isLoopbackForwardedFor } from "@plannotator/shared/loopback-host";
 import { prepareAppHtml, prewarmAppHtml } from "@plannotator/shared/app-html";
 import type { InboxSearchIndex, InboxSearchIndexOptions } from "@plannotator/shared/inbox/search";
 import { createInboxSearchRoutes } from "./inbox-search";
@@ -167,8 +167,8 @@ import {
 /** Where a request came in: the window's loopback port, or the tailnet-only listener `tailscale serve` points at. */
 type RequestVia = "local" | "tailnet";
 
-/** Headers `tailscale serve` sets on every proxied request (X-Forwarded-For always; the identity for a user's device). */
-const SERVE_HEADERS = ["tailscale-headers-info", "tailscale-user-login", "x-forwarded-for"] as const;
+/** Headers `tailscale serve` sets on every proxied request (the identity headers for a user's device). */
+const SERVE_IDENTITY_HEADERS = ["tailscale-headers-info", "tailscale-user-login"] as const;
 
 const LOOPBACK = "127.0.0.1";
 /** A palette id as packages/ui/themes names them (`plannotator`, `tokyo-night`). */
@@ -2348,9 +2348,18 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
    * Such a mapping hands the tailnet the whole Inbox, `/mcp` included (serve
    * passes a peer's own Host through), so the request is refused and Settings
    * offers the owner-only address instead.
+   *
+   * Note on X-Forwarded-For (#1867): a local reverse proxy (e.g. nginx, Caddy,
+   * portless) also adds X-Forwarded-For with loopback IP(s). That is NOT tailscale
+   * serve exposure. Tailscale serve forwards the peer's tailnet/remote IP. We only
+   * treat X-Forwarded-For as tailnet exposure if it contains a non-loopback address.
    */
   const fetch = (req: Request): Promise<Response> => {
-    if (SERVE_HEADERS.some((name) => req.headers.has(name))) {
+    const hasTailscaleHeader = SERVE_IDENTITY_HEADERS.some((name) => req.headers.has(name));
+    const forwardedFor = req.headers.get("x-forwarded-for");
+    const hasExternalForwardedFor = forwardedFor !== null && !isLoopbackForwardedFor(forwardedFor);
+
+    if (hasTailscaleHeader || hasExternalForwardedFor) {
       tailscale.noteServedRequest();
       return Promise.resolve(localOnly());
     }

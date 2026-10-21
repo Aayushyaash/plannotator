@@ -27,10 +27,34 @@ export function isLoopbackHostname(hostname: string): boolean {
 }
 
 /**
- * True when `hostHeader` is `<loopback name>:<port>`: `localhost`, any
- * `127.x.y.z` literal, or `[::1]`, followed by exactly this server's port.
- * A missing port, another port, or any other name is refused.
+ * Extracts and checks client IP addresses from X-Forwarded-For header.
+ * Returns true if ALL addresses listed in X-Forwarded-For are loopback addresses.
+ * If any address is non-loopback (or malformed), returns false.
  */
+export function isLoopbackForwardedFor(headerValue: string | null | undefined): boolean {
+  if (!headerValue) return false;
+  const parts = headerValue.split(",").map((p) => p.trim()).filter(Boolean);
+  if (parts.length === 0) return false;
+  return parts.every((part) => {
+    // If port is present (e.g. 127.0.0.1:1234 or [::1]:1234), strip it
+    let host = part;
+    if (host.startsWith("[")) {
+      const close = host.indexOf("]");
+      if (close > 0) {
+        host = host.slice(0, close + 1);
+      }
+    } else if (host.includes(":")) {
+      // Could be IPv4 with port (e.g. 127.0.0.1:8080) or unbracketed IPv6 (e.g. ::1 or ::1:8080)
+      if (host.indexOf(":") === host.lastIndexOf(":")) {
+        // Exactly one colon: IPv4:port
+        host = host.slice(0, host.indexOf(":"));
+      }
+      // If multiple colons, it's an unbracketed IPv6 address like ::1
+    }
+    return isLoopbackHostname(host);
+  });
+}
+
 export function isLoopbackHostHeader(hostHeader: string | null | undefined, port: number | null | undefined): boolean {
 	if (!hostHeader || typeof port !== "number" || !Number.isInteger(port) || port <= 0) return false;
 	const value = hostHeader.trim();

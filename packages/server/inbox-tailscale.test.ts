@@ -603,6 +603,13 @@ describe("Inbox over your tailnet", () => {
         expect([header, path, response.status]).toEqual([header, path, 403]);
       }
     }
+
+    // A purely local reverse proxy adding loopback X-Forwarded-For is allowed (#1867)
+    for (const loopbackFwd of ["127.0.0.1", "127.0.0.1, 127.0.0.2", "::1", "localhost", "127.0.0.1:8080"]) {
+      const resp = await fetch(`${main}/api/inbox/threads`, { headers: { "X-Forwarded-For": loopbackFwd, Host: `127.0.0.1:${inbox.port}` } });
+      expect([loopbackFwd, resp.status]).toEqual([loopbackFwd, 200]);
+    }
+
     expect((await fetch(`${main}/api/inbox/threads`)).status).toBe(200);
     const settings = (await (await fetch(`${main}/api/inbox/settings`)).json()) as Json;
     expect(settings.tailscale.exposed).toEqual([{ https_port: inbox.port, target: `http://127.0.0.1:${inbox.port}` }]);
