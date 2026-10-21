@@ -62,7 +62,7 @@ import { preloadFile } from "@pierre/diffs/ssr";
  * payload still returns the full AnnotateHistoryResult, `diffCurrent`
  * included, for legacy shape parity — see annotate.ts).
  */
-export type FolderAnnotateHistory = Omit<AnnotateHistoryResult, "diffCurrent">;
+export type FolderAnnotateHistory = Omit<AnnotateHistoryResult, "diffCurrent" | "isNew">;
 
 // --- Route handlers ---
 

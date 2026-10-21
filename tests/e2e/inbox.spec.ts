@@ -449,11 +449,14 @@ test('Send carries the picks and the words, wait_for_reply returns them, and the
   const [claude] = world.agents;
   await page.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' }).click();
   const box = page.getByRole('textbox', { name: 'Reply to Claude Code' });
-  await expect(box).toHaveValue(
-    'Which way should the worker go on a Stripe 409: Retry with the same idempotency key. Ship the retry worker behind a flag: Yes.',
-  );
+  // The picks are listed in the box, never written into the words.
+  await expect(box).toHaveValue('');
+  await expect(page.locator('[data-reply-answers] [data-reply-answer]')).toHaveText([
+    /Q1\s+Which way should the worker go on a Stripe 409\?\s+Retry with the same idempotency key/,
+    /Q2\s+Ship the retry worker behind a flag\?\s+Yes/,
+  ]);
   await expect(page.locator('[data-picks-chip]')).toHaveText('2 picks');
-  await box.fill(`${await box.inputValue()} Keep the flag on for the test account first.`);
+  await box.fill('Keep the flag on for the test account first.');
   await shot('2.6-reply-box');
 
   const reply = claude!.waitForReply(world.threads.stopped!, 50);

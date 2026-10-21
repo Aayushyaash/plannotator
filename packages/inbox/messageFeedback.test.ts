@@ -95,7 +95,7 @@ describe('which reply a comment rides', () => {
     const t = thread([message('msg_A', 'ses_a'), message('msg_B', 'ses_b')]);
     const onA = record('c1', 'retry', 'Cap it.', {}, 'msg_A');
     const onB = record('c2', 'jitter', 'Fine.', {}, 'msg_B');
-    const routed = routeSendAnnotations(t, sendTargetsOf(t, false), [onA, onB]);
+    const routed = routeSendAnnotations(t, sendTargetsOf(t), [onA, onB]);
     expect(routed.targets.map((x) => x.message.id)).toEqual(['msg_A', 'msg_B']);
     expect(routed.carried.get('msg_A')!.map((r) => r.id)).toEqual(['c1']);
     expect(routed.carried.get('msg_B')!.map((r) => r.id)).toEqual(['c2']);
@@ -103,7 +103,7 @@ describe('which reply a comment rides', () => {
 
   test("a comment on an earlier message of the last reply's session rides that reply, once", () => {
     const t = thread([message('msg_A', 'ses_a'), message('msg_A2', 'ses_a')]);
-    const routed = routeSendAnnotations(t, sendTargetsOf(t, false), [record('c1', 'retry', 'Cap it.', {}, 'msg_A')]);
+    const routed = routeSendAnnotations(t, sendTargetsOf(t), [record('c1', 'retry', 'Cap it.', {}, 'msg_A')]);
     expect(routed.targets.map((x) => x.message.id)).toEqual(['msg_A2']);
     expect(routed.carried.get('msg_A2')!.map((r) => r.id)).toEqual(['c1']);
   });
@@ -111,7 +111,7 @@ describe('which reply a comment rides', () => {
   test('a file comment rides the last reply', () => {
     const t = thread([message('msg_A', 'ses_a'), message('msg_B', 'ses_b')]);
     const file = { ...record('f1', 'x', 'y'), message: undefined, attachment_id: 'att_1', path: '/p/a.md' } as InboxAnnotationRecord;
-    const routed = routeSendAnnotations(t, sendTargetsOf(t, false), [file]);
+    const routed = routeSendAnnotations(t, sendTargetsOf(t), [file]);
     expect(routed.targets.map((x) => x.message.id)).toEqual(['msg_B']);
     expect(routed.carried.get('msg_B')!.map((r) => r.id)).toEqual(['f1']);
   });

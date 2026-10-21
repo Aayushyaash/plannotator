@@ -37,6 +37,11 @@
  * `PLANNOTATOR_TOOL_BUNDLE_UNAVAILABLE_TEXT`. Replying to a single comment is
  * not part of the contract yet: it comes back with the comment loop.
  *
+ * Gate: `gate: true` means the agent waits for the reviewer's sign-off, so a
+ * host delivers a bare Approve as a message too (annotate adds an Approve
+ * button; review always has one, and its gate is never passed to the CLI).
+ * Without it a host may only log a bare Approve (the Claude Code mod does).
+ *
  * Targets: every decision heading and opened text also names the review's
  * FULL target (`plannotatorTargetLines`: the absolute path, URL, bundle files,
  * reviewed directory or PR URL) as the server that shows the review resolved
@@ -75,7 +80,7 @@ export interface PlannotatorToolInput {
 export const PLANNOTATOR_TOOL_DESCRIPTION = [
   'Open Plannotator, the browser review UI, for the user, and return at once. Also lists and closes the reviews opened in this conversation (by this tool or the user\'s /plannotator-* commands).',
   '- action "annotate": annotate a file (markdown, text, config, HTML), a folder, or a URL; `target` is required. Pass a list as `target` to review several files together, in the order you want them read. `gate: true` adds an Approve button for an explicit sign-off. `options.markdown: true` converts HTML or a URL to markdown first.',
-  '- action "review": review code changes; `target` is an optional repository directory or a GitHub/GitLab/Bitbucket pull request URL (default: the current repository). `options.base` sets the compare branch or ref (git only).',
+  '- action "review": review code changes; `target` is an optional repository directory or a GitHub/GitLab/Bitbucket pull request URL (default: the current repository). `options.base` sets the compare branch or ref (git only). `gate: true` when you wait for the sign-off: a bare Approve reaches you too.',
   '- action "last": annotate your own last assistant message; no target.',
   '- action "list": the reviews opened in this conversation that are still open, one line each: session id, what it shows, url, age, state, and how many comments the reviewer has not sent yet.',
   '- action "close": close a review opened in this conversation that is no longer needed; `session` is its id (pn-...) or "all". Nothing is sent to you, and the reviewer\'s unsent comments stay saved as a draft. Plan reviews are not closed this way: they end with the reviewer\'s decision.',
@@ -99,7 +104,7 @@ export const PLANNOTATOR_TOOL_INPUT_SCHEMA = {
     },
     gate: {
       type: 'boolean',
-      description: 'annotate only: show an Approve button so the reviewer can sign off explicitly.',
+      description: 'annotate: add an Approve button for an explicit sign-off. review: deliver a bare Approve too.',
     },
     options: {
       type: 'object',
@@ -208,7 +213,7 @@ export function parsePlannotatorToolInput(value: unknown): PlannotatorToolParse 
 
   if (value.gate !== undefined) {
     if (typeof value.gate !== 'boolean') return fail('gate must be true or false')
-    if (value.gate && action !== 'annotate') return fail('gate is for action "annotate" only')
+    if (value.gate && action !== 'annotate' && action !== 'review') return fail('gate is for actions "annotate" and "review" only')
     if (value.gate) input.gate = true
   }
 
@@ -278,6 +283,9 @@ export function plannotatorToolArgs(input: PlannotatorToolInput): string[] {
         ...(input.options?.markdown ? ['--markdown'] : []),
       ]
     case 'review':
+      // A review's `gate` is the host's alone (deliver a bare approval as a
+      // message), never passed on: the review page always has Approve, and a
+      // CLI older than `review --gate` refuses the flag.
       return [
         ...(input.options?.base ? ['--base', input.options.base] : []),
         ...plannotatorToolTargets(input),
@@ -751,8 +759,8 @@ const COMMAND_ACTIONS: Record<string, PlannotatorToolAction> = {
  * represents: annotate `<target>` (or several targets that all read as file
  * paths, `looksLikeFilePath`, which become `target: [...]`, a review of
  * several files) plus `--gate` and `--markdown`; review `[target]` plus
- * `--base <ref>`; last with no arguments. `--json` is accepted and dropped
- * (the decision arrives as a message, not on stdout). The result passes
+ * `--base <ref>` and `--gate`; last with no arguments. `--json` is accepted
+ * and dropped (the decision arrives as a message, not on stdout). The result passes
  * `parsePlannotatorToolInput`.
  *
  * Everything else is null and runs as written: other subcommands, any other
@@ -785,7 +793,7 @@ export function plannotatorCommandToToolInput(command: string): PlannotatorToolI
     if (seen.has(word)) return null
     seen.add(word)
     if (word === '--json') continue
-    if (word === '--gate' && action === 'annotate') call.gate = true
+    if (word === '--gate' && (action === 'annotate' || action === 'review')) call.gate = true
     else if (word === '--markdown' && action === 'annotate') options.markdown = true
     else if (word === '--base' && action === 'review') {
       const value = rest[index + 1]

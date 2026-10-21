@@ -62,6 +62,21 @@ describe('Bash take-over', () => {
     expect(host.submits[0]).toContain('The user approved.')
   })
 
+  test('a gated agent-run review delivers the bare Approve, without passing --gate to the CLI (#1907)', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+    await bashCall(mod, 'plannotator review --gate --json')
+
+    const [launch] = host.runs.filter(isLaunch)
+    expect(launch?.argv.slice(5)).toEqual(['plannotator', 'review'])
+    host.files.set(`${launch?.argv[4]}/result.json`, JSON.stringify({ v: 1, surface: 'review', decision: 'approved', message: '', noop: true }))
+    await host.tick()
+
+    expect(host.submits).toHaveLength(1)
+    expect(host.submits[0]).toContain('— Approved.')
+  })
+
   test('a startup failure is an error result for the Bash call', async () => {
     const host = fakeHost()
     host.onRun = (call) => {

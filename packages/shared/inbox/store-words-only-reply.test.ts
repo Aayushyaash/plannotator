@@ -112,9 +112,9 @@ describe("a reply that answers nothing", () => {
     expect(closed.store.sendReply(closed.asked.id, { words: "Thanks.", idempotency_key: "k-1" }).reply.body).toBe("Thanks.");
   });
 
-  test("the person switched to skip: today's skip-all reply, no still-open line", () => {
-    const { store, asked } = setup();
-    const result = store.sendReply(asked.id, { words: "Redo the design.", idempotency_key: "k-1", skip_unanswered: true });
+  test("the person pressed Skip them: the skip-all reply, no still-open line", () => {
+    const { store, asked, questions } = setup();
+    const result = store.sendReply(asked.id, { words: "Redo the design.", idempotency_key: "k-1", skip: questions.map((q) => q.key) });
     expect(result.reply.body.split("\n")[0]).toBe("Skipped 3 questions.");
     expect(result.reply.body).not.toContain("still open");
   });
@@ -124,11 +124,11 @@ describe("a session asked, then posted a plain update (the words go to the updat
   test("same session: the reply to the update counts the questions the session asked earlier", () => {
     const { store, project, asked } = setup();
     const update = store.sendMessage({ project_id: project.id, author: AGENT, reply_to: asked.id, body: "Update: the list builds now." }).message;
-    const result = store.sendReply(update.id, { words: "Still deciding.", idempotency_key: "k-1", skip_unanswered: false });
+    const result = store.sendReply(update.id, { words: "Still deciding.", idempotency_key: "k-1" });
     expect(result.reply.body).toBe(`Still deciding.\n\n${STILL_OPEN_3}`);
     expect(store.questionsOf(asked.id).map((q) => q.state)).toEqual(["open", "open", "open"]);
-    // The phone door and older windows send no skip_unanswered: the same body.
-    expect(store.sendReply(update.id, { words: "Later.", idempotency_key: "k-2" }).reply.body).toBe(`Later.\n\n${STILL_OPEN_3}`);
+    // Again, with the old flag a phone or an older window may still send: ignored, the same body.
+    expect(store.sendReply(update.id, { words: "Later.", idempotency_key: "k-2", skip_unanswered: true } as never).reply.body).toBe(`Later.\n\n${STILL_OPEN_3}`);
   });
 
   test("another session posted the update: its reply says nothing about the first session's questions", () => {
@@ -146,43 +146,49 @@ describe("a session asked, then posted a plain update (the words go to the updat
     expect(result.reply.body).toBe("Later.\n\nNo questions answered yet; all 4 are still open. Don't re-ask them; the person will answer in the Inbox.");
   });
 
-  test("a partial answer on the update is byte-identical to before: its own questions only, no still-open line", () => {
+  test("a partial answer on the update: its own questions in the section, and a line for the session's other questions", () => {
     const { store, project, asked } = setup();
     const update = store.sendMessage({ project_id: project.id, author: AGENT, reply_to: asked.id, body: question("Deploy tonight?", ["Yes", "No"]) }).message;
     const q = store.questionsOf(update.id)[0]!;
     const result = store.sendReply(update.id, { words: "Yes.", idempotency_key: "k-1", questions: [{ key: q.key, revision: 0, answer: pickFor(q, "Yes") }] });
     expect(result.reply.body.split("\n\n").slice(0, 2)).toEqual(["Answered 1 question.", "Yes."]);
     expect(result.reply.body).toContain("1 of 1 question answered.");
-    expect(result.reply.body).not.toContain("still open");
+    expect(result.reply.body.split("\n\n")[2]).toBe(
+      "You have 3 other questions open in this thread. They stay open; the person will answer them in the Inbox. Don't re-ask them.",
+    );
+    expect(store.questionsOf(asked.id).map((q) => q.state)).toEqual(["open", "open", "open"]);
   });
 });
 
-describe("a reply that answers at least one question is unchanged", () => {
-  test("partial with skip: first line, words, the answers section; no still-open line", () => {
+describe("a reply that answers at least one question (approval inbox-explicit-skip)", () => {
+  test("partial with Skip them: first line, words, the answers section; no still-open line", () => {
     const { store, asked, questions } = setup();
     const result = store.sendReply(asked.id, {
       words: "Table, please.",
       idempotency_key: "k-1",
       questions: [{ key: questions[0]!.key, revision: 0, answer: pickFor(questions[0]!, "A dense table") }],
-      skip_unanswered: true,
+      skip: [questions[1]!.key, questions[2]!.key],
     });
     const body = result.reply.body;
     expect(body.split("\n\n").slice(0, 2)).toEqual(["Answered 1 question, skipped 2.", "Table, please."]);
-    expect(body).toContain("## Answers to your questions\n\n1 of 3 questions answered. 2 were not answered in this reply;");
+    expect(body).toContain("## Answers to your questions\n\n1 of 3 questions answered.\n\n");
+    expect(body.match(/Skipped by the person/g)).toHaveLength(2);
     expect(body).not.toContain("still open");
+    expect(body).not.toContain("stay open");
     expect(result.questions.map((q) => q.state)).toEqual(["sent", "sent", "sent"]);
   });
 
-  test("partial with Keep open: first line and the section with Unanswered; no still-open line", () => {
+  test("partial, the default (Keep open): first line, the line that the rest stay open, and the section with Unanswered", () => {
     const { store, asked, questions } = setup();
     const result = store.sendReply(asked.id, {
       idempotency_key: "k-1",
       questions: [{ key: questions[0]!.key, revision: 0, answer: pickFor(questions[0]!, "Cards") }],
-      skip_unanswered: false,
     });
-    expect(result.reply.body.split("\n")[0]).toBe("Answered 1 question.");
+    expect(result.reply.body.split("\n\n").slice(0, 2)).toEqual([
+      "Answered 1 question.",
+      "You have 2 other questions open in this thread. They stay open; the person will answer them in the Inbox. Don't re-ask them.",
+    ]);
     expect(result.reply.body).toContain("### Unanswered");
-    expect(result.reply.body).not.toContain("still open");
     expect(result.questions.map((q) => q.state)).toEqual(["sent", "open", "open"]);
   });
 });

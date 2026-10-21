@@ -48,8 +48,10 @@ import {
   type InboxSearchThreadRow,
 } from "@plannotator/core/inbox-search";
 import { findQuestionBlocks, QUESTION_ANSWERS_HEADING, type QuestionAnswer } from "@plannotator/core/question-block";
+import { INBOX_STILL_OPEN_LINE } from "@plannotator/core/inbox-questions";
 import { withoutInboxSkillsBlock } from "@plannotator/core/skill-reference-block";
 import {
+  displayInboxSubject,
   inboxAgentName,
   isInboxNote,
   type InboxLine,
@@ -154,7 +156,7 @@ export function forEachInboxSearchBodyLine(markdown: string, visit: (line: strin
 
 /**
  * The person's own words in a reply: not the generated first line, not the
- * answers section, and not the skills block the window pastes at the end (a
+ * still-open line, not the answers section, and not the skills block the window pastes at the end (a
  * human-only skill's SKILL.md text, which the person did not write; the
  * `$name` they typed stays in their words, so the reply is still found by it).
  */
@@ -167,7 +169,8 @@ export function inboxSearchReplyText(body: string, message?: { reask?: readonly 
 /** inboxSearchReplyText for a body whose skills block is already gone (a windowed long reply). */
 function replyWordsText(body: string): string {
   const lines = body.split(/\r?\n/);
-  const at = lines.findIndex((line) => ANSWERS_HEADING_LINE.test(line.trim()));
+  // The answers section, or the still-open line the store writes before it (folding.ts replyWords cuts the same).
+  const at = lines.findIndex((line) => ANSWERS_HEADING_LINE.test(line.trim()) || INBOX_STILL_OPEN_LINE.test(line.trim()));
   const kept = (at >= 0 ? lines.slice(0, at) : lines).join("\n");
   return inboxSearchBodyText(kept.replace(/^\s*(?:Answered \d+ questions?(?:, skipped \d+)?|Skipped \d+ questions?)\.\s*/, ""));
 }
@@ -646,7 +649,7 @@ export class InboxSearchIndex {
     }
     const facts = this.factsOf(threadId);
     const project = this.store.project(root.project_id);
-    const subject = facts?.subject ?? root.subject ?? "";
+    const subject = facts?.subject ?? displayInboxSubject(root.subject) ?? "";
     this.put(
       `t:${threadId}`,
       "thread",
@@ -937,7 +940,7 @@ export class InboxSearchIndex {
         const root = this.store.message(doc.ref);
         if (!root) return [];
         const facts = this.factsOf(doc.ref);
-        return [facts?.subject ?? root.subject ?? "", root.thread_name ?? "", this.store.project(root.project_id)?.name ?? ""];
+        return [facts?.subject ?? displayInboxSubject(root.subject) ?? "", root.thread_name ?? "", this.store.project(root.project_id)?.name ?? ""];
       }
       case "message": {
         const message = this.store.message(doc.ref);

@@ -65,7 +65,9 @@ import {
   type InboxListSection,
   type InboxThread,
   type InboxThreadSummary,
+  checkInboxSubject,
   checkInboxThreadName,
+  displayInboxSubject,
   type InboxThreadNaming,
   inboxThreadNameKey,
   isInboxNote,
@@ -203,6 +205,13 @@ export interface InboxSendResult {
 }
 
 export interface InboxAnswerEntry {
+  /**
+   * A Send only: the message the question is on, when it is not the message
+   * the reply answers. It must be another message of the same thread from
+   * the same agent session (one Send to one session is one reply, approval
+   * "inbox-explicit-skip"). Absent: the reply's own message.
+   */
+  message_id?: string;
   key: string;
   revision: number;
   /** Absent: keep the current pick (Send only). Null: clear the pick. */
@@ -229,12 +238,17 @@ export interface InboxReplyInput {
    */
   to?: InboxAddressee | null;
   /**
-   * Skip the message's questions this Send leaves unanswered (no pick): each
-   * is sent as a skip marked `by_reply`, in the same reply. The window sends
-   * true unless the person pressed Keep open; absent (an older window, the
-   * MCP) keeps them open.
+   * The open questions the person chose to skip with this Send ("Skip them"
+   * on the chip; approval "inbox-explicit-skip", 2026-10-21): each is sent as
+   * a skip marked `by_reply`, in the same reply. A key alone is a question of
+   * the reply's own message; `{ message_id, key }` names one on another
+   * message of the same thread and session. A listed question that is no
+   * longer open (answered, picked, closed, replaced) is left alone, so a race
+   * never refuses the Send; one that is not a question of that message is
+   * refused. Absent or empty: nothing is skipped. A Send never skips on its
+   * own (the old `skip_unanswered` flag is gone).
    */
-  skip_unanswered?: boolean;
+  skip?: unknown;
   /**
    * Files the person pasted into the reply box, already copied out of their
    * uploads (`inboxUploadAttachments`): the reply carries them as compose's
@@ -850,7 +864,9 @@ export class InboxStore {
 
   private wire(message: InboxMessage): InboxMessageWire {
     const questions = this.questionsOf(message.id);
-    return questions.length > 0 ? { ...message, questions } : { ...message };
+    // A subject is served as shown (displayInboxSubject), never as stored.
+    const shown = message.subject ? { ...message, subject: displayInboxSubject(message.subject) } : { ...message };
+    return questions.length > 0 ? { ...shown, questions } : shown;
   }
 
   messageWire(id: string): InboxMessageWire | null {
@@ -876,9 +892,14 @@ export class InboxStore {
    * that a subject derived from a question follows that question's
    * replacement (`superseded_by` with a key), down the chain. An agent-given
    * subject never changes, and a question withdrawn with nothing in its place
-   * keeps the subject it gave.
+   * keeps the subject it gave. Served as shown (`displayInboxSubject`: one
+   * line, no leaked tool-call text), never as an older store kept it.
    */
   threadSubject(threadId: string): string | null {
+    return displayInboxSubject(this.storedThreadSubject(threadId));
+  }
+
+  private storedThreadSubject(threadId: string): string | null {
     const root = this.messages.get(threadId);
     if (!root) return null;
     let id = this.subjectQuestion(root);
@@ -2017,6 +2038,12 @@ export class InboxStore {
   sendMessage(input: InboxSendInput): InboxSendResult {
     const body = input.body;
     if (typeof body !== "string" || body.trim() === "") throw new InboxError("validation_error", "body: a message needs a body.", { field: "body" });
+    // One line of plain text, checked before anything else (a reply ignores
+    // its subject, but leaked tool-call text means the call itself was
+    // malformed): nothing is written, so a corrected retry with the same
+    // idempotency_key lands once.
+    const subjectCheck = checkInboxSubject(input.subject);
+    if (!subjectCheck.ok) throw new InboxError("validation_error", `subject: ${subjectCheck.message}`, { field: "subject" });
     let threadName: string | null = null;
     if (input.thread !== undefined && input.thread !== null && !input.reply_to) {
       const checked = checkInboxThreadName(input.thread);
@@ -2098,7 +2125,7 @@ export class InboxStore {
     // Checked before anything is written: one id that names no open question
     // of this thread refuses the whole send.
     const superseding = this.planSupersede(threadId, id, supersedes, parsed);
-    const agentSubject = input.subject?.trim() || null;
+    const agentSubject = subjectCheck.subject;
     const message: InboxMessage = {
       id,
       project_id: projectId,
@@ -2312,6 +2339,58 @@ export class InboxStore {
   }
 
   /**
+   * The message a Send's answer or skip is on: the reply's own (`raw`
+   * absent), or another message of the same thread written by the same agent
+   * session (one Send to one session is one reply, approval
+   * "inbox-explicit-skip"). Anything else is refused before anything is
+   * written; a message the archive closed refuses as the reply's own does.
+   */
+  private sendMessageOf(reply: InboxMessage, raw: string | undefined, field: string): InboxMessage {
+    if (raw === undefined || raw === reply.id) return reply;
+    const other = this.messages.get(raw);
+    const sameSession =
+      other !== undefined &&
+      other.thread_id === reply.thread_id &&
+      other.author.kind === "agent" &&
+      reply.author.kind === "agent" &&
+      !!reply.author.session &&
+      other.author.session === reply.author.session &&
+      (other.author.host ?? "") === (reply.author.host ?? "");
+    if (!sameSession) {
+      throw new InboxError("validation_error", `${field}: ${raw} is not a message of this thread from the session the reply goes to.`, { field });
+    }
+    if (this.closedByArchive(other!)) throw new InboxError("thread_resolved", "This thread is resolved; reopen it to answer.");
+    return other!;
+  }
+
+  /**
+   * A Send's `skip` list, checked: each entry a question key (the reply's own
+   * message) or `{ message_id?, key }`, on a message `sendMessageOf` accepts,
+   * and a question of that message (else refused). Returns the records as
+   * they are now; the caller keeps the open ones.
+   */
+  private planSkips(reply: InboxMessage, raw: unknown): InboxQuestionRecord[] {
+    if (raw === undefined || raw === null) return [];
+    if (!Array.isArray(raw)) throw new InboxError("validation_error", "skip: a list of question keys.", { field: "skip" });
+    const out = new Map<string, InboxQuestionRecord>();
+    raw.forEach((item, index) => {
+      const field = `skip[${index}]`;
+      const entry = typeof item === "string" ? { key: item } : item;
+      if (!entry || typeof entry !== "object" || typeof (entry as { key?: unknown }).key !== "string") {
+        throw new InboxError("validation_error", `${field}: a question key, or { message_id, key }.`, { field });
+      }
+      const messageId = (entry as { message_id?: unknown }).message_id;
+      if (messageId !== undefined && typeof messageId !== "string") throw new InboxError("validation_error", `${field}.message_id: a message id.`, { field: `${field}.message_id` });
+      const target = this.sendMessageOf(reply, messageId as string | undefined, `${field}.message_id`);
+      const key = (entry as { key: string }).key;
+      const record = this.questionRecords(target.id).find((r) => r.key === key);
+      if (!record) throw new InboxError("question_not_found", `No question ${key} on message ${target.id}.`, { key, message_id: target.id });
+      out.set(record.id, record);
+    });
+    return [...out.values()];
+  }
+
+  /**
    * Check every entry against the message's questions and plan the new
    * records. Nothing is written unless every entry passes.
    */
@@ -2319,11 +2398,14 @@ export class InboxStore {
     message: InboxMessage,
     entries: readonly InboxAnswerEntry[],
     mode: "pick" | "send",
+    /** Each entry's index in the request's `questions` (a Send's entries are planned per message). */
+    indices?: readonly number[],
   ): { record: InboxQuestionRecord; answer: QuestionAnswer | null | undefined }[] {
     const records = new Map(this.questionRecords(message.id).map((r) => [r.key, r]));
     const seen = new Set<string>();
     const plan: { record: InboxQuestionRecord; answer: QuestionAnswer | null | undefined }[] = [];
-    entries.forEach((entry, index) => {
+    entries.forEach((entry, position) => {
+      const index = indices?.[position] ?? position;
       const field = `questions[${index}]`;
       if (!entry || typeof entry !== "object" || typeof entry.key !== "string") {
         throw new InboxError("validation_error", `${field}.key: required.`, { field: `${field}.key` });
@@ -2334,7 +2416,7 @@ export class InboxStore {
         throw new InboxError("validation_error", `${field}.revision: a non-negative integer is required.`, { field: `${field}.revision` });
       }
       const record = records.get(entry.key);
-      if (!record) throw refusalError({ code: "question_not_found", key: entry.key });
+      if (!record) throw new InboxError("question_not_found", `No question ${entry.key} on message ${message.id}.`, { key: entry.key, message_id: message.id });
       // A superseded question takes no pick and no Send: a pick saved on it stays, never sent.
       if (record.superseded_by) {
         const by = { message_id: record.superseded_by.message_id, key: record.superseded_by.key ?? null };
@@ -2417,27 +2499,40 @@ export class InboxStore {
     const entries = input.questions ?? [];
     if (!Array.isArray(entries)) throw new InboxError("validation_error", "questions: must be a list.", { field: "questions" });
     const words = typeof input.words === "string" ? input.words : "";
-    const plan = this.planAnswers(message, entries, "send");
+    // One Send to one session is one reply: the answers may be on any of the
+    // session's messages in this thread. Each is planned against its own
+    // message's questions (revisions included); nothing is written unless
+    // every entry passes.
+    const byMessage = new Map<string, { entry: InboxAnswerEntry; index: number }[]>();
+    entries.forEach((entry, index) => {
+      const field = `questions[${index}].message_id`;
+      const raw = entry && typeof entry === "object" ? (entry as InboxAnswerEntry).message_id : undefined;
+      if (raw !== undefined && typeof raw !== "string") throw new InboxError("validation_error", `${field}: a message id.`, { field });
+      const target = this.sendMessageOf(message, raw, field);
+      byMessage.set(target.id, [...(byMessage.get(target.id) ?? []), { entry, index }]);
+    });
+    const plan: { record: InboxQuestionRecord; answer: QuestionAnswer | null | undefined }[] = [];
+    for (const [id, list] of byMessage) {
+      const target = this.messages.get(id)!;
+      plan.push(...this.planAnswers(target, list.map((x) => x.entry), "send", list.map((x) => x.index)));
+    }
     const feedback = typeof input.feedback === "string" ? input.feedback.trim() : "";
     const carried = this.planSentAnnotations(message.thread_id, input.annotation_ids);
-    // A Send skips the message's questions it leaves unanswered (no pick),
-    // unless the person pressed Keep open. Superseded and closed ones are not open.
-    const planned = new Set(plan.map((p) => p.record.key));
-    const skips =
-      input.skip_unanswered === true
-        ? this.questionRecords(message.id).filter((r) => !planned.has(r.key) && inboxQuestionState(r, false) === "open")
-        : [];
+    // Skips only what the person listed ("Skip them"), and only while still open.
+    const planned = new Set(plan.map((p) => p.record.id));
+    const listed = this.planSkips(message, input.skip);
+    const skips = listed.filter((r) => !planned.has(r.id) && inboxQuestionState(r, false) === "open");
     const attachments = input.attachments ?? [];
     if (plan.length === 0 && skips.length === 0 && words.trim() === "" && feedback === "" && attachments.length === 0) {
-      // A target a Send meant only to skip, whose questions closed meanwhile
+      // A Send meant only to skip, whose questions closed meanwhile
       // (answered, replaced, a Mark read): nothing to write, not a refusal.
-      if (input.skip_unanswered === true) throw new InboxError("nothing_to_send", "Nothing is left to send on this message.");
+      if (listed.length > 0) throw new InboxError("nothing_to_send", "Nothing is left to send on this message.");
       throw new InboxError("validation_error", "words: write a reply or send at least one answer.", { field: "words" });
     }
 
     const replyId = inboxId("msg");
     const at = this.stamp();
-    const sentKeys = new Set([...plan.map((p) => p.record.key), ...skips.map((r) => r.key)]);
+    const sentIds = new Set([...plan.map((p) => p.record.id), ...skips.map((r) => r.id)]);
     const skipped = skips.map(
       (record) =>
         ({
@@ -2463,14 +2558,24 @@ export class InboxStore {
       } satisfies InboxQuestionRecord;
     });
     const updated = [...answered, ...skipped];
-    const all = this.questionRecords(message.id);
-    const earlier = all
-      .filter((r) => !sentKeys.has(r.key) && r.answer !== null && r.sent_revision > 0 && r.sent_revision === r.revision)
-      .map((r) => r.answer as QuestionAnswer);
-    // A reply that answers nothing says which questions stay open: every one
-    // the replied-to message's session asked in this thread (it asked in one
-    // message and posted a plain update after it, and the words go to the
-    // update), never another session's.
+    // Every message the reply answers questions on (the reply's own first
+    // when it has none), in thread order, for the answers section.
+    const order = this.threadMessages(message.thread_id).map((m) => m.id);
+    const touched = new Set([message.id, ...updated.map((r) => r.message_id)]);
+    const groups = order
+      .filter((id) => touched.has(id))
+      .map((id) => {
+        const all = this.questionRecords(id);
+        const sent = updated.filter((r) => r.message_id === id).map((r) => r.answer as QuestionAnswer);
+        const earlier = all
+          .filter((r) => !sentIds.has(r.id) && r.answer !== null && r.sent_revision > 0 && r.sent_revision === r.revision)
+          .map((r) => r.answer as QuestionAnswer);
+        return { message_id: id, questions: all, sent, earlier };
+      });
+    // The reply says which questions stay open: every one the replied-to
+    // message's session asked in this thread (it asked in one message and
+    // posted a plain update after it, and the words go to the update), never
+    // another session's.
     const asker = message.author.kind === "agent" && message.author.session ? message.author : null;
     const stillOpen = asker
       ? this.threadMessages(message.thread_id)
@@ -2482,13 +2587,15 @@ export class InboxStore {
               !this.closedByArchive(m),
           )
           .flatMap((m) => this.questionRecords(m.id))
-      : all;
+      : this.questionRecords(message.id);
     // The picks first, then the annotations as Plannotator's feedback text.
     const body = [
       composeInboxReplyBody({
-        questions: all,
-        sent: updated.map((r) => r.answer as QuestionAnswer),
-        earlier,
+        questions: [],
+        sent: [],
+        earlier: [],
+        messages: groups,
+        replyTo: message.id,
         words,
         stillOpen,
       }),

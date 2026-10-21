@@ -370,4 +370,6 @@ export interface OpenCodeConfig extends AIProviderConfig {
   hostname?: string;
   /** Port for the spawned OpenCode server. Default: 0 (OS-assigned free port). */
   port?: number;
+  /** How long Ask AI waits for the event stream's first frame before it gives up. Default: 10000 ms. */
+  firstEventTimeoutMs?: number;
 }

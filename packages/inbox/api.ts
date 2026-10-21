@@ -383,8 +383,33 @@ async function readJson<T>(response: Response): Promise<T> {
   return body as T;
 }
 
-async function get<T>(path: string): Promise<T> {
-  return readJson<T>(await fetch(path, { headers: { Accept: 'application/json' }, cache: 'no-store' }));
+async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+  return readJson<T>(await fetch(path, { headers: { Accept: 'application/json' }, cache: 'no-store', signal }));
+}
+
+/** A read that gives no answer in `timeoutMs` (a held connection, a stalled server) fails with this. */
+export class InboxReadTimeout extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`no answer in ${Math.round(timeoutMs / 1000)} s`);
+    this.name = 'InboxReadTimeout';
+  }
+}
+
+/** `get`, given up after `timeoutMs`: the fetch is aborted and the read fails with InboxReadTimeout. */
+async function getWithin<T>(path: string, timeoutMs: number): Promise<T> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    return await get<T>(path, controller.signal);
+  } catch (cause) {
+    throw timedOut ? new InboxReadTimeout(timeoutMs) : cause;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** The serverSession every POST carries; set from the first list read. */
@@ -530,7 +555,11 @@ export const inboxApi = {
     const qs = query.toString();
     return get<ArchivedModel>(`/api/inbox/threads/archived${qs ? `?${qs}` : ''}`);
   },
-  thread: (threadId: string) => get<ThreadModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}`),
+  /** One thread; with `timeoutMs`, a read with no answer by then fails (InboxReadTimeout) instead of waiting for good. */
+  thread: (threadId: string, timeoutMs?: number) =>
+    timeoutMs === undefined
+      ? get<ThreadModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}`)
+      : getWithin<ThreadModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}`, timeoutMs),
   settings: () => get<SettingsModel>('/api/inbox/settings'),
   /**
    * The person looked at the thread. `throughSeq`: the seq of the newest
@@ -569,13 +598,17 @@ export const inboxApi = {
     input: {
       idempotency_key: string;
       words: string;
-      questions: { key: string; revision: number }[];
+      /** The picks this reply sends; one on another message of the same session names it (`message_id`). */
+      questions: { message_id?: string; key: string; revision: number }[];
       feedback?: string;
       annotation_ids?: string[];
       /** Another live session takes the reply: the session that asked has ended. */
       to?: { host: string; session: string };
-      /** Skip this message's questions the Send leaves unanswered (false: Keep open). */
-      skip_unanswered?: boolean;
+      /**
+       * The open questions the person chose to skip ("Skip them"), on this message or (with
+       * `message_id`) another of the same session. A Send never skips anything else.
+       */
+      skip?: { message_id?: string; key: string }[];
       /** Files pasted into the reply box (upload ids): attachments on this reply. */
       uploads?: string[];
       /** The sessions the person tagged with `@` (approval "inbox-tag-agents"): each one gets this reply too. */

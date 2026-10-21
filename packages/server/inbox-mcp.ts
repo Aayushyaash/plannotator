@@ -16,7 +16,7 @@ import { isAbsolute } from "node:path";
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { QUESTION_AUTHORING_GUIDE } from "@plannotator/core/question-block";
-import { INBOX_CARD_ACTION_ON, inboxAgentName, INBOX_NAME_THIS_THREAD_HINT, INBOX_SECTIONS, isInboxNote, INBOX_THREAD_NAME_MAX, type InboxGuideRef, type InboxSectionId, type InboxLine, type InboxMessage, type InboxProject } from "@plannotator/core/inbox-types";
+import { checkInboxSubject, INBOX_CARD_ACTION_ON, inboxAgentName, INBOX_NAME_THIS_THREAD_HINT, INBOX_SECTIONS, isInboxNote, INBOX_THREAD_NAME_MAX, type InboxGuideRef, type InboxSectionId, type InboxLine, type InboxMessage, type InboxProject } from "@plannotator/core/inbox-types";
 import { INBOX_WAKES_META_KEY, inboxTaggedLine } from "@plannotator/shared/inbox/connection";
 import { inboxBodyForAgent } from "@plannotator/shared/inbox/uploads";
 import { inboxSectionOf } from "@plannotator/shared/inbox/list";
@@ -131,7 +131,7 @@ const AGENT_SESSION_DESCRIPTION =
  */
 export const SEND_ROUTING_FIELDS = {
   project_path: z.string().optional().describe(PROJECT_PATH_DESCRIPTION),
-  subject: z.string().optional().describe("A short subject when this starts a thread (ignored when it joins one). Default: the first question's prompt, else the first line."),
+  subject: z.string().optional().describe("A short one-line subject when this starts a thread (ignored when it joins one). Plain text: no line breaks. Default: the first question's prompt, else the first line."),
   thread: z
     .string()
     .optional()
@@ -277,6 +277,19 @@ export function replyQuestions(store: InboxStore, messageId: string): { key: str
   }));
 }
 
+/**
+ * The messages a reply answers questions on, in thread order: the one it
+ * replies to, and every other message of the thread holding a question this
+ * reply sent (one Send to one session is one reply, approval
+ * "inbox-explicit-skip").
+ */
+function replyAnsweredMessages(store: InboxStore, reply: InboxMessage): string[] {
+  const messages = store.thread(reply.thread_id)?.messages ?? [];
+  return messages
+    .filter((m) => m.id === reply.reply_to || store.questionsOf(m.id).some((q) => q.sent_reply_id === reply.id))
+    .map((m) => m.id);
+}
+
 function replyResult(store: InboxStore, reply: InboxMessage, base: string, caller: string | null = null): ToolResult {
   const cursor = store.messageCursor(reply.id) ?? store.cursor();
   // A reply that tags agents (approval "inbox-tag-agents") reached the caller, its owner or a session it
@@ -292,7 +305,10 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string, calle
   // The agent now has this reply (not any later one): a Sent row moves to Quiet.
   // Not for a session only tagged here: its read must not settle what the owner still waits for.
   if (!store.isTaggedGuest(reply.thread_id, caller)) store.markAgentChecked(reply.thread_id, cursor);
-  const questions = reply.reply_to ? replyQuestions(store, reply.reply_to) : [];
+  // Every question of each message the reply answers (its reply_to and any other of the session's messages
+  // it sent answers or skips on), each named by its message.
+  const answered = replyAnsweredMessages(store, reply);
+  const questions = answered.flatMap((id) => replyQuestions(store, id).map((q) => ({ message_id: id, ...q })));
   const subject = store.threadSubject(reply.thread_id);
   // The files the person attached are named with their paths, as the wake names them.
   const body = inboxBodyForAgent(reply);
@@ -304,16 +320,17 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string, calle
     : `The person replied in thread ${reply.thread_id}${subject ? ` (${subject})` : ""}:`;
   const url = threadUrl(base, reply.thread_id);
   // The facts the structured content holds, in words, so the text is complete.
-  const numbers = new Map(
-    [...(reply.reply_to ? store.questionsOf(reply.reply_to) : [])].sort((a, b) => a.position - b.position).map((q, i) => [q.key, i + 1]),
-  );
+  const numbered = (id: string) => new Map([...store.questionsOf(id)].sort((a, b) => a.position - b.position).map((q, i) => [q.key, i + 1]));
   const facts = [
     `reply ${reply.id}`,
     reply.reply_to ? `to ${reply.reply_to}` : null,
     shortTime(reply.created_at),
-    questions.length > 0
-      ? `questions of ${reply.reply_to}: ${questions.map((q) => questionWords({ key: q.key, q: numbers.get(q.key) ?? 1, state: q.state }, false, false)).join("; ")}`
-      : null,
+    ...answered.map((id) => {
+      const own = questions.filter((q) => q.message_id === id);
+      if (own.length === 0) return null;
+      const numbers = numbered(id);
+      return `questions of ${id}: ${own.map((q) => questionWords({ key: q.key, q: numbers.get(q.key) ?? 1, state: q.state }, false, false)).join("; ")}`;
+    }),
     `cursor ${cursor}`,
     url,
   ].filter((part): part is string => part !== null);
@@ -384,9 +401,13 @@ export type AgentSendInput = {
 };
 
 /** The project a send lands in: reply_to's, else the one at project_path. */
-export async function sendProject(context: InboxMcpContext, input: { reply_to?: string; project_path?: string; thread?: string }): Promise<InboxProject> {
+export async function sendProject(
+  context: InboxMcpContext,
+  input: { reply_to?: string; project_path?: string; thread?: string; subject?: string | null },
+): Promise<InboxProject> {
   // Before anything resolves (resolving a path makes its project): a refused send writes nothing.
   refuseIdShapedThread(input.thread, input.reply_to);
+  refuseBadSubject(input.subject);
   if (input.reply_to) {
     const parent = context.store.message(input.reply_to);
     if (!parent) throw new InboxError("message_not_found", `No message ${input.reply_to}.`);
@@ -532,6 +553,17 @@ export function refuseIdShapedThread(thread: string | undefined, replyTo?: strin
   );
 }
 
+/**
+ * A `subject` that is not one line of plain text (`checkInboxSubject`):
+ * refused before any file is copied or project made, so nothing is written
+ * and a corrected retry with the same idempotency_key lands once. The store
+ * checks again.
+ */
+export function refuseBadSubject(subject: unknown): void {
+  const checked = checkInboxSubject(subject);
+  if (!checked.ok) throw new InboxError("validation_error", `subject: ${checked.message}`, { field: "subject" });
+}
+
 /** An agent's message into `project`, routed by the store (send_message, submit_guide). */
 export async function sendAgentMessage(
   context: InboxMcpContext,
@@ -542,6 +574,7 @@ export async function sendAgentMessage(
 ): Promise<{ structured: Record<string, unknown>; replayed: boolean; questions: number; attachments: number; superseded: number; imagesNotShown: ImageNotShown[]; naming: InboxSendResult["naming"] | null }> {
   const { store } = context;
   refuseIdShapedThread(input.thread, input.reply_to);
+  refuseBadSubject(input.subject);
   let attachments: InboxAttachment[] | undefined;
   if (input.attachments && input.attachments.length > 0) {
     if (!context.recordAttachments) throw new InboxError("validation_error", "attachments: not taken by this Inbox.");

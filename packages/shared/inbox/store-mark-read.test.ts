@@ -209,15 +209,15 @@ describe("Mark read", () => {
   });
 });
 
-describe("a Send skips what it leaves unanswered", () => {
-  test("words only: every open question is sent as a skip by_reply, and the reply says so", () => {
-    const { store, asked } = setup();
-    const result = store.sendReply(asked.id, { words: "Redo the design.", idempotency_key: "k-1", skip_unanswered: true });
+describe("a Send skips only what the person chose (approval inbox-explicit-skip)", () => {
+  test("Skip them on words only: every listed question is sent as a skip by_reply, and the reply says so", () => {
+    const { store, asked, questions } = setup();
+    const result = store.sendReply(asked.id, { words: "Redo the design.", idempotency_key: "k-1", skip: questions.map((q) => q.key) });
     const body = result.reply.body;
     expect(body.split("\n")[0]).toBe("Skipped 3 questions.");
     expect(body).toContain("Redo the design.");
-    expect(body).toContain("0 of 3 questions answered. 3 were not answered in this reply; treat them as skipped, and ask again if you still need them.");
-    expect(body.match(/Skipped \(not answered in this reply\)/g)).toHaveLength(3);
+    expect(body).toContain("0 of 3 questions answered.\n\n");
+    expect(body.match(/Skipped by the person/g)).toHaveLength(3);
     for (const q of result.questions) {
       expect(q.state).toBe("sent");
       expect(q.answer).toMatchObject({ skipped: true, by_reply: true });
@@ -226,19 +226,49 @@ describe("a Send skips what it leaves unanswered", () => {
     expect(rowOf(store, asked.id).section).toBe("sent");
   });
 
-  test("with a pick: the pick is the answer, the rest are skipped", () => {
+  test("with a pick and Skip them: the pick is the answer (a listed key that is picked is not skipped), the rest are skipped", () => {
     const { store, asked, questions } = setup();
     const result = store.sendReply(asked.id, {
       idempotency_key: "k-1",
       questions: [{ key: questions[0].key, revision: 0, answer: pickFor(questions[0], "A dense table") }],
-      skip_unanswered: true,
+      skip: questions.map((q) => q.key),
     });
     expect(result.reply.body.split("\n")[0]).toBe("Answered 1 question, skipped 2.");
     expect(result.questions.map((q) => q.state)).toEqual(["sent", "sent", "sent"]);
     expect(result.questions[0]!.answer?.skipped).toBeUndefined();
   });
 
-  test("without skip_unanswered (Keep open, an older window, the MCP) the questions stay open", () => {
+  test("a pick without Skip them: the pick goes, the other two stay open, and the reply says so", () => {
+    const { store, asked, questions } = setup();
+    const result = store.sendReply(asked.id, {
+      idempotency_key: "k-1",
+      questions: [{ key: questions[0].key, revision: 0, answer: pickFor(questions[0], "A dense table") }],
+    });
+    const body = result.reply.body;
+    expect(body.split("\n")[0]).toBe("Answered 1 question.");
+    expect(body).toContain("You have 2 other questions open in this thread. They stay open; the person will answer them in the Inbox. Don't re-ask them.");
+    expect(body).not.toContain("treat them as skipped");
+    expect(result.questions.map((q) => q.state)).toEqual(["sent", "open", "open"]);
+  });
+
+  test("only the listed keys are skipped", () => {
+    const { store, asked, questions } = setup();
+    const result = store.sendReply(asked.id, { idempotency_key: "k-1", skip: [questions[1].key] });
+    expect(result.reply.body.split("\n")[0]).toBe("Skipped 1 question.");
+    expect(result.reply.body).toContain("You have 2 other questions open in this thread.");
+    expect(result.questions.map((q) => q.state)).toEqual(["open", "sent", "open"]);
+  });
+
+  test("skip_unanswered is ignored: it skips nothing", () => {
+    const { store, asked } = setup();
+    const result = store.sendReply(asked.id, { words: "Redo the design.", idempotency_key: "k-1", skip_unanswered: true } as never);
+    expect(result.questions.map((q) => q.state)).toEqual(["open", "open", "open"]);
+    expect(result.reply.body).toBe(
+      "Redo the design.\n\nNo questions answered yet; all 3 are still open. Don't re-ask them; the person will answer in the Inbox.",
+    );
+  });
+
+  test("without a skip list the questions stay open", () => {
     const { store, asked } = setup();
     const result = store.sendReply(asked.id, { words: "Redo the design.", idempotency_key: "k-1" });
     // The words, then the line that keeps the agent from asking again
@@ -251,16 +281,26 @@ describe("a Send skips what it leaves unanswered", () => {
   });
 
   test("a skip alone is a Send: nothing written by the person is needed", () => {
-    const { store, asked } = setup();
-    const result = store.sendReply(asked.id, { idempotency_key: "k-1", skip_unanswered: true });
+    const { store, asked, questions } = setup();
+    const result = store.sendReply(asked.id, { idempotency_key: "k-1", skip: questions.map((q) => q.key) });
     expect(result.reply.body.split("\n")[0]).toBe("Skipped 3 questions.");
   });
 
-  test("a skip-only Send on a message with nothing left open is nothing_to_send, not a validation error", () => {
-    const { store, asked } = setup();
+  test("a skip-only Send whose listed questions closed meanwhile is nothing_to_send, not a validation error", () => {
+    const { store, asked, questions } = setup();
     store.markRead(asked.id, true);
-    expect(() => store.sendReply(asked.id, { idempotency_key: "k-1", skip_unanswered: true })).toThrow(expect.objectContaining({ code: "nothing_to_send" }));
+    expect(() => store.sendReply(asked.id, { idempotency_key: "k-1", skip: questions.map((q) => q.key) })).toThrow(expect.objectContaining({ code: "nothing_to_send" }));
     expect(() => store.sendReply(asked.id, { idempotency_key: "k-2" })).toThrow(expect.objectContaining({ code: "validation_error" }));
+  });
+
+  test("a skip list that is not a list of keys of the message is refused, and nothing is written", () => {
+    const { store, asked, questions } = setup();
+    expect(() => store.sendReply(asked.id, { idempotency_key: "k-1", skip: "all" })).toThrow(expect.objectContaining({ code: "validation_error" }));
+    expect(() => store.sendReply(asked.id, { idempotency_key: "k-1", skip: [42] })).toThrow(expect.objectContaining({ code: "validation_error" }));
+    expect(() => store.sendReply(asked.id, { idempotency_key: "k-1", skip: ["q-00000000"] })).toThrow(expect.objectContaining({ code: "question_not_found" }));
+    expect(store.questionsOf(asked.id).map((q) => q.state)).toEqual(["open", "open", "open"]);
+    expect(store.thread(asked.id)!.messages).toHaveLength(1);
+    void questions;
   });
 });
 

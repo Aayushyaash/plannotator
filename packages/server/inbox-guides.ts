@@ -28,7 +28,7 @@ import * as z from "zod";
 import { parseDiffToFiles } from "@plannotator/core/diff-files";
 import { GUIDE_REVIEW_PROMPT, GUIDE_SCHEMA_JSON } from "@plannotator/core/guide-prompt";
 import { parseGuideSnapshot, parseGuideSnapshotJson, type GuideSnapshot } from "@plannotator/core/guide-format";
-import type { InboxGuideRef } from "@plannotator/core/inbox-types";
+import { displayInboxSubject, type InboxGuideRef } from "@plannotator/core/inbox-types";
 import { checkServerSession, INBOX_SERVER_SESSION_MISMATCH_ERROR, serverSessionMismatchBody } from "@plannotator/core/server-session";
 import { readFileSync } from "node:fs";
 import { inboxBlobPath, writeBlob } from "@plannotator/shared/inbox/attachments";
@@ -239,7 +239,10 @@ export function registerInboxGuideTools(server: McpServer, context: InboxMcpCont
         const described = describeInboxGuide(checked.snapshot, inboxGuideInputHash(input));
         const body = input.body?.trim() ? input.body : checked.snapshot.guide.intent;
         // A reply never gets the default: its only subject is one the agent gives (it may name a thread the person started).
-        const subject = input.subject ?? (input.body?.trim() || input.reply_to ? undefined : `Guided review: ${described.ref.title}`);
+        // The default is made one line here (displayInboxSubject), so the guide's own title can never fail the subject check.
+        const subject =
+          input.subject ??
+          (input.body?.trim() || input.reply_to ? undefined : (displayInboxSubject(`Guided review: ${described.ref.title}`) ?? undefined));
         const sent = await sendAgentMessage(context, project, { ...input, body, subject }, described.ref, callerWakes(ctx));
         // The blob is written once the message has landed, in the same turn (nothing can ask for it
         // in between); a refused send writes none, and a retry answers the first message's guide.

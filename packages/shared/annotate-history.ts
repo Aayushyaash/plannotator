@@ -35,6 +35,8 @@ export interface AnnotateHistoryResult {
   diffCurrent: string;
   previousPlan: string | null;
   versionInfo: AnnotateVersionInfo;
+  /** False when `content` equalled the latest version and nothing was written. */
+  isNew: boolean;
 }
 
 /**
@@ -86,6 +88,7 @@ export function computeAnnotateHistory(
         totalVersions: getVersionCount(project, slug),
         project,
       },
+      isNew: saved.isNew,
     };
   } catch (error) {
     console.error(

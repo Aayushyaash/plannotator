@@ -310,7 +310,7 @@ test.skipIf(!hasDom)('A asks 2, B asks 1 and B is picked: one press sends A its 
   await act(async () => reaskButton(el)!.click());
   await settle();
   expect(posted.map((p) => p.path)).toEqual([`/api/inbox/messages/${M3}/reply`, `/api/inbox/messages/${M1}/reask`]);
-  expect(posted[0]!.body).toMatchObject({ words: '', questions: [{ key: qb.key, revision: 1 }], skip_unanswered: false });
+  expect(posted[0]!.body).toMatchObject({ words: '', questions: [{ key: qb.key, revision: 1 }] });
   expect(typeof posted[0]!.body.idempotency_key).toBe('string');
 });
 

@@ -38,7 +38,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { decryptWithKey, deriveRelayKeys, encryptWithKey } from "@plannotator/core/crypto";
-import { inboxAgentName } from "@plannotator/core/inbox-types";
+import { displayInboxSubject, inboxAgentName } from "@plannotator/core/inbox-types";
 import { sha256Hex, type InboxDevice, type InboxDevices } from "@plannotator/shared/inbox/devices";
 import { inboxDir } from "@plannotator/shared/inbox/schema";
 import type { InboxLine } from "@plannotator/core/inbox-types";
@@ -519,7 +519,7 @@ export function createInboxRelay(context: InboxRelayContext) {
       type: "push",
       thread_id: message.thread_id,
       message_id: message.id,
-      subject: store.threadSubject(message.thread_id) ?? message.subject ?? "",
+      subject: store.threadSubject(message.thread_id) ?? displayInboxSubject(message.subject) ?? "",
       project: store.project(message.project_id)?.name ?? "",
       agent: inboxAgentName(message.author),
       // Apple shows at most four actions: one single-choice question with up to four choices is answered from the lock screen.

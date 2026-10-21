@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { parseCodePath } from "@plannotator/core/code-file";
 
 interface CodeFileState {
@@ -9,6 +9,7 @@ interface CodeFileState {
   requestedPath?: string;
   line?: number;
   lineEnd?: number;
+  revealKey?: number;
 }
 
 interface UseCodeFilePopoutOptions {
@@ -29,6 +30,8 @@ export interface UseCodeFilePopoutReturn {
     requestedPath?: string;
     line?: number;
     lineEnd?: number;
+    /** Changes on every open, so reopening the same file:line scrolls to it again. */
+    revealKey?: number;
   } | null;
 }
 
@@ -38,6 +41,7 @@ export function useCodeFilePopout(
   const { buildUrl } = options;
   const [state, setState] = useState<CodeFileState | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const revealCount = useRef(0);
 
   const close = useCallback(() => {
     setState(null);
@@ -75,6 +79,7 @@ export function useCodeFilePopout(
           prerenderedHTML: data.prerenderedHTML,
           line: data.line ?? parsed.line,
           lineEnd: data.lineEnd ?? parsed.lineEnd,
+          revealKey: ++revealCount.current,
         });
         setIsLoading(false);
       } catch {
@@ -105,6 +110,7 @@ export function useCodeFilePopout(
           requestedPath: state.requestedPath,
           line: state.line,
           lineEnd: state.lineEnd,
+          revealKey: state.revealKey,
         }
       : null,
   };
