@@ -576,6 +576,51 @@ describe('the plannotator tool', () => {
     expect(host.logs.some((line) => line.includes('notes.md closed with no annotations'))).toBe(true)
   })
 
+  // #1907: an agent that opens a code review and waits for the sign-off gets
+  // the bare Approve; a review it did not gate (and the slash command) only logs.
+  test('a gated code review delivers the bare Approve; an ungated one does not', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+    const answer = await mod.runTool({ action: 'review', gate: true })
+    expect('text' in answer && answer.text).toContain('If they approve, an approval message arrives')
+    await mod.runTool({ action: 'review', target: '../wt' })
+    await mod.runCommand('review', '--gate')
+    const [gated, plain, slash] = launches(host)
+    // The gate is the mod's: never passed to the CLI, so an older CLI still opens it.
+    expect(gated?.argv.slice(5)).toEqual(['plannotator', 'review'])
+    expect(slash?.argv.slice(5)).toEqual(['plannotator', 'review', '--gate'])
+
+    const lgtm = { surface: 'review' as const, decision: 'approved' as const, message: '# Code Review\n\nCode review completed — no changes requested.', noop: true, annotationCount: 0 }
+    decide(host, gated!, lgtm)
+    decide(host, plain!, lgtm)
+    decide(host, slash!, lgtm)
+    await host.tick()
+
+    expect(host.submits).toHaveLength(1)
+    expect(host.submits[0]).toMatch(/^Plannotator: .+ \(pn-[0-9a-f]{6}\) — Approved\./)
+    expect(host.submits[0]).toContain('Code review completed — no changes requested.')
+    expect(host.logs.filter((line) => line.includes('approved with no notes'))).toHaveLength(2)
+  })
+
+  test('a gated code review posted to the PR platform is delivered with its status line (#1907)', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.runTool({ action: 'review', target: 'https://github.com/o/r/pull/7', gate: true })
+    await mod.runTool({ action: 'review', target: 'https://github.com/o/r/pull/8' })
+    const [gated, plain] = launches(host)
+    const status = (n: number) => ({ surface: 'review', decision: 'annotated', noop: true, platform: true, message: `Pull request approved on GitHub: https://github.com/o/r/pull/${n}` })
+    decide(host, gated!, status(7))
+    decide(host, plain!, status(8))
+    await host.tick()
+
+    expect(host.submits).toHaveLength(1)
+    expect(host.submits[0]).toMatch(/^Plannotator: .+ \(pn-[0-9a-f]{6}\) — Review posted\./)
+    expect(host.submits[0]).toContain('Pull request approved on GitHub: https://github.com/o/r/pull/7')
+    expect(host.logs.some((line) => line.includes('pull/8'))).toBe(true)
+  })
+
   test('the slash command keeps a bare gated approval as a log line', async () => {
     const host = fakeHost()
     serveOnLaunch(host)

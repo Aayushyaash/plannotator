@@ -111,5 +111,5 @@ export function agentToolAppliesWhen(host: AgentToolHost): string {
 export function agentToolCostNote(host: AgentToolHost): string {
   if (host === 'claude-code') return 'Claude Code loads it only when needed.';
   if (host === 'oh-my-pi') return 'Oh My Pi lists it in one short line (about 50 tokens) and loads the rest only when needed.';
-  return 'Adds about 780 tokens to every request.';
+  return 'Adds about 800 tokens to every request.';
 }

@@ -46,6 +46,17 @@ describe('deliveryFor', () => {
     expect(delivery.action === 'log' && delivery.suggest).toBe('address the review comments on PR #412')
   })
 
+  // #1907: a gated review waits for the outcome, and the platform post is it.
+  test('a gated review posted to the PR platform is a turn with its status line; ungated it logs', () => {
+    const status = 'Pull request approved on GitHub: https://x/pull/412'
+    const posted = record({ surface: 'review', decision: 'annotated', noop: true, platform: true, message: status })
+    expect(deliveryFor(posted, { ...CONTEXT, subject: 'PR #412', sessionId: 'pn-abc123', deliverApproval: true })).toEqual({
+      action: 'submit',
+      text: `Plannotator: PR #412 (pn-abc123) — Review posted.\n\n${status}`,
+    })
+    expect(deliveryFor(posted, { ...CONTEXT, subject: 'PR #412', sessionId: 'pn-abc123' }).action).toBe('log')
+  })
+
   // Every status line the review editor posts after a platform submission
   // (`statusMessage` in packages/review-editor/App.tsx), built the same way.
   test('every editor status line still logs as the platform post', () => {
@@ -97,6 +108,12 @@ describe('legacyResult (a CLI that predates the host result file)', () => {
   test('a review approval is an LGTM, not "Changes requested"', () => {
     const lgtm = legacyResult('review', `${DEFAULT_REVIEW_APPROVED_PROMPT}\n`)
     expect(deliveryFor(lgtm, CONTEXT).action).toBe('log')
+  })
+
+  test('a gated review takes an older CLI\'s LGTM as the approval to deliver (#1907)', () => {
+    const lgtm = legacyResult('review', `${DEFAULT_REVIEW_APPROVED_PROMPT}\n`)
+    const delivery = deliveryFor(lgtm, { ...CONTEXT, deliverApproval: true })
+    expect(delivery).toEqual({ action: 'submit', text: `Plannotator: notes.md — Approved.\n\n${DEFAULT_REVIEW_APPROVED_PROMPT}` })
   })
 
   test('a review approval with notes is delivered under its own outcome', () => {

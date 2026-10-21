@@ -27,6 +27,7 @@ import { createRequestHostGuard } from "./request-host-guard.ts";
 import { refuseCrossOriginWrite } from "./request-origin-guard.ts";
 import { getPlanVersion, getVersionCount, listVersions } from "../generated/storage.ts";
 import { computeAnnotateHistory, deriveAnnotateHistorySlug, persistAnnotateSubmission, type AnnotateHistoryResult } from "../generated/annotate-history.ts";
+import { ANNOTATE_LIVE_VERSION_PATH, annotateLiveVersionFilePath, saveAnnotateLiveVersion } from "../generated/annotate-live-version.ts";
 import { htmlDiff } from "../generated/html-diff.ts";
 import { agentSwitchConfigToSave, agentToolSaveFailed, saveConfig, detectGitUser, getServerConfig, isAgentTerminalSide, loadConfig, resolveAIEnabled, resolveSharingEnabled, resolveAnnotateHistory, resolveFeedbackHistory, type PromptRuntime } from "../generated/config.ts";
 import { currentPiHost } from "../pi-host.ts";
@@ -781,6 +782,13 @@ export async function startAnnotateServer(options: {
 			? initialSingleFileSourceSave.path
 			: resolveUserPath(options.filePath)
 		: null;
+	// The file a live version save (#2037) reads and keys history by: the same
+	// resolved path the open-time save used, so both land in one history.
+	const liveVersionFilePath = annotateLiveVersionFilePath({
+		sourceSaveEligible: singleFileSourceSaveEligible && singleFileLocalAnnotate,
+		resolvedFilePath: resolvePath(options.filePath),
+		realFilePath: initialSingleFileSourcePath,
+	});
 	// A review of several files: Edit Mode may write exactly the bundle's own
 	// files (real paths, captured now, as a single-file session captures its
 	// one file), never a document they link to.
@@ -984,6 +992,9 @@ export async function startAnnotateServer(options: {
 							diffCurrent: servedIsSnapshot || !servedHtml ? annotateHistory.diffCurrent : servedHtml,
 					  }
 					: {}),
+				// The editor may save a disk change as a version (#2037); absent
+				// when history is off or the file is not Markdown/text.
+				...(liveVersionFilePath && annotateHistoryEnabled ? { liveVersions: true } : {}),
 				sharingEnabled,
 				shareBaseUrl,
 				pasteApiUrl,
@@ -1087,6 +1098,17 @@ export async function startAnnotateServer(options: {
 				slug: annotateHistory.slug,
 				versions: listVersions(annotateProjectName, annotateHistory.slug),
 			});
+		} else if (url.pathname === ANNOTATE_LIVE_VERSION_PATH && req.method === "POST") {
+			// Save the file as it is on disk now as a version (#2037); mirrors
+			// the Bun annotate server (annotate-live-version.ts decides).
+			const outcome = saveAnnotateLiveVersion(await parseBody(req), {
+				serverSession,
+				historyEnabled: annotateHistoryEnabled,
+				resolvedFilePath: liveVersionFilePath,
+				project: annotateProjectName,
+			});
+			if (outcome.status === 200) annotateHistory = outcome.history;
+			json(res, outcome.body, outcome.status);
 		} else if (url.pathname === "/api/share-html" && req.method === "GET") {
 			handleShareHtml(res, url);
 		} else if (url.pathname === "/api/config" && req.method === "POST") {

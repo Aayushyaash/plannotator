@@ -66,7 +66,9 @@ import {
   type InboxListSection,
   type InboxThread,
   type InboxThreadSummary,
+  checkInboxSubject,
   checkInboxThreadName,
+  displayInboxSubject,
   type InboxThreadNaming,
   inboxThreadNameKey,
   isInboxNote,
@@ -870,7 +872,9 @@ export class InboxStore {
 
   private wire(message: InboxMessage): InboxMessageWire {
     const questions = this.questionsOf(message.id);
-    return questions.length > 0 ? { ...message, questions } : { ...message };
+    // A subject is served as shown (displayInboxSubject), never as stored.
+    const shown = message.subject ? { ...message, subject: displayInboxSubject(message.subject) } : { ...message };
+    return questions.length > 0 ? { ...shown, questions } : shown;
   }
 
   messageWire(id: string): InboxMessageWire | null {
@@ -896,9 +900,14 @@ export class InboxStore {
    * that a subject derived from a question follows that question's
    * replacement (`superseded_by` with a key), down the chain. An agent-given
    * subject never changes, and a question withdrawn with nothing in its place
-   * keeps the subject it gave.
+   * keeps the subject it gave. Served as shown (`displayInboxSubject`: one
+   * line, no leaked tool-call text), never as an older store kept it.
    */
   threadSubject(threadId: string): string | null {
+    return displayInboxSubject(this.storedThreadSubject(threadId));
+  }
+
+  private storedThreadSubject(threadId: string): string | null {
     const root = this.messages.get(threadId);
     if (!root) return null;
     let id = this.subjectQuestion(root);
@@ -2085,6 +2094,12 @@ export class InboxStore {
   sendMessage(input: InboxSendInput): InboxSendResult {
     const body = input.body;
     if (typeof body !== "string" || body.trim() === "") throw new InboxError("validation_error", "body: a message needs a body.", { field: "body" });
+    // One line of plain text, checked before anything else (a reply ignores
+    // its subject, but leaked tool-call text means the call itself was
+    // malformed): nothing is written, so a corrected retry with the same
+    // idempotency_key lands once.
+    const subjectCheck = checkInboxSubject(input.subject);
+    if (!subjectCheck.ok) throw new InboxError("validation_error", `subject: ${subjectCheck.message}`, { field: "subject" });
     let threadName: string | null = null;
     if (input.thread !== undefined && input.thread !== null && !input.reply_to) {
       const checked = checkInboxThreadName(input.thread);
@@ -2166,7 +2181,7 @@ export class InboxStore {
     // Checked before anything is written: one id that names no open question
     // of this thread refuses the whole send.
     const superseding = this.planSupersede(threadId, id, supersedes, parsed);
-    const agentSubject = input.subject?.trim() || null;
+    const agentSubject = subjectCheck.subject;
     const message: InboxMessage = {
       id,
       project_id: projectId,

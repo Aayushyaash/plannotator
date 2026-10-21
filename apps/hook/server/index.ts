@@ -2113,6 +2113,9 @@ if (args[0] === "sessions") {
   const server = await startPlannotatorServer({
     plan: planContent,
     origin: "opencode",
+    // The plugin's submit_plan executor turns an approval's feedback into the
+    // approved-with-notes prompt (every plugin version that calls this).
+    approvalNotesSupported: true,
     sharingEnabled: bridgeSharingEnabled,
     shareBaseUrl: bridgeShareBaseUrl,
     pasteApiUrl: bridgePasteApiUrl,
@@ -2719,6 +2722,10 @@ if (args[0] === "sessions") {
     planFilePath: input.planFilePath,
     permissionMode: input.permissionMode,
     planRevisions: true,
+    // The mod delivers an approval's notes (planHostResult composes the
+    // approved-with-notes prompt). The classic PermissionRequest hook below
+    // cannot: its allow decision carries no message.
+    approvalNotesSupported: true,
     sharingEnabled,
     shareBaseUrl,
     pasteApiUrl,
@@ -2995,6 +3002,9 @@ if (args[0] === "sessions") {
   const server = await startPlannotatorServer({
     plan: planContent,
     origin: isGemini ? "gemini-cli" : detectedOrigin,
+    // No approvalNotesSupported: Claude Code's PermissionRequest allow carries
+    // no message, and Gemini CLI shows a systemMessage to the person, not the
+    // model, so notes sent with an approval would be lost.
     // Claude Code writes the plan to disk before the hook fires.
     planFilePath: isGemini ? undefined : event.tool_input?.planFilePath,
     permissionMode,

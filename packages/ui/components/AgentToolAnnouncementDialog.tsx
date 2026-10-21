@@ -193,7 +193,7 @@ export function AgentToolAnnouncementDialog({
             </p>
           </div>
           <p className="mt-3 text-pretty text-xs leading-relaxed text-muted-foreground" data-agent-tool-cost>
-            Adds about 780 tokens to each request.{save.kind === 'saved' ? '' : ` ${startsLine(host)}`}
+            Adds about 800 tokens to each request.{save.kind === 'saved' ? '' : ` ${startsLine(host)}`}
           </p>
 
           <div className="mt-5 flex flex-col gap-3">

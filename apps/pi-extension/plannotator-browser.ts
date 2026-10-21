@@ -410,6 +410,9 @@ export async function startPlanReviewBrowserSession(
 		pasteApiUrl: process.env.PLANNOTATOR_PASTE_URL || undefined,
 		sessionBridge: options.sessionBridge,
 		planRevisions: options.planRevisions,
+		// Pi delivers an approval's notes (deliverPlanDecision's approved-with-
+		// notes prompt; the event API's review result carries `feedback`).
+		approvalNotesSupported: true,
 	}));
 
 	const session = startBrowserDecisionSession(server, ctx, server.waitForDecision, signal, {

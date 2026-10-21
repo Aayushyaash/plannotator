@@ -22,6 +22,7 @@
 
 import { randomBytes } from "node:crypto";
 import type { HostControl } from "./generated/host-control.ts";
+import { isSessionEventIdOpen } from "./session-events.ts";
 import {
 	plannotatorDistinctSubjects,
 	plannotatorSessionId,
@@ -78,16 +79,22 @@ export interface PiReviewRegistry {
 }
 
 export function createPiReviewRegistry(
-	options: { now?: () => number; randomHex?: () => string } = {},
+	options: {
+		now?: () => number;
+		randomHex?: () => string;
+		/** Ids held elsewhere (a `plannotator:request` review's session events): never handed out. */
+		isTaken?: (id: string) => boolean;
+	} = {},
 ): PiReviewRegistry {
 	const now = options.now ?? Date.now;
 	const randomHex = options.randomHex ?? (() => randomBytes(3).toString("hex"));
+	const isTaken = options.isTaken ?? (() => false);
 	const reviews = new Map<string, PiOpenReview>();
 
 	const newId = (): string => {
 		let value = Number.parseInt(randomHex(), 16) || 0;
 		let id = plannotatorSessionId(value.toString(16).padStart(6, "0"));
-		while (reviews.has(id)) {
+		while (reviews.has(id) || isTaken(id)) {
 			value = (value + 1) % 0x1000000;
 			id = plannotatorSessionId(value.toString(16).padStart(6, "0"));
 		}
@@ -192,7 +199,9 @@ export function getProcessPiReviewRegistry(): PiReviewRegistry {
 	const store = globalThis as typeof globalThis & Record<string, unknown>;
 	const existing = store[REGISTRY_KEY];
 	if (isPiReviewRegistry(existing)) return existing;
-	const registry = createPiReviewRegistry();
+	// Its ids never clash with a `plannotator:request` review's session events
+	// (session-events.ts), so a `pn-` id names one open review in this process.
+	const registry = createPiReviewRegistry({ isTaken: isSessionEventIdOpen });
 	store[REGISTRY_KEY] = registry;
 	return registry;
 }

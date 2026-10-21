@@ -10,7 +10,7 @@ export const T3_CLI_USAGE = [
   "",
   "Explicitly scoped diagnostics (not required for the normal agent flow):",
   "  plannotator t3 annotate <file | folder | URL>... --url <T3 MCP URL> --thread <id> [--gate] [--markdown]",
-  "  plannotator t3 review [DIRECTORY | PR_URL] --url <T3 MCP URL> --thread <id> [--base <ref>]",
+  "  plannotator t3 review [DIRECTORY | PR_URL] --url <T3 MCP URL> --thread <id> [--base <ref>] [--gate]",
   "  plannotator t3 last --url <T3 MCP URL> --thread <id>",
   "  plannotator t3 list --url <T3 MCP URL> --thread <id>",
   "  plannotator t3 close <pn-id | all> --url <T3 MCP URL> --thread <id>",
