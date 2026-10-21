@@ -6,7 +6,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import type { InboxMessageWire, InboxThread } from '@plannotator/core/inbox-types';
-import { sendTargetsOf } from './sendTargets';
+import { replyKeysToRenew, sendTargetAnswerIds, sendTargetsOf, type SentContents } from './sendTargets';
 
 type State = 'open' | 'picked' | 'sent';
 const message = (id: string, session: string | null, states: State[]): InboxMessageWire =>
@@ -71,5 +71,28 @@ describe('sendTargetsOf', () => {
   test('messages with no session are each a reply of their own', () => {
     const m = [message('msg_1', null, ['picked']), message('msg_2', null, ['picked'])];
     expect(sendTargetsOf(thread(m)).map((t) => t.message.id)).toEqual(['msg_1', 'msg_2']);
+  });
+});
+
+describe('a retried Send keeps or renews each reply\'s key', () => {
+  const c = (value: string, answers: string[]): SentContents => ({ value, answers });
+  test('a pick added on the retry renews the key, so the new answer is not dropped by a replay', () => {
+    const before = new Map([['s:ses_a', c('v', ['a:msg_1/q-1'])]]);
+    const now = new Map([['s:ses_a', c('v', ['a:msg_1/q-1', 'a:msg_2/q-2'])]]);
+    expect(replyKeysToRenew(before, now)).toEqual(['s:ses_a']);
+  });
+  test('a skip added, or the words changed, renews it too', () => {
+    expect(replyKeysToRenew(new Map([['k', c('v', [])]]), new Map([['k', c('v', ['s:msg_1/q-1'])]]))).toEqual(['k']);
+    expect(replyKeysToRenew(new Map([['k', c('v', [])]]), new Map([['k', c('w', [])]]))).toEqual(['k']);
+  });
+  test('the same Send, or one whose pick went with the last try, keeps the key (a replay, not a second reply)', () => {
+    expect(replyKeysToRenew(new Map([['k', c('v', ['a:msg_1/q-1'])]]), new Map([['k', c('v', ['a:msg_1/q-1'])]]))).toEqual([]);
+    expect(replyKeysToRenew(new Map([['k', c('v', ['a:msg_1/q-1'])]]), new Map([['k', c('v', [])]]))).toEqual([]);
+    expect(replyKeysToRenew(null, new Map([['k', c('v', [])]]))).toEqual([]);
+  });
+  test('answer ids name the message, the reply\'s own included', () => {
+    const m = [message('msg_1', 'ses_a', ['picked']), message('msg_2', 'ses_a', ['picked', 'open'])];
+    const [target] = sendTargetsOf(thread(m), new Set(['msg_2/q-msg_2-1']));
+    expect(sendTargetAnswerIds(target!)).toEqual(['a:msg_1/q-msg_1-0', 'a:msg_2/q-msg_2-0', 's:msg_2/q-msg_2-1']);
   });
 });

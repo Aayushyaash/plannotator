@@ -216,8 +216,8 @@ describe("a Send skips only what the person chose (approval inbox-explicit-skip)
     const body = result.reply.body;
     expect(body.split("\n")[0]).toBe("Skipped 3 questions.");
     expect(body).toContain("Redo the design.");
-    expect(body).toContain("0 of 3 questions answered. 3 were not answered in this reply; treat them as skipped, and ask again if you still need them.");
-    expect(body.match(/Skipped \(not answered in this reply\)/g)).toHaveLength(3);
+    expect(body).toContain("0 of 3 questions answered.\n\n");
+    expect(body.match(/Skipped by the person/g)).toHaveLength(3);
     for (const q of result.questions) {
       expect(q.state).toBe("sent");
       expect(q.answer).toMatchObject({ skipped: true, by_reply: true });

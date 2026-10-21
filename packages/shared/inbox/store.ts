@@ -2384,7 +2384,7 @@ export class InboxStore {
       const target = this.sendMessageOf(reply, messageId as string | undefined, `${field}.message_id`);
       const key = (entry as { key: string }).key;
       const record = this.questionRecords(target.id).find((r) => r.key === key);
-      if (!record) throw refusalError({ code: "question_not_found", key });
+      if (!record) throw new InboxError("question_not_found", `No question ${key} on message ${target.id}.`, { key, message_id: target.id });
       out.set(record.id, record);
     });
     return [...out.values()];
@@ -2416,7 +2416,7 @@ export class InboxStore {
         throw new InboxError("validation_error", `${field}.revision: a non-negative integer is required.`, { field: `${field}.revision` });
       }
       const record = records.get(entry.key);
-      if (!record) throw refusalError({ code: "question_not_found", key: entry.key });
+      if (!record) throw new InboxError("question_not_found", `No question ${entry.key} on message ${message.id}.`, { key: entry.key, message_id: message.id });
       // A superseded question takes no pick and no Send: a pick saved on it stays, never sent.
       if (record.superseded_by) {
         const by = { message_id: record.superseded_by.message_id, key: record.superseded_by.key ?? null };

@@ -56,7 +56,7 @@ async function setup() {
       ].join("\n"),
     },
   })) as { structuredContent: { thread_id: string; message_id: string } };
-  return { server, client, threadId: sent.structuredContent.thread_id, messageId: sent.structuredContent.message_id };
+  return { server, client, project, threadId: sent.structuredContent.thread_id, messageId: sent.structuredContent.message_id };
 }
 
 const url = (server: InboxServer, path: string) => `http://127.0.0.1:${server.port}${path}`;
@@ -233,5 +233,36 @@ describe("POST /api/inbox/messages/:id/reply with words only (approval inbox-wor
     const res = await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-1", words: "Still thinking." });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { reply: { body: string } }).reply.body).toBe(`Still thinking.\n\n${STILL_OPEN}`);
+  });
+});
+
+describe("wait_for_reply on a reply that answers several messages (approval inbox-explicit-skip)", () => {
+  test("its structured questions and its facts line name every message the reply answered or skipped on", async () => {
+    const { server, client, project, threadId, messageId } = await setup();
+    const second = (await client.callTool({
+      name: "send_message",
+      arguments: { project_path: project, agent_session: "ses_mr", agent_name: "Claude Code", reply_to: messageId, body: ":::question\nShip tonight?\n\n- [ ] Yes\n- [ ] No\n:::" },
+    })) as { structuredContent: { message_id: string } };
+    const secondId = second.structuredContent.message_id;
+    const [first] = server.store.questionsOf(messageId);
+    const [next] = server.store.questionsOf(secondId);
+    const res = await post(server, `/api/inbox/messages/${secondId}/reply`, {
+      idempotency_key: "k-1",
+      questions: [{ key: next!.key, revision: 0, answer: { v: 1, key: next!.key, kind: next!.kind, prompt: next!.prompt, selected: ["Yes"] } }],
+      skip: [{ message_id: messageId, key: first!.key }],
+    });
+    expect(res.status).toBe(200);
+    const waited = (await client.callTool({ name: "wait_for_reply", arguments: { thread_id: threadId, agent_session: "ses_mr", timeout_seconds: 1 } })) as {
+      content: { text: string }[];
+      structuredContent: { questions: { message_id: string; key: string; state: string; answer: { skipped?: boolean } | null }[] };
+    };
+    expect(waited.structuredContent.questions.map((q) => [q.message_id, q.key, q.state, q.answer?.skipped ?? false])).toEqual([
+      [messageId, first!.key, "sent", true],
+      [secondId, next!.key, "sent", false],
+    ]);
+    const text = waited.content[0]!.text;
+    expect(text).toContain(`questions of ${messageId}: Q1 ${first!.key} sent`);
+    expect(text).toContain(`questions of ${secondId}: Q1 ${next!.key} sent`);
+    expect(text).toContain("Skipped by the person");
   });
 });

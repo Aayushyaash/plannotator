@@ -203,7 +203,7 @@ test('a words-only reply keeps the questions open by default; after Skip them, i
   await shot('02-reply-skips');
   await page.locator('.ib-pfoot').getByRole('button', { name: 'Send' }).click();
   await expect(page.locator('.ib-rtext')).toHaveCount(0);
-  await expect(pane.getByText(/^Skipped with your reply · /).first()).toBeVisible();
+  await expect(pane.getByText(/^Skipped · \d{1,2}:\d{2} [AP]M$/).first()).toBeVisible();
   // Not on top any more, but the visible list does not move while the person is in the thread.
   await expect(page.locator(`.ib-lbody [data-thread-id="${threads.invoices}"]`)).toHaveAttribute('data-section', 'sent');
   expect(await sectionOf(page, threads.invoices)).toBe('waiting');
@@ -239,7 +239,7 @@ test('one session asked, then posted an update: a words-only Send writes exactly
   await page.locator('.ib-rtext').fill('Ship it as it is.');
   await page.locator('.ib-pfoot').getByRole('button', { name: 'Send' }).click();
   await expect(page.locator('.ib-rtext')).toHaveCount(0);
-  await expect(pane.getByText(/^Skipped with your reply · /).first()).toBeVisible();
+  await expect(pane.getByText(/^Skipped · \d{1,2}:\d{2} [AP]M$/).first()).toBeVisible();
   // Give a second reply every chance to land before counting.
   await page.waitForTimeout(500);
   const mine = await persons();
@@ -265,7 +265,7 @@ test('a words-only reply left as it is: the questions stay open, and the agent g
   await page.locator('.ib-pfoot').getByRole('button', { name: 'Send' }).click();
   await expect(page.locator('.ib-rtext')).toHaveCount(0);
   // The cards still take answers: nothing was skipped.
-  await expect(pane.getByText(/^Skipped with your reply/)).toHaveCount(0);
+  await expect(pane.getByText(/^Skipped · \d{1,2}:\d{2} [AP]M$/)).toHaveCount(0);
   await shot('04c-words-only-keeps-open');
   const waited = await agents.codex.waitForReply(threadId, 5);
   expect((waited.reply as { body: string }).body).toBe(

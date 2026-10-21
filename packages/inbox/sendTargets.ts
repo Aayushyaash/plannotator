@@ -109,3 +109,37 @@ export function sendTargetsOf(thread: InboxThread, skip: ReadonlySet<string> = n
 function groupKey(m: InboxMessageWire): string {
   return m.author.kind === 'agent' && m.author.session ? `s:${m.author.host ?? ''}\u0000${m.author.session}` : `m:${m.id}`;
 }
+
+/** What one reply of a Send carried, for a retry's key (`replyKeysToRenew`). */
+export interface SentContents {
+  /** The message it answers and what rides it besides answers (words, files, tags, comments), as a string. */
+  value: string;
+  /** Its picks (`a:<message id>/<key>`) and skips (`s:…`). */
+  answers: string[];
+}
+
+/** A reply's picks and skips, as `SentContents.answers` lists them. */
+export function sendTargetAnswerIds(target: SendTarget): string[] {
+  return [
+    ...target.questions.map((q) => `a:${q.message_id ?? target.message.id}/${q.key}`),
+    ...target.skip.map((q) => `s:${q.message_id ?? target.message.id}/${q.key}`),
+  ];
+}
+
+/**
+ * The replies of a retried Send that must take a new idempotency key: one
+ * whose words, files or comments changed, or that carries a pick or a skip
+ * the last try did not (a replay of the old key would answer the old reply
+ * and drop the new answer). A pick that went with the last try is sent now
+ * and only leaves the list, which keeps the key, so a reply that went with
+ * its answer lost is replayed, not written twice.
+ */
+export function replyKeysToRenew(before: ReadonlyMap<string, SentContents> | null, now: ReadonlyMap<string, SentContents>): string[] {
+  if (!before) return [];
+  const renew: string[] = [];
+  for (const [id, next] of now) {
+    const last = before.get(id);
+    if (last && (last.value !== next.value || next.answers.some((a) => !last.answers.includes(a)))) renew.push(id);
+  }
+  return renew;
+}

@@ -146,7 +146,7 @@ test("desktop: answer 1 of 11 and Send: one reply, the other 10 stay open, and t
       'Answered 1 question.',
       "You have 10 other questions open in this thread. They stay open; the person will answer them in the Inbox. Don't re-ask them.",
     ]);
-    await expect(page.getByText(/^Skipped with your reply/)).toHaveCount(0);
+    await expect(page.getByText(/^Skipped · \d{1,2}:\d{2} [AP]M$/)).toHaveCount(0);
     expect(errors).toEqual([]);
   } finally {
     await context.close();

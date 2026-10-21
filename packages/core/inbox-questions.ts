@@ -544,10 +544,10 @@ function replySentence(answered: number, skipped: number): string {
 }
 
 /**
- * A skip the Inbox writes for the person: a Send's for a question it left
- * unanswered (`by_reply`, so the window says "Skipped with your reply" and
- * the agent can tell it from a Skip the person pressed), or a Mark read's for
- * a question it closed.
+ * A skip the Inbox writes for the person: a Send's, for a question the person
+ * chose to skip with "Skip them" (`by_reply`: the agent reads "Skipped by
+ * the person", the card "Skipped · <time>"), or a Mark read's for a question
+ * it closed.
  */
 export function inboxSkipAnswer(record: Pick<InboxQuestionRecord, "key" | "kind" | "prompt">, options: { byReply: boolean }): QuestionAnswer {
   return {

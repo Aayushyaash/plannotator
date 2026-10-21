@@ -282,7 +282,7 @@ export function agentAnswer(answer: QuestionAnswer | null | undefined): AgentAns
  */
 export function answerWords(answer: AgentAnswer | undefined): string {
   if (!answer) return "";
-  if (answer.skipped) return answer.by_reply ? "skipped (not answered in the reply)" : "skipped";
+  if (answer.skipped) return answer.by_reply ? "skipped by the person" : "skipped";
   const parts = (answer.selected ?? []).map((label) => JSON.stringify(label));
   if (answer.other) parts.push(`Other: ${JSON.stringify(answer.other)}`);
   if (answer.text) parts.push(JSON.stringify(answer.text));

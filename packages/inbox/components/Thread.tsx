@@ -66,7 +66,7 @@ import { INBOX_REPLY_SKILL_AUDIENCE, annotationSkillTexts, inboxSkillsBlock, wit
 import { splitInboxSkillsBlock } from '@plannotator/core/skill-reference-block';
 import { Tip } from './Tip';
 import { selectionToolbarShowing } from '../selectionToolbar';
-import { routeSendAnnotations, sendTargetsOf, type SendTarget } from '../sendTargets';
+import { replyKeysToRenew, routeSendAnnotations, sendTargetAnswerIds, sendTargetsOf, type SendTarget, type SentContents } from '../sendTargets';
 
 export { routeSendAnnotations, sendTargetsOf, type SendTarget };
 
@@ -868,7 +868,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
    * that carries them, so it is never answered as the earlier reply (which
    * may have gone through) and silently dropped.
    */
-  const sendContents = useRef<Map<string, string> | null>(null);
+  const sendContents = useRef<Map<string, SentContents> | null>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
   // The box is read-only while a Send is on its way (approval "inbox-reply-drafts"): the words it carries are
   // the words in the box, and nothing typed meanwhile can be saved as a draft the Send then clears.
@@ -1777,8 +1777,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     if (!q) return null;
     if (q.state === 'sent') {
       const at = sentAt(q.sent_reply_id);
-      // A Send skipped it because the person left it unanswered.
-      if (q.answer?.skipped && q.answer.by_reply) return at ? `Skipped with your reply · ${whenTime(at)}` : 'Skipped with your reply';
+      // The person skipped it with "Skip them" on the Send (approval "inbox-explicit-skip").
+      if (q.answer?.skipped && q.answer.by_reply) return at ? `Skipped · ${whenTime(at)}` : 'Skipped';
       return at ? `Sent ${whenTime(at)}` : 'Sent';
     }
     if (q.state === 'closed' && q.set_aside_at) return `Closed unanswered when you marked it read · ${whenTime(q.set_aside_at)}`;
@@ -2082,20 +2082,23 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
       if (!sendKeys.current) sendKeys.current = new Map();
       // One key per session's reply, kept for a retry.
       for (const t of targets) if (!sendKeys.current.has(replyKeyOf(t.message))) sendKeys.current.set(replyKeyOf(t.message), crypto.randomUUID());
-      // A retry whose words, files or annotations changed: each reply carrying them is a new one.
-      const contents = new Map(
+      // A retry whose words, files or annotations changed, or that carries a pick or skip the last try did
+      // not: each reply carrying them is a new one (a replay of the old key would drop the new answer). A pick
+      // that went with the last try and is now sent only leaves the list, which keeps the key.
+      const contents = new Map<string, SentContents>(
         targets.map((t) => [
           replyKeyOf(t.message),
-          JSON.stringify([
-            t.message.id,
-            t.message.id === lastId ? [words, uploads, sendTags.get(lastId) ?? []] : [],
-            (carried.get(t.message.id) ?? []).map((r) => [r.id, r.updated_at]),
-          ]),
+          {
+            value: JSON.stringify([
+              t.message.id,
+              t.message.id === lastId ? [words, uploads, sendTags.get(lastId) ?? []] : [],
+              (carried.get(t.message.id) ?? []).map((r) => [r.id, r.updated_at]),
+            ]),
+            answers: sendTargetAnswerIds(t),
+          },
         ]),
       );
-      if (sendContents.current) {
-        for (const [id, value] of contents) if (sendContents.current.has(id) && sendContents.current.get(id) !== value) sendKeys.current.set(id, crypto.randomUUID());
-      }
+      for (const id of replyKeysToRenew(sendContents.current, contents)) sendKeys.current.set(id, crypto.randomUUID());
       sendContents.current = contents;
       // The words and the annotations ride the last reply, after its picks;
       // a comment on another session's message rides the reply to it. The

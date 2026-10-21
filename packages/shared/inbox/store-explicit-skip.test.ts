@@ -63,7 +63,7 @@ describe("the owner's case", () => {
     const parts = result.reply.body.split("\n\n");
     expect(parts[0]).toBe("Answered 1 question.");
     expect(parts[1]).toBe("You have 10 other questions open in this thread. They stay open; the person will answer them in the Inbox. Don't re-ask them.");
-    expect(result.reply.body).not.toContain("treat them as skipped");
+    expect(result.reply.body).not.toContain("Skipped");
     expect(store.pendingReplies("ses_a").map((m) => m.id)).toEqual([result.reply.id]);
   });
 

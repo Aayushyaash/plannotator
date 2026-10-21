@@ -171,7 +171,8 @@ describe("a reply that answers at least one question (approval inbox-explicit-sk
     });
     const body = result.reply.body;
     expect(body.split("\n\n").slice(0, 2)).toEqual(["Answered 1 question, skipped 2.", "Table, please."]);
-    expect(body).toContain("## Answers to your questions\n\n1 of 3 questions answered. 2 were not answered in this reply;");
+    expect(body).toContain("## Answers to your questions\n\n1 of 3 questions answered.\n\n");
+    expect(body.match(/Skipped by the person/g)).toHaveLength(2);
     expect(body).not.toContain("still open");
     expect(body).not.toContain("stay open");
     expect(result.questions.map((q) => q.state)).toEqual(["sent", "sent", "sent"]);

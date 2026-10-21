@@ -41,7 +41,7 @@ describe("a note on a question card rides the Send", () => {
     const [saved] = store.savePicks(asked.id, [{ key: first.key, revision: 0, answer: answer(first, { skipped: true, note: "Ask me after the design review" }) }]);
     const result = store.sendReply(asked.id, { idempotency_key: "k-1", questions: [{ key: first.key, revision: saved!.revision }], skip: [second.key] });
     expect(result.reply.body).toContain("### Q1. Which layout? (line 2)\nSkipped\nNote: Ask me after the design review\n");
-    expect(result.reply.body).toContain("### Q2. Sort overdue first? (line 9)\nSkipped (not answered in this reply)");
+    expect(result.reply.body).toContain("### Q2. Sort overdue first? (line 9)\nSkipped by the person");
     expect(result.questions.map((q) => [q.state, q.answer?.note ?? null])).toEqual([
       ["sent", "Ask me after the design review"],
       ["sent", null],
