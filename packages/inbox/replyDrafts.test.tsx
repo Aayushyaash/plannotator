@@ -57,7 +57,7 @@ function loopback(path: string, method = 'GET', body?: string): Promise<{ status
   });
 }
 
-const TESTS = 26;
+const TESTS = 29;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -737,4 +737,78 @@ test.skipIf(!hasDom)('words a conflict left unsaved come back when the thread is
   await until(async () => (await serverDraft(world.waiting))?.body === 'Mine, kept through a switch.', 'kept');
   // Nothing of this thread is left unsaved: the line is gone (other threads' unsaved words are kept as they are).
   expect(again.querySelector('[data-draft-conflict]')).toBeNull();
+}, 30_000);
+
+/** The reply reaches the Inbox but its answer is lost, and thread reads fail (the Inbox stops answering). */
+function landUnread(real: typeof fetch) {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (/\/api\/inbox\/threads\/[^/]+$/.test(path)) throw new TypeError('Failed to fetch');
+    const answer = await real(input, init);
+    if ((init?.method ?? 'GET') === 'POST' && path.endsWith('/reply')) throw new TypeError('Failed to fetch');
+    return answer;
+  }) as typeof fetch;
+}
+
+test.skipIf(!hasDom)('an unconfirmed Send is forgotten when the person leaves: the same words sent later to a new question go to it', async () => {
+  const { el } = await openWithSaved('Yes.');
+  const real = globalThis.fetch;
+  landUnread(real);
+  act(() => button(el, 'Send').click());
+  await until(() => !!el.textContent?.includes('The reply may not have gone.'), 'the error');
+  globalThis.fetch = real;
+  const first = posted.filter((p) => p.path.endsWith('/reply')).at(-1)!;
+  // The Inbox recovers; the agent asks something new; the person leaves and comes back.
+  const asked = await agentSend(['One more:', '', ':::question', 'Ship it today?', '', '- [ ] Yes', '- [ ] No', ':::'].join('\n'), world.waiting);
+  leave();
+  const again = await renderApp(`#thread=${world.waiting}`);
+  await until(() => again.textContent!.includes('Ship it today?'), 'the new question');
+  const opener = () => [...again.querySelectorAll('.ib-pfoot button')].find((b) => ['Reply', 'Edit draft'].includes(b.textContent?.replace(/\s+/g, ' ').trim() ?? '')) as HTMLButtonElement;
+  act(() => opener().click());
+  await settle();
+  type(again, 'Yes.');
+  act(() => button(again, 'Send').click());
+  await until(() => box(again) === null, 'the Send');
+  const second = posted.filter((p) => p.path.endsWith('/reply')).at(-1)!;
+  expect(second).not.toBe(first);
+  expect(second.path).toContain(asked);
+  expect(await personReplies('Yes.')).toHaveLength(2);
+}, 30_000);
+
+test.skipIf(!hasDom)('an unconfirmed Send that a thread read shows landed is finished while the box still holds its words', async () => {
+  const { el } = await openWithSaved('Landed, seen on a read.');
+  const real = globalThis.fetch;
+  landUnread(real);
+  act(() => button(el, 'Send').click());
+  await until(() => !!el.textContent?.includes('The reply may not have gone.'), 'the error');
+  globalThis.fetch = real;
+  // The Inbox answers again: the stream's next record reads the thread, and the reply is there.
+  await act(async () => emit('record', { seq: 1 }));
+  await until(() => box(el) === null, 'the box closed');
+  await until(() => liveText(el).includes('Your reply went.'), 'said in the live region');
+  expect(await personReplies('Landed, seen on a read.')).toHaveLength(1);
+}, 30_000);
+
+test.skipIf(!hasDom)('an unconfirmed Send found by the next Send: a pick made since is named as not sent, and the next Send sends it', async () => {
+  const { el } = await openWithSaved('Words first.');
+  const real = globalThis.fetch;
+  landUnread(real);
+  act(() => button(el, 'Send').click());
+  await until(() => !!el.textContent?.includes('The reply may not have gone.'), 'the error');
+  globalThis.fetch = real;
+  // A pick, made after the lost Send.
+  const choice = [...el.querySelectorAll('fieldset[data-question-key] label')].find((l) => l.textContent?.includes('Pagefind')) as HTMLElement;
+  act(() => choice.click());
+  await until(() => el.textContent!.includes('in your draft'), 'the pick saved');
+  const before = posted.filter((p) => p.path.endsWith('/reply')).length;
+  act(() => button(el, 'Send').click());
+  await until(() => !!el.textContent?.includes('Not sent yet: 1 pick.'), 'the pick named');
+  expect(posted.filter((p) => p.path.endsWith('/reply')).length).toBe(before);
+  expect(liveText(el)).toContain('Your reply went. Not sent yet: 1 pick.');
+  expect(await personReplies('Words first.')).toHaveLength(1);
+  // Send sends the pick as an ordinary reply.
+  act(() => button(el, 'Send').click());
+  await until(() => posted.filter((p) => p.path.endsWith('/reply')).length === before + 1, 'the pick sent');
+  const pickReply = posted.filter((p) => p.path.endsWith('/reply')).at(-1)!;
+  expect((pickReply.body.questions as unknown[]).length).toBe(1);
 }, 30_000);

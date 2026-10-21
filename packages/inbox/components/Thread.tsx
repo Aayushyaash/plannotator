@@ -765,23 +765,38 @@ export function AckPill({
 /**
  * Per thread, a Send whose reply carrying the words went out but could not be
  * confirmed (its answer was lost and the thread could not be read: the Inbox
- * may be down). The next Send of the same words first reads the thread for
- * that reply's key: there, the Send is finished as it would have been and
- * nothing goes again; not there, it is an ordinary new Send. Module-level so
- * it outlives the pane; it lasts 10 minutes (`UNCONFIRMED_MS`).
+ * may be down): its key, and what it carried. It holds only while the box
+ * keeps exactly those unsent words: it goes when any thread read shows the
+ * reply landed (the Send is then finished), when the words change or the box
+ * empties, when the person leaves the thread, and after 10 minutes. The next
+ * Send of those words first reads the thread for that reply: there, the Send
+ * is finished and nothing goes again; not there, it is an ordinary new Send.
  */
-const unconfirmed = new Map<string, { key: string; words: string; uploads: string[]; at: number }>();
+interface UnconfirmedSend {
+  key: string;
+  words: string;
+  uploads: string[];
+  comments: string[];
+  picks: string[];
+  at: number;
+}
+const unconfirmed = new Map<string, UnconfirmedSend>();
 const UNCONFIRMED_MS = 10 * 60_000;
 
-/** Whether a reply with this idempotency key is in the thread: 'unknown' when the thread could not be read. */
-async function replyLanded(threadId: string, key: string): Promise<'yes' | 'no' | 'unknown'> {
+/**
+ * Whether a reply with this idempotency key is in the thread: 'unknown' when
+ * the thread could not be read, 'gone' when the thread no longer exists.
+ */
+async function replyLanded(threadId: string, key: string): Promise<'yes' | 'no' | 'unknown' | 'gone'> {
   try {
     const read = await inboxApi.thread(threadId);
     return read.thread.messages.some((m) => m.author.kind === 'person' && m.idempotency_key === key) ? 'yes' : 'no';
-  } catch {
-    return 'unknown';
+  } catch (cause) {
+    return cause instanceof InboxApiError && cause.status === 404 ? 'gone' : 'unknown';
   }
 }
+
+const THREAD_GONE_TEXT = 'This thread was deleted, so nothing was sent.';
 
 export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged = 0, onClose, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
   // "Open in" (OpenIn.tsx): apps on this computer; a new tab only through the tailnet or on a phone.
@@ -1834,6 +1849,54 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   }, []);
 
   /**
+   * What the person added after a Send that went without its answer (comments, picks, files it did not
+   * carry): said plainly, since they are still to send. Null when nothing was added.
+   */
+  const leftoverText = (earlier: UnconfirmedSend): string | null => {
+    const comments = records.filter((r) => !earlier.comments.includes(r.id)).length;
+    const picks = picked.filter((q) => !earlier.picks.includes(`${q.message_id}/${q.key}`)).length;
+    const files = replyUploads.filter((id) => !earlier.uploads.includes(id)).length;
+    const parts = [
+      comments > 0 ? `${comments} comment${comments === 1 ? '' : 's'}` : null,
+      picks > 0 ? `${picks} pick${picks === 1 ? '' : 's'}` : null,
+      files > 0 ? `${files} file${files === 1 ? '' : 's'}` : null,
+    ].filter((part): part is string => part !== null);
+    if (parts.length === 0) return null;
+    const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
+    return `Your reply went. Not sent yet: ${list}. Press Send to send ${parts.length === 1 && !list.endsWith('s') ? 'it' : 'them'}.`;
+  };
+
+  /** The remembered unconfirmed Send turned out to have landed: finish it, and say what is still to send. */
+  const finishLanded = (earlier: UnconfirmedSend) => {
+    unconfirmed.delete(threadRef.current.thread_id);
+    const leftover = leftoverText(earlier);
+    finishSent(earlier.uploads, true);
+    setError(leftover);
+    announce(leftover ?? 'Your reply went.');
+  };
+
+  // A thread read shows the remembered Send's reply landed: finished now (while the box still holds its words),
+  // or forgotten.
+  useEffect(() => {
+    const earlier = unconfirmed.get(thread.thread_id);
+    if (!earlier) return;
+    if (!thread.messages.some((m) => m.author.kind === 'person' && m.idempotency_key === earlier.key)) return;
+    if (box.open && box.text.trim() === earlier.words) {
+      finishLanded(earlier);
+      void reloadFiles();
+    } else unconfirmed.delete(thread.thread_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [thread]);
+
+  // Leaving the thread forgets it: a later Send is always an ordinary one.
+  useEffect(() => {
+    const id = thread.thread_id;
+    return () => {
+      unconfirmed.delete(id);
+    };
+  }, [thread.thread_id]);
+
+  /**
    * A Send went: the keys and choice reset, the files it carried leave the box (one pasted while it
    * was in flight keeps it open), the box empties, and its words' draft is done with.
    */
@@ -1912,15 +1975,20 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
       // first. There, that Send is finished and nothing goes again; not there, this is an ordinary new Send.
       const earlier = unconfirmed.get(current.thread_id);
       unconfirmed.delete(current.thread_id);
-      if (earlier && Date.now() - earlier.at < UNCONFIRMED_MS && earlier.words === boxWords) {
+      if (earlier && Date.now() - earlier.at < UNCONFIRMED_MS && box.open && earlier.words === boxWords) {
         const landed = await replyLanded(current.thread_id, earlier.key);
         if (landed === 'unknown') {
           unconfirmed.set(current.thread_id, earlier);
           setError('Still no answer from the Inbox, so nothing was sent. Try again in a moment.');
           return;
         }
+        if (landed === 'gone') {
+          setError(THREAD_GONE_TEXT);
+          return;
+        }
         if (landed === 'yes') {
-          finishSent(earlier.uploads, true);
+          // It went. Anything added since stays, named, for an ordinary Send.
+          finishLanded(earlier);
           await onChanged();
           await reloadFiles();
           return;
@@ -2050,7 +2118,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
       // e.g. the answer was lost): the thread is read, and a reply with its key there means it went.
       if (claimed && !done) {
         const refused = failure instanceof InboxApiError && failure.status >= 400 && failure.status < 500;
-        let wentAnyway: 'yes' | 'unknown' | 'no' = 'no';
+        let wentAnyway: 'yes' | 'unknown' | 'no' | 'gone' = 'no';
         if (wordsKey !== null && !refused) {
           wentAnyway = await replyLanded(threadRef.current.thread_id, wordsKey);
         }
@@ -2061,11 +2129,22 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
           announce('Your reply went.');
           void onChanged();
           void reloadFiles();
+        } else if (wentAnyway === 'gone') {
+          replyDraft.release();
+          setError(THREAD_GONE_TEXT);
         } else if (wentAnyway === 'unknown') {
           // Not known (the Inbox may be down): the draft stays as it is on the server, the box keeps the
           // words, and the next Send of them first looks for this reply (unconfirmed).
           replyDraft.release();
-          unconfirmed.set(threadRef.current.thread_id, { key: wordsKey!, words: sendWords, uploads: sentUploads, at: Date.now() });
+          unconfirmed.set(threadRef.current.thread_id, {
+            key: wordsKey!,
+            words: sendWords,
+            uploads: sentUploads,
+            comments: requests.flatMap((r) => r.input.annotation_ids ?? []),
+            // The picks a reply carries are the questions it names (their saved picks go with it).
+            picks: requests.flatMap((r) => (r.input.questions ?? []).map((q) => `${r.messageId}/${q.key}`)),
+            at: Date.now(),
+          });
           setError('The reply may not have gone. Send again: it looks for this one first, so it is not sent twice.');
         } else {
           replyDraft.release();
@@ -2986,6 +3065,9 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                 onChange={(text) => {
                   // Read-only while a Send is on its way: the words it carries are the words in the box.
                   if (sending) return;
+                  // The words changed (or emptied): a Send waiting to be confirmed no longer matches them.
+                  const earlier = unconfirmed.get(thread.thread_id);
+                  if (earlier && text.trim() !== earlier.words) unconfirmed.delete(thread.thread_id);
                   setBox({ open: true, text });
                   replyDraft.save(text);
                 }}
