@@ -8,13 +8,15 @@ describe("T3 CLI scope and review arguments", () => {
       .toEqual({ action: "annotate", target: ["a file.md", "b.md"], gate: true, options: { markdown: true } });
     expect(parseT3Args(["review", ...scope, "--base", "origin/main"]).review)
       .toEqual({ action: "review", options: { base: "origin/main" } });
+    expect(parseT3Args(["review", ...scope, "--gate"]).review).toEqual({ action: "review", gate: true });
     expect(parseT3Args(["close", "ABCDEF", ...scope]).review).toEqual({ action: "close", session: "pn-abcdef" });
   });
   test("requires explicit scope and rejects flags or targets that an action cannot use", () => {
     for (const args of [
       ["annotate", "a.md", "--url", scope[1]!],
       ["annotate", ...scope],
-      ["review", ...scope, "--gate"],
+      ["last", ...scope, "--gate"],
+      ["review", ...scope, "--markdown"],
       ["last", ...scope, "notes.md"],
       ["list", ...scope, "--base", "main"],
       ["review", ...scope, "--thread", "thread-b"],

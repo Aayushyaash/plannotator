@@ -83,8 +83,8 @@ export interface DecisionSpec {
 }
 
 export interface DecisionSpecInput {
-  app: 'annotate' | 'review';
-  /** Annotate: `gate`. Review: always true — review's primary decision IS approval. */
+  app: 'annotate' | 'review' | 'plan';
+  /** Annotate: `gate`. Review and plan: ignored — their primary decision IS approval. */
   gate: boolean;
   /** The annotation count interpolated into the menu's discard and note copy (never the primary label). */
   count: number;
@@ -117,6 +117,38 @@ export interface DecisionSpecInput {
    * gate only on `selfAuthored`, muted rather than removed.
    */
   platform?: DecisionPlatformInput;
+  /**
+   * #1057: the plan-review arm's extra facts (only read when `app` is
+   * `'plan'`). Absent means no answers, no edits, no agent switch.
+   */
+  plan?: DecisionPlanInput;
+}
+
+/**
+ * Plan review (#1057). Plan approval is the same decision as review's, with
+ * three plan-only facts: `:::question` answers (an answers-only deny reads as
+ * answers, not as a rejection), direct edits (they ride the deny and, where
+ * supported, the approval), and the agent an OpenCode approval hands off to.
+ */
+export interface DecisionPlanInput {
+  /** How many of `count` are answers to the plan's questions. */
+  answers: number;
+  /** Direct edits ride the feedback (they are not in `count`). */
+  directEdits: boolean;
+  /** The only feedback is answers: the primary reads "Send answers". */
+  answersOnly: boolean;
+  /** Named where notes on approval would be lost ("Claude Code"). */
+  agentName: string;
+  /** OpenCode: the agent approval switches to, shown as "Approve → build". */
+  approveTarget?: string;
+  /**
+   * The only feedback is file changes the reviewer already saved to disk
+   * (Edit Mode on a source-backed document). Approving drops nothing, the
+   * agent just isn't told, so the approve-away row says that instead of
+   * "discard". The value is the confirm's sentence ("Your saved file change
+   * is already on disk. The agent won't be told about it.").
+   */
+  savedFilesOnly?: string;
 }
 
 export interface DecisionPlatformInput {
@@ -449,10 +481,166 @@ function buildPlatformSpec(input: DecisionSpecInput, platform: DecisionPlatformI
   };
 }
 
+/** Frozen label (owner-approved mock): the plan primary when only answers are ready. */
+const SEND_ANSWERS = 'Send answers';
+/** The longest agent name the Approve primary carries before it is cut. */
+const APPROVE_TARGET_MAX = 24;
+
+function approveTargetSuffix(target: string | undefined): string {
+  const name = target?.trim();
+  if (!name) return '';
+  const cut = name.length > APPROVE_TARGET_MAX ? `${name.slice(0, APPROVE_TARGET_MAX - 1)}…` : name;
+  return ` → ${cut}`;
+}
+
+/**
+ * What the plan feedback is, in the reviewer's words: `2 answers`,
+ * `3 annotations`, `1 answer and 2 annotations`, `direct edits`. Mirrors the
+ * editor's describeFeedbackLoss so the menu and the close warnings agree;
+ * duplicated here because this module imports nothing.
+ */
+function planFeedbackPhrase(count: number, plan: DecisionPlanInput): { text: string; plural: boolean } {
+  const answers = Math.min(Math.max(plan.answers, 0), Math.max(count, 0));
+  const others = Math.max(count, 0) - answers;
+  const parts = [
+    answers > 0 ? `${answers} answer${answers === 1 ? '' : 's'}` : '',
+    others > 0 ? `${others} ${annotationNoun(others)}` : '',
+    plan.directEdits ? 'direct edits' : '',
+  ].filter(Boolean);
+  if (parts.length === 0) return { text: 'feedback', plural: false };
+  const text = parts.length === 1
+    ? parts[0]
+    : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+  return { text, plural: parts.length > 1 || answers + others > 1 || plan.directEdits };
+}
+
+/**
+ * The plan arm (#1057, approved proposal "plan-review-decision-control").
+ * Empty: the approval-flow empty spec (Approve; "Approve with a note…" where
+ * the host takes notes on approval; "Request changes…"), the Approve label
+ * naming OpenCode's hand-off agent. Feedback: Send Feedback, or Send answers
+ * for answers only; then the approve-away alternates, each saying what
+ * happens to the feedback on THIS host: "Approve with notes" only where the
+ * server advertises delivery, and "Approve, discard …" always (its subtitle
+ * and confirm name the agent when that is the only way to approve).
+ */
+function buildPlanSpec(input: DecisionSpecInput): DecisionSpec {
+  const plan: DecisionPlanInput = input.plan ?? {
+    answers: 0,
+    directEdits: false,
+    answersOnly: false,
+    agentName: 'The agent',
+  };
+  const target = approveTargetSuffix(plan.approveTarget);
+
+  if (!input.hasFeedback) {
+    const empty = buildEmptySpec(input, true);
+    return {
+      primary: target ? { ...empty.primary, label: `${empty.primary.label}${target}` } : empty.primary,
+      items: empty.items,
+    };
+  }
+
+  const { text: what, plural } = planFeedbackPhrase(input.count, plan);
+  const sendLabel = plan.answersOnly ? SEND_ANSWERS : 'Send Feedback';
+  const items: DecisionMenuItem[] = [
+    {
+      id: 'note-with-feedback',
+      label: plan.answersOnly ? 'Send answers with a note…' : 'Send with a note…',
+      subtitle: `Add an overall note on top of your ${what}`,
+      tone: 'primary',
+      icon: 'send',
+      composer: {
+        title: 'Send with a note',
+        actionLabel: plan.answersOnly ? 'Send answers with note' : 'Send feedback with note',
+        tone: 'primary',
+        icon: 'send',
+        placeholder: DECISION_NOTE_PLACEHOLDER,
+      },
+    },
+  ];
+
+  if (input.approvalNotesSupported) {
+    items.push({
+      id: 'approve-with-notes',
+      // Frozen copy (maintainer-approved): 'Approve with notes'.
+      label: `Approve with notes${target}`,
+      subtitle: `Approve; your ${what} ${plural ? 'ride' : 'rides'} along as non-blocking guidance`,
+      tone: 'success',
+      icon: 'check',
+      dividerBefore: true,
+    });
+  }
+
+  const pronoun = plural ? 'them' : 'it';
+  if (plan.savedFilesOnly) {
+    // Nothing is lost on approval: the changes stay on disk. Same confirm
+    // (one click away from a plain Approve would hide that the agent is not
+    // told), different words.
+    items.push({
+      id: 'discard-and-finish',
+      label: 'Approve without telling the agent…',
+      subtitle: "Already on disk; the agent isn't told. Asks to confirm",
+      tone: 'destructive',
+      icon: 'check',
+      dividerBefore: !input.approvalNotesSupported,
+      confirm: {
+        title: 'Approve without telling the agent?',
+        message: plan.savedFilesOnly,
+        // Frozen copy (maintainer-approved): 'Discard & approve' is the
+        // discard confirm's; this one discards nothing.
+        confirmText: 'Approve',
+      },
+    });
+  } else items.push({
+    id: 'discard-and-finish',
+    label: `Approve, discard ${what}…`,
+    subtitle: input.approvalNotesSupported
+      ? 'Asks to confirm: nothing is sent'
+      : `${plan.agentName} can't take notes on approval; asks to confirm`,
+    tone: 'destructive',
+    icon: 'check',
+    dividerBefore: !input.approvalNotesSupported,
+    confirm: {
+      title: `Discard ${what} and approve?`,
+      message: input.approvalNotesSupported
+        ? `Approving without ${pronoun} tells the agent no changes are needed.`
+        : `${plan.agentName} doesn't take feedback on approval, so your ${what} would be lost. To send ${pronoun}, use ${sendLabel}.`,
+      // Frozen copy (maintainer-approved): 'Discard & approve'.
+      confirmText: 'Discard & approve',
+    },
+  });
+
+  return {
+    primary: plan.answersOnly
+      ? {
+          id: 'primary',
+          // Frozen copy (owner-approved mock): 'Send answers'.
+          label: SEND_ANSWERS,
+          mobileLabel: SEND_ANSWERS,
+          title: 'Send your answers to the agent',
+          tone: 'primary',
+          icon: 'send',
+        }
+      : {
+          id: 'primary',
+          // Frozen copy (maintainer-approved): 'Send Feedback'.
+          label: 'Send Feedback',
+          shortLabel: 'Send',
+          mobileLabel: 'Send feedback',
+          title: 'Send your feedback to the agent',
+          tone: 'primary',
+          icon: 'send',
+        },
+    items,
+  };
+}
+
 export function buildDecisionSpec(input: DecisionSpecInput): DecisionSpec {
   // PR6 (§3.4): the platform destination maps onto the same spec shape with
   // no composer items; presence of the arm selects it outright.
   if (input.platform) return buildPlatformSpec(input, input.platform);
+  if (input.app === 'plan') return buildPlanSpec(input);
   // Review's primary positive decision IS approval, gate flag or not.
   const approvalFlow = input.app === 'review' || input.gate;
   return input.hasFeedback

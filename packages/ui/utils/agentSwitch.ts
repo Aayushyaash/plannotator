@@ -101,3 +101,18 @@ export function getEffectiveAgentName(settings: AgentSwitchSettings): string | u
   }
   return settings.switchTo;
 }
+
+/**
+ * The agent name an approval hands off to, for display ("Approve → build"):
+ * a discovered agent's display name, the custom name, or the stored id when
+ * it matches nothing discovered. Null when switching is off.
+ */
+export function agentSwitchTargetLabel(
+  setting: AgentSwitchSettings,
+  agents: ReadonlyArray<{ id: string; name: string }>,
+): string | null {
+  if (setting.switchTo === 'disabled') return null;
+  if (setting.switchTo === 'custom') return setting.customName || null;
+  const match = agents.find((a) => a.id.toLowerCase() === setting.switchTo.toLowerCase());
+  return match?.name ?? setting.switchTo;
+}

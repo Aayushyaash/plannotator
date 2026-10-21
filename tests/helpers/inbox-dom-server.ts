@@ -70,6 +70,11 @@
  * stdin line `{ "poll": { session, body } }` is that session's connection
  * polling the bridge with `body`'s fields (`plugin`, `busy`, `send_now`...);
  * the server answers `{ "polled": true }`.
+ *
+ * With `leaked-subject`, each project also gets a thread whose STORED subject
+ * holds an agent's leaked tool-call text, as an Inbox older than the one-line
+ * subject check kept it (tests/helpers/inbox-leaked-subject.ts); the world
+ * adds `leaked` (that thread's id).
  */
 import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -81,6 +86,7 @@ import { writeUpdateState } from "../../packages/shared/update-check";
 import { createAgentEnvironmentFor } from "../../packages/server/inbox-agents";
 import { isScratchDataDir, refuseRealDataDir } from "./real-data-dir";
 import { seedTagWorld, TAG_SESSIONS } from "./inbox-tag-world";
+import { seedLeakedSubjects } from "./inbox-leaked-subject";
 
 const [dataDir, projectsDir, countArg, extra] = process.argv.slice(2);
 const withNews = extra === "news";
@@ -228,6 +234,18 @@ const openInLauncher: InboxOpenInLauncher = {
   openWithApp: (app, path) => recordLaunch(app.id, path),
   openWithSystemDefault: (path) => recordLaunch("default", path),
 };
+// Written before the Inbox opens the store: it reads the raw lines at start.
+const leakedIds =
+  extra === "leaked-subject"
+    ? seedLeakedSubjects(
+        dataDir,
+        Array.from({ length: count }, (_, i) => {
+          const root = join(projectsDir, `billing-${i}`);
+          mkdirSync(root, { recursive: true });
+          return { name: `billing-${i}`, root };
+        }),
+      )
+    : [];
 const server = await startInboxServer({
   dataDir,
   setAsideDelayMs: Number(process.env.INBOX_DOM_SET_ASIDE_MS) > 0 ? Number(process.env.INBOX_DOM_SET_ASIDE_MS) : 60_000,
@@ -262,6 +280,7 @@ type World = {
   openIn?: { thread: string; ids: Record<string, string> };
   htmlLinks?: { thread: string; ids: Record<string, string> };
   restart?: { thread: string; session: string; project: string; installPath: string; oldPath: string };
+  leaked?: string;
   news: string[];
 };
 const SENT_MULTI = [
@@ -391,6 +410,7 @@ for (let i = 0; i < count; i++) {
   worlds.push({
     ...(htmlLinks ? { htmlLinks } : {}),
     ...(restart ? { restart } : {}),
+    ...(leakedIds[i] ? { leaked: leakedIds[i] } : {}),
     ...(openIn ? { openIn } : {}),
     ...(files ? { files } : {}),
     ...(sentMulti ? { sentMulti } : {}),

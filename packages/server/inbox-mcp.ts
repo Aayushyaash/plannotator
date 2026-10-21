@@ -16,7 +16,7 @@ import { isAbsolute } from "node:path";
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { QUESTION_AUTHORING_GUIDE } from "@plannotator/core/question-block";
-import { INBOX_CARD_ACTION_ON, inboxAgentName, INBOX_NAME_THIS_THREAD_HINT, INBOX_SECTIONS, isInboxNote, INBOX_THREAD_NAME_MAX, type InboxGuideRef, type InboxSectionId, type InboxLine, type InboxMessage, type InboxProject } from "@plannotator/core/inbox-types";
+import { checkInboxSubject, INBOX_CARD_ACTION_ON, inboxAgentName, INBOX_NAME_THIS_THREAD_HINT, INBOX_SECTIONS, isInboxNote, INBOX_THREAD_NAME_MAX, type InboxGuideRef, type InboxSectionId, type InboxLine, type InboxMessage, type InboxProject } from "@plannotator/core/inbox-types";
 import { INBOX_WAKES_META_KEY, inboxTaggedLine } from "@plannotator/shared/inbox/connection";
 import { inboxBodyForAgent } from "@plannotator/shared/inbox/uploads";
 import { inboxSectionOf } from "@plannotator/shared/inbox/list";
@@ -131,7 +131,7 @@ const AGENT_SESSION_DESCRIPTION =
  */
 export const SEND_ROUTING_FIELDS = {
   project_path: z.string().optional().describe(PROJECT_PATH_DESCRIPTION),
-  subject: z.string().optional().describe("A short subject when this starts a thread (ignored when it joins one). Default: the first question's prompt, else the first line."),
+  subject: z.string().optional().describe("A short one-line subject when this starts a thread (ignored when it joins one). Plain text: no line breaks. Default: the first question's prompt, else the first line."),
   thread: z
     .string()
     .optional()
@@ -384,9 +384,13 @@ export type AgentSendInput = {
 };
 
 /** The project a send lands in: reply_to's, else the one at project_path. */
-export async function sendProject(context: InboxMcpContext, input: { reply_to?: string; project_path?: string; thread?: string }): Promise<InboxProject> {
+export async function sendProject(
+  context: InboxMcpContext,
+  input: { reply_to?: string; project_path?: string; thread?: string; subject?: string | null },
+): Promise<InboxProject> {
   // Before anything resolves (resolving a path makes its project): a refused send writes nothing.
   refuseIdShapedThread(input.thread, input.reply_to);
+  refuseBadSubject(input.subject);
   if (input.reply_to) {
     const parent = context.store.message(input.reply_to);
     if (!parent) throw new InboxError("message_not_found", `No message ${input.reply_to}.`);
@@ -532,6 +536,17 @@ export function refuseIdShapedThread(thread: string | undefined, replyTo?: strin
   );
 }
 
+/**
+ * A `subject` that is not one line of plain text (`checkInboxSubject`):
+ * refused before any file is copied or project made, so nothing is written
+ * and a corrected retry with the same idempotency_key lands once. The store
+ * checks again.
+ */
+export function refuseBadSubject(subject: unknown): void {
+  const checked = checkInboxSubject(subject);
+  if (!checked.ok) throw new InboxError("validation_error", `subject: ${checked.message}`, { field: "subject" });
+}
+
 /** An agent's message into `project`, routed by the store (send_message, submit_guide). */
 export async function sendAgentMessage(
   context: InboxMcpContext,
@@ -542,6 +557,7 @@ export async function sendAgentMessage(
 ): Promise<{ structured: Record<string, unknown>; replayed: boolean; questions: number; attachments: number; superseded: number; imagesNotShown: ImageNotShown[]; naming: InboxSendResult["naming"] | null }> {
   const { store } = context;
   refuseIdShapedThread(input.thread, input.reply_to);
+  refuseBadSubject(input.subject);
   let attachments: InboxAttachment[] | undefined;
   if (input.attachments && input.attachments.length > 0) {
     if (!context.recordAttachments) throw new InboxError("validation_error", "attachments: not taken by this Inbox.");

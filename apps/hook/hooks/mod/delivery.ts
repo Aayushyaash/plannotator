@@ -1,4 +1,4 @@
-import { plannotatorDecisionHeading, type PlannotatorTarget } from './tool'
+import { PLANNOTATOR_OUTCOME_REVIEW_POSTED, plannotatorDecisionHeading, type PlannotatorTarget } from './tool'
 
 /**
  * What to do with a decision the CLI published (the host result record,
@@ -160,6 +160,13 @@ export function deliveryFor(record: HostResultRecord, context: DeliveryContext):
   }
 
   const platformPost = record.surface === 'review' && record.platform === true && isPlatformStatusLine(record.message)
+  // A gated review (#1907): Claude waits for the outcome, and posting the
+  // review to the PR platform IS the outcome, so it is a turn with the status
+  // line, worded as Pi and OpenCode word it. Ungated, it only logs.
+  if (platformPost && context.deliverApproval === true) {
+    const heading = plannotatorDecisionHeading(subject, context.sessionId, PLANNOTATOR_OUTCOME_REVIEW_POSTED, record.target ?? context.target)
+    return { action: 'submit', text: `${heading}\n\n${record.message.trim()}` }
+  }
   if (platformPost) {
     const posted = record.message.trim() || 'review posted'
     return {
@@ -169,8 +176,9 @@ export function deliveryFor(record: HostResultRecord, context: DeliveryContext):
     }
   }
 
-  // A gated session Claude opened itself (the `plannotator` tool): Claude was
-  // told to wait for the sign-off, so a bare approval still starts a turn.
+  // A gated session Claude opened itself (the `plannotator` tool, annotate or
+  // review): Claude was told to wait for the sign-off, so a bare approval
+  // still starts a turn.
   const approvalAwaited = context.deliverApproval === true && record.decision === 'approved'
   if (record.noop && !approvalAwaited && !misreadAsPlatformPost(record)) {
     const what = record.decision === 'approved' ? 'approved with no notes' : 'closed with no annotations'
@@ -250,7 +258,7 @@ export function legacyResult(kind: SessionKind, printed: string): HostResultReco
     return { v: 1, surface, decision: 'annotated', message: '', noop: true }
   }
   if (surface === 'review' && text === LEGACY_REVIEW_APPROVED_TEXT) {
-    return { v: 1, surface, decision: 'approved', message: '', noop: true }
+    return { v: 1, surface, decision: 'approved', message: text, noop: true }
   }
   if (surface === 'review' && text.startsWith(LEGACY_REVIEW_APPROVED_WITH_NOTES_HEADING)) {
     return { v: 1, surface, decision: 'approved', message: text, noop: false, withNotes: true }

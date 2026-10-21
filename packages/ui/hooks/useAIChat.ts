@@ -73,6 +73,15 @@ const BRIDGE_DRAFTS_KEY = 'session-bridge';
 /** Stream messages that show the session received the question. */
 const DELIVERED_MESSAGE_TYPES = new Set(['text_delta', 'text', 'tool_use', 'tool_result', 'result']);
 
+/**
+ * A busy "Ask this session" answer still offers its choice ("Ask when it
+ * finishes" / "Interrupt and ask now"): the question has not been asked yet,
+ * and clearing the thread would drop it without a word.
+ */
+export function hasPendingBusyChoice(messages: AIChatEntry[]): boolean {
+  return messages.some(m => m.response.errorCode === SESSION_ASK_ERROR_CODES.agentBusy);
+}
+
 /** Overrides for re-asking a question that ended in a busy/gone/blocked answer. */
 export interface AIRetryOptions {
   busyPolicy?: 'wait' | 'interrupt';
@@ -265,6 +274,8 @@ export function useAIChat({
   const createRequestRef = useRef(0);
   const sessionIdRef = useRef<string | null>(null);
   sessionIdRef.current = thread.sessionId;
+  const threadRef = useRef(thread);
+  threadRef.current = thread;
 
   const updateMessages = useCallback((updater: (messages: AIChatEntry[]) => AIChatEntry[]) => {
     setThread(prev => ({ ...prev, messages: updater(prev.messages) }));
@@ -649,6 +660,22 @@ export function useAIChat({
     setError(null);
   }, [postServerAbort, threadTitle]);
 
+  // The panel's "New chat": clears the thread and forgets the Plannotator AI
+  // session, so the next question starts a fresh one (a separate AI then gets
+  // the full context again). Unlike `resetThread` (a document switch), it never
+  // stops anything: while a question is in flight (streaming, creating its
+  // session, or waiting on a busy "Ask this session") or a busy answer still
+  // offers its choice, it does nothing and answers false, so a running turn is
+  // not aborted and a pending ask is not dropped. What the agent session already received (`deliveredDraftsRef`) is
+  // kept: with "Ask this session" a new chat reaches the SAME host session,
+  // which still remembers it.
+  const newChat = useCallback((): boolean => {
+    if (abortRef.current) return false;
+    if (hasPendingBusyChoice(threadRef.current.messages)) return false;
+    resetThread();
+    return true;
+  }, [resetThread]);
+
   useEffect(() => {
     return () => {
       sessionEpochRef.current += 1;
@@ -672,6 +699,7 @@ export function useAIChat({
     abort,
     resetSession,
     resetThread,
+    newChat,
     sessionId: thread.sessionId,
   };
 }

@@ -57,6 +57,14 @@ describe("parseReviewArgs", () => {
     });
   });
 
+  // #1907: `plannotator review --gate` (an agent waiting for the sign-off) must
+  // not be refused as an unknown option on hosts that run the CLI as written.
+  test("--gate is accepted, marked, and absent otherwise", () => {
+    expect(parseReviewArgs("--gate")).toMatchObject({ gate: true, errors: [] });
+    expect(parseReviewArgs(["--gate", "../wt"])).toMatchObject({ gate: true, words: ["../wt"], errors: [] });
+    expect("gate" in parseReviewArgs("")).toBe(false);
+  });
+
   test("--no-git-remote-check sets the opt-out bit and is absent otherwise", () => {
     // #1553: every host (CLI, OpenCode, Pi) forwards this bit to the review
     // server. It must be absent — not `true` — when the flag is not typed, or

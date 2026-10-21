@@ -126,6 +126,65 @@ export function inboxThreadNameKey(name: string): string {
     .toLowerCase();
 }
 
+// ─────────────────────────────── Subjects ───────────────────────────────
+
+/** A line break in any spelling: CR, LF, U+2028, U+2029. */
+const SUBJECT_LINE_BREAK = /[\r\n\u2028\u2029]/;
+/**
+ * Text a model's malformed tool call can leak into a string argument: the
+ * closing tag of the field, the next parameter, an invoke block, or an
+ * `antml:`-prefixed tag. Narrow on purpose, so `a < b`, `Vec<T>` and `<div>`
+ * in prose stay allowed.
+ */
+const SUBJECT_TOOL_MARKUP =
+  /<\/subject\s*>|<\/parameter\s*>|<parameter\s+name\s*=|<invoke\s+name\s*=|<\/invoke\s*>|<\/?function_calls\s*>|<\/?antml:/i;
+
+/**
+ * A `subject` as an agent sends it (send_message, submit_guide): one line of
+ * plain text. Empty (or only spaces) means none, as before; the value is
+ * trimmed and otherwise kept. Refused, with one sentence the agent can act
+ * on: leaked tool-call markup (`</subject>`, `<parameter name=…>`), a line
+ * break, other control characters, bidi controls.
+ */
+export function checkInboxSubject(value: unknown): { ok: true; subject: string | null } | { ok: false; message: string } {
+  if (value === undefined || value === null) return { ok: true, subject: null };
+  if (typeof value !== "string") return { ok: false, message: "must be a string." };
+  const subject = value.trim();
+  if (subject === "") return { ok: true, subject: null };
+  if (SUBJECT_TOOL_MARKUP.test(subject)) {
+    return {
+      ok: false,
+      message:
+        "contains tool-call text (such as </subject> or <parameter name=…>), so your call was malformed. Send again with the subject alone as its value and every other field as its own argument. If you meant to write that text, reword it without the angle brackets.",
+    };
+  }
+  if (SUBJECT_LINE_BREAK.test(subject)) {
+    return { ok: false, message: "must be one line; it contains a line break. Send a short one-line subject; put the rest in body." };
+  }
+  if (THREAD_NAME_CONTROL.test(subject)) return { ok: false, message: "must not contain control characters." };
+  if (THREAD_NAME_BIDI.test(subject)) return { ok: false, message: "must not contain bidirectional control characters." };
+  return { ok: true, subject };
+}
+
+/**
+ * A stored subject as it is shown and served: its first line, cut where
+ * leaked tool-call markup starts, without control or bidi characters,
+ * trimmed; null when nothing is left. Subjects stored before the send-side
+ * check (`checkInboxSubject`) can hold such text; the append-only store is
+ * never rewritten, so every read goes through this instead.
+ */
+export function displayInboxSubject(subject: string | null | undefined): string | null {
+  if (typeof subject !== "string") return null;
+  let text = subject.split(SUBJECT_LINE_BREAK, 1)[0] ?? "";
+  const markup = SUBJECT_TOOL_MARKUP.exec(text);
+  if (markup) text = text.slice(0, markup.index);
+  text = text
+    .replace(new RegExp(THREAD_NAME_BIDI.source, "gu"), "")
+    .replace(new RegExp(THREAD_NAME_CONTROL.source, "g"), " ")
+    .trim();
+  return text === "" ? null : text;
+}
+
 // ─────────────────────────────── Records ───────────────────────────────
 
 /** One row of the window: the repository or folder an agent works in. */
