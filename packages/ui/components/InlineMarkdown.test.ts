@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import katex from 'katex';
-import { InlineMarkdown, trimUrlTail } from './InlineMarkdown';
+import { InlineMarkdown, resetDigitHexIssueRefs, setDigitHexIssueRefs, trimUrlTail } from './InlineMarkdown';
 import { getMathRenderer, getMathRendererSource, resetMathRenderer, setMathRenderer } from '../utils/math';
 
 function renderInline(text: string): string {
@@ -222,11 +222,19 @@ describe('issue and mention refs (#1596)', () => {
 });
 
 describe('digit-only #refs vs hex swatches (#1932)', () => {
-  const render = (text: string, githubRepo?: string) =>
-    renderToStaticMarkup(createElement(InlineMarkdown, { text, githubRepo }));
+  const render = (text: string, githubRepo?: string, repoHost?: string) =>
+    renderToStaticMarkup(createElement(InlineMarkdown, { text, githubRepo, repoHost }));
   const isSwatch = (html: string) => html.includes('background-color');
+  afterEach(() => resetDigitHexIssueRefs());
 
-  test('with a repo, 6- and 8-digit refs link as issues', () => {
+  test('flag off (every host but the Inbox): a digit-only value stays a swatch even with a repo', () => {
+    const html = render('Fixes #186379.', 'home-assistant/core');
+    expect(isSwatch(html)).toBe(true);
+    expect(html).not.toContain('/issues/');
+  });
+
+  test('flag on, with a GitHub repo: 6- and 8-digit refs link as issues', () => {
+    setDigitHexIssueRefs(true);
     for (const num of ['186379', '12345678']) {
       const html = render(`Fixes #${num}.`, 'home-assistant/core');
       expect(html).toContain(`href="https://github.com/home-assistant/core/issues/${num}"`);
@@ -234,15 +242,19 @@ describe('digit-only #refs vs hex swatches (#1932)', () => {
     }
   });
 
-  test('with a repo, hex with a letter, a leading zero, or no word boundary stays a swatch', () => {
+  test('flag on, but no ref link can be built: stays a swatch', () => {
+    setDigitHexIssueRefs(true);
+    expect(isSwatch(render('#186379'))).toBe(true);
+    expect(isSwatch(render('#186379', 'my-folder'))).toBe(true);
+    expect(isSwatch(render('#186379', 'group/project', 'git.internal.example'))).toBe(true);
+  });
+
+  test('flag on, with a repo: hex with a letter, a leading zero, or no word boundary stays a swatch', () => {
+    setDigitHexIssueRefs(true);
     for (const text of ['#a1b2c3', '#000000', '#003366ff', 'x#123456']) {
       const html = render(text, 'home-assistant/core');
       expect(isSwatch(html)).toBe(true);
       expect(html).not.toContain('/issues/');
     }
-  });
-
-  test('without a repo, a digit-only 6-digit value stays a swatch', () => {
-    expect(isSwatch(render('#186379'))).toBe(true);
   });
 });
