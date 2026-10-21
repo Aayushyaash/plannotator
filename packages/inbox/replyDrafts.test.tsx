@@ -56,7 +56,7 @@ function loopback(path: string, method = 'GET', body?: string): Promise<{ status
   });
 }
 
-const TESTS = 10;
+const TESTS = 13;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -364,4 +364,82 @@ test.skipIf(!hasDom)('a pick not sent: the card says "Draft", its footer "in you
   expect(el.querySelector('[data-draft-foot]')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Draft 1 pick');
   expect(el.textContent).toMatch(/Picked \d{1,2}:\d{2} [AP]M · in your draft/);
   expect(el.textContent).not.toContain('Not sent');
+});
+
+test.skipIf(!hasDom)('typing during a slow Send never brings back a draft holding the sent words: the box is read-only while it goes', async () => {
+  const el = await renderApp(`#thread=${world.waiting}`);
+  await until(() => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Reply'), 'the foot');
+  act(() => button(el, 'Reply').click());
+  await settle();
+  type(el, 'First words.');
+  await until(async () => (await serverDraft(world.waiting))?.body === 'First words.', 'the words saved');
+  // The reply's answer is held 1.5 s; the person keeps typing meanwhile.
+  replyDelay = 1500;
+  act(() => button(el, 'Send').click());
+  await until(() => posted.some((p) => p.path.endsWith('/reply')), 'the reply posted');
+  expect((el.querySelector('textarea') as HTMLTextAreaElement).readOnly).toBe(true);
+  type(el, 'First words. And more.');
+  // The box keeps the words the Send carries.
+  expect((el.querySelector('textarea') as HTMLTextAreaElement).value).toBe('First words.');
+  await until(() => el.querySelector('textarea') === null, 'the Send');
+  await settle(200);
+  expect(await serverDraft(world.waiting)).toBeNull();
+  // No save went after the reply.
+  const reply = posted.findIndex((p) => p.path.endsWith('/reply'));
+  expect(posted.slice(reply).some((p) => /\/draft$/.test(p.path))).toBe(false);
+  // The next visit shows no draft.
+  leave();
+  const again = await renderApp(`#thread=${world.waiting}`);
+  await until(() => [...again.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Reply'), 'the foot');
+  await settle();
+  expect(again.querySelector('textarea')).toBeNull();
+  expect(again.querySelector('[data-draft-foot]')).toBeNull();
+});
+
+test.skipIf(!hasDom)('a Send that fails gives the thread back: the words are saved again', async () => {
+  const el = await renderApp(`#thread=${world.waiting}`);
+  await until(() => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Reply'), 'the foot');
+  act(() => button(el, 'Reply').click());
+  await settle();
+  type(el, 'Kept after a failure.');
+  await until(async () => (await serverDraft(world.waiting))?.body === 'Kept after a failure.', 'the words saved');
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if ((init?.method ?? 'GET') === 'POST' && String(input).endsWith('/reply')) return new Response(JSON.stringify({ error: 'down' }), { status: 500 });
+    return real(input, init);
+  }) as typeof fetch;
+  act(() => button(el, 'Send').click());
+  await until(() => !(el.querySelector('textarea') as HTMLTextAreaElement).readOnly && el.textContent!.includes('down'), 'the failure');
+  globalThis.fetch = real;
+  type(el, 'Kept after a failure, edited.');
+  await until(async () => (await serverDraft(world.waiting))?.body === 'Kept after a failure, edited.', 'saved again after the failure');
+});
+
+test.skipIf(!hasDom)('another window sent the words: this window\'s next save is refused, never re-creates the draft, and keeps its words as not saved', async () => {
+  const el = await renderApp(`#thread=${world.waiting}`);
+  await until(() => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Reply'), 'the foot');
+  act(() => button(el, 'Reply').click());
+  await settle();
+  type(el, 'First words.');
+  await until(async () => (await serverDraft(world.waiting))?.body === 'First words.', 'the words saved');
+  // Window A sends those words (its Send clears the draft it saved).
+  const mine = (await serverDraft(world.waiting))!;
+  const sent = await loopback(`/api/inbox/messages/${world.waiting}/reply`, 'POST', JSON.stringify({ idempotency_key: 'other-window', words: 'First words.', clear_draft: mine.updated_at }));
+  expect(sent.status).toBe(200);
+  expect(await serverDraft(world.waiting)).toBeNull();
+  // This window keeps typing: its save is refused, and it adopts the server's state.
+  type(el, 'First words. And more.');
+  await until(() => el.querySelector('[data-draft-conflict]') !== null, 'the conflict');
+  expect(el.querySelector('[data-draft-conflict] .ib-draft-saved')?.textContent).toBe('Not saved: sent or discarded in another window');
+  await settle(200);
+  expect(await serverDraft(world.waiting)).toBeNull();
+  // More typing stays here, not saved.
+  type(el, 'First words. And more, still.');
+  await settle(200);
+  expect(await serverDraft(world.waiting)).toBeNull();
+  expect((el.querySelector('textarea') as HTMLTextAreaElement).value).toBe('First words. And more, still.');
+  // Keep mine: the person's choice saves them.
+  act(() => (el.querySelector('[data-draft-keep-mine]') as HTMLButtonElement).click());
+  await until(async () => (await serverDraft(world.waiting))?.body === 'First words. And more, still.', 'kept on purpose');
+  expect(el.querySelector('[data-draft-conflict]')).toBeNull();
 });

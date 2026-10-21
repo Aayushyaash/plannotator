@@ -34,8 +34,45 @@ export function DraftLabel({ unsent }: { unsent: InboxRowUnsent }) {
   );
 }
 
-/** Above the open reply box: the pill, whom it goes to, when it was saved, and Discard. */
-export function DraftHead({ label, savedAt, onDiscard }: { label: string; savedAt: string | null; onDiscard: (() => void) | null }) {
+/**
+ * A save another window's change refused: the words in the box are not saved.
+ * `sentElsewhere`: the draft was sent or discarded there (the server holds none).
+ */
+export interface DraftConflict {
+  sentElsewhere: boolean;
+  onKeepMine: () => void;
+  onTakeTheirs: () => void;
+}
+
+/** Above the open reply box: the pill, whom it goes to, when it was saved, and Discard (or, after a conflict, the choice). */
+export function DraftHead({
+  label,
+  savedAt,
+  onDiscard,
+  conflict = null,
+}: {
+  label: string;
+  savedAt: string | null;
+  onDiscard: (() => void) | null;
+  conflict?: DraftConflict | null;
+}) {
+  if (conflict) {
+    return (
+      <div className="ib-reply-l ib-draft-head" data-draft-head="" data-draft-conflict="">
+        <span className="ib-draft-pill">Draft</span> <span className="ib-draft-for" dir="auto">{label}</span>
+        <span className="ib-sp" />
+        <span className="ib-draft-saved" role="status">
+          {conflict.sentElsewhere ? 'Not saved: sent or discarded in another window' : 'Not saved: changed in another window'}
+        </span>
+        <button type="button" className="ib-draft-discard" data-draft-keep-mine="" onClick={conflict.onKeepMine}>
+          Keep mine
+        </button>
+        <button type="button" className="ib-draft-discard" data-draft-take-theirs="" onClick={conflict.onTakeTheirs}>
+          {conflict.sentElsewhere ? 'Drop mine' : 'Use theirs'}
+        </button>
+      </div>
+    );
+  }
   return (
     <div className="ib-reply-l ib-draft-head" data-draft-head="">
       {savedAt !== null && <span className="ib-draft-pill">Draft</span>} <span className="ib-draft-for" dir="auto">{label}</span>

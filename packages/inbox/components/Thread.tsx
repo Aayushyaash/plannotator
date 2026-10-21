@@ -805,7 +805,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
    */
   const replyDraft = useReplyDraft(thread.thread_id);
   /** The words a Send carries: the box's, or (the box closed) those kept as its draft. */
-  const boxWords = box.open ? box.text.trim() : (replyDraft.draft?.body.trim() ?? '');
+  const boxWords = box.open ? box.text.trim() : ((replyDraft.conflict ?? replyDraft.draft?.body)?.trim() ?? '');
   /** A draft put back in the box opens it without taking focus (j/k and the page keep working). */
   const restoringRef = useRef(false);
   /** The thread whose draft was put back already (once per visit). */
@@ -849,6 +849,12 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
    */
   const sendContents = useRef<Map<string, string> | null>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  // The box is read-only while a Send is on its way (approval "inbox-reply-drafts"): the words it carries are
+  // the words in the box, and nothing typed meanwhile can be saved as a draft the Send then clears.
+  useEffect(() => {
+    const el = textRef.current;
+    if (el) el.readOnly = sending;
+  }, [sending, box.open]);
   const bodyRef = useRef<HTMLDivElement>(null);
   const sendRef = useRef<HTMLButtonElement>(null);
   const guardRef = useRef<HTMLDivElement>(null);
@@ -1611,14 +1617,15 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   useEffect(() => {
     if (replyDraft.loadedFor !== thread.thread_id || restoredFor.current === thread.thread_id) return;
     restoredFor.current = thread.thread_id;
-    const kept = replyDraft.draft;
-    if (!kept) return;
+    // Words a conflict left unsaved here come back before the draft another window holds.
+    const kept = replyDraft.conflict ?? replyDraft.draft?.body ?? null;
+    if (kept === null) return;
     setBox((current) => {
       if (current.open && current.text.trim()) return current;
       if (!current.open) restoringRef.current = true;
-      return { open: true, text: kept.body };
+      return { open: true, text: kept };
     });
-  }, [replyDraft.loadedFor, replyDraft.draft, thread.thread_id]);
+  }, [replyDraft.loadedFor, replyDraft.draft, replyDraft.conflict, thread.thread_id]);
 
   useEffect(() => {
     if (restoringRef.current) {
@@ -1727,7 +1734,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   /** Picks or annotations wait for a Send. */
   const waiting = picksCount > 0 || records.length > 0;
   /** The box is closed and its words are kept as a draft (Cancel or Escape kept them): Edit draft brings them back. */
-  const draftKept = !box.open && replyDraft.draft !== null;
+  const draftKept = !box.open && (replyDraft.draft !== null || replyDraft.conflict !== null);
   // What a Send skips: every question still open with no pick (one being
   // saved counts as picked), unless the person pressed Keep open.
   const unanswered = thread.messages.flatMap((m) =>
@@ -1746,7 +1753,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     setRoute((current) => ({ ...current, open: false, error: null }));
     const draft = withDraft ? picked.map((q) => (q.answer ? `${q.prompt.replace(/[?.!]\s*$/, '')}: ${answerWords(q.answer)}.` : '')).filter(Boolean).join(' ') : '';
     // A draft's words come back as they were; picks only seed the box when there are none.
-    const kept = replyDraft.draft?.body ?? '';
+    const kept = replyDraft.conflict ?? replyDraft.draft?.body ?? '';
     setBox({ open: true, text: kept.trim() ? kept : draft });
     setError(null);
   };
@@ -1806,6 +1813,9 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     /** Replies of this Send that went (or were already there, a retry's replays). */
     let went = 0;
     let total = 0;
+    /** The Send claimed the thread's draft, and whether it went (else the claim is given back). */
+    let claimed = false;
+    let done = false;
     try {
       await pickChain.current;
       const current = threadRef.current;
@@ -1813,10 +1823,17 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
       // Before anything goes, the draft's saves are answered (a save landing after the Send would bring the
       // words back), and the Send names the `updated_at` its words were saved as, so the server clears that
       // draft only, never a newer one another window saved meanwhile.
+      // The Send claims the thread as it starts: the words waiting are saved, every save in flight is
+      // answered, and no save of this thread runs until it ends (the box is read-only meanwhile).
       let words = boxWords;
       let draftSavedAs: string | null = null;
+      const savedAs = await replyDraft.claim();
+      claimed = true;
       if (box.open) {
-        if (words !== '') draftSavedAs = await replyDraft.settle();
+        if (words !== '') draftSavedAs = savedAs;
+      } else if (replyDraft.conflict !== null) {
+        // Words another window's change left unsaved here: they go, and the newer draft stays.
+        words = replyDraft.conflict.trim();
       } else {
         // The box is closed: the words as the draft holds them now (another window may have changed them).
         const fresh = await replyDraft.reload();
@@ -1903,7 +1920,9 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
       const later = replyFiles.current().some((f) => !sentFiles.has(f.key));
       replyFiles.forget(sentFiles);
       setBox({ open: later, text: '' });
+      done = true;
       if (words !== '') replyDraft.sent();
+      else replyDraft.release();
       setTaggedIds([]);
       setFull(false);
       await onChanged();
@@ -1929,6 +1948,12 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
       }
       setError(cause instanceof InboxApiError ? cause.message : 'The reply was not sent. Send again to retry.');
     } finally {
+      // Nothing went (or not all of it): the claim is given back and the box's words are saved again.
+      if (claimed && !done) {
+        replyDraft.release();
+        const text = textRef.current?.value ?? '';
+        if (text.trim() !== '') replyDraft.save(text);
+      }
       setSending(false);
     }
   };
@@ -2797,6 +2822,23 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             <DraftHead
               label={`Reply to ${asker} in ${thread.project.name}`}
               savedAt={box.text.trim() ? (replyDraft.draft?.updated_at ?? null) : null}
+              conflict={
+                replyDraft.conflict !== null
+                  ? {
+                      sentElsewhere: replyDraft.draft === null,
+                      onKeepMine: () => {
+                        replyDraft.keepMine(box.text);
+                        announce('Your words were saved over the other window’s.');
+                      },
+                      onTakeTheirs: () => {
+                        const theirs = replyDraft.takeTheirs();
+                        if (theirs.trim()) setBox({ open: true, text: theirs });
+                        else closeBox();
+                        announce(theirs.trim() ? 'The other window’s words are in the box.' : 'Your words were dropped.');
+                      },
+                    }
+                  : null
+              }
               onDiscard={() => {
                 replyDraft.discard();
                 closeBox();
@@ -2820,6 +2862,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                 tags={composerTags}
                 value={box.text}
                 onChange={(text) => {
+                  // Read-only while a Send is on its way: the words it carries are the words in the box.
+                  if (sending) return;
                   setBox({ open: true, text });
                   replyDraft.save(text);
                 }}
