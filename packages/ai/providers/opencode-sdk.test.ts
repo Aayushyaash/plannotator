@@ -295,7 +295,8 @@ describe("OpenCode Ask AI event stream", () => {
 				},
 			},
 			event: {
-				subscribe: async (_query: unknown, options: { signal: AbortSignal }) => {
+				// The v1 client's shape: one options object.
+				subscribe: async (options: { signal: AbortSignal }) => {
 					log.push("subscribe");
 					signals.push(options.signal);
 					const made = fakeStream(options.signal);
@@ -355,5 +356,121 @@ describe("OpenCode Ask AI event stream", () => {
 		});
 		expect(log).toEqual(["subscribe"]);
 		expect(messages).toEqual([{ type: "error", error: "OpenCode query aborted.", code: "provider_error" }]);
+	});
+});
+
+/**
+ * The same three cases through the REAL v1 client against a local SSE server
+ * standing in for `opencode serve`. What regresses if this fails: the signal
+ * never reaches the client's stream (a wrong call shape is silently ignored),
+ * so a timed-out or finished question leaves its /event connection open, and a
+ * refused one is retried forever in the background.
+ */
+describe("OpenCode Ask AI event stream through the real client", async () => {
+	const { createOpencodeClient } = await import("@opencode-ai/sdk/client");
+	const encoder = new TextEncoder();
+
+	type Mode = "silent" | "answers" | "connects";
+	function fakeOpencodeServe(mode: Mode) {
+		const events: Array<{ opened: number; closed: number | null }> = [];
+		let send: ((event: unknown) => void) | null = null;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(req) {
+				const url = new URL(req.url);
+				if (url.pathname === "/session" && req.method === "POST") {
+					return Response.json({ id: "oc_real", title: "t", version: "1", time: { created: 0, updated: 0 } });
+				}
+				if (url.pathname.endsWith("/prompt_async")) {
+					if (mode === "answers") {
+						setTimeout(() => {
+							send?.({ type: "message.part.delta", properties: { sessionID: "oc_real", field: "text", delta: "pong" } });
+							send?.({ type: "session.status", properties: { sessionID: "oc_real", status: { type: "idle" } } });
+						}, 10);
+					}
+					return new Response(null, { status: 204 });
+				}
+				if (url.pathname.endsWith("/abort")) return Response.json(true);
+				if (url.pathname === "/event") {
+					const record = { opened: Date.now(), closed: null as number | null };
+					events.push(record);
+					req.signal.addEventListener("abort", () => {
+						record.closed = Date.now();
+					});
+					const body = new ReadableStream<Uint8Array>({
+						start(controller) {
+							send = (event) => {
+								try {
+									controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+								} catch {}
+							};
+							if (mode !== "silent") send({ type: "server.connected", properties: {} });
+						},
+						cancel() {
+							record.closed ??= Date.now();
+						},
+					});
+					return new Response(body, { headers: { "Content-Type": "text/event-stream" } });
+				}
+				return new Response("not found", { status: 404 });
+			},
+		});
+		return { url: `http://127.0.0.1:${server.port}`, events, stop: () => server.stop(true) };
+	}
+
+	async function askReal(serve: ReturnType<typeof fakeOpencodeServe>, timeoutMs: number, stopAfterMs?: number) {
+		clientFactory = () => createOpencodeClient({ baseUrl: serve.url });
+		const provider = new OpenCodeProvider({ type: "opencode-sdk", firstEventTimeoutMs: timeoutMs });
+		const session = await provider.createSession({ context: { mode: "plan-review", plan: { plan: "# Plan" } } } as never);
+		if (stopAfterMs != null) setTimeout(() => session.abort(), stopAfterMs);
+		const messages: Array<Record<string, unknown>> = [];
+		for await (const message of session.query("ping")) messages.push(message as Record<string, unknown>);
+		provider.dispose();
+		return messages;
+	}
+
+	async function closedSoon(serve: ReturnType<typeof fakeOpencodeServe>): Promise<boolean> {
+		for (let i = 0; i < 50 && serve.events.some((e) => e.closed === null); i++) await Bun.sleep(10);
+		return serve.events.length > 0 && serve.events.every((e) => e.closed !== null);
+	}
+
+	test("a stream that never sends a frame is closed on the timeout", async () => {
+		const serve = fakeOpencodeServe("silent");
+		try {
+			const messages = await askReal(serve, 100);
+			expect(String(messages[0]?.error)).toContain("did not connect");
+			expect(await closedSoon(serve)).toBe(true);
+			expect(serve.events).toHaveLength(1);
+		} finally {
+			serve.stop();
+		}
+	});
+
+	test("the stream is closed once the answer is complete", async () => {
+		const serve = fakeOpencodeServe("answers");
+		try {
+			const messages = await askReal(serve, 5_000);
+			expect(messages).toEqual([
+				{ type: "text_delta", delta: "pong" },
+				{ type: "result", sessionId: "oc_real", success: true },
+			]);
+			expect(await closedSoon(serve)).toBe(true);
+		} finally {
+			serve.stop();
+		}
+	});
+
+	test("Stop while waiting for the next event ends the query at once and closes the stream", async () => {
+		const serve = fakeOpencodeServe("connects");
+		try {
+			const started = Date.now();
+			const messages = await askReal(serve, 5_000, 100);
+			expect(Date.now() - started).toBeLessThan(1_000);
+			expect(messages).toEqual([{ type: "error", error: "OpenCode query aborted.", code: "provider_error" }]);
+			expect(await closedSoon(serve)).toBe(true);
+		} finally {
+			serve.stop();
+		}
 	});
 });

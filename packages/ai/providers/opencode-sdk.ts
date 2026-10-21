@@ -353,10 +353,11 @@ class OpenCodeSession extends BaseSession {
 			let iterator: AsyncIterator<{ type?: string; properties?: Record<string, unknown> }> | null = null;
 
 			try {
-				const { stream } = await this.config.client.event.subscribe(
-					undefined,
-					{ signal: subscription.signal },
-				);
+				// The v1 client takes one options object; a signal in a second
+				// argument is ignored and the connection is never closed.
+				const { stream } = await this.config.client.event.subscribe({
+					signal: subscription.signal,
+				});
 				const events: AsyncIterator<{ type?: string; properties?: Record<string, unknown> }> =
 					stream[Symbol.asyncIterator]();
 				iterator = events;
@@ -413,8 +414,10 @@ class OpenCodeSession extends BaseSession {
 
 				const state = createOpenCodeQueryState();
 				while (!signal.aborted) {
-					const next = await events.next();
-					if (next.done) break;
+					// Stop ends this wait at once; the stream itself can take up to
+					// its retry delay to notice the abort.
+					const next = await nextEventWithin(events, null, signal);
+					if (next === "aborted" || next === "timeout" || next.done) break;
 					const { messages, done } = consumeOpenCodeEvent(
 						next.value,
 						this.config.sessionId,
@@ -483,18 +486,19 @@ export const OPENCODE_FIRST_EVENT_TIMEOUT_MS = 10_000;
 
 /**
  * The iterator's next result, or "timeout" / "aborted" when neither comes
- * first. The caller ends the pending next() itself (by aborting its stream).
+ * first (`timeoutMs` null: no time limit). The caller ends the pending next()
+ * itself (by aborting its stream).
  */
 export async function nextEventWithin<T>(
 	iterator: AsyncIterator<T>,
-	timeoutMs: number,
+	timeoutMs: number | null,
 	signal: AbortSignal,
 ): Promise<IteratorResult<T> | "timeout" | "aborted"> {
 	if (signal.aborted) return "aborted";
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let onAbort: (() => void) | undefined;
 	const stop = new Promise<"timeout" | "aborted">((resolve) => {
-		timer = setTimeout(() => resolve("timeout"), timeoutMs);
+		if (timeoutMs !== null) timer = setTimeout(() => resolve("timeout"), timeoutMs);
 		onAbort = () => resolve("aborted");
 		signal.addEventListener("abort", onAbort, { once: true });
 	});
