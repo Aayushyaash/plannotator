@@ -249,6 +249,40 @@ export function addOwnThreads(shown: readonly InboxListSection[], latest: readon
 }
 
 /**
+ * Everything `latest` says (Show's adopt), except the thread the person has
+ * open: its row stays in the group it is drawn in and at its place there
+ * (between the same neighbours, never re-sorted by its time), so a refresh
+ * beside an open thread (click Inbox to refresh, the list's title) never
+ * takes the selected row out of view. Its state is the read's, or, when the
+ * read has no row for it (the window reads without archived threads, and the
+ * person archived it while it is open), the row as drawn (shown Archived by
+ * markHeldRowArchived). It takes its own place when the thread closes. A
+ * thread not on screen is the read.
+ */
+export function adoptKeepingOpen(shown: readonly InboxListSection[], latest: readonly InboxListSection[], threadId: string): InboxListSection[] {
+  // The group it is drawn in (a held row's own `section` may already say where it will go).
+  const drawn = shown.find((section) => section.threads.some((row) => row.thread_id === threadId));
+  if (!drawn) return latest.map((section) => ({ ...section }));
+  const at = drawn.threads.findIndex((row) => row.thread_id === threadId);
+  const row = rowsById(latest).get(threadId) ?? drawn.threads[at]!;
+  return latest.map((section) => {
+    const threads = section.threads.filter((other) => other.thread_id !== threadId);
+    if (section.id !== drawn.id) return { ...section, threads };
+    // Before the nearest row that followed it on screen and is still in this group, else after the nearest that preceded it.
+    const here = new Set(threads.map((other) => other.thread_id));
+    const after = drawn.threads.slice(at + 1).find((other) => here.has(other.thread_id));
+    const before = [...drawn.threads.slice(0, at)].reverse().find((other) => here.has(other.thread_id));
+    const index = after
+      ? threads.findIndex((other) => other.thread_id === after.thread_id)
+      : before
+        ? threads.findIndex((other) => other.thread_id === before.thread_id) + 1
+        : 0;
+    threads.splice(index, 0, row);
+    return { ...section, threads };
+  });
+}
+
+/**
  * The person archived a thread while its row is on screen (the thread is
  * open). The list the window reads leaves archived threads out, so
  * refreshHeldRows would keep the row as it was; this shows it archived in
