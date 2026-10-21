@@ -151,6 +151,20 @@ describe("Done and Can't do it", () => {
   });
 });
 
+describe("Re-ask", () => {
+  test("asks for the open questions only: a to-do waits on its card, and with only a to-do open there is nothing to re-ask", () => {
+    const { store, asked, action, question } = setup();
+    const { reply } = store.sendReask(asked.id, { idempotency_key: "r1" });
+    expect(reply.reask).toEqual([`${asked.id}/${question.key}`]);
+    expect(reply.body).not.toContain(action.prompt);
+    const { store: other, project } = open();
+    const p = other.ensureProject({ name: "web", root: "/work/solo" });
+    void project;
+    const m = other.sendMessage({ project_id: p.id, author: AGENT, body: ":::action\nTouch your YubiKey\n:::" }).message;
+    expect(() => other.sendReask(m.id, { idempotency_key: "r1" })).toThrow(/No open question/);
+  });
+});
+
 describe("Mark read", () => {
   test("sets an open to-do aside like a question, the note lists it as A1, and Undo opens it again", () => {
     const { store, clock, asked } = setup();

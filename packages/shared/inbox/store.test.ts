@@ -1563,7 +1563,8 @@ class ThreadStateModel {
         const group = thread.messages.filter(
           (m) => m.author === "agent" && (session !== null ? m.session === session : m === message) && !this.closedByArchive(thread, m),
         );
-        const questions = group.flatMap((m) => m.questions);
+        // A to-do is not asked again: it waits on its card.
+        const questions = group.flatMap((m) => m.questions).filter((q) => !q.action);
         const asked = questions.filter((q) => this.recordState(q) === "open");
         if (asked.length === 0) return "refused:nothing_to_reask";
         // Picks not sent go with the note.

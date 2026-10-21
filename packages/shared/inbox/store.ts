@@ -2962,7 +2962,9 @@ export class InboxStore {
           : m.id === message.id,
       )
       .filter((m) => !this.closedByArchive(m))
-      .flatMap((m) => this.questionRecords(m.id));
+      .flatMap((m) => this.questionRecords(m.id))
+      // A to-do is not asked again: it waits on its card (Done, Can't do it, or Mark read).
+      .filter((r) => r.kind !== "action");
     const picked = records.filter((r) => inboxQuestionState(r, false) === "picked" && r.answer !== null);
     const open = records.filter((r) => inboxQuestionState(r, false) === "open");
     if (open.length === 0) throw new InboxError("nothing_to_reask", "No open question is left to ask again.");
