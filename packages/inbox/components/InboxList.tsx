@@ -34,6 +34,13 @@ export interface InboxListProps {
   /** The one-time notifications line (record 6.1), above everything else. */
   ask?: ReactNode;
   onShowNew: () => void;
+  /**
+   * The title, pressed, refreshes the list it names (click Inbox to refresh):
+   * ↻ beside it on hover with the tooltip, one turn on a click. Absent: a plain heading.
+   */
+  onRefresh?: () => void;
+  /** A refresh of this list just ran: the title's icon turns once (the key restarts the turn). */
+  refreshSpin?: number | null;
   onOpen: (row: InboxListRow) => void;
   /** The row's hover action (a row that waits on the person): Mark read, without opening it. Absent: no action. */
   onMarkRead?: (row: InboxListRow) => void;
@@ -350,6 +357,7 @@ export function InboxList(props: InboxListProps) {
   // main sidebar, which holds its own New message, is closed (the peek does not count as open).
   const headerCompose = isMobile || !sidebarDocked;
   const columnId = useId();
+  const refreshHintId = useId();
   const resizable = props.narrow && !isMobile;
   const visible = props.sections.filter((s) => s.threads.length > 0);
   const lit = (row: InboxListRow) => props.lit?.has(row.thread_id) === true;
@@ -386,9 +394,34 @@ export function InboxList(props: InboxListProps) {
     >
       <div className="ib-lhead">
         <SidebarTrigger />
-        <Tip content={props.title} cut>
-          <h1 dir="auto">{props.title}</h1>
-        </Tip>
+        {props.onRefresh ? (
+          <h1 dir="auto" className="ib-lhead-h">
+            {/* The full name in the tooltip too, for a project name the header cuts. */}
+            <Tip content={props.title === 'Inbox' ? 'Refresh' : `Refresh ${props.title}`}>
+              <button
+                type="button"
+                className="ib-lhead-title"
+                onClick={props.onRefresh}
+                aria-describedby={refreshHintId}
+                data-list-refresh=""
+                data-refreshing={props.refreshSpin != null ? '' : undefined}
+              >
+                <span className="ib-lhead-tt">{props.title}</span>
+                <Icon key={props.refreshSpin ?? 'rest'} name="refresh" size={16} className="ib-ic-refresh" />
+              </button>
+            </Tip>
+          </h1>
+        ) : (
+          <Tip content={props.title} cut>
+            <h1 dir="auto">{props.title}</h1>
+          </Tip>
+        )}
+        {/* The button's description, outside the h1 so the heading reads only the name. */}
+        {props.onRefresh && (
+          <span id={refreshHintId} hidden>
+            Refresh the list
+          </span>
+        )}
         {props.path && (
           <Tip content={props.path} cut>
             <span className="ib-path">{props.path}</span>

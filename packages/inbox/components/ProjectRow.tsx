@@ -21,6 +21,10 @@ export interface ProjectRowProps {
   phone: boolean;
   onOpen: () => void;
   onAction: (action: ProjectAction) => void;
+  /** The list shows this project, no thread open: pressing the row refreshes it (↻ on hover, "Refresh"). */
+  refreshes?: boolean;
+  /** A refresh of this project just ran: its ↻ turns once (the key restarts the turn). */
+  refreshSpin?: number | null;
 }
 
 /**
@@ -67,14 +71,20 @@ export function ProjectRow(props: ProjectRowProps) {
   );
   const content = (
     <>
-      <ProjectTip name={project.name} root={project.root}>
+      <ProjectTip name={project.name} root={project.root} refresh={props.refreshes === true}>
         <button
           type="button"
           className={`ib-proj${props.count === 0 ? ' ib-proj-quiet' : ''}${props.on ? ' ib-on' : ''}`}
           onClick={props.onOpen}
           aria-current={props.on ? 'page' : undefined}
+          data-refreshes={props.refreshes ? '' : undefined}
+          data-refreshing={props.refreshSpin != null ? '' : undefined}
         >
           <span className="ib-name" dir="auto">{project.name}</span>
+          {/* On the list it shows, the row refreshes it (click Inbox to refresh): ↻ on hover, one turn on a click. */}
+          {(props.refreshes || props.refreshSpin != null) && (
+            <Icon key={props.refreshSpin ?? 'rest'} name="refresh" size={14} className="ib-ic-refresh" />
+          )}
           {props.count > 0 && <span className="ib-n">{formatCount(props.count)}</span>}
         </button>
       </ProjectTip>
@@ -136,11 +146,12 @@ function ProjectMenuItems({ name, readable, onAction }: { name: string; readable
  * hears the folder as the row's description (visually hidden text named by
  * `aria-describedby`), as it did from the native title.
  */
-export function ProjectTip({ name, root, children }: { name: string; root: string; children: ReactElement }) {
+export function ProjectTip({ name, root, refresh = false, children }: { name: string; root: string; refresh?: boolean; children: ReactElement }) {
   const describedBy = useId();
   return (
     <>
-      <Tip side="right" content={<ProjectTipText name={name} root={root} />}>
+      {/* The project the list shows says what a press does, like Inbox; its folder is in the list's header and the description. */}
+      <Tip side="right" content={refresh ? 'Refresh' : <ProjectTipText name={name} root={root} />}>
         {cloneElement(children as ReactElement<{ 'aria-describedby'?: string }>, { 'aria-describedby': describedBy })}
       </Tip>
       {/* `hidden`: not read a second time in browse mode; aria-describedby still reads it. */}
