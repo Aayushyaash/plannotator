@@ -23,7 +23,7 @@ jobs:
   # or create a GitHub release even if the build itself succeeds.
   release-eligibility:
     if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs['dry-run'] == 'false'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -48,7 +48,7 @@ jobs:
         run: node scripts/check-release-version.mjs --tag "$RELEASE_TAG"
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -74,7 +74,7 @@ jobs:
 
   build:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Build job has NO id-token / attestations permissions. Compilation
     # itself doesn't need OIDC minting — those capabilities live in the
     # separate `attest` job below, which only runs on tag pushes. This
@@ -199,7 +199,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             binary: plannotator-linux-x64
           - os: windows-latest
             binary: plannotator-win32-x64.exe
@@ -897,7 +897,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             artifact: plannotator-linux-x64
 
     steps:
@@ -1060,7 +1060,7 @@ jobs:
       - install-script-smoke
       - release-security
     if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs['dry-run'] == 'false'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
@@ -1145,7 +1145,7 @@ jobs:
     # race-fail. `needs: attest` implicitly requires `build` too.
     needs: attest
     if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs['dry-run'] == 'false'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
@@ -1189,7 +1189,7 @@ jobs:
       - smoke-binaries
       - pi-extension-ai-runtime-windows
       - install-script-smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -1244,7 +1244,7 @@ jobs:
     needs:
       - build
       - npm-package
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
@@ -1322,7 +1322,7 @@ jobs:
       - npm-package
       - release-security
     if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs['dry-run'] == 'false'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: npm-publish
     permissions:
       contents: read
