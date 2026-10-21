@@ -71,8 +71,11 @@ the Inbox restart reconnected in 1.2 s; notify_reach steps 0/27/0/28 ms.
   fails on the previous code too.
 - CI (GitHub's Linux runner): the crashed leader was taken over in 2.6 s
   against a 1 s bound (2-3 ms on macOS). A crashed tab's lock is freed when the
-  browser notices the renderer died; on Linux the tab in front may take it
-  first through its check. The crash case's bound is now the stalled-leader
+  browser notices the renderer died, which on Linux takes about 3 s: the next
+  CI run recorded the takeover as `queue` (the lock came in line, not by a
+  steal) 3.0 s after the crash, and a crashed follower stopped counting 3.3 s
+  after (other cases on that runner: close 3 ms, reload 23 ms, freeze 567 ms,
+  stall 3.6 s by `steal`, WebKit stall 5.1 s, every tab exact). The crash case's bound is now the stalled-leader
   takeover (7 s: the check every 3 s, no answer in 2 s, room for a slow
   runner), two streams allowed for a moment, and each takeover records how it
   came (`queue` or `steal`; locally every case but the stall is `queue`). The

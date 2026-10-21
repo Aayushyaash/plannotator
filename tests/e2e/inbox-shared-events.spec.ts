@@ -262,8 +262,8 @@ async function handover(browser: Browser, how: 'close' | 'reload' | 'crash' | 'f
   expect(await leaders(w.pages)).toHaveLength(1);
   // A leader that closes or reloads frees its lock at once: the next tab leads within a second. A frozen one steps
   // down at its freeze event (2 s on a slow machine). A crashed one frees its lock when the browser notices the
-  // renderer died: at once on macOS (2 ms), 2.6 s on GitHub's Linux runners, where the tab in front may take it first
-  // (its check every 3 s, no answer in 2 s); either way within the takeover a stalled leader gets.
+  // renderer died: at once on macOS (2 ms), about 3 s on GitHub's Linux runners; were it longer, the tab in front
+  // would take it first (its check every 3 s, no answer in 2 s). Either way within the takeover a stalled leader gets.
   const bound = how === 'stall' || how === 'crash' ? 7000 : how === 'freeze' ? 2000 : 1000;
   expect(takeover.value!).toBeLessThan(bound);
   expect(frontLongestGapMs).toBeLessThan(bound + 500);
@@ -399,7 +399,7 @@ test('notify_reach follows the tabs: open, a follower closes, a follower crashes
   // A new tab joins.
   await openTab(w);
   timeline.tabOpenedMs = (await waitFor(windows, (r) => r.windows === 2)).ms;
-  // A crashed tab is seen when the browser frees its lock: at once on macOS, seconds later on GitHub's Linux runners.
+  // A crashed tab is seen when the browser frees its lock: at once on macOS, about 3 s later on GitHub's Linux runners.
   for (const [step, ms] of Object.entries(timeline)) expect(ms).toBeLessThan(step === 'followerCrashedMs' ? 8000 : 3000);
   results.reach = timeline;
 });
