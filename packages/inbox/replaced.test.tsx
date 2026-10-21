@@ -283,14 +283,14 @@ test.skipIf(!hasDom)('the stale guard: a pick replaced while the person writes s
   expect(document.activeElement?.textContent).toBe('Send');
 
   // Once per replacement: Send now goes, with the words only (no pick).
-  // With no pick in it, the Send leaves the questions open (Keep open by
-  // default, approval "inbox-words-only-reply"): one reply, the words.
+  // The Send leaves the questions open (Keep open by default, approval
+  // "inbox-explicit-skip"): one reply, the words.
   act(() => button(el, 'Send').click());
   await settle();
   const replies = posted.filter((p) => p.path.endsWith('/reply'));
   expect(replies).toHaveLength(1);
   expect((replies[0]!.body as { questions: unknown[] }).questions).toEqual([]);
-  expect((replies[0]!.body as { skip_unanswered?: boolean }).skip_unanswered).toBe(false);
+  expect((replies[0]!.body as { skip?: unknown }).skip).toBeUndefined();
   expect((replies[0]!.body as { words: string }).words).toBe(text.value.trim());
 });
 
