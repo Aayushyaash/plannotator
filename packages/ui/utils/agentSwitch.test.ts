@@ -118,6 +118,24 @@ describe("agent switch settings", () => {
     expect(getEffectiveAgentName(settings)).toBe("build");
   });
 
+  test("Custom with its name cleared removes the old name, so that agent is not revived", () => {
+    const { store, jar } = freshStore({ [SWITCH_COOKIE]: "custom", [CUSTOM_COOKIE]: "old-agent" });
+    expect(getEffectiveAgentName(getAgentSwitchSettings("plan", store))).toBe("old-agent");
+    saveAgentSwitchSettings({ switchTo: "custom", customName: "" }, store);
+    expect(jar.values.has(CUSTOM_COOKIE)).toBe(false);
+    // A later load over the same cookies (a fresh store) switches to nobody.
+    const reload = new ConfigStoreForTest();
+    expect(getEffectiveAgentName(getAgentSwitchSettings("plan", reload))).toBeUndefined();
+  });
+
+  test("config.json's bare \"custom\" is not paired with a leftover cookie name", () => {
+    const { store } = freshStore({ [CUSTOM_COOKIE]: "old-agent" });
+    store.init({ agentSwitch: "custom" });
+    const settings = getAgentSwitchSettings("plan", store);
+    expect(settings).toEqual({ switchTo: "custom" });
+    expect(getEffectiveAgentName(settings)).toBeUndefined();
+  });
+
   test("does not emit custom as an agent when no custom name is set", () => {
     expect(getEffectiveAgentName({ switchTo: "custom" })).toBeUndefined();
   });

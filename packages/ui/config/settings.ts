@@ -111,6 +111,9 @@ function writeAgentSwitchCookies(choice: AgentSwitchChoice | null): void {
   if (!choice) return;
   storage.setItem(AGENT_SWITCH_COOKIE, choice.switchTo);
   if (choice.customName) storage.setItem(AGENT_SWITCH_CUSTOM_COOKIE, choice.customName);
+  // Custom with its name cleared: drop the old name, or the next read would
+  // pair it with "custom" and switch to that old agent again.
+  else if (choice.switchTo === 'custom') storage.removeItem(AGENT_SWITCH_CUSTOM_COOKIE);
 }
 
 const DIFF_LINE_BG_INTENSITY_VALUES = ['subtle', 'normal', 'strong'] as const;
@@ -696,7 +699,8 @@ export const SETTINGS = {
     serverKey: 'agentSwitch',
     fromServer: (sc: Record<string, unknown>) => {
       const choice = parseAgentSwitchConfig(sc.agentSwitch);
-      if (!choice || choice.customName) return choice;
+      // Custom with no name means no switch: never pair it with an old name.
+      if (!choice || choice.customName || choice.switchTo === 'custom') return choice;
       // A plain choice keeps the name typed in the Custom field earlier, so
       // picking Custom again shows it (the cookie is the only place it lives).
       const customName = storage.getItem(AGENT_SWITCH_CUSTOM_COOKIE);
