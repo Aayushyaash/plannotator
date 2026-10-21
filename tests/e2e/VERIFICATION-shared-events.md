@@ -41,7 +41,14 @@ reference's lines after its subscribe cursor, once each, in order.
 | Two origins (`localhost` and `inbox-second.localhost`, standing in for the tailnet address) | Chromium | 2 streams, one leader per origin, every tab exact |
 | No Web Locks (removed by an init script) | Chromium, WebKit | each tab its own stream (3 streams for 3 tabs), as before |
 | Soak: 5 minutes, tabs opening, closing, reloading and crashing at random (87 opens, 51 closes, 48 reloads, 34 crashes) while an agent wrote 5,577 messages | Chromium | streams never above 1 in 231 samples; every surviving tab exact; every leaving tab in order and never twice |
+| Soak, second run on the final build: 4 minutes (68 opens, 40 closes, 35 reloads, 27 crashes), 4,501 messages | Chromium | streams never above 1 in 179 samples; 4/4 surviving tabs exact; all 102 tabs that left were in order and never twice |
 | Page errors | both | none |
+
+The whole Chromium and WebKit suite ran twice; the second, final run (19 tests,
+6.2 min, on the last build) gave the same results: takeovers 2 ms (close),
+7 ms (reload), 2 ms (crash), 222 ms (freeze), 12 ms (WebKit close); the old
+build's seventh tab stalled 8 s and loaded 546 ms after one tab closed; the
+Inbox restart reconnected in 1.0 s.
 
 ## Unit and server tests
 
@@ -52,6 +59,7 @@ reference's lines after its subscribe cursor, once each, in order.
 | `packages/server/inbox*.test.ts` | all pass (the door's health key list gained `event_streams`) |
 | `packages/inbox` DOM tests (`DOM_TESTS=1 --isolate`), which run the fallback path (happy-dom has no Web Locks) | 552 pass |
 | Typecheck (`bun run typecheck`) | clean |
+| Existing e2e specs that read the event stream (Chromium, compiled binary): `notifications`, `inbox-sound`, `inbox`, `inbox-reply-drafts`, `inbox-send-now`, `inbox-open-stays-put`, `inbox-seen-on-sight`, `inbox-restart`, `inbox-updates` | 66 pass, 1 skipped (as on main) |
 
 ## Not verified
 
