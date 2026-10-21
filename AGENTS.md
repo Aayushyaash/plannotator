@@ -953,7 +953,25 @@ the plan (the plan file when it is an absolute `.md` regular file within the
    approved") and `setMode` to the reviewer's permission mode. Modules sit above
    the settings hooks in that chain, so the plugin's own PermissionRequest
    command hook never runs: no second review. A different plan opens a new
-   review instead.
+   review instead. **When a plugin seated above sends
+   `classic.PermissionRequest` past the mod** (Claude Code's built-in guard
+   `cc-plugin-sec-default` does on Team/Enterprise accounts, #2007; the
+   transcript says "its classic.PermissionRequest hook was skipped"), the
+   plugin's command hook IS reached. So while the approved call is in flight
+   the mod also writes the approval (`{ v: 1, hash, plan, permissionMode?, at }`)
+   to `<data dir>/claude-code-mod/<session>/plan-approvals/<tool use id>.json`
+   (owner-only folder; plan.ts `PLAN_APPROVALS_DIR`, launch.ts
+   `planApprovalPathOf`) and removes it when the call settles. The classic hook
+   (`apps/hook/server/mod-plan-approval.ts`, `takeModPlanApproval`, before
+   anything else in the Claude Code plan path) takes a record for this
+   `session_id` whose hash matches the requested plan (the #1667 file rule,
+   or the inline plan), at most 10 minutes old, never for a subagent, deletes
+   it (answers once) and prints the same allow (`updatedInput.plan`, `setMode`)
+   without starting a server. Without the guard the record is written and
+   removed and nothing else changes. A CLI older than this ignores the record
+   (the double approval remains until the binary is updated).
+   `mod-plan-approval.test.ts` keeps the mod's copy of the names equal and
+   runs the hook as a process.
 Decisions: deny and answers-only submit the denied / answered prompt; approval
 submits the approved (or approved-with-notes) prompt plus
 `PLAN_APPROVAL_NEXT_STEP` ("Call ExitPlanMode once more …"), the two-hop

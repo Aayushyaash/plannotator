@@ -106,6 +106,42 @@ describe('register', () => {
     expect(launch?.slice(5)).toEqual(['plannotator', 'claude-mod-plan'])
   })
 
+  // #2007: an organization's guard plugin (cc-plugin-sec-default) can send
+  // classic.PermissionRequest past the mod, so the plugin's own command hook
+  // gets the approved call. While the call runs, the approval is on disk for
+  // it; once the call settles it is gone.
+  test('approved: the approved call is recorded for the classic hook while it runs, then removed', async ($: any, on: any) => {
+    const w = world(on, {
+      run: (argv, files) => {
+        if (argv[3] !== 'plannotator-rm') return undefined
+        files.delete(argv[4]!)
+        return { exitCode: 0, stdout: '', stderr: '' }
+      },
+    })
+    const plan = '# Plan\n\n1. Ship.\n'
+    let during: any[] = []
+    on('tool.call', ($: any, e: any) => {
+      during = [...w.files.keys()].filter((path) => path.includes('/plan-approvals/')).map((path) => ({ path, ...JSON.parse(w.files.get(path)!) }))
+      return { result: 'ExitPlanMode ran' }
+    })
+    await $.session.start(SESSION)
+    await $.tool.call({ tool: 'ExitPlanMode', plan })
+    const dir = w.runs.find((argv) => argv[3] === 'plannotator-launch')?.[4]
+    w.files.set(
+      `${dir}/result.json`,
+      JSON.stringify({ v: 1, surface: 'plan', decision: 'approved', message: 'Plan approved.', noop: false, approvedPlan: plan, permissionMode: 'acceptEdits' }),
+    )
+    await w.clock.advance(1_000)
+
+    const answer = await $.tool.call({ tool: 'ExitPlanMode', plan })
+
+    expect(answer.result).toBe('ExitPlanMode ran')
+    expect(during).toHaveLength(1)
+    expect(during[0].path.startsWith('/home/me/.plannotator/claude-code-mod/session-1/plan-approvals/')).toBe(true)
+    expect(during[0]).toMatchObject({ v: 1, plan, permissionMode: 'acceptEdits' })
+    expect([...w.files.keys()].filter((path) => path.includes('/plan-approvals/'))).toEqual([])
+  })
+
   test('the decision arrives later as a plugin turn', async ($: any, on: any) => {
     const w = world(on)
     await $.session.start(SESSION)
