@@ -15,6 +15,7 @@ import {
 	loadPlannotatorBrowser,
 } from "./plannotator-browser-runtime.ts";
 import { isBrowserSessionStoppedError } from "./browser-session-error.ts";
+import { getProcessPiReviewRegistry } from "./plannotator-tool-host.ts";
 import {
 	newSessionEventId,
 	openSessionEvent,
@@ -410,7 +411,9 @@ export function registerPlannotatorEventListeners(
 			piSessionId = undefined;
 		}
 		return openSessionEvent(pi, () => sessionLive, {
-			id: newSessionEventId(),
+			// Unique among the open reviews: the ones announced, and the ones
+			// the `plannotator` tool lists (the process registry).
+			id: newSessionEventId((id) => getProcessPiReviewRegistry().openAll().some((review) => review.id === id)),
 			action,
 			url,
 			...(piSessionId ? { piSessionId } : {}),

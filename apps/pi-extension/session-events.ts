@@ -144,8 +144,53 @@ function emitSafely(opener: EventBusOwner, useOpener: boolean, channel: string, 
 	});
 }
 
-/** A fresh `pn-` id for a review the registry does not track (`plannotator:request`). */
-export function newSessionEventId(): string {
+/**
+ * The ids of every review announced and not yet closed, in this process
+ * (every extension instance). Versioned like the slot.
+ */
+const OPEN_IDS_KEY = "__plannotatorPiSessionEventOpenIds_v1";
+
+function openIds(): Set<string> {
+	const store = globalThis as typeof globalThis & Record<string, unknown>;
+	const existing = store[OPEN_IDS_KEY];
+	if (existing instanceof Set) return existing as Set<string>;
+	const created = new Set<string>();
+	store[OPEN_IDS_KEY] = created;
+	return created;
+}
+
+/** Whether an announced review still holds `id` (not yet closed). */
+export function isSessionEventIdOpen(id: string): boolean {
+	return openIds().has(id);
+}
+
+/**
+ * A fresh `pn-` id for a review the registry does not track
+ * (`plannotator:request`), unique among the open reviews: never an id an
+ * announced review still holds, nor one `taken` names (the caller passes the
+ * process registry's open ids). Tries the next value on a clash, as the
+ * registry does.
+ */
+export function newSessionEventId(
+	taken: (id: string) => boolean = () => false,
+	randomHex: () => string = () => randomBytes(3).toString("hex"),
+): string {
+	const open = openIds();
+	let value = Number.parseInt(randomHex(), 16) || 0;
+	for (let attempt = 0; attempt < 0x1000000; attempt += 1) {
+		const id = `pn-${value.toString(16).padStart(6, "0")}`;
+		let clash = open.has(id);
+		if (!clash) {
+			try {
+				clash = taken(id);
+			} catch {
+				clash = false;
+			}
+		}
+		if (!clash) return id;
+		value = (value + 1) % 0x1000000;
+	}
+	// Every id is open: cannot happen in practice (16.7 million reviews).
 	return `pn-${randomBytes(3).toString("hex")}`;
 }
 
@@ -176,6 +221,7 @@ export function openSessionEvent(
 		...(identity.reviewId ? { reviewId: identity.reviewId } : {}),
 		...(identity.requestId ? { requestId: identity.requestId } : {}),
 	};
+	openIds().add(event.id);
 	emitSafely(pi, liveNow(isLive), PLANNOTATOR_SESSION_OPENED_CHANNEL, { ...event });
 	let closed = false;
 	return {
@@ -183,6 +229,7 @@ export function openSessionEvent(
 		close(end) {
 			if (closed) return;
 			closed = true;
+			openIds().delete(event.id);
 			const closedEvent: PlannotatorSessionClosedEvent = {
 				...event,
 				outcome: end.outcome,

@@ -33,12 +33,14 @@ import {
 	PLANNOTATOR_SESSION_CLOSED_CHANNEL,
 	PLANNOTATOR_SESSION_OPENED_CHANNEL,
 	claimSessionEventBus,
+	newSessionEventId,
 	openSessionEvent,
 	releaseSessionEventBus,
 	type PlannotatorSessionClosedEvent,
 	type PlannotatorSessionOpenedEvent,
 } from "./session-events.ts";
 import { setPiHost } from "./pi-host.ts";
+import { createPiReviewRegistry } from "./plannotator-tool-host.ts";
 
 const STALE_MESSAGE =
 	"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload().";
@@ -534,6 +536,32 @@ describe("where an event goes when its opener is gone", () => {
 		}
 		expect(logged).toEqual([expect.stringContaining(`could not emit ${PLANNOTATOR_SESSION_OPENED_CHANNEL}`)]);
 		expect(live.got).toEqual([PLANNOTATOR_SESSION_OPENED_CHANNEL]);
+	});
+});
+
+describe("pn- ids are unique among the open reviews", () => {
+	test("a plannotator:request review's id skips ids open reviews hold, and frees its own on close", async () => {
+		const sink = { events: { emit: () => undefined } };
+		pis.push(sink);
+		const held = openSessionEvent(sink, () => true, { id: "pn-00000a", action: "annotate", url: "http://localhost:1" });
+		// Open in the registry (the caller's predicate) and announced: both skipped.
+		const registryIds = new Set(["pn-00000b"]);
+		expect(newSessionEventId((id) => registryIds.has(id), () => "00000a")).toBe("pn-00000c");
+		held.close({ outcome: "submitted" });
+		expect(newSessionEventId((id) => registryIds.has(id), () => "00000a")).toBe("pn-00000a");
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	});
+
+	test("the registry never hands out an id a plannotator:request review holds", async () => {
+		const sink = { events: { emit: () => undefined } };
+		pis.push(sink);
+		const held = openSessionEvent(sink, () => true, { id: "pn-00001a", action: "code-review", url: "http://localhost:2" });
+		const { isSessionEventIdOpen } = await import("./session-events.ts");
+		const registry = createPiReviewRegistry({ randomHex: () => "00001a", isTaken: isSessionEventIdOpen });
+		const review = registry.add({ kind: "annotate", subject: "notes.md", url: "http://localhost:3", owner: "s" });
+		expect(review.id).toBe("pn-00001b");
+		held.close({ outcome: "submitted" });
+		await new Promise((resolve) => setTimeout(resolve, 5));
 	});
 });
 

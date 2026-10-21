@@ -458,11 +458,14 @@ annotate-last / plan-review (`plannotator-events.ts`, which now starts the
 session and waits on it itself so the URL is known before the decision).
 Opened: `{ id, action, url, openedAt, piSessionId?, reviewId?, requestId? }`,
 `id` the registry's `pn-` id (a fresh `pn-` id for `plannotator:request`
-reviews, which are not in the registry), `action` one of `plan-review`,
+reviews, which are not in the registry; unique among the open reviews both
+ways: `newSessionEventId` skips ids the registry or an announced review holds,
+and the process registry skips ids an announced review holds,
+`isSessionEventIdOpen`), `action` one of `plan-review`,
 `code-review`, `annotate`, `annotate-last`. Closed: the same plus `outcome`
 (`approved`, `submitted`, or `closed` with `closedBy` `reviewer` | `agent` |
 `stopped` | `error`) and `closedAt` (`sessionEndOf` / `sessionEndOfError`).
-The handle emits closed once. Archive emits neither. **Cache safety:** they go
+The handle emits closed at most once; an event with no live bus is dropped. Archive emits neither. **Cache safety:** they go
 on `pi.events` only, never a message, entry, system prompt or tool list.
 **Stale runtimes (#1864):** every emit runs on a microtask inside try/catch;
 it goes through the opener's `pi` when the opener's session was live at the

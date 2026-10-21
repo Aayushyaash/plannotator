@@ -315,7 +315,7 @@ Plannotator emits one event when a review opens in the browser and one when it e
 }
 ```
 
-Each review gets exactly one of each, opened first. `stopped` means the review ended without a decision: plan mode was left, the session ended with a plan review open, or its server was stopped. A review that ends after `/reload` or `/resume` still sends its closed event, on the event bus of the session that is live then. The archive browser emits neither. Listen with `pi.events.on("plannotator:session-opened", ...)`; the constants and types are exported from `plannotator-events` as a typing convenience.
+Each review gets at most one of each, opened first. An event is dropped (never thrown) when no live event bus is there to take it: for example, a `plannotator:request` review that closes after `/reload` before the new session has started (no instance has claimed the bus yet), or with no Pi session live at all. Pair them by `id`; a host that runs several Pi sessions in one process can tell them apart by `piSessionId`. `stopped` means the review ended without a decision: plan mode was left, the session ended with a plan review open, or its server was stopped. A review that ends after `/reload` or `/resume` still sends its closed event, on the event bus of the session that is live then. The archive browser emits neither. Listen with `pi.events.on("plannotator:session-opened", ...)`; the constants and types are exported from `plannotator-events` as a typing convenience.
 
 These events go to Pi's extension event bus only. They add nothing to the conversation, the system prompt or the tool list, so the model's prompt cache is unaffected.
 
