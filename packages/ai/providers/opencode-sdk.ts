@@ -185,6 +185,7 @@ export class OpenCodeProvider implements AIProvider {
 			client,
 			model: options.model,
 			parentSessionId: null,
+			firstEventTimeoutMs: this.config.firstEventTimeoutMs,
 		});
 		return session;
 	}
@@ -212,6 +213,7 @@ export class OpenCodeProvider implements AIProvider {
 			client,
 			model: options.model,
 			parentSessionId: parentId,
+			firstEventTimeoutMs: this.config.firstEventTimeoutMs,
 		});
 	}
 
@@ -228,6 +230,7 @@ export class OpenCodeProvider implements AIProvider {
 			client,
 			model: undefined,
 			parentSessionId: null,
+			firstEventTimeoutMs: this.config.firstEventTimeoutMs,
 		});
 	}
 
@@ -301,6 +304,8 @@ interface SessionConfig {
 	/** Model in "providerID/modelID" format. */
 	model?: string;
 	parentSessionId: string | null;
+	/** How long to wait for the event stream's first frame before prompting. */
+	firstEventTimeoutMs?: number;
 }
 
 class OpenCodeSession extends BaseSession {
@@ -337,17 +342,42 @@ class OpenCodeSession extends BaseSession {
 			// Open the SSE stream and wait for the first frame *before* prompting.
 			// OpenCode 1.18+ can finish a short turn before a late subscriber
 			// connects; Ask AI then hangs until the browser reports Failed to fetch.
-			const { stream } = await this.config.client.event.subscribe(
-				undefined,
-				{ signal },
-			);
-			const iterator = stream[Symbol.asyncIterator]();
+			// The subscription has its own controller (aborted with the query) so a
+			// first frame that never comes can end it too: the SDK's stream retries
+			// a failed connection forever, and an async generator's return() waits
+			// behind a pending next().
+			const subscription = new AbortController();
+			const abortSubscription = () => subscription.abort();
+			signal.addEventListener("abort", abortSubscription, { once: true });
+			if (signal.aborted) subscription.abort();
+			let iterator: AsyncIterator<{ type?: string; properties?: Record<string, unknown> }> | null = null;
 
 			try {
+				const { stream } = await this.config.client.event.subscribe(
+					undefined,
+					{ signal: subscription.signal },
+				);
+				iterator = stream[Symbol.asyncIterator]();
 				// First frame only proves the subscriber is live. Do not treat it as
 				// this turn — it can be server.connected or leftover idle from a
 				// previous query on the same session.
-				const first = await iterator.next();
+				const first = await nextEventWithin(
+					iterator,
+					this.config.firstEventTimeoutMs ?? OPENCODE_FIRST_EVENT_TIMEOUT_MS,
+					signal,
+				);
+				if (first === "aborted") {
+					yield { type: "error", error: "OpenCode query aborted.", code: "provider_error" };
+					return;
+				}
+				if (first === "timeout") {
+					yield {
+						type: "error",
+						error: "OpenCode's event stream did not connect, so the question was not sent.",
+						code: "provider_error",
+					};
+					return;
+				}
 				if (first.done) {
 					yield {
 						type: "error",
@@ -381,7 +411,7 @@ class OpenCodeSession extends BaseSession {
 
 				const state = createOpenCodeQueryState();
 				while (!signal.aborted) {
-					const next = await iterator.next();
+					const next = await iterator!.next();
 					if (next.done) break;
 					const { messages, done } = consumeOpenCodeEvent(
 						next.value,
@@ -400,7 +430,10 @@ class OpenCodeSession extends BaseSession {
 					code: "provider_error",
 				};
 			} finally {
-				await iterator.return?.();
+				// Abort first: it ends a pending next(), which return() waits behind.
+				signal.removeEventListener("abort", abortSubscription);
+				subscription.abort();
+				void Promise.resolve(iterator?.return?.()).catch(() => {});
 			}
 		} catch (err) {
 			yield {
@@ -441,6 +474,34 @@ class OpenCodeSession extends BaseSession {
 /** Returns true for events that should terminate the query when mapped to an error. */
 function isTerminalEvent(eventType: string): boolean {
 	return eventType === "session.error" || eventType === "session.status";
+}
+
+/** How long Ask AI waits for OpenCode's event stream to send its first frame. */
+export const OPENCODE_FIRST_EVENT_TIMEOUT_MS = 10_000;
+
+/**
+ * The iterator's next result, or "timeout" / "aborted" when neither comes
+ * first. The caller ends the pending next() itself (by aborting its stream).
+ */
+export async function nextEventWithin<T>(
+	iterator: AsyncIterator<T>,
+	timeoutMs: number,
+	signal: AbortSignal,
+): Promise<IteratorResult<T> | "timeout" | "aborted"> {
+	if (signal.aborted) return "aborted";
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let onAbort: (() => void) | undefined;
+	const stop = new Promise<"timeout" | "aborted">((resolve) => {
+		timer = setTimeout(() => resolve("timeout"), timeoutMs);
+		onAbort = () => resolve("aborted");
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		return await Promise.race([iterator.next(), stop]);
+	} finally {
+		clearTimeout(timer);
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+	}
 }
 
 export function openCodeEventSessionId(

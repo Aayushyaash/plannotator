@@ -243,3 +243,117 @@ describe("no eager opencode spawn at runtime startup", () => {
 		});
 	}
 });
+
+/**
+ * Ask AI subscribes to OpenCode's events and waits for the first frame before
+ * it sends the question, so a short turn cannot finish before anyone listens.
+ * What regresses if this fails: a stream that never sends a frame (the SDK
+ * retries a refused connection forever) leaves Ask AI hanging with no answer
+ * and no error; or the question is sent before the stream is live.
+ */
+describe("OpenCode Ask AI event stream", () => {
+	type Event = { type: string; properties: Record<string, unknown> };
+
+	/** A stream that yields queued events and ends when its signal aborts. */
+	function fakeStream(signal: AbortSignal) {
+		const queue: Event[] = [];
+		let wake: (() => void) | null = null;
+		const push = (event: Event) => {
+			queue.push(event);
+			wake?.();
+		};
+		signal.addEventListener("abort", () => wake?.(), { once: true });
+		const stream = (async function* () {
+			while (!signal.aborted) {
+				const event = queue.shift();
+				if (event) {
+					yield event;
+					continue;
+				}
+				await new Promise<void>((resolve) => {
+					wake = resolve;
+				});
+				wake = null;
+			}
+		})();
+		return { stream, push };
+	}
+
+	function fakeClient(onSubscribe: (push: (event: Event) => void) => void) {
+		const log: string[] = [];
+		const signals: AbortSignal[] = [];
+		let push: (event: Event) => void = () => {};
+		const client = {
+			session: {
+				create: async () => ({ data: { id: "oc_1" } }),
+				abort: async () => ({}),
+				promptAsync: async () => {
+					log.push("prompt");
+					push({ type: "message.part.delta", properties: { sessionID: "oc_1", field: "text", delta: "pong" } });
+					push({ type: "session.status", properties: { sessionID: "oc_1", status: { type: "idle" } } });
+					return {};
+				},
+			},
+			event: {
+				subscribe: async (_query: unknown, options: { signal: AbortSignal }) => {
+					log.push("subscribe");
+					signals.push(options.signal);
+					const made = fakeStream(options.signal);
+					push = (event) => {
+						log.push(`event:${event.type}`);
+						made.push(event);
+					};
+					onSubscribe(push);
+					return { stream: made.stream };
+				},
+			},
+		};
+		return { client, log, signals };
+	}
+
+	async function ask(client: unknown, timeoutMs = 10_000, onSession?: (session: { abort(): void }) => void) {
+		clientFactory = () => client;
+		const provider = new OpenCodeProvider({ type: "opencode-sdk", firstEventTimeoutMs: timeoutMs });
+		const session = await provider.createSession({ context: { mode: "plan-review", plan: { plan: "# Plan" } } } as never);
+		onSession?.(session);
+		const messages: Array<Record<string, unknown>> = [];
+		for await (const message of session.query("ping")) messages.push(message as Record<string, unknown>);
+		provider.dispose();
+		return messages;
+	}
+
+	test("sends the question only after the first frame, then streams the answer", async () => {
+		const { client, log, signals } = fakeClient((push) => {
+			setTimeout(() => push({ type: "server.connected", properties: {} }), 20);
+		});
+		const messages = await ask(client);
+		expect(log.slice(0, 3)).toEqual(["subscribe", "event:server.connected", "prompt"]);
+		expect(messages).toEqual([
+			{ type: "text_delta", delta: "pong" },
+			{ type: "result", sessionId: "oc_1", success: true },
+		]);
+		expect(signals[0]!.aborted).toBe(true);
+	});
+
+	test("a stream that never sends a frame ends with an error and no question sent", async () => {
+		const { client, log, signals } = fakeClient(() => {});
+		const started = Date.now();
+		const messages = await ask(client, 50);
+		expect(Date.now() - started).toBeLessThan(2_000);
+		expect(log).toEqual(["subscribe"]);
+		expect(messages).toHaveLength(1);
+		expect(messages[0]).toMatchObject({ type: "error", code: "provider_error" });
+		expect(String(messages[0]!.error)).toContain("did not connect");
+		// The subscription is closed, not left retrying in the background.
+		expect(signals[0]!.aborted).toBe(true);
+	});
+
+	test("Stop while waiting for the first frame ends the query at once", async () => {
+		const { client, log } = fakeClient(() => {});
+		const messages = await ask(client, 10_000, (session) => {
+			setTimeout(() => session.abort(), 20);
+		});
+		expect(log).toEqual(["subscribe"]);
+		expect(messages).toEqual([{ type: "error", error: "OpenCode query aborted.", code: "provider_error" }]);
+	});
+});
