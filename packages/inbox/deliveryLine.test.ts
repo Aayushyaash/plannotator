@@ -5,7 +5,8 @@
  * or the agent had to poll for it.
  */
 import { describe, expect, test } from 'bun:test';
-import { deliveryLine, sentRowLine, type DeliveryLineInput } from './deliveryLine';
+import { INBOX_SEND_NOW_SINCE } from '@plannotator/core/inbox-types';
+import { deliveryLine, restartNote, sentRowLine, type DeliveryLineInput } from './deliveryLine';
 
 const base: DeliveryLineInput = {
   name: 'Claude Code',
@@ -63,5 +64,46 @@ describe('the line under a sent reply', () => {
     expect(sentRowLine('Pi', true)).toBe('Queued for Pi; it gets this as its next turn.');
     expect(sentRowLine('Codex', false)).toBe('Saved for Codex. It sees it when it next reads this thread.');
     expect(sentRowLine('Codex', undefined)).toBe('Saved for Codex. It sees it when it next reads this thread.');
+  });
+});
+
+// The restart line (owner approval "restart-warning"): it explains a missing Send now, so it shows only
+// when the session works, has no Send now, and runs an older plugin; never for an engine too old for
+// Send now (a restart would not bring it, and the owner chose to say nothing about that).
+describe('restartNote', () => {
+  const outdated = { loaded: '0.28.21', installed: '0.28.23', fix: 'restart' as const };
+  const busy = { busy: true, idle_since: null, send_now: false, outdated, engine: '2.1.305', restart_command: 'cd ~/code/billing-api && claude --resume abc' };
+  test('busy, no Send now, an older plugin: the fix is /reload-plugins, with the resume command for the fallback', () => {
+    const note = restartNote(busy)!;
+    expect(note.fix).toBe('restart');
+    expect(note.command).toBe('cd ~/code/billing-api && claude --resume abc');
+    expect(note.updateCommand).toBeNull();
+  });
+  test('the same version reinstalled, and an older mod whose version is unknown, still lead with /reload-plugins', () => {
+    expect(restartNote({ ...busy, outdated: { loaded: '0.28.23', installed: '0.28.23', fix: 'restart' } })!.fix).toBe('restart');
+    expect(restartNote({ ...busy, outdated: { loaded: null, installed: '0.28.23', fix: 'restart' } })!.fix).toBe('restart');
+  });
+  test('the installed plugin is behind this Inbox: update the plugin first', () => {
+    const note = restartNote({ ...busy, outdated: { loaded: '0.28.23', installed: '0.28.23', fix: 'update_plugin', update_command: 'claude plugin update x' } });
+    expect(note!.fix).toBe('update_plugin');
+    expect(note!.updateCommand).toBe('claude plugin update x');
+  });
+  test('a session that loaded a plugin with Send now (0.28.24 on) lacks it for another reason: the line never blames the plugin', () => {
+    expect(INBOX_SEND_NOW_SINCE).toBe('0.28.24');
+    expect(restartNote({ ...busy, outdated: { loaded: '0.28.24', installed: '0.28.25', fix: 'restart' } })).toBeNull();
+    expect(restartNote({ ...busy, outdated: { loaded: '0.29.0', installed: '0.29.1', fix: 'restart' } })).toBeNull();
+    // A development build counts as having it; an unknown version (an older mod) and anything older do not.
+    expect(restartNote({ ...busy, outdated: { loaded: '0.0.0-dev', installed: '0.28.25', fix: 'restart' } })).toBeNull();
+    expect(restartNote({ ...busy, outdated: { loaded: null, installed: '0.28.25', fix: 'restart' } })).not.toBeNull();
+    expect(restartNote({ ...busy, outdated: { loaded: '0.28.23', installed: '0.28.25', fix: 'restart' } })).not.toBeNull();
+  });
+  test('nothing while idle, with Send now, up to date, for an engine too old, for Pi, or from an older Inbox', () => {
+    expect(restartNote({ ...busy, busy: false })).toBeNull();
+    expect(restartNote({ ...busy, send_now: true })).toBeNull();
+    expect(restartNote({ ...busy, outdated: null })).toBeNull();
+    expect(restartNote({ ...busy, engine: '2.1.290' })).toBeNull();
+    expect(restartNote({ ...busy, outdated: { loaded: '0.28.20', installed: '0.28.25', fix: 'update_extension' } })).toBeNull();
+    expect(restartNote({ busy: true, idle_since: null, send_now: false })).toBeNull();
+    expect(restartNote(null)).toBeNull();
   });
 });

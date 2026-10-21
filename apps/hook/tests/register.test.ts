@@ -631,6 +631,22 @@ describe('register', () => {
     expect(delivered).toBe(true)
   })
 
+  // The restart warning (owner approval "restart-warning"): the poll says what this process loaded, so the
+  // Inbox can tell a session on an older plugin. Through the engine's own `$.plugin.root` and `$.session.version()`.
+  test('the poll says what this process loaded: the plugin (its folder and load time) and the engine', async ($: any, on: any) => {
+    const calls: { url: string; body: any }[] = []
+    const w = world(on, { files: withRegistry(), fetch: inbox(TOOLS, calls, (path) => (path === '/api/inbox/bridge/poll' ? { commands: [] } : { ok: true })) })
+    on('session.version', () => ({ value: { version: '2.1.305', base: '2.1.305' } }))
+    await $.session.start(SESSION)
+    for (let second = 0; second < 3; second++) await w.clock.advance(1_000)
+    const polls = calls.filter((c) => c.url.endsWith('/api/inbox/bridge/poll'))
+    expect(polls.length).toBeGreaterThan(0)
+    const last = polls[polls.length - 1]!.body
+    expect(last.engine).toBe('2.1.305')
+    expect(typeof last.plugin?.root).toBe('string')
+    expect(typeof last.plugin?.loaded_at).toBe('number')
+  })
+
   test("a background subagent's turn does not hold the reply: the main loop is idle, so it arrives as a turn", async ($: any, on: any) => {
     const calls: { url: string; body: any }[] = []
     let delivered = false

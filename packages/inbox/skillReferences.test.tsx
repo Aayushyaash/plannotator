@@ -15,7 +15,8 @@
  *   (the per-comment list is off in the Inbox);
  * - New message: a clicked row inserts, and the session's wake carries the
  *   block ("this message");
- * - compose (a message the person starts): the picker in its field, Escape
+ * - compose (a message the person starts): the picker at the caret, portaled
+ *   into the dialog out of the scrolling body, Escape (even on a bare `/`)
  *   closing the picker before the dialog, the block on the Send, and the new
  *   thread folding it behind "Skills:";
  * - an agent's message is never folded, whatever it says.
@@ -365,9 +366,9 @@ test.skipIf(!hasDom)('a comment on an attached file: its skill rides the one blo
   // The window's own catalog is this computer's skills (the comment composers' picker reads it too).
   const { fetchSkillCatalog } = await import('@plannotator/ui/utils/skillCatalog');
   expect((await fetchSkillCatalog()).map((s) => s.name)).toEqual(['readback', 'write-better']);
-  // The comment waits to be sent: the foot offers "Edit the reply".
-  await until(() => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Edit the reply'), 'the waiting comment');
-  act(() => button(el, 'Edit the reply').click());
+  // The comment waits to be sent: the foot offers "Edit draft".
+  await until(() => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Edit draft'), 'the waiting comment');
+  act(() => button(el, 'Edit draft').click());
   await until(() => textarea(el) !== null, 'the reply box');
   await type(textarea(el), 'See my note.');
   act(() => button(el, 'Send').click());
@@ -397,6 +398,23 @@ test.skipIf(!hasDom)('compose (a message you start): the field takes a skill, th
   act(() => (dialog()!.querySelector('[data-compose-session="ses_compose"]') as HTMLElement).click());
   const field = dialog()!.querySelector('[data-compose-text] textarea.ib-rtext') as HTMLTextAreaElement;
   expect(field.getAttribute('aria-label')).toBe('Message');
+  // A bare `/` opens the picker at the caret: portaled into the dialog (a modal dialog is the top layer,
+  // so never the body), outside the message's scrolling body, which used to clip it under the footer.
+  await type(field, 'Plan the retry budget. /');
+  await until(() => menu() !== null, 'the skill picker on a bare /');
+  const anchor = menu()!.parentElement!;
+  expect(anchor.hasAttribute('data-skill-menu-anchor')).toBe(true);
+  expect(anchor.parentElement).toBe(dialog() as HTMLElement | null);
+  expect(menu()!.closest('.ib-cp-body')).toBeNull();
+  expect(menu()!.getAttribute('data-skill-menu-placement')).toBe('below');
+  expect(field.getAttribute('aria-controls')).toBe(menu()!.id);
+  // Escape on the bare trigger closes the picker, not the dialog (no "keep a draft?" question either).
+  await press(field, 'Escape');
+  expect(menu()).toBeNull();
+  expect(dialog()).not.toBeNull();
+  expect(dialog()!.querySelector('[data-compose-question]')).toBeNull();
+  // The dismissed trigger stays closed until the caret leaves it.
+  await type(field, 'Plan the retry budget.');
   await type(field, 'Plan the retry budget. /rea');
   await until(() => rows().join() === 'readback', 'the skill picker');
   // Escape closes the picker only, never the dialog.

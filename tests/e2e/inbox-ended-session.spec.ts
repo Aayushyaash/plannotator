@@ -221,8 +221,8 @@ test('the asking session stopped and another is live: the thread says so, Send a
   }
 
   await pane.getByText('Retry 3 times with backoff').click();
-  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M, not sent$/)).toBeVisible();
-  await pane.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' }).click();
+  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M · in your draft$/)).toBeVisible();
+  await pane.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' }).click();
   const box = pane.getByRole('textbox', { name: 'Reply to Pi' });
   const words = 'Go with backoff, but cap the total wait at 10 minutes so it finishes before the 2 AM export.';
   await box.fill(words);

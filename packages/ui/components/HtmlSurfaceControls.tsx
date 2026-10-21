@@ -31,6 +31,7 @@
  */
 import React from 'react';
 import { Tooltip } from './Tooltip';
+import { modKey } from '../utils/platform';
 import { formatShortcutBindingText, formatShortcutBindingTokens } from '../shortcuts/core';
 import { htmlAnnotateShortcuts } from '../shortcuts/plan-review/htmlAnnotate.shortcuts';
 
@@ -135,7 +136,7 @@ export interface HtmlSurfaceControlLabels {
 export const DEFAULT_HTML_SURFACE_CONTROL_LABELS: Required<
   Omit<HtmlSurfaceControlLabels, 'annotateLabel' | 'interactLabel'>
 > = {
-  annotateTitle: 'Annotate mode: click an element or select text to comment. Esc to interact',
+  annotateTitle: `Annotate mode: click an element or select text to comment; links open (${modKey}-click one to comment on it). Esc to interact`,
   interactTitle: 'Interact mode: clicks reach the page (text selection still comments). Click to annotate',
   hideTools: 'Hide tools',
   showTools: 'Show tools',

@@ -354,6 +354,7 @@ function lineRangeLabel(start: number, end: number): string {
 /** The small tag beside a row in the chip's list: the element, diagram part, or a guided-review comment's lines. */
 export function recordTag(record: InboxAnnotationRecord): string | null {
   if (record.guide) return lineRangeLabel(record.guide.line_start, record.guide.line_end);
+  if (record.message) return null;
   return annotationTag(annotationOf(record));
 }
 
@@ -469,6 +470,83 @@ export function exportFileLabel(
   return `${label} (image in ${whose} ${second} message ${place})`;
 }
 
+/** A comment on the text of an agent's message (approval "inbox-message-comments"), or false for any other annotation. */
+export function isMessageComment(record: InboxAnnotationRecord): boolean {
+  return record.message !== undefined;
+}
+
+/** A comment on a file (not a guided review's diff, not a message's text): what the file viewers list. */
+export function isFileComment(record: InboxAnnotationRecord): boolean {
+  return !record.guide && !record.message;
+}
+
+export const MESSAGE_FEEDBACK_HEADING = {
+  title: 'Feedback on your messages',
+  intro: 'The following feedback is on the text of your messages in this thread, one section per message. Each quote is the words I selected (as shown on screen) in your message.',
+};
+
+/** A message comment's section heading: "Feedback on your message from 2:58 PM (msg_…)", the time in the person's own time zone. */
+export function messageFeedbackLabel(record: Pick<InboxAnnotationRecord, 'message_id' | 'message'>, time: (iso: string) => string = whenTime): string {
+  const at = record.message ? time(record.message.at) : '';
+  return `Feedback on your message${at ? ` from ${at}` : ''} (${record.message_id})`;
+}
+
+/**
+ * One comment on a message's text: "Feedback on" the words selected, then
+ * the comment, every line of it quoted. The words are the rendered text, so
+ * they can span paragraphs and hold anything a message can (a code block, a
+ * line starting with `#`): words on one line sit inline in quotes, words on
+ * several lines go in a fenced block no line of theirs can close
+ * (`codeFenceFor`, as the guided-review export quotes code), so nothing in
+ * them reads as a heading or leaves a fence open.
+ */
+function messageCommentEntry(annotation: Annotation, number: number): string {
+  const words = annotation.originalText ?? '';
+  const label = annotation.isQuickLabel && annotation.text ? `[${annotation.text}] ` : '';
+  const multiline = /[\r\n]/.test(words);
+  let out = `### ${number}. ${label}Feedback on${multiline ? ':' : `: "${words}"`}\n`;
+  if (multiline) {
+    const fence = codeFenceFor(words);
+    out += `${fence}\n${words.replace(/\r\n?/g, '\n')}\n${fence}\n`;
+  }
+  if (!annotation.isQuickLabel && annotation.text) out += `${annotation.text.split(/\r\n|\r|\n/).map((line) => `> ${line}`).join('\n')}\n`;
+  return `${out}\n`;
+}
+
+/** Comments in the order their words come in the message: by block, then by where in it. */
+function compareInMessage(a: Annotation, b: Annotation): number {
+  return String(a.blockId ?? '').localeCompare(String(b.blockId ?? ''), undefined, { numeric: true }) || (a.startOffset ?? 0) - (b.startOffset ?? 0);
+}
+
+/**
+ * The comments on the text of agents' messages, as the feedback text a Send
+ * carries (approval "inbox-message-comments"): one section per message,
+ * oldest message first, under "Feedback on your message from <time> (<id>)",
+ * each comment quoting the words selected, then the comment. No line
+ * numbers: the words are what find the place.
+ */
+export function messageFeedback(records: readonly InboxAnnotationRecord[], time: (iso: string) => string = whenTime): string {
+  const messages = records.filter((record) => record.message);
+  if (messages.length === 0) return '';
+  const byMessage = new Map<string, { at: string; annotations: Annotation[] }>();
+  for (const record of messages) {
+    const entry = byMessage.get(record.message_id) ?? { at: record.message!.at, annotations: [] };
+    entry.annotations.push(annotationOf(record));
+    byMessage.set(record.message_id, entry);
+  }
+  const ordered = [...byMessage].sort(([idA, a], [idB, b]) => a.at.localeCompare(b.at) || idA.localeCompare(idB));
+  let out = `# ${MESSAGE_FEEDBACK_HEADING.title}\n\n${MESSAGE_FEEDBACK_HEADING.intro}\n\n`;
+  for (const [id, entry] of ordered) {
+    const list = [...entry.annotations].sort(compareInMessage);
+    out += `## ${messageFeedbackLabel({ message_id: id, message: { at: entry.at } }, time)}\n\n`;
+    out += `I've reviewed this message and have ${list.length} piece${list.length === 1 ? '' : 's'} of feedback:\n\n`;
+    list.forEach((annotation, index) => {
+      out += messageCommentEntry(annotation, index + 1);
+    });
+  }
+  return `${out}---`;
+}
+
 export const ATTACHMENT_FEEDBACK_HEADING = {
   title: 'Feedback on the attached files',
   intro: 'The following feedback is on the files you attached, one section per file and version.',
@@ -481,8 +559,9 @@ export const ATTACHMENT_AND_IMAGE_FEEDBACK_HEADING = {
 };
 
 /**
- * The feedback text a Send carries after the picks: Plannotator's export of
- * the annotations (the same entry renderer `exportAnnotations` uses), one
+ * The feedback text a Send carries after the picks: the comments on the text
+ * of agents' messages (`messageFeedback`), then Plannotator's export of the
+ * files' annotations (the same entry renderer `exportAnnotations` uses), one
  * section per file and version, then the comments on guided reviews' diffs
  * (`guideFeedback`). `texts` holds each version's text, keyed
  * `<attachment id>\0<version>`, so line numbers name the lines the person read.
@@ -493,14 +572,22 @@ export function attachmentFeedback(
   texts: ReadonlyMap<string, string>,
   projectRoot: string,
   /** The person's own messages (their images are named "image in my … message"). */
-  options: { personMessageIds?: ReadonlySet<string> } = {},
+  options: {
+    personMessageIds?: ReadonlySet<string>;
+    /**
+     * The names of the agents a comment tags with `@` (approval "inbox-tag-agents"): the export marks
+     * which comment carried a tag ("Tagged Pi"). Absent: tags are not named.
+     */
+    tagNames?: (ids: readonly string[]) => string[];
+  } = {},
 ): string {
   if (records.length === 0) return '';
+  const messages = messageFeedback(records);
   let inlineImages = false;
   const groups = new Map<string, { annotations: Annotation[]; markdown?: string; blocks: Block[]; video?: { durationMs?: number } }>();
   for (const record of records) {
-    // Comments on a guided review's diff go in their own section, after the files'.
-    if (record.guide) continue;
+    // Comments on a guided review's diff go in their own section, after the files'; a message's text has its own, before them.
+    if (record.guide || record.message) continue;
     const attachment = attachments.find((a) => a.id === record.attachment_id) ?? attachments.find((a) => a.path === record.path);
     const sent = record.version !== 'current';
     if (!attachment) {
@@ -546,7 +633,20 @@ export function attachmentFeedback(
       });
     }
   }
+  // A comment that tags agents says so under its heading, after a video's moment (export copies only).
+  if (options.tagNames) {
+    for (const group of groups.values()) {
+      group.annotations = group.annotations.map((annotation) => {
+        const ids = Array.isArray(annotation.mentions) ? annotation.mentions : [];
+        const names = ids.length > 0 ? options.tagNames!(ids) : [];
+        if (names.length === 0) return annotation;
+        const line = `Tagged ${names.join(', ')}: this comment sends the reply to ${names.length === 1 ? 'it' : 'them'} too.`;
+        const before = (annotation as Annotation & { exportLocation?: string }).exportLocation;
+        return { ...annotation, exportLocation: before ? `${before} · ${line}` : line } as Annotation;
+      });
+    }
+  }
   const entries = new Map([...groups].map(([label, group]) => [label, { annotations: group.annotations, globalAttachments: [], blocks: group.blocks }]));
-  const files = records.some((record) => !record.guide) ? exportLinkedDocAnnotations(entries, inlineImages ? ATTACHMENT_AND_IMAGE_FEEDBACK_HEADING : ATTACHMENT_FEEDBACK_HEADING).trim() : '';
-  return [files, guideFeedback(records)].filter(Boolean).join('\n\n');
+  const files = records.some(isFileComment) ? exportLinkedDocAnnotations(entries, inlineImages ? ATTACHMENT_AND_IMAGE_FEEDBACK_HEADING : ATTACHMENT_FEEDBACK_HEADING).trim() : '';
+  return [messages, files, guideFeedback(records)].filter(Boolean).join('\n\n');
 }

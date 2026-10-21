@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A backstop, not a budget: green runs take 16-19 minutes. Some DOM tests
     # run on fake timers, where bun's per-test timeout cannot fire, so a stuck
     # await would otherwise idle until GitHub's 6-hour default.
@@ -127,6 +127,7 @@ jobs:
           packages/ui/components/DiagramBlock.anchor.test.tsx
           packages/ui/components/DiagramBlock.askAI.test.tsx
           packages/ui/components/Viewer.askAISelectionLine.test.tsx
+          packages/ui/components/Viewer.textComments.test.tsx
           packages/ui/components/ImageLightbox.test.tsx
           packages/ui/components/HostTitle.dom.test.tsx
           packages/inbox/images.test.tsx
@@ -138,7 +139,9 @@ jobs:
           packages/inbox/updates.test.tsx
           packages/inbox/whatsNewLink.test.tsx
           packages/inbox/whatsNewHeader.test.tsx
+          packages/inbox/whatsNewImages.test.tsx
           packages/inbox/replaced.test.tsx
+          packages/inbox/reask.test.tsx
           packages/inbox/threadFolding.test.tsx
           packages/inbox/pasteTarget.test.ts
           packages/inbox/seenOnSight.test.tsx
@@ -160,16 +163,25 @@ jobs:
           packages/inbox/listHeaderCompose.test.tsx
           packages/inbox/composeThread.test.tsx
           packages/inbox/sendNow.test.tsx
+          packages/inbox/tagAgents.test.tsx
+          packages/inbox/restartWarning.test.tsx
           packages/inbox/pasteFiles.test.tsx
           packages/inbox/markRead.test.tsx
           packages/inbox/ack.test.tsx
           packages/inbox/wordsOnlyTwoAsks.test.tsx
+          packages/inbox/replyDrafts.test.tsx
+          packages/inbox/skipNote.test.tsx
           packages/inbox/projectMenu.test.tsx
+          packages/inbox/rowMenu.test.tsx
           packages/inbox/fileBack.test.tsx
           packages/inbox/archived.test.tsx
           packages/inbox/openStaysPut.test.tsx
+          packages/inbox/clickToRefresh.test.tsx
+          packages/inbox/tabCountWindow.test.tsx
           packages/inbox/phoneList.test.tsx
           packages/inbox/listLabels.test.tsx
+          packages/inbox/listRowMemo.test.tsx
+          packages/inbox/rowTicks.test.tsx
           packages/inbox/componentTooltips.test.tsx
           packages/inbox/toast.test.tsx
           packages/inbox/attachmentsHeader.test.tsx
@@ -183,11 +195,14 @@ jobs:
           packages/inbox/searchPalette.test.tsx
           packages/inbox/searchShortcut.test.tsx
           packages/inbox/openIn.test.tsx
+          packages/inbox/htmlLinks.test.tsx
           packages/inbox/videoAttachment.test.tsx
           packages/inbox/skillReferences.test.tsx
+          packages/inbox/messageComments.test.tsx
           packages/ui/components/HumanOnlySkillNotice.test.tsx
           packages/ui/components/MenuVersionSection.test.tsx
           packages/ui/components/blocks/QuestionBlock.test.tsx
+          packages/ui/components/blocks/QuestionContext.lines.test.tsx
           packages/ui/components/blocks/QuestionBlock.host.test.tsx
           packages/ui/components/blocks/QuestionBlock.decisionToggle.test.tsx
           packages/ui/components/blocks/QuestionBlock.decisionAnyQuestion.test.tsx
@@ -280,6 +295,7 @@ jobs:
           packages/editor/planDiffAutoExit.test.tsx
           packages/editor/App.archiveReadOnly.test.tsx
           packages/editor/App.htmlChrome.test.tsx
+          packages/editor/App.htmlLinkDraft.test.tsx
           packages/editor/App.decisionControl.test.tsx
           packages/editor/App.planRevision.test.tsx
           packages/editor/askSessionDrafts.test.tsx
@@ -296,6 +312,7 @@ jobs:
           packages/review-editor/components/ReviewSidebar.outdated.test.tsx
           packages/ui/components/HtmlSurfaceControls.test.tsx
           packages/ui/components/AnnotationPanel.unanchored.test.tsx
+          packages/ui/components/AnnotationPanel.breakUi.test.tsx
           packages/ui/hooks/useHtmlRefresh.test.tsx
           packages/ui/hooks/useSharing.contentRevision.test.tsx
           packages/ui/hooks/useSharing.shortUrlLifecycle.test.tsx
@@ -391,7 +408,7 @@ jobs:
 
   opencode-v2:
     name: OpenCode 2 installed package
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The smoke's own budgets (health 120s, plugin activation 300s) are the real assertion;
     # this is only a backstop so a genuinely wedged runner cannot idle for hours.
     timeout-minutes: 25
@@ -476,7 +493,7 @@ jobs:
 
   guides-show:
     name: guides.show viewer (budgets + pinned manifest)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

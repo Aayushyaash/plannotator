@@ -74,7 +74,7 @@ export const INBOX_DEFAULT_TOOLS: readonly InboxToolInfo[] = [
   },
   {
     "name": "read_thread",
-    "description": "Read one Inbox thread (thread_id or message_id): every message with its questions and the person's answers. A message the person marked 👍 Looks good carries `ack` (they read it and need nothing more; no reply is needed). Without an id, list this project's threads, newest activity first, each with its section in the person's list: only the ones you sent in unless asked_by is \"anyone\", and only open ones unless include_resolved.",
+    "description": "Read one Inbox thread (thread_id, or message_id to show that message in full) as a transcript: the questions still waiting on the person (key, state, prompt, choices), the newest messages in full (`limit`, default 6), the person's earlier messages in full (up to 12.0 KB), and every other earlier message as one line with its questions' states and answers; a body over 16.0 KB is cut. `expand` shows messages in full, `before` reads further back, `after` (the result's cursor, or a message id) returns only what is new; `format: \"full\"` returns every full record. A message the person marked 👍 Looks good carries `ack` (they read it and need nothing more; no reply is needed). Without an id, list this project's threads, newest activity first, one short row each (subject, name, section in the person's list, open questions, last author and time, the person's last message, `unread`: the person wrote something you have not read): only the ones you sent in unless asked_by is \"anyone\", and only open ones unless include_resolved.",
     "inputSchema": {
       "type": "object",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -101,16 +101,87 @@ export const INBOX_DEFAULT_TOOLS: readonly InboxToolInfo[] = [
           "type": "boolean"
         },
         "limit": {
-          "description": "Threads to list (default 20).",
+          "description": "How many: a thread's messages in full (default 6), listed threads (20), search results (10, at most 50).",
           "type": "integer",
           "minimum": 1,
           "maximum": 100
+        },
+        "expand": {
+          "description": "Message ids of this thread to show in full.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "before": {
+          "description": "Only messages before this message id or cursor.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number",
+              "minimum": 0
+            }
+          ]
+        },
+        "after": {
+          "description": "Only messages after this message id or cursor (what is new).",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number",
+              "minimum": 0
+            }
+          ]
+        },
+        "format": {
+          "description": "Every message as its full record (large).",
+          "type": "string",
+          "enum": [
+            "full"
+          ]
         },
         "agent_session": {
           "description": "Your session id. The `plannotator inbox mcp` shim fills it. send_message joins your session's thread by it; read_thread's asked_by \"me\" and wait_for_reply without a thread match on it.",
           "type": "string"
         }
       },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "search",
+    "description": "Search the Inbox's messages (yours, other agents' and the person's) by words, read-only: in this project unless all_projects. Up to `limit` results (default 10, at most 50; a larger limit answers 50). Every word must match (the last may be the start of a word), questions' prompts, choices and answers included. Each result is one line: the thread, the message, who wrote it, when, and the words around the match. read_thread with that thread_id and message_id shows the message in full.",
+    "inputSchema": {
+      "type": "object",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Words to find."
+        },
+        "project_path": {
+          "description": "Absolute path of the repository or folder you work in; the thread lands in that project's row. The `plannotator inbox mcp` shim fills it from its working folder.",
+          "type": "string"
+        },
+        "all_projects": {
+          "description": "Search every project.",
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "Results (default 10, at most 50).",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "query"
+      ],
       "additionalProperties": false
     }
   },

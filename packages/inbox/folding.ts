@@ -175,6 +175,9 @@ export function replyWords(body: string): string {
  */
 export function foldSnippet(message: InboxMessageWire, messages: readonly InboxMessageWire[] = [message]): FoldSnippet {
   if (message.author.kind === 'person') {
+    // A Re-ask note: what the person did, not the instructions the agent got.
+    const reasked = message.reask?.length ?? 0;
+    if (reasked > 0) return { kind: 'words', text: reasked === 1 ? 'Asked to re-ask the open question' : `Asked to re-ask ${reasked} open questions in one message` };
     const words = firstWords(replyWords(message.body));
     if (words) return { kind: 'words', text: words };
     const sent = messages.flatMap((m) => (m.questions ?? []).filter((q) => q.sent_reply_id === message.id && q.answer !== null));
@@ -288,7 +291,7 @@ export function holdingsOf(message: InboxMessageWire, options: { delivered: bool
   const picks = questions.filter((q) => q.state !== 'sent' && isPicked(q)).length;
   const open = questions.filter((q) => q.state !== 'sent' && !isPicked(q)).length;
   const sent = questions.filter((q) => q.state === 'sent').length;
-  if (picks > 0) out.push({ kind: 'picks', text: `${plural(picks, 'pick')}, not sent`, say: `${plural(picks, 'pick')} not sent`, count: picks });
+  if (picks > 0) out.push({ kind: 'picks', text: `${plural(picks, 'pick')} in your draft`, say: `${plural(picks, 'pick')} in your draft`, count: picks });
   if (open > 0) out.push({ kind: 'open', text: `${open} open ${open === 1 ? 'question' : 'questions'}`, say: `${open} open ${open === 1 ? 'question' : 'questions'}`, count: open });
   if (sent > 0 && open === 0 && picks === 0) out.push({ kind: 'answered', text: `${sent} answered`, say: `${plural(sent, 'question')} answered`, count: sent });
   const files = message.attachments?.length ?? 0;

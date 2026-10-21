@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type { InboxListRow, InboxListSection, InboxQuestion } from "@plannotator/core/inbox-types";
 import { parseInboxLine } from "@plannotator/shared/inbox/schema";
+import type { InboxAgentThreadRow } from "./inbox-mcp";
 import { startInboxServer, type InboxServer } from "./inbox";
 
 const roots: string[] = [];
@@ -180,11 +181,13 @@ describe("send_message routing: a row is a thread", () => {
     expect((await send({ body: "ok", thread: "x".repeat(120), agent_session: "ses_A" })).new_thread).toBe(true);
 
     // read_thread lists the threads a session sent in: started, joined or replied in.
-    const mine = structured<{ threads: InboxListRow[] }>(
+    const listed = structured<{ project: { name: string }; threads: InboxAgentThreadRow[] }>(
       await client.callTool({ name: "read_thread", arguments: { project_path: repo, agent_session: "ses_B", include_resolved: true } }),
-    ).threads;
+    );
+    const mine = listed.threads;
     expect(new Set(mine.map((t) => t.thread_id))).toEqual(new Set([a3.thread_id, b2.thread_id, b3.thread_id, a1.thread_id]));
-    expect(mine.every((t) => t.project.name === "api" && typeof t.section === "string")).toBe(true);
+    expect(listed.project.name).toBe("api");
+    expect(mine.every((t) => typeof t.section === "string")).toBe(true);
   });
 });
 

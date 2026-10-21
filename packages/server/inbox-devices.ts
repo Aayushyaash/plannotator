@@ -125,8 +125,11 @@ const ALLOWLIST: readonly DoorRoute[] = [
   { method: "POST", route: /^threads\/([^/]+)\/(read|unread)$/, window: (m) => `/api/inbox/threads/${m[1]}/${m[2]}` },
   { method: "GET", route: /^events$/, window: () => "/api/inbox/events" },
   // `to`: Send to another session (7.41), a person message no session took yet. `ack`: 👍 Looks good and its Undo (7.56).
-  { method: "POST", route: /^messages\/([^/]+)\/(picks|reply|resolve|to|ack|send-now)$/, window: (m) => `/api/inbox/messages/${m[1]}/${m[2]}` },
+  // `reask`: Re-ask, the agent asks its open questions again in one message (7.61).
+  { method: "POST", route: /^messages\/([^/]+)\/(picks|reply|resolve|to|ack|send-now|reask)$/, window: (m) => `/api/inbox/messages/${m[1]}/${m[2]}` },
   { method: "POST", route: /^threads\/([^/]+)\/delete$/, window: (m) => `/api/inbox/threads/${m[1]}/delete` },
+  // The thread's reply draft (the words typed on the computer and not sent), read only: contract 7.62.
+  { method: "GET", route: /^threads\/([^/]+)\/draft$/, window: (m) => `/api/inbox/threads/${m[1]}/draft` },
   { method: "GET", route: /^threads\/([^/]+)\/attachments$/, window: (m) => `/api/inbox/threads/${m[1]}/attachments` },
   { method: "GET", route: /^attachments\/([^/]+)\/view$/, window: (m) => `/api/inbox/attachments/${m[1]}/view` },
   // An image's bytes, a video's (by Range) and any kind's download (by Range
@@ -147,7 +150,11 @@ const ALLOWLIST: readonly DoorRoute[] = [
   { method: "POST", route: /^messages\/([^/]+)\/guide\/reviewed$/, window: (m) => `/api/inbox/messages/${m[1]}/guide/reviewed` },
   // A comment on a guided review's diff (7.53), new or edited (same annotation id); removed through annotations/:id/remove.
   { method: "POST", route: /^messages\/([^/]+)\/guide\/annotations$/, window: (m) => `/api/inbox/messages/${m[1]}/guide/annotations` },
+  // A comment on the text of an agent's message (7.59), new or edited (same annotation id); removed through annotations/:id/remove.
+  { method: "POST", route: /^messages\/([^/]+)\/annotations$/, window: (m) => `/api/inbox/messages/${m[1]}/annotations` },
   { method: "GET", route: /^threads\/([^/]+)\/sessions$/, window: (m) => `/api/inbox/threads/${m[1]}/sessions` },
+  // Tags (7.60): who the person can tag with `@`; the tags ride the reply's `tags`, forwarded unchanged.
+  { method: "GET", route: /^threads\/([^/]+)\/taggable$/, window: (m) => `/api/inbox/threads/${m[1]}/taggable` },
   { method: "POST", route: /^threads\/([^/]+)\/message$/, window: (m) => `/api/inbox/threads/${m[1]}/message` },
   // Compose (7.39, 7.40): every live session, and a thread the person starts (the body's key is also the store's own).
   { method: "GET", route: /^sessions$/, window: () => "/api/inbox/sessions" },

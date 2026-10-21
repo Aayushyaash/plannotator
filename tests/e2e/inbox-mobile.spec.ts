@@ -390,7 +390,7 @@ for (const phone of [
 
       // A pick, then the reply box: 16 px text, above the foot's 44 px actions.
       await pane.getByText('Retry with the same idempotency key').click();
-      await pane.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' }).click();
+      await pane.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' }).click();
       const box = pane.getByRole('textbox', { name: 'Reply to Claude Code' });
       await expect(box).toBeVisible();
       expect(await box.evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(16);
@@ -580,7 +580,7 @@ for (const phone of [
       await expect(pane.getByRole('heading', { name: /Stripe 409/ })).toBeVisible();
       // One of the two questions picked: the reply box's chip offers Keep open for the other.
       await pane.getByText('Retry with the same idempotency key').click();
-      await pane.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' }).click();
+      await pane.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' }).click();
       const chip = pane.locator('.ib-skipchip').first();
       await expect(chip).toBeVisible();
       const keep = chip.getByRole('button', { name: 'Keep open' });
@@ -635,12 +635,13 @@ for (const phone of [
       const toast = page.locator('[data-inbox-toast]');
       await expect(toast).toBeVisible();
       await expect(toast.getByRole('button', { name: 'Undo' })).toBeVisible();
-      // A phone's short form: "Read", no Reply (the foot has it), no Z hint.
+      // A phone's short form: "Read", no Reply (the foot has it), no Z hint; Undo and the ×.
       await expect(toast.locator('.ib-tlead')).toHaveText('Read');
-      await expect(toast.getByRole('button')).toHaveCount(1);
+      await expect(toast.getByRole('button')).toHaveCount(2);
+      await expect(toast.getByRole('button', { name: 'Dismiss' })).toBeVisible();
       await expect(toast.locator('kbd')).toHaveCount(0);
       await shot(page, '14-toast');
-      const [toastBox, footBox, lines, undoTarget] = await Promise.all([
+      const [toastBox, footBox, lines, undoTarget, closeTarget] = await Promise.all([
         toast.boundingBox(),
         pane.locator('.ib-pfoot').boundingBox(),
         // The text's line boxes: the lead and the detail sit on one baseline, so their tops lie within a
@@ -657,11 +658,18 @@ for (const phone of [
           const after = getComputedStyle(el, '::after');
           return Math.min(box.height - parseFloat(after.top) - parseFloat(after.bottom), box.width - parseFloat(after.left) - parseFloat(after.right));
         }),
+        // The ×: 24 px drawn, a 44 px target.
+        toast.locator('[data-toast-dismiss]').evaluate((el) => {
+          const box = el.getBoundingClientRect();
+          const after = getComputedStyle(el, '::after');
+          return { drawn: Math.round(box.width), target: Math.min(box.height - parseFloat(after.top) - parseFloat(after.bottom), box.width - parseFloat(after.left) - parseFloat(after.right)) };
+        }),
       ]);
       // One line (44 px, not the 171 px of three wrapped lines), clear of the foot.
       expect(toastBox!.height).toBeLessThanOrEqual(48);
       expect(lines).toBe(1);
       expect(undoTarget).toBeGreaterThanOrEqual(44);
+      expect(closeTarget).toEqual({ drawn: 24, target: 44 });
       expect(toastBox!.y + toastBox!.height).toBeLessThanOrEqual(footBox!.y);
       // The thread's banner says the rest; Undo puts it back.
       await expect(pane.locator('[data-read-line]')).toBeVisible();
@@ -669,7 +677,7 @@ for (const phone of [
       await expect(read).toHaveAttribute('aria-pressed', 'false');
 
       // With the reply box open the foot is much taller: the toast still sits above it.
-      await pane.locator('.ib-pfoot').getByRole('button', { name: /^(Reply|Edit the reply)$/ }).click();
+      await pane.locator('.ib-pfoot').getByRole('button', { name: /^(Reply|Edit draft)$/ }).click();
       await expect(pane.locator('.ib-pfoot textarea')).toBeVisible();
       await read.click();
       await expect(toast).toBeVisible();
@@ -678,6 +686,66 @@ for (const phone of [
       expect(tallToast!.y + tallToast!.height).toBeLessThanOrEqual(tallFoot!.y);
       await shot(page, '14b-toast-reply-open');
       await toast.getByRole('button', { name: 'Undo' }).click();
+      await expect(read).toHaveAttribute('aria-pressed', 'false');
+
+      // Undo and the × are 8 px apart and their 44 px targets meet in the middle: a tap 2 px past the Undo pill
+      // is still Undo (the thread moves back); one 6 px past it is the × (the toast goes, the thread stays read).
+      const tapPast = async (px: number) => {
+        await read.click();
+        await expect(read).toHaveAttribute('aria-pressed', 'true');
+        await expect(toast).toBeVisible();
+        const undoBox = (await toast.locator('[data-toast-undo]').boundingBox())!;
+        await page.touchscreen.tap(undoBox.x + undoBox.width + px, undoBox.y + undoBox.height / 2);
+      };
+      await tapPast(2);
+      await expect(read).toHaveAttribute('aria-pressed', 'false');
+      await tapPast(6);
+      await expect(toast).toHaveCount(0);
+      await expect(read).toHaveAttribute('aria-pressed', 'true');
+      await read.click();
+      await expect(read).toHaveAttribute('aria-pressed', 'false');
+
+      // Swipe it away with a finger (touch pointer events): a short drag springs back, one past 40% of its
+      // width dismisses it, and its Undo goes with it (the thread stays read).
+      const swipe = (distance: number) =>
+        toast.evaluate(async (el, distance) => {
+          const box = el.getBoundingClientRect();
+          const y = box.top + box.height / 2;
+          const x0 = box.left + 40;
+          let t = performance.now();
+          const fire = (type: string, x: number) => {
+            t += 32;
+            const event = new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 11, pointerType: 'touch', isPrimary: true, clientX: x, clientY: y });
+            Object.defineProperty(event, 'timeStamp', { value: t });
+            el.querySelector('.ib-tsay')!.dispatchEvent(event);
+          };
+          fire('pointerdown', x0);
+          const steps = 8;
+          for (let i = 1; i <= steps; i++) {
+            fire('pointermove', x0 + (distance * i) / steps);
+            await new Promise((r) => requestAnimationFrame(r));
+          }
+          const mid = { translate: el.style.translate, opacity: el.style.opacity };
+          fire('pointerup', x0 + distance);
+          return mid;
+        }, distance);
+      await read.click();
+      await expect(read).toHaveAttribute('aria-pressed', 'true');
+      await expect(toast).toBeVisible();
+      const short = await swipe(60);
+      expect(short.translate).toBe('60px');
+      await expect(toast).toBeVisible();
+      await expect.poll(() => toast.evaluate((el) => el.style.translate)).toBe('');
+      // (The short drag ran under reduced motion, which snaps back; this one slides out.)
+      await page.emulateMedia({ reducedMotion: 'no-preference' });
+      const width = (await toast.boundingBox())!.width;
+      await swipe(Math.round(width * 0.55));
+      await expect(toast).toHaveCount(0);
+      await expect(page.locator('[data-toast-ghost]')).toHaveCount(0);
+      await expect(read).toHaveAttribute('aria-pressed', 'true');
+      // Back for the tests after this one.
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      await read.click();
       await expect(read).toHaveAttribute('aria-pressed', 'false');
     });
 
@@ -767,7 +835,7 @@ for (const narrow of [
         expect(await overlaps(page, '.ib-fline.ib-is-open', '.ib-mk, .ib-fl-nm, .ib-fl-meta, .ib-fl-tm')).toEqual([]);
         expect(await overlaps(page, '.ib-phead', '.ib-pback, .ib-hbtn, .ib-phsubj[data-on], .ib-ptool')).toEqual([]);
         expect(await cardFits(page)).toEqual([]);
-        // A pick: the foot gains "Not sent" and the skip chip, and wraps rather than running past the pane.
+        // A pick: the foot gains "Draft · 1 pick" and the skip chip, and wraps rather than running past the pane.
         await pane.getByText('Retry with the same idempotency key').click();
         await expect(pane.locator('.ib-pfoot .ib-skipchip')).toBeVisible();
         const foot = await pane.locator('.ib-pfoot').evaluate((el) => {
@@ -814,23 +882,28 @@ for (const narrow of [
         // Closing the file reopens the docked sidebar on a spring: the thread covers the list from the first
         // frame, never drawn squeezed beside it while the sidebar opens (motion on, so the spring runs).
         await page.emulateMedia({ reducedMotion: 'no-preference' });
+        type Sampled = { listFrames: boolean[]; listFrameAt: number[] };
         await page.evaluate(() => {
           const frames: boolean[] = [];
-          (window as unknown as { listFrames: boolean[] }).listFrames = frames;
+          const at: number[] = [];
+          Object.assign(window, { listFrames: frames, listFrameAt: at });
           const start = performance.now();
           const tick = () => {
             const list = document.querySelector('.ib-listcol');
             frames.push(!!list && getComputedStyle(list).visibility !== 'hidden' && list.getBoundingClientRect().width > 0);
-            if (performance.now() - start < 900) requestAnimationFrame(tick);
+            at.push(performance.now() - start);
+            if (at.at(-1)! < 900) requestAnimationFrame(tick);
           };
           requestAnimationFrame(tick);
         });
         await view.getByRole('button', { name: 'Back to the thread' }).click();
         await expect(view).toHaveCount(0);
         await expect(pane).toBeVisible();
-        await page.waitForTimeout(1000);
-        const frames = await page.evaluate(() => (window as unknown as { listFrames: boolean[] }).listFrames);
-        expect(frames.length).toBeGreaterThan(10);
+        // The sampling covered the whole 900 ms window (a loaded runner draws fewer frames in it, not a shorter window).
+        await expect.poll(() => page.evaluate(() => (window as unknown as Sampled).listFrameAt.at(-1) ?? 0), { timeout: 10_000 }).toBeGreaterThanOrEqual(900);
+        const frames = await page.evaluate(() => (window as unknown as Sampled).listFrames);
+        // Enough samples to land inside the ~540 ms spring itself.
+        expect(frames.length).toBeGreaterThanOrEqual(5);
         expect(frames.filter(Boolean)).toEqual([]);
       } finally {
         await browser.close();
@@ -883,7 +956,7 @@ test.describe('a desktop window', () => {
         send.boundingBox(),
         keep.boundingBox(),
         foot.locator('.ib-skipchip').boundingBox(),
-        foot.getByText('Not sent', { exact: true }).boundingBox(),
+        foot.locator('[data-draft-foot]').boundingBox(),
       ]);
       const right = Math.min(paneBox!.x + paneBox!.width, width);
       for (const [name, box] of [['Send', sendBox], ['Keep open', keepBox], ['the skip chip', chipBox]] as const) {
@@ -891,7 +964,7 @@ test.describe('a desktop window', () => {
         expect(box!.x + box!.width, `${name} at ${width}px`).toBeLessThanOrEqual(right);
         expect(box!.y + box!.height, `${name} at ${width}px`).toBeLessThanOrEqual(footBox!.y + footBox!.height);
       }
-      // "Not sent" stays one line (it was squeezed to two).
+      // "Draft · 1 pick" stays one line ("Not sent" was once squeezed to two).
       expect(notSent!.height, `at ${width}px`).toBeLessThan(24);
       // A tap on Keep open lands on it.
       await keep.click();

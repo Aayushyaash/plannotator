@@ -18,6 +18,8 @@ import type {
   InboxThread,
   InboxComposeProject,
   InboxDraft,
+  InboxReplyDraft,
+  InboxReplyDraftRow,
   InboxDraftStatus,
   InboxUpload,
 } from '@plannotator/core/inbox-types';
@@ -28,6 +30,7 @@ import type {
   InboxAgentId,
   InboxAgentsModel,
   InboxAnnotationRecord,
+  InboxCardWire,
   InboxAttachmentState,
   InboxMessageWire,
   InboxNoteAgentId,
@@ -72,6 +75,8 @@ export interface ListModel {
   update: InboxHealth['update'];
   /** This Inbox started on a newer version than the one before it: "What's new in X" for this run. Absent from an older Inbox. */
   updated?: string | null;
+  /** Claude Code sessions a /reload-plugins would bring up to date: the sidebar's "Reload Claude Code N". Absent from an older Inbox. */
+  restart_claude_code?: number;
   notice: string | null;
   projects: ProjectFolder[];
   project: string | null;
@@ -143,6 +148,16 @@ export interface WhatsNewModel {
   release_url: string;
   notes: string;
   skipped: { version: string; text: string }[];
+  /**
+   * The notes' image sources (as written) saved on this computer, loaded from
+   * `whatsNewImageUrl`. Absent from an older Inbox (no image is loaded).
+   */
+  images?: string[];
+}
+
+/** Where the What's new page loads one of the notes' saved images. */
+export function whatsNewImageUrl(version: string, src: string): string {
+  return `/api/inbox/whats-new/image?version=${encodeURIComponent(version)}&src=${encodeURIComponent(src)}`;
 }
 
 /** "Over your tailnet" (packages/server/inbox-tailscale.ts): the switch, the address or why not, and who may open it. */
@@ -239,6 +254,36 @@ export interface LiveSessionsModel {
      */
     connection?: RecipientConnection | null;
   };
+  /**
+   * Asked for with `?recipients=a,b` (approval "inbox-tag-agents"): how each
+   * session a reply tags is connected now (null: its connection does not poll
+   * now). Absent from an older Inbox.
+   */
+  recipients?: Record<string, RecipientConnection | null>;
+}
+
+/** One session the person may tag with `@` (packages/server/inbox-tags.ts). */
+export interface TaggableSession {
+  session: string;
+  host: string | null;
+  /** `live`: its connection polls and wakes it; `mcp`: it reads the Inbox only. */
+  kind: 'live' | 'mcp';
+  name: string | null;
+  project: { id: string | null; name: string; root: string | null } | null;
+  started_at: string | null;
+  last_at: string;
+  busy: boolean | null;
+  idle_since: string | null;
+  /** False: a live session on an older Plannotator; update it to tag it. */
+  taggable: boolean;
+  owner: boolean;
+  wrote_thread: boolean;
+}
+
+export interface TaggableModel {
+  serverSession: string;
+  owner: { host: string | null; session: string } | null;
+  sessions: TaggableSession[];
 }
 
 /** A paired phone as the window lists it (adr/implementation/inbox-mobile.md, 7.36). */
@@ -347,6 +392,11 @@ let pageSession: string | null = null;
 
 export function setPageSession(value: string): void {
   if (pageSession === null) pageSession = value;
+}
+
+/** The page's serverSession (null before the first list read), for a keepalive request built by hand. */
+export function pageServerSession(): string | null {
+  return pageSession;
 }
 
 async function post<T>(path: string, body: Record<string, unknown>): Promise<T> {
@@ -528,8 +578,22 @@ export const inboxApi = {
       skip_unanswered?: boolean;
       /** Files pasted into the reply box (upload ids): attachments on this reply. */
       uploads?: string[];
+      /** The sessions the person tagged with `@` (approval "inbox-tag-agents"): each one gets this reply too. */
+      tags?: { host?: string | null; session: string; label?: string }[];
+      /**
+       * This reply carries the reply box's words: their draft goes (approval "inbox-reply-drafts"),
+       * named by the `updated_at` they were saved as, so a newer draft from another window stays.
+       */
+      clear_draft?: string;
     },
   ) => post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reply`, input),
+  /**
+   * Re-ask (approval "inbox-reask"): a note asking the session that wrote this
+   * message for its open questions again, in one message. `to`: another live
+   * session, because the one that asked has ended.
+   */
+  reask: (messageId: string, input: { idempotency_key: string; to?: { host: string; session: string } }) =>
+    post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reask`, input),
   resolve: (messageId: string, resolved: boolean) =>
     post<unknown>(`/api/inbox/messages/${encodeURIComponent(messageId)}/resolve`, { resolved }),
   health: () => get<InboxHealth>('/api/inbox/health'),
@@ -542,6 +606,9 @@ export const inboxApi = {
   /** A comment on that guide's diff (the review app's line comment), new or edited; removed through `removeAnnotation`. */
   saveGuideAnnotation: (messageId: string, annotation: object) =>
     post<{ annotation: InboxAnnotationRecord }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/guide/annotations`, { annotation }),
+  /** A comment on the text of an agent's message (the words selected), new or edited; removed through `removeAnnotation`. */
+  saveMessageAnnotation: (messageId: string, annotation: object) =>
+    post<{ annotation: InboxAnnotationRecord }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/annotations`, { annotation }),
   restart: () => post<{ ok: true }>('/api/inbox/restart', {}),
   // The update control: the dialogs' facts, Update now, Remind me tomorrow, Check now, What's new.
   updateDetails: () => get<UpdateDetails>('/api/inbox/update'),
@@ -583,6 +650,9 @@ export const inboxApi = {
   attachments: (threadId: string) => get<AttachmentsModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}/attachments`),
   view: (attachmentId: string, version: 'current' | 'sent') =>
     get<AttachmentView>(`/api/inbox/attachments/${encodeURIComponent(attachmentId)}/view${version === 'sent' ? '?version=sent' : ''}`),
+  /** A page an attached HTML page links to (not attached itself), by a path relative to that page's folder: read-only. */
+  linkedPage: (attachmentId: string, path: string) =>
+    get<LinkedPageView>(`/api/inbox/attachments/${encodeURIComponent(attachmentId)}/linked-page?path=${encodeURIComponent(path)}`),
   saveAnnotation: (attachmentId: string, version: string, annotation: object) =>
     post<{ annotation: InboxAnnotationRecord }>('/api/inbox/annotations', { attachment_id: attachmentId, version, annotation }),
   removeAnnotation: (id: string) => post<{ annotation: InboxAnnotationRecord }>(`/api/inbox/annotations/${encodeURIComponent(id)}/remove`, {}),
@@ -607,14 +677,36 @@ export const inboxApi = {
     post<{ thread_id: string; message: InboxMessage; project?: { id: string; name: string; root: string }; replayed: boolean }>('/api/inbox/messages', { ...input }),
   readdress: (messageId: string, to: { host: string; session: string }) =>
     post<{ message: InboxMessage; row: InboxListRow | null }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/to`, { to }),
-  drafts: () => get<{ serverSession: string; drafts: DraftView[] }>('/api/inbox/drafts'),
+  /** `replies` (additive): open threads holding unsent work; an older Inbox sends none. */
+  drafts: () => get<{ serverSession: string; drafts: DraftView[]; replies?: InboxReplyDraftRow[] }>('/api/inbox/drafts'),
+  // Reply drafts (approval "inbox-reply-drafts"): the reply box's words per thread.
+  replyDraft: (threadId: string) => get<{ draft: InboxReplyDraft | null }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/draft`),
+  /** Save (compare-and-set on `base`, the `updated_at` last read; null to create); an empty body deletes it. */
+  saveReplyDraft: (threadId: string, body: string, base: string | null, baseBody: string | null = null) =>
+    post<{ draft: InboxReplyDraft | null }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/draft`, {
+      body,
+      base,
+      ...(baseBody !== null ? { base_body: baseBody } : {}),
+    }),
+  discardReplyDraft: (threadId: string) => post<{ ok: true; deleted: boolean }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/draft/delete`, {}),
   saveDraft: (id: string, input: { body: string; to: InboxDraft['to']; project: InboxDraft['project']; files: string[]; base: string | null; thread_name?: string }) =>
     post<{ draft: DraftView }>(`/api/inbox/drafts/${encodeURIComponent(id)}`, { ...input }),
   deleteDraft: (id: string) => post<{ ok: true; deleted: boolean }>(`/api/inbox/drafts/${encodeURIComponent(id)}/delete`, {}),
-  sessions: (threadId: string, asker?: string | null) =>
-    get<LiveSessionsModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}/sessions${asker ? `?asker=${encodeURIComponent(asker)}` : ''}`),
-  /** Send now: deliver the person's reply or message at once, into the running turn when one runs. */
-  sendNow: (messageId: string) => post<{ message: InboxMessage }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/send-now`, {}),
+  sessions: (threadId: string, asker?: string | null, recipients: readonly string[] = []) => {
+    const query = [
+      ...(asker ? [`asker=${encodeURIComponent(asker)}`] : []),
+      ...(recipients.length > 0 ? [`recipients=${recipients.map(encodeURIComponent).join(',')}`] : []),
+    ].join('&');
+    return get<LiveSessionsModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}/sessions${query ? `?${query}` : ''}`);
+  },
+  /** Who the person can tag with `@` in this thread (approval "inbox-tag-agents"). */
+  taggable: (threadId: string) => get<TaggableModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}/taggable`),
+  /**
+   * Send now: deliver the person's reply or message at once, into the running turn when one runs.
+   * `session`: one tagged session's own line (absent: the session the reply goes to).
+   */
+  sendNow: (messageId: string, session?: string | null) =>
+    post<{ message: InboxMessage }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/send-now`, session ? { session } : {}),
   newMessage: (threadId: string, input: { session: string; body: string; idempotency_key: string }) =>
     post<{ message: InboxMessage; replayed: boolean }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/message`, input),
   // Phones: pairing, the paired devices, the tailnet and Wi-Fi switches (packages/server/inbox-devices.ts).
@@ -648,7 +740,9 @@ export type InboxEvent =
   /** `first`: the message's first line, not a later rewrite of it (a look, an archive, an Unarchive). Absent from an older Inbox. */
   | { seq: number; kind: 'message'; id: string; first?: boolean; message: InboxMessage }
   | { seq: number; kind: 'question'; id: string; question: InboxQuestion }
-  | { seq: number; kind: 'annotation'; id: string; annotation: InboxAnnotationRecord };
+  | { seq: number; kind: 'annotation'; id: string; annotation: InboxAnnotationRecord }
+  /** A Board card (approval "inbox-board"); absent from an older Inbox. */
+  | { seq: number; kind: 'card'; id: string; card: InboxCardWire };
 
 /** A thread's attachments as they are now, and the person's annotations waiting for a Send. */
 export interface AttachmentsModel {
@@ -669,6 +763,18 @@ export interface AttachmentView {
   html: string | null;
 }
 
+/** A page an attached HTML page links to, as `/linked-page` answers it. */
+export interface LinkedPageView {
+  serverSession: string;
+  /** Its realpath. */
+  path: string;
+  name: string;
+  /** The page with a `<base href>` at its own folder's asset route. */
+  html: string;
+  /** Its asset-route URL, for Open in new tab. */
+  url: string | null;
+}
+
 /**
  * The server's event stream: `onRecord` for every store line after the
  * cursor (the line, for the notifications), `onStatus` for restart-to-update. EventSource reconnects on its
@@ -678,16 +784,27 @@ export function subscribeInboxEvents(
   cursor: number,
   handlers: {
     onRecord: (event: InboxEvent | null) => void;
-    /** `updated` is undefined from an Inbox older than the field (the "What's new in X" link stays as the list said). */
-    onStatus: (update: InboxHealth['update'], updated?: string | null) => void;
+    /**
+     * `updated` is undefined from an Inbox older than the field (the "What's new in X" link stays as the list said);
+     * `restartClaudeCode` too (the sidebar's "Reload Claude Code N" stays as the list said).
+     */
+    onStatus: (update: InboxHealth['update'], updated?: string | null, restartClaudeCode?: number) => void;
     /** Whether a notification can reach the person now (inbox-windows.ts); never called by an older Inbox. */
     onReach?: (reach: InboxNotifyReach) => void;
+    /**
+     * A row's delivery may have moved with the live sessions (a turn started or
+     * ended, a session went away): no store line, so the list is read again.
+     * Never called by an older Inbox.
+     */
+    onDeliveries?: () => void;
     /**
      * The stream (re)connected: the server's `hello`. A reconnect carries the
      * URL it was first opened with, so its `permission=` may be stale (a grant
      * since, a restarted Inbox that forgot the window): report again here.
      */
     onConnect?: () => void;
+    /** A reply draft was saved or discarded (`event: drafts`, approval "inbox-reply-drafts"); never called by an older Inbox. */
+    onDrafts?: (threadId: string) => void;
   },
   /** This window, so the server counts it (and what its browser allows) while the stream is open. */
   win?: { id: string; permission: InboxWindowPermission; origin: string },
@@ -707,6 +824,15 @@ export function subscribeInboxEvents(
       // A malformed frame changes nothing.
     }
   });
+  source.addEventListener('drafts', (event) => {
+    try {
+      const data = JSON.parse((event as MessageEvent<string>).data) as { thread_id?: unknown };
+      if (typeof data.thread_id === 'string') handlers.onDrafts?.(data.thread_id);
+    } catch {
+      // A malformed frame changes nothing.
+    }
+  });
+  source.addEventListener('deliveries', () => handlers.onDeliveries?.());
   source.addEventListener('record', (event) => {
     let parsed: InboxEvent | null = null;
     try {
@@ -718,8 +844,12 @@ export function subscribeInboxEvents(
   });
   source.addEventListener('status', (event) => {
     try {
-      const data = JSON.parse((event as MessageEvent<string>).data) as { update: InboxHealth['update']; updated?: string | null };
-      handlers.onStatus(data.update, 'updated' in data ? (data.updated ?? null) : undefined);
+      const data = JSON.parse((event as MessageEvent<string>).data) as { update: InboxHealth['update']; updated?: string | null; restart_claude_code?: unknown };
+      handlers.onStatus(
+        data.update,
+        'updated' in data ? (data.updated ?? null) : undefined,
+        typeof data.restart_claude_code === 'number' ? data.restart_claude_code : undefined,
+      );
     } catch {
       // A malformed frame changes nothing.
     }

@@ -12,11 +12,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { inboxAckLine, inboxAgentTool, inboxSentNowFollowUpText, INBOX_MESSAGE_INSTRUCTION, INBOX_NAME_THREAD_LINE, INBOX_NEW_THREAD_INSTRUCTION, INBOX_TOOL_ACTIONS, INBOX_WAKE_INSTRUCTION, inboxRedirectedLine, inboxWakeText, mcpAnswerOf } from './inbox-contract'
+import { inboxAckLine, inboxAgentTool, inboxSentNowFollowUpText, INBOX_MESSAGE_INSTRUCTION, INBOX_NAME_THREAD_LINE, INBOX_NEW_THREAD_INSTRUCTION, INBOX_TOOL_ACTIONS, INBOX_WAKE_INSTRUCTION, INBOX_TAGGED_INSTRUCTION, inboxAlsoTaggedLine, inboxRedirectedLine, inboxTaggedLine, inboxWakeText, mcpAnswerOf } from './inbox-contract'
 import { ClaudeSession } from './testing/claude-session'
 import { removeStubbedHtml, stubBuiltHtml } from '../../../../tests/helpers/inbox-world'
 import { inboxEntryOf, isAlive, mustSignalInbox, stopProvenInboxes } from '../../../../tests/helpers/inbox-process'
 import { INBOX_DISCOVER_TIMEOUT_MS, STORE_INBOX_TOOLS } from './inbox'
+import { INBOX_CARD_ACTION_ON } from '@plannotator/core/inbox-types'
 
 const entry = resolve(import.meta.dir, '../../server/index.ts')
 const binary = process.env.PLANNOTATOR_INBOX_TEST_BINARY
@@ -178,7 +179,7 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
     const w = world('01-registry-and-tool-list')
     const silent = await open(w, 'session-silent')
     // Before this computer ever ran the Inbox: the list bundled with the mod (pinned to a real Inbox by inbox-default-tools.test.ts).
-    expect(silent.inboxTools?.map((tool) => tool.name)).toEqual([...INBOX_TOOL_ACTIONS])
+    expect(silent.inboxTools?.map((tool) => tool.name)).toEqual(INBOX_TOOL_ACTIONS.filter((name) => name !== 'card' || INBOX_CARD_ACTION_ON))
     expect(silent.mod.inbox).not.toBeNull()
     await Bun.sleep(2_500)
     expect(silent.host.fetches).toEqual([])
@@ -237,6 +238,34 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
     expect('text' in next && next.text).not.toContain('wait_for_reply with this thread_id')
     w.proof(`thread ${sent.thread_id}: project ${t.project.root}, author ${JSON.stringify(t.messages[0]?.author)}`)
   }, 60_000)
+
+  test('a long thread through the tool: read_thread answers a windowed transcript as text alone (no JSON after it), and search finds a message by its words', async () => {
+    const w = world('02b-long-thread')
+    startInbox(w)
+    const session = await open(w, 'session-long')
+    const first = await send(session, w, `Round 1: the queue drains in order.\n\n${QUESTION}`)
+    let last = first.message_id
+    for (let round = 2; round <= 20; round++) {
+      const reply = await personSends(w, last, `Round ${round - 1}: go ahead.`)
+      const answer = await session.callInbox({ action: 'send_message', reply_to: reply, body: `Round ${round}: the queue drains in order.${round === 13 ? ' The flamingo budget is set.' : ''}` }, w.project)
+      if ('deny' in answer) throw new Error(answer.deny)
+      last = JSON.parse(answer.text.slice(answer.text.indexOf('{'))).message_id
+    }
+    const read = await session.callInbox({ action: 'read_thread', thread_id: first.thread_id }, w.project)
+    if ('deny' in read) throw new Error(read.deny)
+    expect(read.text.split('\n')[0]).toStartWith(`Thread ${first.thread_id} (What should the worker do on a Stripe 409?): 39 messages, 19 from the person.`)
+    // The transcript is complete: the connection hands it over without the JSON.
+    expect(read.text).not.toContain('{"thread"')
+    expect(read.text).toContain(`- ${first.message_id} · Claude Code · `)
+    expect(read.text).toContain(`Q1 `)
+    expect(read.text).toMatch(/\nCursor \d+: read_thread after: \d+ returns only what is new since this read\.$/)
+    expect(Buffer.byteLength(read.text)).toBeLessThan(12_000)
+    const found = await session.callInbox({ action: 'search', query: 'flamingo' }, w.project)
+    if ('deny' in found) throw new Error(found.deny)
+    expect(found.text.split('\n')[0]).toBe('1 message matches "flamingo" in refund-service:')
+    expect(found.text).not.toContain('{"query"')
+    w.proof(`> plannotator_inbox read_thread (39 messages)\n${read.text}\n\n> plannotator_inbox search flamingo\n${found.text}`)
+  }, 120_000)
 
   test("the person's Send reaches the asking session once, as a turn: the stable header, the fixed line, the reply verbatim; Delivered, then Replied", async () => {
     const w = world('03-send-wakes-the-session')
@@ -564,7 +593,9 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
     expect(other.host.submits[0]!.endsWith(`\n\n${words}`)).toBe(true)
     expect(writer.host.submits).toEqual([])
     const waited = await writerWait
-    expect('text' in waited && waited.text).toContain('"status": "waiting"')
+    // The wait's text is complete (the Inbox marks it), so the mod hands the model the text alone.
+    expect('text' in waited && waited.text).toStartWith('No reply yet.')
+    expect('text' in waited && waited.text).not.toContain('"status"')
     w.proof(`session-writer's wait_for_reply on the same thread kept waiting: ${('text' in waited ? waited.text : waited.deny).split('\n')[0]}`)
     w.proof(`turn.start ${turn.id} in session-other:\n${turn.text}\n\nsession-writer submits: ${writer.host.submits.length}`)
 
@@ -630,6 +661,68 @@ describe('Claude Code ↔ Plannotator Inbox (real Inbox, real processes)', () =>
     const delivered = await waitFor('the delivery record', async () => (await thread(w, asked.thread_id)).messages.find((m) => m.id === reply.id)?.delivery)
     expect(delivered).toMatchObject({ state: 'delivered', host: 'claude-code', session: 'session-taker' })
     w.proof(`thread shows: Delivered to Claude Code (another session), ${delivered.at}`)
+  }, 120_000)
+
+  test("tags: the person tags another live session in the owner's reply; each is woken once, the owner told who else got it, the tagged one told to read the thread first; the tagged one's read never swallows the owner's wake", async () => {
+    const w = world('10b-tagged-sessions')
+    startInbox(w)
+    const owner = await open(w, 'session-owner')
+    const asked = await send(owner, w, QUESTION)
+    const tagged = await open(w, 'session-tagged')
+    const { port } = registry(w)
+    // The mod says it understands tags: the window offers the session.
+    await waitFor('the tagged session taggable', async () => {
+      const model = (await (await fetch(`http://127.0.0.1:${port}/api/inbox/threads/${asked.thread_id}/taggable`)).json()) as { sessions: { session: string; taggable: boolean }[] }
+      return model.sessions.some((s) => s.session === 'session-tagged' && s.taggable) ? true : null
+    })
+    // The owner is busy, so its wake waits; the tagged session reads the thread first meanwhile (as its wake will tell it).
+    await owner.startTurn('Refactor the webhook handler.')
+    const health = (await (await fetch(`http://127.0.0.1:${port}/api/inbox/health`)).json()) as { serverSession: string }
+    const response = await fetch(`http://127.0.0.1:${port}/api/inbox/messages/${asked.message_id}/reply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({
+        serverSession: health.serverSession,
+        idempotency_key: 'tag-1',
+        words: 'Retry with the same key. @Claude Code (another session) add a test for the 409 path.',
+        tags: [{ host: 'claude-code', session: 'session-tagged', label: 'Claude Code (another session)' }],
+      }),
+    })
+    expect(response.status).toBe(200)
+    const reply = ((await response.json()) as { reply: { id: string; body: string } }).reply
+    w.proof(`> the person tags session-tagged in the reply to session-owner\n${reply.body}\n`)
+
+    const tagTurn = await waitFor('the tagged turn', () => tagged.turns.find((t) => t.text.includes(reply.id)))
+    expect(tagged.host.submits).toEqual([
+      inboxWakeText({ id: reply.id, subject: 'What should the worker do on a Stripe 409?', body: reply.body, tagged: { owner: 'Claude Code' } }),
+    ])
+    const tagLines = tagged.host.submits[0]!.split('\n')
+    expect(tagLines[1]).toBe(INBOX_TAGGED_INSTRUCTION)
+    expect(tagLines[2]).toBe(inboxTaggedLine('Claude Code', reply.id))
+    w.proof(`turn.start ${tagTurn.id} in session-tagged:\n${tagTurn.text}`)
+    // It reads the thread, as told, before the owner's turn ends.
+    const read = await tagged.callInbox({ action: 'read_thread', message_id: reply.id }, w.project)
+    expect('deny' in read).toBe(false)
+
+    expect(owner.host.submits).toEqual([])
+    await owner.endTurn('Done.')
+    const ownerTurn = await waitFor('the owner turn', () => owner.turns.find((t) => t.text.includes(reply.id)))
+    await Bun.sleep(3_000)
+    expect(owner.host.submits).toEqual([
+      inboxWakeText({ id: reply.id, subject: 'What should the worker do on a Stripe 409?', body: reply.body, also_tagged: ['Claude Code'] }),
+    ])
+    expect(owner.host.submits[0]!.split('\n')[2]).toBe(inboxAlsoTaggedLine(['Claude Code']))
+    // Each woken once, no more.
+    expect(tagged.host.submits).toHaveLength(1)
+    w.proof(`turn.start ${ownerTurn.id} in session-owner:\n${ownerTurn.text}`)
+
+    const message = await waitFor('both deliveries', async () => {
+      const found = (await thread(w, asked.thread_id)).messages.find((m) => m.id === reply.id) as ThreadMessage & { tags?: { delivery?: { session: string } | null }[] }
+      return found?.delivery && found.tags?.[0]?.delivery ? found : null
+    })
+    expect(message.delivery).toMatchObject({ session: 'session-owner' })
+    expect(message.tags?.[0]?.delivery).toMatchObject({ session: 'session-tagged' })
+    w.proof(`thread shows: Delivered to Claude Code; Delivered to Claude Code (another session)`)
   }, 120_000)
 
   test('compose: the person starts a thread with a session that never wrote in the Inbox; it arrives once as a new-thread turn, the answer lands in that thread, and the session\'s next message starts its own', async () => {

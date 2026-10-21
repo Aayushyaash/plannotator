@@ -255,6 +255,56 @@ describe.skipIf(!piRuns)("Pi ↔ Plannotator Inbox (the real Pi in RPC mode, a r
 		w.proof(`Inbox running, switch on for pi: plannotator_inbox sent to the model with actions ${JSON.stringify(actions)}\n\n${tool.description}`);
 	}, 120_000);
 
+	test("a long thread read through the tool reaches the model as a windowed transcript, text alone (no JSON after it); search answers one line per message", async () => {
+		const w = world("01c-long-thread");
+		let threadId = "";
+		const m = model(
+			askingScript((request) => {
+				const last = lastMessage(request);
+				if (last.role === "user" && last.text === "Read the long thread.") return { toolCall: { name: "plannotator_inbox", arguments: { action: "read_thread", thread_id: threadId } } };
+				if (last.role === "user" && last.text === "Search for flamingo.") return { toolCall: { name: "plannotator_inbox", arguments: { action: "search", query: "flamingo" } } };
+				return null;
+			}),
+		);
+		startInbox(w);
+		knob(w, true);
+		// Seed 20 rounds as another agent would, over the Inbox's /mcp; the person answers each through the window's route.
+		const mcp = async (name: string, args: Record<string, unknown>) => {
+			const response = await fetch(`http://127.0.0.1:${registry(w).port}/mcp`, {
+				method: "POST",
+				headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+				body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+			});
+			const text = await response.text();
+			return (JSON.parse(text.includes("data:") ? text.split("data:")[1]!.split("\n")[0]! : text) as { result: { structuredContent: { message_id: string; thread_id: string } } }).result.structuredContent;
+		};
+		let last = "";
+		for (let round = 1; round <= 20; round++) {
+			const reply = last ? await personSends(w, last, `Round ${round - 1}: go ahead.`) : null;
+			const sent = await mcp("send_message", {
+				project_path: w.project,
+				agent_session: "seeder",
+				body: `Round ${round}: the queue drains in order.${round === 13 ? " The flamingo budget is set." : ""}`,
+				...(reply ? { reply_to: reply } : {}),
+			});
+			threadId = sent.thread_id;
+			last = sent.message_id;
+		}
+		const pi = await openPi(w, m);
+		await ask(pi, "Read the long thread.");
+		const read = m.requests.map((request) => lastMessage(request)).find((message) => message.role === "tool" && message.text.startsWith(`Thread ${threadId}`));
+		expect(read).toBeDefined();
+		expect(read!.text.split("\n")[0]).toBe(`Thread ${threadId} (Round 1: the queue drains in order.): 39 messages, 19 from the person.`);
+		expect(read!.text).not.toContain('{"thread"');
+		expect(read!.text).toMatch(/\nCursor \d+: read_thread after: \d+ returns only what is new since this read\.$/);
+		expect(Buffer.byteLength(read!.text)).toBeLessThan(12_000);
+		await ask(pi, "Search for flamingo.");
+		const found = m.requests.map((request) => lastMessage(request)).find((message) => message.role === "tool" && message.text.includes('"flamingo"'));
+		expect(found!.text.split("\n")[0]).toMatch(/^1 message matches "flamingo" in /);
+		expect(found!.text).not.toContain('{"query"');
+		w.proof(`read_thread as the model got it:\n${read!.text}\n\nsearch:\n${found!.text}`);
+	}, 120_000);
+
 	test("the tool's cost per request, measured on what Pi sends: the same prompt with the tool off and on (no reminder) differs by the tool alone, and that is the number the window shows", async () => {
 		const w = world("01a-tool-cost");
 		const m = model(askingScript());

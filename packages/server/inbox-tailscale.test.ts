@@ -631,6 +631,7 @@ describe("the update control never answers through the tailnet", () => {
       ["POST", "/api/inbox/update/check", { serverSession: inbox.serverSession }],
       ["GET", "/api/inbox/update", undefined],
       ["GET", "/api/inbox/whats-new?version=0.28.12", undefined],
+      ["GET", "/api/inbox/whats-new/image?version=0.28.12&src=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fa", undefined],
       ["POST", "/api/inbox/settings", { serverSession: inbox.serverSession, auto_update: true }],
       ["POST", "/api/inbox/settings", { serverSession: inbox.serverSession, update_check: false }],
     ];

@@ -168,7 +168,7 @@ Parity gate: existing `GuideView.test.tsx` / `GuideSectionCard.test.tsx` keep pa
 ### 6.3 CLI (`apps/hook/server/index.ts`) — D9
 - `plannotator guide export --id <savedGuideId> [--out <file>]` — reads `${DATA_DIR}/guides/**/{id}.json` + `.patch`.
 - `plannotator guide export --snapshot <snapshot.json> [--out <file>]` — the pure form (a complete snapshot document, wrapped as-is).
-- `plannotator guide export --guide <guide.json> --patch <diff.patch | -> [--out <file>]` — the agent form (D9 caller 3: the standalone `plannotator-guide` skill, its own repo). The agent writes only the guide (`title/intent/sections[/unplacedFiles]` + optional `review{gitRef,base}`/`source`/`generator`) and hands over the `git diff`; the CLI validates strictly against the patch (unknown or duplicate files are errors that list the patch's files), infers `source` from git in cwd, builds the snapshot, and round-trips it through the strict parser before writing HTML.
+- `plannotator guide export --guide <guide.json> --patch <diff.patch | -> [--out <file>]` — the agent form (D9 caller 3: the standalone `plannotator-guide` skill, since renamed `guided-review`, its own repo). The agent writes only the guide (`title/intent/sections[/unplacedFiles]` + optional `review{gitRef,base}`/`source`/`generator`) and hands over the `git diff`; the CLI validates strictly against the patch (unknown or duplicate files are errors that list the patch's files), infers `source` from git in cwd, builds the snapshot, and round-trips it through the strict parser before writing HTML.
 - `plannotator guide list` — id, label, title, savedAt, hasPatch (small, helps `--id`).
 - Exit codes: 0 ok, 1 not found / invalid snapshot, 2 usage.
 

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { InboxHealth } from '@plannotator/core/inbox-types';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import { ClaudeIcon, CodexIcon, OpenCodeIcon, PiIcon } from '@plannotator/ui/components/icons/AgentIcons';
@@ -46,11 +46,27 @@ export interface SidebarProps {
   /** Drafts not sent: the Drafts row shows only while there are some. */
   draftsCount?: number;
   onDrafts?: () => void;
+  /**
+   * The list is on screen with no thread open: Inbox (when it shows every
+   * project) or the project it shows, pressed now, refreshes it. On hover
+   * its icon becomes ↻ with the tooltip "Refresh".
+   */
+  refreshes?: boolean;
+  /** A refresh just ran (`scope`: the project, or null for Inbox): that row's ↻ turns once (the key restarts the turn). */
+  refreshSpin?: { key: number; scope: string | null } | null;
   onInbox: () => void;
   onProject: (projectId: string) => void;
   onSettings: () => void;
   onUpdate: () => void;
   onWhatsNew: (version: string) => void;
+  /**
+   * Claude Code sessions a restart would bring up to date (the list model's
+   * `restart_claude_code`): "Reload Claude Code N" under "What's new in X",
+   * opening Settings → Agents (owner approval "restart-warning"). It goes away
+   * by itself once they restart. Absent or 0: no row.
+   */
+  restartClaudeCode?: number;
+  onRestartSessions?: () => void;
   /**
    * `GET /api/inbox/settings` `mcp_command`, for the absolute `plannotator`
    * the connect prompt names; null until the settings load.
@@ -95,6 +111,9 @@ export function Sidebar(props: SidebarProps) {
   const shown = shownProjects(props.projects, held);
   const [projsRef, moreProjects] = useMoreBelow<HTMLDivElement>(shown.length);
   const inboxRef = useRef<HTMLButtonElement>(null);
+  const inboxRefreshes = props.refreshes === true && props.page === 'inbox' && props.projectId === null;
+  const spinOf = (scope: string | null) => (props.refreshSpin && props.refreshSpin.scope === scope ? props.refreshSpin.key : null);
+  const refreshHintId = useId();
   /** The project a menu action ran on: once its row is gone (Archive all hid it), focus goes to Inbox, never the page. */
   const actedOn = useRef<string | null>(null);
   useLayoutEffect(() => {
@@ -157,17 +176,30 @@ export function Sidebar(props: SidebarProps) {
         )}
         </div>
       )}
-      <button
-        ref={inboxRef}
-        type="button"
-        className={`ib-nav${props.page === 'inbox' && props.projectId === null ? ' ib-on' : ''}`}
-        onClick={pick(props.onInbox)}
-        aria-current={props.page === 'inbox' && props.projectId === null ? 'page' : undefined}
-      >
-        <Icon name="inbox" />
-        Inbox
-        {!firstRun && props.inboxCount > 0 && <span className="ib-n">{formatCount(props.inboxCount)}</span>}
-      </button>
+      {/* On the list it shows, Inbox refreshes it: ↻ on hover with "Refresh", one turn on a click. */}
+      <Tip content="Refresh" when={() => inboxRefreshes}>
+        <button
+          ref={inboxRef}
+          type="button"
+          className={`ib-nav ib-nav-inbox${props.page === 'inbox' && props.projectId === null ? ' ib-on' : ''}`}
+          onClick={pick(props.onInbox)}
+          aria-current={props.page === 'inbox' && props.projectId === null ? 'page' : undefined}
+          aria-describedby={inboxRefreshes ? refreshHintId : undefined}
+          data-refreshes={inboxRefreshes ? '' : undefined}
+          data-refreshing={spinOf(null) != null ? '' : undefined}
+          data-inbox-nav=""
+        >
+          <span className="ib-nav-ics" aria-hidden="true">
+            <Icon name="inbox" className="ib-ic-inbox" />
+            <Icon key={spinOf(null) ?? 'rest'} name="refresh" className="ib-ic-refresh" />
+          </span>
+          Inbox
+          {!firstRun && props.inboxCount > 0 && <span className="ib-n">{formatCount(props.inboxCount)}</span>}
+        </button>
+      </Tip>
+      <span id={refreshHintId} hidden>
+        Refresh the list
+      </span>
       {(props.draftsCount ?? 0) > 0 && props.onDrafts && (
         <button
           type="button"
@@ -216,6 +248,8 @@ export function Sidebar(props: SidebarProps) {
                 count={n}
                 on={on}
                 held={project.listed === 0}
+                refreshes={on && props.refreshes === true}
+                refreshSpin={spinOf(project.id)}
                 readable={props.projectsReadable?.has(project.id) ?? false}
                 phone={phone}
                 onOpen={pick(() => props.onProject(project.id))}
@@ -240,6 +274,9 @@ export function Sidebar(props: SidebarProps) {
           onPress={pick(props.onUpdate)}
           onWhatsNew={(version) => pick(() => props.onWhatsNew(version))()}
         />
+        {(props.restartClaudeCode ?? 0) > 0 && props.onRestartSessions && (
+          <RestartSessionsRow count={props.restartClaudeCode ?? 0} onOpen={pick(props.onRestartSessions)} />
+        )}
         {/* Two controls side by side, never one inside the other: the row opens Settings, the icon flips light and dark. */}
         <div className="ib-setrow">
           <button
@@ -255,6 +292,23 @@ export function Sidebar(props: SidebarProps) {
         </div>
       </div>
     </aside>
+  );
+}
+
+/**
+ * "Reload Claude Code N": the Claude Code sessions still on the plugin from
+ * before an update. A real button named by its words and count; what it does
+ * is in its description. Opens Settings → Agents, which lists them.
+ */
+function RestartSessionsRow({ count, onOpen }: { count: number; onOpen: () => void }) {
+  const why = `${count === 1 ? '1 Claude Code session runs' : `${count} Claude Code sessions run`} the plugin from before the update; /reload-plugins loads the new one. Opens Settings, Agents.`;
+  return (
+    <button type="button" className="ib-nav ib-quiet ib-rw-restart" data-restart-sidebar={count} onClick={onOpen}>
+      <Icon name="refresh" />
+      <span className="ib-rw-label">Reload Claude Code</span>
+      <span className="ib-n">{formatCount(count)}</span>
+      <span className="ib-sr">. {why}</span>
+    </button>
   );
 }
 

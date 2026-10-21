@@ -59,14 +59,18 @@ export interface UseSkillReferenceAutocompleteResult {
  * active row and dismisses the menu when the user has engaged with it (a row
  * is active or a query was typed); on a bare-trigger menu with no engagement
  * it passes through, so Escape still closes the composer in one press.
+ * `bareEscapeDismisses` (default off) makes Escape close any open menu first,
+ * for a composer where Escape costs more than a press (the Inbox's compose
+ * dialog asks whether to keep a draft).
  */
 export function useSkillReferenceAutocomplete(options: {
   text: string;
   setText: (text: string) => void;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   enabled: boolean;
+  bareEscapeDismisses?: boolean;
 }): UseSkillReferenceAutocompleteResult {
-  const { text, setText, textareaRef, enabled } = options;
+  const { text, setText, textareaRef, enabled, bareEscapeDismisses = false } = options;
   // Seed from the memory cache only when the surface opted in — a disabled
   // composer must stay inert even after another surface warmed the catalog.
   const [catalog, setCatalog] = useState<SkillCatalogEntry[]>(() =>
@@ -205,7 +209,7 @@ export function useSkillReferenceAutocomplete(options: {
           // Only consume Escape when the user engaged with the menu (typed a
           // query or activated a row). A bare-trigger menu the user ignored
           // must not cost an extra Escape on the way to closing the composer.
-          if (boundedActive === null && trigger.query.length === 0) return false;
+          if (!bareEscapeDismisses && boundedActive === null && trigger.query.length === 0) return false;
           e.preventDefault();
           e.stopPropagation();
           setActiveIndex(null);
@@ -215,7 +219,7 @@ export function useSkillReferenceAutocomplete(options: {
           return false;
       }
     },
-    [boundedActive, items.length, open, select, trigger],
+    [bareEscapeDismisses, boundedActive, items.length, open, select, trigger],
   );
 
   const humanOnlyReferences = useMemo(

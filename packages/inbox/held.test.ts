@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import type { InboxListRow, InboxListSection } from '@plannotator/core/inbox-types';
-import { addOwnThreads, heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread } from './held';
+import { addOwnThreads, adoptKeepingOpen, heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread } from './held';
 
 function row(id: string, project: string, last_at: string, last_author: 'agent' | 'person'): InboxListRow {
   return { thread_id: id, project: { id: `prj_${project}`, name: project }, last_at, last_author } as InboxListRow;
@@ -384,5 +384,50 @@ describe('addOwnThreads', () => {
     expect(ids(again)).toEqual(['sent:s1']);
     expect(again.find((s) => s.id === 'sent')!.threads[0]).toBe(shown.find((s) => s.id === 'sent')!.threads[0]);
     expect(ids(addOwnThreads(shown, bySection(), ['gone']))).toEqual(['sent:s1']);
+  });
+});
+
+// Click Inbox to refresh: a refresh beside an open thread adopts everything,
+// but the open thread's row stays in the group it is drawn in, so the
+// selection never goes into folded Quiet out of view.
+describe('adoptKeepingOpen', () => {
+  const two = (newRows: InboxListRow[], quiet: InboxListRow[]): InboxListSection[] => [
+    { id: 'new', label: 'New since you looked', threads: newRows },
+    { id: 'quiet', label: 'Quiet', threads: quiet },
+  ];
+  const at = (id: string, time: string, section: 'new' | 'quiet') => ({ ...row(id, 'docs', time, 'agent'), section }) as InboxListRow;
+
+  test('the open row keeps its group, at its place there; everything else is the read', () => {
+    // On screen: a is open (already read, so its own section says quiet), b new.
+    const shown = two([at('a', '2026-10-20T10:00:00Z', 'quiet'), at('b', '2026-10-20T09:00:00Z', 'new')], []);
+    // The read: c arrived, a is in Quiet.
+    const latest = two([at('c', '2026-10-20T11:00:00Z', 'new'), at('b', '2026-10-20T09:00:00Z', 'new')], [at('a', '2026-10-20T10:00:00Z', 'quiet')]);
+    const next = adoptKeepingOpen(shown, latest, 'a');
+    expect(next[0]!.threads.map((r) => r.thread_id)).toEqual(['c', 'a', 'b']);
+    expect(next[1]!.threads).toEqual([]);
+  });
+
+  test('without the open row on screen it is the read', () => {
+    const latest = two([at('c', '2026-10-20T11:00:00Z', 'new')], [at('a', '2026-10-20T10:00:00Z', 'quiet')]);
+    expect(adoptKeepingOpen(two([], []), latest, 'a')).toEqual(latest);
+  });
+
+  test('it keeps its place between the same neighbours, never re-sorted by its time', () => {
+    // On screen a sits between x and y, though its time is older than y's (held rows keep their places).
+    const shown = two([at('x', '2026-10-20T12:00:00Z', 'new'), at('a', '2026-10-20T08:00:00Z', 'quiet'), at('y', '2026-10-20T10:00:00Z', 'new')], []);
+    const latest = two([at('x', '2026-10-20T12:00:00Z', 'new'), at('y', '2026-10-20T10:00:00Z', 'new')], [at('a', '2026-10-20T08:00:00Z', 'quiet')]);
+    expect(adoptKeepingOpen(shown, latest, 'a')[0]!.threads.map((r) => r.thread_id)).toEqual(['x', 'a', 'y']);
+  });
+
+  // The window reads without archived threads: a thread the person archived while it is open is
+  // not in the read, and its row (drawn Archived by markHeldRowArchived) must not vanish under them.
+  test('an open thread the read leaves out (archived while open) stays as drawn, still Archived', () => {
+    const archivedRow = { ...at('a', '2026-10-20T10:00:00Z', 'quiet'), resolved_at: '2026-10-20T10:05:00Z' } as InboxListRow;
+    const shown = two([at('b', '2026-10-20T11:00:00Z', 'new'), archivedRow, at('c', '2026-10-20T09:00:00Z', 'new')], []);
+    const latest = two([at('d', '2026-10-20T12:00:00Z', 'new'), at('b', '2026-10-20T11:00:00Z', 'new'), at('c', '2026-10-20T09:00:00Z', 'new')], []);
+    const next = adoptKeepingOpen(shown, latest, 'a');
+    expect(next[0]!.threads.map((r) => r.thread_id)).toEqual(['d', 'b', 'a', 'c']);
+    expect(next[0]!.threads[2]).toBe(archivedRow);
+    expect(next[0]!.threads[2]!.resolved_at).toBe('2026-10-20T10:05:00Z');
   });
 });

@@ -1,5 +1,6 @@
 import { GUIDE_CLI_USAGE } from "@plannotator/server/guide-cli";
 import { T3_CLI_USAGE } from "@plannotator/t3-code/usage";
+import { INBOX_CARD_COLUMNS } from "@plannotator/core/inbox-types";
 
 const HELP_FLAGS = new Set(["--help", "-h"]);
 
@@ -186,9 +187,33 @@ export function formatTopLevelHelp(): string {
  * formatTopLevelHelp() and document it in apps/skills/core/plannotator/SKILL.md.
  *
  * `inbox` (the Plannotator Inbox) was the last one to launch. Today: the
- * opt-in T3 Code connection (`t3`, and `t3-hook`, its Claude hook).
+ * opt-in T3 Code connection (`t3`, and `t3-hook`, its Claude hook), and
+ * `card`, the Board's card call from a shell (approval "inbox-board", step 1),
+ * hidden until the Board page ships.
  */
-export const HIDDEN_SUBCOMMANDS: ReadonlySet<string> = new Set<string>(["t3", "t3-hook"]);
+export const HIDDEN_SUBCOMMANDS: ReadonlySet<string> = new Set<string>(["t3", "t3-hook", "card"]);
+
+/**
+ * `plannotator card …` (card-command.ts): the Board's card call from a shell,
+ * a thin client over the Inbox's `card` MCP tool. Unreleased (HIDDEN_SUBCOMMANDS).
+ */
+export const CARD_COMMAND_USAGE = [
+  "Usage:",
+  "  plannotator card create <title> [--column <column>] [--say <text>] [--you <text>] [--thread <id>] [--pr <ref>] [--key <key>]",
+  "  plannotator card create --thread <id> [...]      (the thread's subject is the title)",
+  "  plannotator card move <crd_id> <column> [--say <text>] [--you <text>] [--thread <id>] [--pr <ref>] [--reason <text>]",
+  "  plannotator card say <crd_id> [<text>] [--you <text>] [--title <text>]",
+  "  plannotator card link <crd_id> [--thread <id>] [--pr <ref>] [--say <text>]",
+  "  plannotator card ship <crd_id> [--say <text>] [--pr <ref>] [--thread <id>]",
+  "  plannotator card drop <crd_id> <reason> [--say <text>]",
+  "  plannotator card list [--anyone | --mine] [--all]",
+  "",
+  "Every command takes [--project <folder>] (default: this folder) and [--json].",
+  `Columns: ${INBOX_CARD_COLUMNS.join(", ")} (icebox is the person's only).`,
+  "",
+  "Keeps a card on the person's Board in the Plannotator Inbox for work that outlasts a reply.",
+  "Run 'plannotator inbox --help' for the full guide (its card tool section).",
+].join("\n");
 
 /**
  * `plannotator inbox`'s commands and flags. `plannotator inbox --help` prints
@@ -412,8 +437,9 @@ export const SUBCOMMAND_HELP: Record<string, string> = {
     "Purge data is local-only: it is not stored on a Plannotator server and",
     "cannot be recovered after purge. Unrecognized custom files are preserved.",
   ].join("\n"),
-  // Unreleased (HIDDEN_SUBCOMMANDS): the opt-in T3 Code connection.
+  // Unreleased (HIDDEN_SUBCOMMANDS): the opt-in T3 Code connection, and the Board's cards.
   t3: T3_CLI_USAGE,
+  card: CARD_COMMAND_USAGE,
   "t3-hook": [
     "Usage:",
     "  plannotator t3-hook install --settings <settings.json> --executable <plannotator>",

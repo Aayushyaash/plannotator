@@ -726,6 +726,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
               activeOptionId={activeComposerOptionId}
             />
             <HumanOnlySkillNotice skills={skillAc.humanOnlyReferences} />
+            {mentionSource?.renderNotice?.(mentionChipPeople)}
             <MentionAutocompleteMenu
               id={mentionListboxId}
               menu={mentionAc.menu}
@@ -879,6 +880,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
           activeOptionId={activeComposerOptionId}
         />
         <HumanOnlySkillNotice skills={skillAc.humanOnlyReferences} />
+        {mentionSource?.renderNotice?.(mentionChipPeople)}
         <MentionAutocompleteMenu
           id={mentionListboxId}
           menu={mentionAc.menu}

@@ -31,6 +31,13 @@ describe('the Escape ladder', () => {
     expect(KINDS.filter((kind) => rungsFor(kind).includes('field'))).toEqual(['image', 'video']);
   });
 
+  test('a linked page steps back before Annotate, also beside the thread; only HTML shows one', () => {
+    expect(escapeRung({ ...IDLE_LADDER, linkedOpen: true, annotating: true })).toBe('linked');
+    expect(escapeRung({ ...IDLE_LADDER, linkedOpen: true, panelOpen: true })).toBe('drawer');
+    expect(escapeRung({ ...IDLE_LADDER, full: false, linkedOpen: true })).toBe('linked');
+    expect(KINDS.filter((kind) => rungsFor(kind).includes('linked'))).toEqual(['html']);
+  });
+
   test('a menu closes before a composer, the drawer before Annotate, Annotate before the question, and the question before leaving', () => {
     expect(escapeRung({ ...IDLE_LADDER, popoverOpen: true, composerOpen: true })).toBe('popover');
     expect(escapeRung({ ...IDLE_LADDER, composerOpen: true, panelOpen: true })).toBe('composer');

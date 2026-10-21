@@ -17,7 +17,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import type { InboxQuestion } from "@plannotator/core/inbox-types";
 import { inboxStatus, isPidAlive, readInboxRegistry, writeInboxRegistry } from "@plannotator/shared/inbox/registry";
 import { startInboxServer } from "@plannotator/server/inbox";
-import { INBOX_MCP_TOOLS } from "@plannotator/server/inbox-mcp";
+import { INBOX_SERVED_TOOLS } from "@plannotator/server/inbox-mcp";
 import { GUIDE_BRIEF_EXAMPLE } from "../../../packages/server/inbox-guides";
 import { runPlannotatorUninstall } from "@plannotator/server/uninstall";
 import { INBOX_MAX_REQUEST_BYTES } from "@plannotator/shared/inbox/connection";
@@ -270,7 +270,7 @@ describe("plannotator inbox mcp (the stdio shim)", () => {
     expect((await inboxStatus(box.dataDir)).state).toBe("running");
     expect(existsSync(box.browserMarker)).toBe(false);
 
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual([...INBOX_MCP_TOOLS].sort());
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual([...INBOX_SERVED_TOOLS].sort());
     const sent = (
       await client.callTool({
         name: "send_message",
@@ -392,6 +392,9 @@ describe("plannotator inbox mcp inside an agent session", () => {
     // read_thread and wait_for_reply have strict schemas without agent_host.
     expect(call("read_thread", {})).toEqual({ project_path: "/work", agent_session: CLAUDE_SESSION });
     expect(call("wait_for_reply", {})).toEqual({ project_path: "/work", agent_session: CLAUDE_SESSION });
+    // search takes the project only (strict, no session), and nothing when it searches every project.
+    expect(call("search", { query: "retry" })).toEqual({ query: "retry", project_path: "/work" });
+    expect(call("search", { query: "retry", all_projects: true })).toEqual({ query: "retry", all_projects: true });
     // The agent's own choices stand.
     expect(call("send_message", { body: "hi", agent_session: "mine" })).toEqual({ body: "hi", project_path: "/work", agent_session: "mine" });
     // An agent that names another host is not this session: it gets the shim's own id, so a reply to it never wakes the session.

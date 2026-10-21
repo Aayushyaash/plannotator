@@ -19,7 +19,10 @@
  * while a test runs; the server answers `{ "sent": <message id> }` on stdout.
  * `{ "deliver": { session } }` is that session's connection delivering every
  * reply waiting for it (the bridge's `delivered`); the server answers
- * `{ "delivered": [<reply id>] }`. The set-aside note's delay (also the 👍
+ * `{ "delivered": [<reply id>] }`. `{ "wait": { thread, session } }` is that
+ * agent calling `wait_for_reply` on the thread through the Inbox's own MCP
+ * (`/mcp`, a real MCP client); the server answers `{ "waited": <its
+ * structured result> }`. The set-aside note's delay (also the 👍
  * Looks good Undo window) is a minute, so no note is written while a test
  * runs, unless `INBOX_DOM_SET_ASIDE_MS` names a shorter one.
  *
@@ -41,17 +44,43 @@
  * each launch to `<data dir>/launches.jsonl`. Each project also gets a thread
  * with page.html, plan.md, build.zip, shot.png and gone.md (deleted after it
  * was sent: missing); the world adds `openIn` (`{ thread, ids: { <name>: <id> } }`).
+ * With `html-links`, each project also gets a thread whose message attaches
+ * `site/SHEET.html` and `site/frames/a.png`; the page links to a sibling page
+ * that is not attached (`B-cards.html`), both images (`b.png` is not
+ * attached), a PDF beside it and another site. The world adds `htmlLinks`
+ * (`{ thread, ids: { <name>: <attachment id> } }`).
+ *
  * The Inbox is published over the tailnet by a scripted `tailscale`, and the
  * first line adds `tailnet: { listener, host, login }`: a request to that
  * loopback port with that Host and login is one `tailscale serve` hands over.
+ *
+ * With `tags` (approval "inbox-tag-agents"), the mock's sample threads are
+ * seeded too (tests/helpers/inbox-tag-world.ts): live connections that poll
+ * as the mod, Pi and OpenCode do (one Pi on an older Plannotator, without
+ * the tags capability) and Codex through MCP only; the first line adds
+ * `tags: { ids, sessions }`. `{ "deliver": { session } }` then delivers what
+ * that session is handed, tagged replies included.
+ * With `restart` (the restart warning, owner approval "restart-warning"):
+ * this Inbox is 0.28.25, its release check never reaches GitHub, and Claude
+ * Code's plugin registry is a scratch `<data dir>/claude/plugins/installed_plugins.json`
+ * recording plugin 0.28.25 (CLAUDE_CONFIG_DIR, read through the Inbox's agent
+ * environment, never the person's ~/.claude). Each project also gets a
+ * thread a waking Claude Code session (`ses_r<i>`) asked in and the person
+ * replied to; the world adds `restart: { thread, session, installPath }`. A
+ * stdin line `{ "poll": { session, body } }` is that session's connection
+ * polling the bridge with `body`'s fields (`plugin`, `busy`, `send_now`...);
+ * the server answers `{ "polled": true }`.
  */
 import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startInboxServer } from "../../packages/server/inbox";
 import type { InboxOpenInLauncher } from "../../packages/server/inbox-open-in";
 import { recordInboxAttachments } from "../../packages/shared/inbox/attachments";
 import { writeUpdateState } from "../../packages/shared/update-check";
+import { createAgentEnvironmentFor } from "../../packages/server/inbox-agents";
 import { isScratchDataDir, refuseRealDataDir } from "./real-data-dir";
+import { seedTagWorld, TAG_SESSIONS } from "./inbox-tag-world";
 
 const [dataDir, projectsDir, countArg, extra] = process.argv.slice(2);
 const withNews = extra === "news";
@@ -165,6 +194,23 @@ if (whatsNewMode) {
   process.env.PLANNOTATOR_UPDATE_API_URL = `http://127.0.0.1:${releaseApi.port}/releases/latest`;
 }
 const openInMode = extra === "open-in";
+const restartMode = extra === "restart";
+const claudeDir = join(dataDir, "claude");
+const pluginFolder = (version: string) => join(claudeDir, "plugins", "cache", "plannotator", "plannotator", version);
+if (restartMode) {
+  mkdirSync(join(claudeDir, "plugins"), { recursive: true });
+  writeFileSync(
+    join(claudeDir, "plugins", "installed_plugins.json"),
+    JSON.stringify({
+      version: 2,
+      plugins: {
+        "plannotator@plannotator": [
+          { scope: "user", installPath: pluginFolder("0.28.25"), version: "0.28.25", installedAt: "2026-10-04T22:07:24.658Z", lastUpdated: "2026-10-17T05:27:07.299Z" },
+        ],
+      },
+    }),
+  );
+}
 /** Records each launch instead of starting an app. */
 const recordLaunch = (app: string, path: string) => {
   appendFileSync(join(dataDir, "launches.jsonl"), `${JSON.stringify({ app, path })}\n`);
@@ -189,6 +235,14 @@ const server = await startInboxServer({
   ...(phonesMode ? { tailscale, pairingProbes } : {}),
   ...(openInMode ? { openInLauncher, tailscale, publishTailnet: true } : {}),
   ...(whatsNewMode ? { version: "0.28.19", binaryPath: null } : {}),
+  ...(restartMode
+    ? {
+        version: "0.28.25",
+        binaryPath: null,
+        agentEnvironment: createAgentEnvironmentFor({ platform: process.platform, homeDir: scratchHome, env: { HOME: scratchHome, CLAUDE_CONFIG_DIR: claudeDir, PATH: "" } }),
+        updates: { fetchRelease: async () => ({ ok: false as const, error: "offline in tests" }), isManaged: () => false, listSessions: () => [] },
+      }
+    : {}),
 });
 const store = server.store;
 type World = {
@@ -206,6 +260,8 @@ type World = {
   files?: { thread: string; first: string; middle: string; last: string; ids: Record<string, string> };
   sentMulti?: string;
   openIn?: { thread: string; ids: Record<string, string> };
+  htmlLinks?: { thread: string; ids: Record<string, string> };
+  restart?: { thread: string; session: string; project: string; installPath: string; oldPath: string };
   news: string[];
 };
 const SENT_MULTI = [
@@ -299,7 +355,42 @@ for (let i = 0; i < count; i++) {
     unlinkSync(join(root, "gone.md"));
     openIn = { thread: thread.id, ids: Object.fromEntries(sentFiles.map((a, n) => [names[n]!, a.id])) };
   }
+  let htmlLinks: World["htmlLinks"];
+  if (extra === "html-links") {
+    const site = join(root, "site");
+    mkdirSync(join(site, "frames"), { recursive: true });
+    const png = Buffer.from(
+      "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63f8cfc0f01f0005fe02fe0dd8a2c90000000049454e44ae426082",
+      "hex",
+    );
+    writeFileSync(
+      join(site, "SHEET.html"),
+      '<!doctype html><title>Sheet</title><h1>Sheet</h1><a href="B-cards.html#pr1">B</a> <a href="frames/a.png">a</a> <a href="frames/b.png">b</a> <a href="report.pdf">pdf</a> <a href="https://example.com/x">site</a>\n',
+    );
+    writeFileSync(join(site, "B-cards.html"), '<!doctype html><title>Cards</title><h1 id="pr1">Cards</h1><a href="SHEET.html">home</a> <a href="C-between.html">C</a>\n');
+    writeFileSync(join(site, "C-between.html"), "<!doctype html><title>Between</title><h1>Between</h1>\n");
+    writeFileSync(join(site, "frames", "a.png"), png);
+    writeFileSync(join(site, "frames", "b.png"), png);
+    writeFileSync(join(site, "report.pdf"), "%PDF-1.4\n");
+    const linkFiles = await recordInboxAttachments(store.dir, ["site/SHEET.html", "site/frames/a.png"], { base: root, at: new Date().toISOString() });
+    const thread = store.sendMessage({ project_id: project.id, author: { ...author, session: `ses_l${i}` }, body: "The contact sheet and one frame.", attachments: linkFiles }).message;
+    htmlLinks = { thread: thread.id, ids: Object.fromEntries(linkFiles.map((a) => [a.name, a.id])) };
+  }
+  let restart: World["restart"];
+  if (restartMode) {
+    const session = `ses_r${i}`;
+    const asked = store.sendMessage({
+      project_id: project.id,
+      author: { ...author, session },
+      body: "Retry policy for the Stripe webhook: shipped the queue. Anything else?",
+      wakes: true,
+    }).message;
+    store.sendReply(asked.id, { idempotency_key: `restart-${i}`, words: "Queue it. Cap retries at 5 and dead-letter after." });
+    restart = { thread: asked.id, session, project: root, installPath: pluginFolder("0.28.25"), oldPath: pluginFolder("0.28.23") };
+  }
   worlds.push({
+    ...(htmlLinks ? { htmlLinks } : {}),
+    ...(restart ? { restart } : {}),
     ...(openIn ? { openIn } : {}),
     ...(files ? { files } : {}),
     ...(sentMulti ? { sentMulti } : {}),
@@ -322,13 +413,46 @@ for (let i = 0; i < count; i++) {
   });
 }
 const tailnet = openInMode ? { listener: server.tailscale.listenerPort(), host: `macbook.tail0000.ts.net:${server.port}`, login: "ramos@example.com" } : undefined;
-process.stdout.write(`${JSON.stringify({ port: server.port, worlds, ...(tailnet ? { tailnet } : {}) })}\n`);
+const tagWorld = extra === "tags" ? await seedTagWorld(`http://127.0.0.1:${server.port}`, server.token, join(projectsDir, "tags")) : null;
+const tags = tagWorld ? { ids: tagWorld.ids, sessions: TAG_SESSIONS } : undefined;
+process.stdout.write(`${JSON.stringify({ port: server.port, worlds, ...(tailnet ? { tailnet } : {}), ...(tags ? { tags } : {}) })}\n`);
+/** The host a delivery is recorded under: the tag world's own sessions are not all Claude Code. */
+function tagHost(session: string): string {
+  if (session === TAG_SESSIONS.pi || session === TAG_SESSIONS.oldPi) return "pi";
+  if (session === TAG_SESSIONS.opencode) return "opencode";
+  return "claude-code";
+}
 // An agent writing while a test runs.
 void (async () => {
   for await (const line of console) {
-    const command = JSON.parse(line) as { send?: { project: string; session: string; body: string; reply_to?: string }; deliver?: { session: string } };
+    const command = JSON.parse(line) as {
+      send?: { project: string; session: string; body: string; reply_to?: string };
+      deliver?: { session: string };
+      wait?: { thread: string; session: string };
+      poll?: { session: string; body: Record<string, unknown> };
+    };
+    if (command.poll) {
+      // That session's connection polling now: it is live, with what it loaded.
+      await fetch(`http://127.0.0.1:${server.port}/api/inbox/bridge/poll`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${server.token}` },
+        body: JSON.stringify({ session: command.poll.session, host: "claude-code", waitMs: 0, ...command.poll.body }),
+      });
+      process.stdout.write(`${JSON.stringify({ polled: true })}\n`);
+      continue;
+    }
+    if (command.wait) {
+      const client = new Client({ name: "inbox-dom-server", version: "1.0.0" });
+      await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`)));
+      const result = (await client.callTool({ name: "wait_for_reply", arguments: { thread_id: command.wait.thread, agent_session: command.wait.session, timeout_seconds: 5 } })) as {
+        structuredContent?: unknown;
+      };
+      await client.close();
+      process.stdout.write(`${JSON.stringify({ waited: result.structuredContent ?? null })}\n`);
+      continue;
+    }
     if (command.deliver) {
-      const ids = store.pendingReplies(command.deliver.session).map((reply) => store.recordDelivery(reply.id, { host: "claude-code", session: command.deliver!.session }).id);
+      const ids = store.pendingReplies(command.deliver.session).map((reply) => store.recordDelivery(reply.id, { host: tagHost(command.deliver!.session), session: command.deliver!.session }).id);
       process.stdout.write(`${JSON.stringify({ delivered: ids })}\n`);
       continue;
     }
@@ -339,6 +463,7 @@ void (async () => {
   }
 })();
 process.on("SIGTERM", () => {
+  void tagWorld?.stop();
   server.stop();
   process.exit(0);
 });

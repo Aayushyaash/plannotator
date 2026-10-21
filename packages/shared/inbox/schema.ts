@@ -10,6 +10,9 @@
  *                                      only its highest seq counts (Decisions
  *                                      were removed in 2026-10)
  *     projects/<key>/annotations.jsonl the person's annotations on attachments
+ *     projects/<key>/cards.jsonl       the Board's cards (approval "inbox-board"):
+ *                                      their own records, never read by thread
+ *                                      routing or the list
  *     blobs/<sha256>                   the bytes of each attachment as sent
  *     seq.json                         the highest seq ever written (kept
  *                                      across a deletion, so seq never repeats)
@@ -33,13 +36,15 @@ export const QUESTIONS_FILE = "questions.jsonl";
 /** Decisions were removed (2026-10): an older store keeps this file; only its seqs count. */
 export const LEGACY_DECISIONS_FILE = "decisions.jsonl";
 export const ANNOTATIONS_FILE = "annotations.jsonl";
+/** The Board's cards (approval "inbox-board"): never read by thread routing or the list. */
+export const CARDS_FILE = "cards.jsonl";
 export const SEQ_FLOOR_FILE = "seq.json";
 
 export function inboxDir(dataDir: string): string {
   return join(dataDir, INBOX_DIR_NAME);
 }
 
-const KINDS: ReadonlySet<InboxRecordKind> = new Set(["project", "message", "question", "annotation"]);
+const KINDS: ReadonlySet<InboxRecordKind> = new Set(["project", "message", "question", "annotation", "card"]);
 
 /**
  * One line of a store file, or null when it is not a line this reader can

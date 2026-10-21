@@ -18,6 +18,9 @@ const QUESTION_CONTEXT_CSS = `
 .question-context > :first-child { margin-top: 0; }
 .question-context > :last-child { margin-bottom: 0; }
 .question-context p, .question-context .text-sm { font-size: 13px; line-height: 1.5; }
+/* Context lines stay lines ("Stopped: …" then "Holds up: …"), as the
+   authoring guide writes them; the parser keeps them as soft breaks. */
+.question-context p { white-space: pre-line; }
 .question-context p, .question-context [data-question-context-list] span { color: inherit; }
 .question-context h1, .question-context h2, .question-context h3 { margin: 0.75rem 0 0.25rem; font-size: 14px; }
 .question-context h3 { font-size: 13.5px; }

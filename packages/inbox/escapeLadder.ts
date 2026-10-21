@@ -12,6 +12,9 @@
  *  3. `field`     the key came from the file's own comment row (an image's or
  *                 a film's): focus leaves the row, its words stay in it.
  *  4. `drawer`    the comments drawer (a phone's sheet) closes.
+ *  4b. `linked`   a page the attached HTML page links to (not attached, shown
+ *                 over it) steps back one page. Beside the thread too: the one
+ *                 rung there, when the key came from inside the pane.
  *  5. `annotate`  an HTML file in Annotate goes to Interact (the pinpoint
  *                 hover goes with it), as it always has.
  *  6. `question`  the question about an unsaved comment goes away: keep writing.
@@ -23,10 +26,10 @@
  * its own Escape, as before.
  */
 
-export type EscapeRung = 'popover' | 'composer' | 'field' | 'drawer' | 'annotate' | 'question' | 'leave';
+export type EscapeRung = 'popover' | 'composer' | 'field' | 'drawer' | 'linked' | 'annotate' | 'question' | 'leave';
 
 /** The rungs in the order a press takes them. */
-export const ESCAPE_LADDER: readonly EscapeRung[] = ['popover', 'composer', 'field', 'drawer', 'annotate', 'question', 'leave'];
+export const ESCAPE_LADDER: readonly EscapeRung[] = ['popover', 'composer', 'field', 'drawer', 'linked', 'annotate', 'question', 'leave'];
 
 export interface EscapeLadderState {
   /** The file is full screen. */
@@ -39,6 +42,8 @@ export interface EscapeLadderState {
   inField: boolean;
   /** The comments drawer (a phone's sheet) is open. */
   panelOpen: boolean;
+  /** A page the attached HTML page links to is shown over it. */
+  linkedOpen: boolean;
   /** An HTML file that takes comments is in Annotate. */
   annotating: boolean;
   /** The question about an unsaved comment is showing. */
@@ -51,17 +56,19 @@ export const IDLE_LADDER: EscapeLadderState = {
   composerOpen: false,
   inField: false,
   panelOpen: false,
+  linkedOpen: false,
   annotating: false,
   questionOpen: false,
 };
 
-/** What this Escape does, or null for nothing (not full screen). */
+/** What this Escape does, or null for nothing (beside the thread, with no linked page shown). */
 export function escapeRung(state: EscapeLadderState): EscapeRung | null {
-  if (!state.full) return null;
+  if (!state.full) return state.linkedOpen ? 'linked' : null;
   if (state.popoverOpen) return 'popover';
   if (state.composerOpen) return 'composer';
   if (state.inField) return 'field';
   if (state.panelOpen) return 'drawer';
+  if (state.linkedOpen) return 'linked';
   if (state.annotating) return 'annotate';
   if (state.questionOpen) return 'question';
   return 'leave';
@@ -78,6 +85,9 @@ export function afterRung(state: EscapeLadderState, rung: EscapeRung): EscapeLad
       return { ...state, inField: false };
     case 'drawer':
       return { ...state, panelOpen: false };
+    case 'linked':
+      // One page back; the walk counts it once (a stack of pages takes one press each).
+      return { ...state, linkedOpen: false };
     case 'annotate':
       return { ...state, annotating: false };
     case 'question':
@@ -111,7 +121,7 @@ export type LadderFileKind = 'html' | 'markdown' | 'text' | 'code' | 'diagram' |
 export function rungsFor(kind: LadderFileKind): readonly EscapeRung[] {
   switch (kind) {
     case 'html':
-      return ['popover', 'composer', 'drawer', 'annotate', 'question', 'leave'];
+      return ['popover', 'composer', 'drawer', 'linked', 'annotate', 'question', 'leave'];
     case 'markdown':
     case 'text':
     case 'code':
@@ -134,6 +144,7 @@ export function everythingOpen(kind: LadderFileKind): EscapeLadderState {
     composerOpen: rungs.has('composer'),
     inField: rungs.has('field'),
     panelOpen: rungs.has('drawer'),
+    linkedOpen: rungs.has('linked'),
     annotating: rungs.has('annotate'),
     questionOpen: rungs.has('question'),
   };

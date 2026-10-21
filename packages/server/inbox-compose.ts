@@ -16,7 +16,9 @@
  *                                            a new thread (409 `session_not_live`, nothing written)
  *   POST /api/inbox/messages/:id/to          `{ to }`: "Send to another session" for a message
  *                                            no session took yet (a live session of its project)
- *   GET  /api/inbox/drafts                   the drafts, each with its chip (`status`)
+ *   GET  /api/inbox/drafts                   the drafts, each with its chip (`status`), and `replies`:
+ *                                            open threads holding unsent work (reply drafts,
+ *                                            picks, comments; inbox-reply-drafts.ts)
  *   POST /api/inbox/drafts/:id               create or replace one (compare-and-set on `base`)
  *   POST /api/inbox/drafts/:id/delete        delete one
  *   POST /api/inbox/uploads?name=&serverSession=   one file, the raw body streamed
@@ -28,6 +30,8 @@
 
 import { homedir } from "node:os";
 import { basename } from "node:path";
+import { inboxHasUnsent, inboxRowArchived } from "@plannotator/shared/inbox/list";
+import type { InboxReplyDraftRow } from "@plannotator/core/inbox-types";
 import type { InboxComposeProject, InboxComposeSession, InboxDraft, InboxDraftStatus, InboxProject } from "@plannotator/core/inbox-types";
 import { checkServerSession, INBOX_SERVER_SESSION_MISMATCH_ERROR, serverSessionMismatchBody } from "@plannotator/core/server-session";
 import { deleteInboxDraft, inboxDraftUploadIds, listInboxDrafts, saveInboxDraft } from "@plannotator/shared/inbox/drafts";
@@ -42,6 +46,9 @@ import {
   sweepInboxUploads,
 } from "@plannotator/shared/inbox/uploads";
 import type { createInboxLiveSessions } from "./inbox-sessions";
+
+/** How many characters of a reply draft the Drafts page shows. */
+const INBOX_REPLY_PREVIEW_MAX = 160;
 
 /** How often pending uploads are swept (each sweep drops those older than a day that no draft names). */
 export const INBOX_UPLOAD_SWEEP_MS = 60 * 60 * 1000;
@@ -192,7 +199,9 @@ export function createInboxCompose(options: {
     }
     if (path === "/api/inbox/drafts") {
       if (req.method !== "GET") return json({ error: "Use GET." }, 405);
-      return json({ serverSession, drafts: listInboxDrafts(store.dir).map(withStatus) });
+      // `replies` (additive, approval "inbox-reply-drafts"): every open thread holding unsent work
+      // (reply words, picks, comments), for the Drafts page's "Replies not sent" and the sidebar's count.
+      return json({ serverSession, drafts: listInboxDrafts(store.dir).map(withStatus), replies: replyDraftRows() });
     }
     const draftMatch = /^\/api\/inbox\/drafts\/([A-Za-z0-9_]+)(\/delete)?$/.exec(path);
     if (draftMatch) {
@@ -219,6 +228,17 @@ export function createInboxCompose(options: {
     }
     return null;
   };
+
+  /** Open threads holding unsent work, the most recently drafted first (each with the reply's first words). */
+  const replyDraftRows = (): InboxReplyDraftRow[] =>
+    store
+      .listRows()
+      .filter((row) => inboxHasUnsent(row.unsent) && !inboxRowArchived(row))
+      .map((row) => {
+        const words = store.replyDraft(row.thread_id)?.body.trim().replace(/\s+/g, " ") ?? "";
+        return { ...row, reply_preview: words ? words.slice(0, INBOX_REPLY_PREVIEW_MAX) : null };
+      })
+      .sort((a, b) => (b.unsent!.reply_at ?? b.last_at).localeCompare(a.unsent!.reply_at ?? a.last_at) || a.thread_id.localeCompare(b.thread_id));
 
   /** Forget uploads older than a day that no draft names, and the blobs only they held. */
   const sweep = () => {

@@ -17,6 +17,7 @@ Where the rules live: the store (`packages/shared/inbox/store.ts`: `listRow`, `r
 - **Came back.** An agent wrote in an archived thread after the line (`agent_after_archive`), and something there still waits on someone (`back_from_archive`): an agent message after the line the person has not looked at, a live question open or picked, or the person's real reply after the line that no agent has read (notes do not count), unless a Mark read made after it still stands. A Mark read made after the latest post-archive agent message ends "came back": the thread is Archived again at once, even while the person's reply there waits on the agent. The thread stays resolved.
 - **Agent read.** `read_thread` read the thread, or `wait_for_reply` returned the person's reply. The root's `agent_checked_seq` becomes the seq of the latest person message it covered.
 - **A thread the person started.** Compose (`POST /api/inbox/messages`): the root is the person's message (`started_by_person`), addressed to one live session (`to`). It is no session's default thread (routing indexes agent roots only), so only a `reply_to` answer lands in it. Its addressed session's **delivery** (the connection put it into the session as a turn) counts as an agent read up to it.
+- **Unsent work** (the row's `unsent`, approval "inbox-reply-drafts", 2026-10-20). What the person has not sent in the thread: words typed in its reply box (a **reply draft**, `inbox/reply-drafts/<thread id>.json`, outside the event log, so no line, no seq and nothing an agent sees), picks saved and not sent, and comments (on attached files, the guided review, the messages) waiting for a Send. Saved while the person types (a compare-and-set on `updated_at`); Discard and the Send that carries the words (`clear_draft`, naming the `updated_at` they were saved as, so a newer draft from another window stays) delete the draft; a deleted thread takes its draft with it.
 - **Waiting on the person** (the summary's `waiting_on_person`, Workspaces' wire). The thread is not resolved, its last message (the Inbox's notes read past) is an agent's, and no Mark read stands: a standing Mark read means nothing waits on the person. The model checks it after every step.
 
 ## Question states
@@ -38,18 +39,22 @@ The six sections, shown in this fixed order: Stopped on you, Holding up work, Wa
 | # | Rule | Section |
 |---|---|---|
 | 1 | Archived: resolved and not came back | Quiet |
-| 2 | Mark read stands (made after the archive line when the thread is resolved) | Quiet ("Read") |
+| 2 | Mark read stands (made after the archive line when the thread is resolved) | Quiet ("Read"); New while unsent work waits and no Re-ask note waits |
+| 2a | Every open question is listed in a Re-ask note that still waits (approval "inbox-reask"). A note waits until the session it went to (its `to`, else the asker) writes again, and only while a question it lists is still open | Sent |
 | 3 | An open question carries `Stopped:` | Stopped on you |
 | 4 | An open question carries `Holds up:` | Holding up work |
 | 5 | Any other open question | Waiting on you |
 | 6 | Picks saved and not sent, nothing open | New since you looked ("Answered, not sent") |
 | 7 | The last message is the person's and no agent read it | Sent |
 | 8 | Agent messages after the look | New since you looked |
-| 9 | Anything else | Quiet |
+| 9 | Unsent work: a reply draft, picks, comments waiting | New since you looked ("Draft · …") |
+| 10 | Anything else | Quiet |
 
-Inside a section, newest first by the thread's latest message (`last_at`), ties on the thread id. A row moves within its section only when the thread gains a message; looks, picks, reads and archives move it between sections.
+Rule 9 (and the exception in rule 2) is the approval's rule: a thread holding unsent work never sinks to Quiet. New, because New already holds rule 6's "Answered, not sent" (work that waits only for the person's Send) and sits above Quiet without claiming that a question waits. A row in New only for the person's own words or comments (no unseen agent message, no rule 6) is not bold, and it does not count as waiting on the person; the Drafts row counts it instead. Rule 1 wins over it: an archived thread stays archived with its draft kept, because archiving is the person's explicit "done" (the archive already closes the questions, and a comment cannot be added to it).
 
-**Archived** is the seventh place (six sections plus Archived): resolved and not came back. A came-back thread is placed by rules 2 to 9 like an open thread.
+Inside a section, newest first by the thread's latest message (`last_at`), ties on the thread id. A row moves within its section only when the thread gains a message; looks, picks, reads, reply drafts and archives move it between sections.
+
+**Archived** is the seventh place (six sections plus Archived): resolved and not came back. A came-back thread is placed by rules 2 to 10 like an open thread.
 
 ## The two list views
 
@@ -70,6 +75,7 @@ A came-back thread is in the sections in both views and is not in the archived l
 | Supersede | `supersedes: [...]` or a `Replaces:` line | The message, then `superseded_by` on each named question that is open or picked. Anything else named refuses the whole send (`invalid_supersedes`) |
 | Open (seen) | `POST /api/inbox/threads/:id/seen`, optional `through_seq` | `person_seen_seq` when an agent message (at or below `through_seq`, when given) is unseen; else nothing |
 | Pick | `POST /api/inbox/messages/:id/picks` | The answer, revision + 1 |
+| Re-ask | `POST /api/inbox/messages/:id/reask` | One person note (`reask`: that session's open questions) as a reply to the message; that session's picks not sent marked sent with it. Refused with nothing of that session open (`nothing_to_reask`), on a person's message, before the archive line. Idempotent on its key (a reply's key: `idempotency_key_reused`). Rule 2a holds while every open question is in a note that waits: another session's new question, the last listed question answered, superseded or closed, or the noted session writing again ends it |
 | Send | `POST /api/inbox/messages/:id/reply` | The listed picks as sent, then one person reply. Idempotent on its key |
 | The Send that skips | the same, `skip_unanswered: true` | Also every open question of that message without a pick, as a sent skip (`by_reply`). With Keep open the window sends `false` |
 | Mark read | `POST /api/inbox/threads/:id/read` | The read fields and the look on the root; `set_aside` on each waiting question |
@@ -83,6 +89,7 @@ A came-back thread is in the sections in both views and is not in the archived l
 | Their Undo | `…/unread` `{ threads }`, `…/resolve` `{ resolved: false, threads }` | Undo or Unarchive on exactly the threads the batch named, as the single actions write them |
 | Person starts a thread | `POST /api/inbox/messages` | A person root with `to` and `started_by_person`; no question records, whatever the body says. Idempotent on its key. Refused (`session_not_live`) when the session is not live, nothing written |
 | Delivered | the bridge's `delivered` event | `delivery` on the person's message, and `agent_checked_seq` up to it |
+| Reply draft | `POST /api/inbox/threads/:id/draft` `{ body, base }`; `…/draft/delete`; `clear_draft` on the Send | The draft's file (no line). An empty body deletes it. A stale `base` is `409 draft_conflict`, nothing written |
 
 ## Transition table
 
@@ -105,6 +112,8 @@ Columns are the state before the event: **Asks** (Stopped, Holding or Waiting), 
 | Set-aside note | Asks (an open question still places it; unseen unchanged) | New, unseen unchanged: the note is neither a reply nor a look | Sent | Read: the note never ends the read | Quiet | Archived; a note goes only for questions asked after the line | as for an open thread |
 | Person starts a thread | a new thread: Sent | | | | | | |
 | Delivered | Asks | New | Quiet (the delivery is the agent's read) | Read | Quiet | Archived | as Agent read your reply |
+| Reply draft saved | Asks | New | Sent | New (the read stands; the row is not bold) | New (not bold) | Archived (the draft is kept) | Came back, as for an open thread |
+| Reply draft emptied or discarded | Asks | New while news or picks wait, else Quiet | Sent | Read | Quiet | Archived | Came back |
 
 ## Invariants
 
@@ -112,12 +121,13 @@ Checked after every step of every sequence, on the store's own output:
 
 1. Every thread is in exactly one section, in each of the two list views.
 2. No thread disappears: the default view holds every thread ever created; the window's view and the archived list together hold every thread, and never the same one twice.
-3. A question still waiting on the person (`open`) keeps its thread in Stopped, Holding or Waiting.
+3. Every open question is either in a Re-ask note that still waits (its session has not written since), or keeps its thread in Stopped, Holding or Waiting. Checked against the questions and the notes themselves, never the row's flag.
 4. Mark read then Undo, back to back, gives the thread back exactly as it was (section, unseen, questions, picks), whatever an earlier Mark read closed. Undo always clears the read fields; afterwards a question is set aside exactly when an earlier Mark read closed it.
 5. Archive then Unarchive loses no message, question or pick; the row comes back identical.
 6. An agent message after the archive line brings the thread back into the list while something waits. Mark read on a came-back thread returns it to Archived. Unarchive clears a read made while archived.
-7. Counts. The sidebar's waiting count (`waitingCount`) equals the rows in Stopped, Holding and Waiting, in both views and per project; the folders' unread count equals the rows in Stopped, Holding, Waiting and New; an archived row never counts.
-8. Replay: a store reopened from disk gives the same rows and threads.
+7. Counts. The sidebar's waiting count (`waitingCount`) equals the rows in Stopped, Holding and Waiting, in both views and per project; the bold rows are the rows in Stopped, Holding, Waiting and New less those in New only for the person's own unsent words (no unseen agent message, not "Answered, not sent"); an archived row never counts.
+8. Replay: a store reopened from disk gives the same rows and threads (reply drafts included: they are files the store reads at open).
+9. Unsent work (a reply draft, picks, comments waiting) never sits in Quiet unless the thread is archived.
 9. Sort: the sections in the fixed order; newest first by `last_at` inside each, ties on the thread id; the archived list newest archived first, ties on the thread id. About one generated step in four shares the previous step's clock time, so `last_at` ties happen in the sections; a second property archives every open thread within one clock tick, so `resolved_at` ties happen in the archived list. Each fails if it met no tie. The trace fixtures keep one clock step per event: a thread id ends in random characters, so the order of a tie is not the same from one run to the next.
 
 Invariant 7 is circular: `waitingCount` counts the rows in Stopped, Holding and Waiting, and `unread` is defined from the section, so they check the counting code rather than the rules.
@@ -161,3 +171,5 @@ Old stores replay unchanged: nothing already written is rewritten or read differ
 ## Trace fixtures
 
 `packages/shared/inbox/fixtures/thread-state/v1/`: one JSON file per trace and `index.json`. The folder's README gives the format, the event vocabulary, the generator, the seeds and how to regenerate. The files are generated by `store.test.ts` through the same checked steps, and the test fails when they differ from what the store does, so they cannot drift from the code. A generated trace's events were drawn from its seed once and are kept in its file as data; the test replays them, so a new fast-check version changes nothing. A change of the format makes `v2`; a change of behaviour (a fixed violation) regenerates `v1` in place, as the fix of A, B and C did. The look's cap (`through_seq`) is additive: the `seen` event gained an optional `through`, `hand-18-look-capped-by-through` was added, and no existing trace changed; the format stays `v1`. Threads the person starts are additive the same way: the `person_thread` and `delivered` events and `hand-19-person-started-thread` were added (the property runs draw both; the generated fixtures were drawn without them), no existing trace changed, and the format stays `v1`.
+
+Reply drafts (approval "inbox-reply-drafts") are not in the fixtures: a draft writes no line, so no trace event names it, and no existing trace changed. A phone draws a row's section from the server and its count slot from the row's `unsent` (contract 7.62); the property runs draw drafts (`draft` op) and check rule 9 and invariant 9 after every step.

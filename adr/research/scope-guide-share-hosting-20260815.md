@@ -50,7 +50,7 @@ Same shape as the paste service, documented in `apps/guides-show/README.md`:
 ### S6 — Plannotator integration
 - **UI**: Share menu on the guide screen grows **Create share link** beside Download (D11 anticipated this). Flow: click → confirm dialog (what is uploaded, encrypted, unlisted, size) → `POST /api/guide/:id/share` on the review server → server encrypts + uploads → dialog shows URL, copy, and the delete token once. Never uploads without the confirmation (same rule as large plan shares).
 - **Server**: `POST /api/guide/:id/share` (Bun + Pi mirror), `DELETE` counterpart using the stored token, and a per-guide record of `{ url, createdAt }` in the guide envelope so a saved guide remembers its link.
-- **CLI**: `plannotator guide share --id <saved> | --guide g.json --patch p.patch [--public] [--ttl]` prints the URL (and the delete token to stderr). The `plannotator-guide` skill gets one optional line: "if the user wants a link, run `guide share` instead of `guide export`".
+- **CLI**: `plannotator guide share --id <saved> | --guide g.json --patch p.patch [--public] [--ttl]` prints the URL (and the delete token to stderr). The `plannotator-guide` skill (since renamed `guided-review`) gets one optional line: "if the user wants a link, run `guide share` instead of `guide export`".
 - **Viewer**: `/g/<id>` is same-origin with `/v1/`, so the worker pool takes the plain module-worker path; the probe already handles it. Add a "Download this guide" affordance on hosted pages (the file is the portable form).
 
 ### S7 — Reserved, not built

@@ -171,7 +171,11 @@ describe("POST /api/update answers only this computer, and only for a session no
     const home = managedHome();
     setCliNoticeVersionForTests("0.28.10");
     process.env.PLANNOTATOR_REMOTE = "1";
-    process.env.PLANNOTATOR_PORT = String(30000 + Math.floor(Math.random() * 20000));
+    // A port the OS says is free right now. A random pick in 30000-50000 sat in Linux's ephemeral range
+    // (32768-60999), where the suite's own outgoing connections hold ports: CI hit "Port … in use after 5 retries".
+    const probe = Bun.serve({ port: 0, hostname: "0.0.0.0", fetch: () => new Response("") });
+    process.env.PLANNOTATOR_PORT = String(probe.port);
+    probe.stop(true);
     const server = await startReviewServer({ rawPatch: PATCH, gitRef: "HEAD", htmlContent: MINIMAL_HTML, origin: "claude-code" });
     try {
       const port = server.port;

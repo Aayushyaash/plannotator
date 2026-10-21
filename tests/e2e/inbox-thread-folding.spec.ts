@@ -378,11 +378,11 @@ test('a pick folded says it is not sent; the reply that sends it is a look, so n
   const { page, ids } = world;
   // A pick on the new question: the list and the thread update, the marks stay.
   await article(ids[6]!).getByText('On main and release tags', { exact: true }).click();
-  await expect(pane().locator('.ib-pfoot')).toContainText('Not sent');
+  await expect(pane().locator('.ib-pfoot [data-draft-foot]')).toContainText('Draft');
   await expect(article(ids[6]!)).toHaveAttribute('data-new', '');
   // Folded by hand, its line says the pick is not sent.
   await article(ids[6]!).locator('[data-fold-head]').click();
-  await expect(article(ids[6]!).locator('[data-holding]')).toHaveText(['1 pick, not sent']);
+  await expect(article(ids[6]!).locator('[data-holding]')).toHaveText(['1 pick in your draft']);
   await shot('5-pick-folded');
   await article(ids[6]!).locator('[data-fold-head]').click();
   // Send: the person's reply is a look at everything before it.

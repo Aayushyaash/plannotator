@@ -376,7 +376,7 @@ test('a pick is saved at once and the agent reads it through read_thread', async
   const [claude] = world.agents;
   const pane = page.locator('section.ib-pane');
   await pane.getByText('Retry with the same idempotency key', { exact: true }).click();
-  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M, not sent$/)).toBeVisible();
+  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M · in your draft$/)).toBeVisible();
   await expect
     .poll(async () => {
       const thread = await claude!.readThread(world.threads.stopped!);
@@ -386,17 +386,18 @@ test('a pick is saved at once and the agent reads it through read_thread', async
     .toBe('picked:Retry with the same idempotency key');
 
   await pane.getByText('Yes', { exact: true }).click();
-  await expect(pane.getByText(/^Picked .*, not sent$/)).toHaveCount(2);
-  await expect(page.locator('.ib-pfoot .ib-st')).toHaveText('Not sent');
+  await expect(pane.getByText(/^Picked .* · in your draft$/)).toHaveCount(2);
+  // "Draft" replaces "Not sent" (approval "inbox-reply-drafts").
+  await expect(page.locator('.ib-pfoot [data-draft-foot]')).toHaveText('Draft 2 picks');
   await expect(page.locator('.ib-pfoot').getByRole('button', { name: 'Send' })).toBeVisible();
-  await expect(page.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' })).toBeVisible();
-  // Answered, not sent: it waits only for Send.
+  await expect(page.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' })).toBeVisible();
+  // Answered, not sent: it waits only for Send. The row says "Draft · 2 picks".
   const row = page.locator(`.ib-nrow[data-thread-id="${world.threads.stopped}"]`);
   await expect(row).toHaveAttribute('data-section', 'new');
-  await expect(row).toContainText('Answered, not sent');
+  await expect(row.locator('[data-draft-label]')).toHaveText('Draft · 2 picks');
   await shot('3.1-answered-not-sent');
 
-  // "Answered, not sent" is wider than the wide row's 96px count column, and
+  // "Draft · 2 picks" is wider than the wide row's 96px count column, and
   // its text must end before the time's begins: in every project and in one,
   // at full and narrower widths (every project below 900px of list draws the
   // two-line row, which must hold the same). Measured on the text itself (a
@@ -432,7 +433,7 @@ test('a pick is saved at once and the agent reads it through read_thread', async
         }, where)
         .toBe(true);
       const measured = await textGap();
-      expect(measured.text).toBe('Answered, not sent');
+      expect(measured.text).toBe('Draft · 2 picks');
       expect(measured.sameLine).toBe(true);
       expect(measured.gap, `count runs into the time ${where}`).toBeGreaterThanOrEqual(8);
     }
@@ -440,13 +441,13 @@ test('a pick is saved at once and the agent reads it through read_thread', async
   await page.setViewportSize({ width: 1440, height: 900 });
   await side(page).getByRole('button', { name: /^Inbox/ }).click();
   await wide.click();
-  await expect(page.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' })).toBeVisible();
+  await expect(page.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' })).toBeVisible();
 });
 
 test('Send carries the picks and the words, wait_for_reply returns them, and the thread says Delivered', async () => {
   const { page } = world;
   const [claude] = world.agents;
-  await page.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' }).click();
+  await page.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' }).click();
   const box = page.getByRole('textbox', { name: 'Reply to Claude Code' });
   await expect(box).toHaveValue(
     'Which way should the worker go on a Stripe 409: Retry with the same idempotency key. Ship the retry worker behind a flag: Yes.',
@@ -508,17 +509,19 @@ test("a Sent row follows the agent's read in place, without an action: its state
   await page.locator(`[data-thread-id="${world.threads.named}"]`).click();
   const pane = page.locator('section.ib-pane');
   await pane.getByText('Trust the webhook', { exact: true }).click();
-  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M, not sent$/)).toBeVisible();
+  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M · in your draft$/)).toBeVisible();
   await page.locator('.ib-pfoot').getByRole('button', { name: 'Send' }).click();
   const row = page.locator(`.ib-lbody [data-thread-id="${world.threads.named}"]`);
   await expect(row).toHaveAttribute('data-section', 'sent');
-  await expect(row).toContainText('Saved for Claude Code');
+  // The delivery glyph (approval "inbox-row-delivery"): saved, an agent reads it later.
+  const tick = row.locator('.ib-tick');
+  await expect(tick).toHaveAttribute('data-tick', 'saved');
   const before = await rowOrder(page);
 
   // The agent reads the reply (as a wake's delivery or wait_for_reply would): the server lists the thread as Quiet.
   await claude2.readThread(world.threads.named!);
   await expect(row).toHaveAttribute('data-section', 'quiet');
-  await expect(row).not.toContainText('Saved for');
+  await expect(tick).toHaveAttribute('data-tick', 'delivered');
   expect(await rowOrder(page)).toEqual(before);
   await page.keyboard.press('Escape');
   await expect(pane).toHaveCount(0);
