@@ -188,7 +188,7 @@ export function StuckReason({ note, name }: { note: RestartNote | null; name: st
           <ReloadCopy />
         </p>
       )}
-      <Fold question="Still stuck after reloading?">
+      <Fold question="Still no Send now after reloading?">
         <div data-restart-fallback="">
           {note.command ? (
             <>

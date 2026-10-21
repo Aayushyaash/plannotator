@@ -3692,3 +3692,5 @@ ol.ib-rl-two .ib-rw-cmd { font-weight: 400; margin-top: 6px; }
   .pn-inbox .ib-sendnow.ib-sendnow-go { height: 36px; margin-left: 20px; padding: 0 14px 0 12px; font-size: var(--ib-fs-14, 14px); }
   .pn-inbox .ib-sendnow.ib-sendnow-go::after { inset: -4px -4px; }
 }
+/* After it went into its turn by itself: the check in the delivered tick's colour. */
+.pn-inbox .ib-delivered[data-auto] .ib-dl-main > svg { color: var(--ib-tick-delivered); }

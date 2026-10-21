@@ -213,7 +213,7 @@ test('a waking connection: Queued, then one wake naming the message, then Delive
   // The session polls while a turn runs: "is working", and no Send now (a 👍 asks nothing of the agent).
   expect((await bridge('/api/inbox/bridge/poll', { session, host: 'claude-code', waitMs: 0, busy: true, send_now: true })).status).toBe(200);
   await page.goto(`${world.url}#thread=${threads.wake}`);
-  await expect(page.locator('[data-ack-pill]')).toContainText('Queued · Claude Code is working; it gets this when its turn ends.');
+  await expect(page.locator('[data-ack-pill]')).toContainText(/Undelivered(?: \d+ min)? · Claude Code is working · goes in by itself in /);
   await expect(page.locator('[data-send-now]')).toHaveCount(0);
   await shot(page, '06-queued');
   // The session's connection polls: one command, the wake naming the message.
