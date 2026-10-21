@@ -10,7 +10,8 @@
  *   icon once (a running animation, then gone), the live region says "Inbox
  *   refreshed", the message comes in and "1 new" goes, focus stays on Inbox.
  * - The project the list shows: the same ↻ after its name and "Refresh".
- * - A phone (WebKit, iPhone 15): a tap on the list's title does the same.
+ * - A phone (the iPhone 15's screen, touch and mobile layout, in the config's Chromium): a tap on
+ *   the list's title does the same. No browser is launched by hand.
  * - Reduced motion: the click still gives the signal, with nothing animated.
  *
  * Build the binary first (see inbox.spec.ts), then `bun run test:e2e:inbox`.
@@ -18,7 +19,7 @@
  * PLANNOTATOR_REFRESH_SHOTS, else .local/proof/inbox-refresh/.
  */
 
-import { devices, expect, test, webkit, type Page } from '@playwright/test';
+import { devices, expect, test, type Page } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -161,11 +162,13 @@ test('reduced motion: the click still gives the signal, with nothing animated', 
   await expect(live(page)).toHaveText('Inbox refreshed');
 });
 
-test('a phone (WebKit, iPhone 15): a tap on the list title refreshes it', async () => {
-  const browser = await webkit.launch();
-  try {
-    const context = await browser.newContext({ ...devices['iPhone 15'] });
-    const page = await context.newPage();
+// The iPhone 15's screen, touch and mobile layout in the config's own browser: launching another
+// browser by hand from this Chromium project dies on the CI runner (the config's Chromium flags reach
+// it). inbox-mobile.spec.ts covers the window in WebKit itself.
+const { defaultBrowserType: _phoneBrowser, ...iPhone } = devices['iPhone 15'];
+test.describe('a phone (iPhone 15 screen)', () => {
+  test.use(iPhone);
+  test('a tap on the list title refreshes it', async ({ page }) => {
     for (const scheme of ['light', 'dark'] as const) {
       await page.emulateMedia({ colorScheme: scheme });
       await page.goto(world.url);
@@ -183,8 +186,5 @@ test('a phone (WebKit, iPhone 15): a tap on the list title refreshes it', async 
       await expect(title).not.toHaveAttribute('data-refreshing', '');
       await page.screenshot({ path: join(shotsDir, `phone-${scheme}-3-after.png`) });
     }
-    await context.close();
-  } finally {
-    await browser.close();
-  }
+  });
 });
