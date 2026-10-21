@@ -84,6 +84,11 @@ export function useReplyDraft(threadId: string) {
   const conflicts = useRef(conflictWords);
   /** Per thread: the words the server held as this window last saved or read them (null: no draft). */
   const synced = useRef(new Map<string, string | null>());
+  /**
+   * Per thread: this window's own Send (unconfirmed) may have cleared the draft holding these words.
+   * A save refused because of it is not another window's doing: adopted, and the words saved again.
+   */
+  const ownClears = useRef(new Map<string, string>());
   /** The words the last save queued here carries (or the draft read): the page's last save names them (`base_body`). */
   const lastWords = useRef<string | null>(null);
 
@@ -124,6 +129,15 @@ export function useReplyDraft(threadId: string) {
           // there, and keep these words here, not saved, for the person to choose.
           const latest = await readDraft(target);
           if (latest === undefined) return;
+          const own = ownClears.current.get(target);
+          if (own !== undefined && (latest === null || latest.body === own)) {
+            // This window's own Send cleared (or still holds) the draft: these words, edited since, are the draft now.
+            ownClears.current.delete(target);
+            adopt(target, latest);
+            show(target, latest);
+            if (generation === generationOf(target)) write(target, text);
+            return;
+          }
           adopt(target, latest);
           // A conflict only when both windows hold words: an empty box (or the same words) is not one,
           // and never deletes the other window's draft.
@@ -338,10 +352,18 @@ export function useReplyDraft(threadId: string) {
     return stateRef.current.draft?.body ?? '';
   }, []);
 
+  /**
+   * This window's Send of `words` may have gone without its answer (and with it cleared their draft):
+   * a later save refused for that reason saves the box's words again instead of showing a conflict.
+   */
+  const expectOwnClear = useCallback((words: string) => {
+    ownClears.current.set(current.current, words);
+  }, []);
+
   /** A save is waiting for the pause in typing (the words are not on the server yet). */
   const waiting = useCallback(() => pending.current !== null, []);
 
-  return { ...state, save, flush, discard, sent, waiting, claim, release, reload, keepMine, takeTheirs };
+  return { ...state, save, flush, discard, sent, waiting, claim, release, reload, keepMine, takeTheirs, expectOwnClear };
 }
 
 /** The thread's draft on the server (null: none), or undefined when it could not be read. */

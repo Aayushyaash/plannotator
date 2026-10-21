@@ -858,6 +858,9 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   const [taggedIds, setTaggedIds] = useState<readonly string[]>([]);
   const onTagsChange = useCallback((ids: readonly string[]) => setTaggedIds(ids), []);
   const closeBox = () => {
+    // A Send waiting to be confirmed: read back now, so a reply that went leaves no stale "Draft" foot.
+    const earlier = unconfirmed.get(thread.thread_id);
+    if (earlier) forgetUnconfirmed(earlier, 'closed');
     // Cancel and Escape keep the words as a draft (saved now); Discard drops them.
     replyDraft.flush();
     setBox({ open: false, text: '' });
@@ -1875,6 +1878,30 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     announce(leftover ?? 'Your reply went.');
   };
 
+  /**
+   * The remembered unconfirmed Send stops matching (the words changed or emptied, or the box closed): it is
+   * forgotten, its own clear of the draft is expected (a refused save is this window's doing, never "another
+   * window"), and the thread is read for it, so the line says honestly where the earlier reply is.
+   */
+  const forgetUnconfirmed = (earlier: UnconfirmedSend, after: 'edited' | 'emptied' | 'closed') => {
+    const id = threadRef.current.thread_id;
+    unconfirmed.delete(id);
+    replyDraft.expectOwnClear(earlier.words);
+    const edited = after === 'edited';
+    setError(edited ? 'Your earlier reply may have gone; Send sends your edited words as another reply.' : null);
+    void replyLanded(id, earlier.key).then(async (landed) => {
+      if (threadRef.current.thread_id !== id) return;
+      if (landed === 'yes') {
+        const line = edited ? 'Your earlier reply went; Send sends your edited words as another reply.' : 'Your reply went.';
+        setError(line);
+        announce(line);
+        // Its clear_draft went with it: a closed box's foot no longer shows a draft of those words.
+        if (after === 'closed') await replyDraft.reload(null);
+      } else if (landed === 'no') setError(null);
+      else if (landed === 'gone') setError(THREAD_GONE_TEXT);
+    });
+  };
+
   // A thread read shows the remembered Send's reply landed: finished now (while the box still holds its words),
   // or forgotten.
   useEffect(() => {
@@ -1884,7 +1911,16 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     if (box.open && box.text.trim() === earlier.words) {
       finishLanded(earlier);
       void reloadFiles();
-    } else unconfirmed.delete(thread.thread_id);
+    } else {
+      // The words changed since (or the box is closed): the earlier reply went, the box's words are new.
+      unconfirmed.delete(thread.thread_id);
+      replyDraft.expectOwnClear(earlier.words);
+      const leftover = leftoverText(earlier);
+      const line = box.open && box.text.trim() ? 'Your earlier reply went; Send sends your edited words as another reply.' : (leftover ?? 'Your reply went.');
+      setError(line);
+      announce(line);
+      if (!box.open) void replyDraft.reload(null);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [thread]);
 
@@ -3067,7 +3103,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                   if (sending) return;
                   // The words changed (or emptied): a Send waiting to be confirmed no longer matches them.
                   const earlier = unconfirmed.get(thread.thread_id);
-                  if (earlier && text.trim() !== earlier.words) unconfirmed.delete(thread.thread_id);
+                  if (earlier && text.trim() !== earlier.words) forgetUnconfirmed(earlier, text.trim() === '' ? 'emptied' : 'edited');
                   setBox({ open: true, text });
                   replyDraft.save(text);
                 }}

@@ -57,7 +57,7 @@ function loopback(path: string, method = 'GET', body?: string): Promise<{ status
   });
 }
 
-const TESTS = 29;
+const TESTS = 32;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -811,4 +811,48 @@ test.skipIf(!hasDom)('an unconfirmed Send found by the next Send: a pick made si
   await until(() => posted.filter((p) => p.path.endsWith('/reply')).length === before + 1, 'the pick sent');
   const pickReply = posted.filter((p) => p.path.endsWith('/reply')).at(-1)!;
   expect((pickReply.body.questions as unknown[]).length).toBe(1);
+}, 30_000);
+
+test.skipIf(!hasDom)('words edited after a lost Send: an honest line replaces the error, and the edits save with no "another window" conflict', async () => {
+  const { el } = await openWithSaved('First take.');
+  const real = globalThis.fetch;
+  landUnread(real);
+  act(() => button(el, 'Send').click());
+  await until(() => !!el.textContent?.includes('The reply may not have gone.'), 'the error');
+  globalThis.fetch = real;
+  type(el, 'First take, and a second thought.');
+  await until(() => !!el.textContent?.includes('Your earlier reply went; Send sends your edited words as another reply.'), 'the honest line');
+  expect(el.textContent).not.toContain('The reply may not have gone.');
+  await until(async () => (await serverDraft(world.waiting))?.body === 'First take, and a second thought.', 'the edits saved as the draft');
+  expect(el.querySelector('[data-draft-conflict]')).toBeNull();
+  expect(el.textContent).not.toContain('another window');
+}, 30_000);
+
+test.skipIf(!hasDom)('a thread read finds the lost Send landed: what was added since is said in the live region', async () => {
+  const { el } = await openWithSaved('Then a pick.');
+  const real = globalThis.fetch;
+  landUnread(real);
+  act(() => button(el, 'Send').click());
+  await until(() => !!el.textContent?.includes('The reply may not have gone.'), 'the error');
+  globalThis.fetch = real;
+  const choice = [...el.querySelectorAll('fieldset[data-question-key] label')].find((l) => l.textContent?.includes('Pagefind')) as HTMLElement;
+  act(() => choice.click());
+  await until(() => el.textContent!.includes('in your draft'), 'the pick saved');
+  await act(async () => emit('record', { seq: 1 }));
+  await until(() => box(el) === null, 'the box closed');
+  await until(() => liveText(el).includes('Your reply went. Not sent yet: 1 pick.'), 'the pick said');
+}, 30_000);
+
+test.skipIf(!hasDom)('a lost Send then Cancel: the reply is read back, and no stale "Draft · Your reply" stays in the foot', async () => {
+  const { el } = await openWithSaved('Cancelled after.');
+  const real = globalThis.fetch;
+  landUnread(real);
+  act(() => button(el, 'Send').click());
+  await until(() => !!el.textContent?.includes('The reply may not have gone.'), 'the error');
+  globalThis.fetch = real;
+  act(() => button(el, 'Cancel').click());
+  await until(() => box(el) === null, 'the box closed');
+  await until(() => el.querySelector('[data-draft-foot]') === null, 'no stale Draft foot');
+  await until(() => liveText(el).includes('Your reply went.'), 'said');
+  expect(await serverDraft(world.waiting)).toBeNull();
 }, 30_000);
