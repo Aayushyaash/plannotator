@@ -32,9 +32,12 @@ export type PlanRevisionBlocker = 'edits' | 'linked-document' | 'composer' | nul
 /**
  * Comment composers and the selection toolbar live inside the viewer (and in
  * portals), not in App state, so they are read from the DOM at apply time.
+ * The decision control's note field (the header popover's composer) and the
+ * compact DecisionNoteDialog count too: a note is written about the plan on
+ * screen, so a revision waits until it is sent or put away (#1057).
  */
 export const PLAN_REVISION_COMPOSER_SELECTOR =
-  '[data-comment-popover="true"], .annotation-toolbar, [data-diagram-composer]';
+  '[data-comment-popover="true"], .annotation-toolbar, [data-diagram-composer], [data-decision-note-input], [data-decision-note-composer]';
 
 export function isPlanRevisionComposerOpen(): boolean {
   if (typeof document === 'undefined') return false;

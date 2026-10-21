@@ -3400,6 +3400,10 @@ const App: React.FC = () => {
   const savedFileChangesVerb = savedFileChanges.length === 1 ? 'is' : 'are';
   const savedFileChangesPronoun = savedFileChanges.length === 1 ? 'it' : 'them';
   const savedFileChangesOnDiskMessage = <>Your {savedFileChangesLabel} {savedFileChangesVerb} already on disk.</>;
+  // The plan decision control's confirm when saved file changes are the only
+  // feedback: approving loses nothing, the agent just isn't told (the words of
+  // the retired "Feedback Won't Be Sent" dialog's saved-files case).
+  const savedFileAwarenessOnlyText = `Your ${savedFileChangesLabel} ${savedFileChangesVerb} already on disk. The agent won't be told about ${savedFileChangesPronoun}.`;
   const savedFileAwarenessMixedMessage = hasSavedFileChanges
     ? <> Your {savedFileChangesLabel} will stay on disk, but the agent won't be told about {savedFileChangesPronoun}.</>
     : null;
@@ -6045,11 +6049,19 @@ const App: React.FC = () => {
     if (!annotateMode) {
       // Plan review: the request helpers own the unsaved-edit and agent
       // warnings. A note queued on 'approve' rides the approval's notes.
+      // Unlike annotate (L3), a plan decision is NEVER left armed: after a
+      // refusal (409 plan_revised), a cancelled warning (Agent Not Found,
+      // unsaved file edits) or a failed POST, the note is an ordinary general
+      // comment and the primary means what its label says (Send Feedback),
+      // so the reviewer decides again from scratch. A warning confirmed later
+      // runs its own continuation, which posts the decision on its own.
       pendingDispatchInFlightRef.current = true;
       const request = route === 'approve' ? requestPlanApprove() : requestPlanDeny();
       void request
-        .then((ok) => { if (ok) setPendingDecisionSubmit(null); })
-        .finally(() => { pendingDispatchInFlightRef.current = false; });
+        .finally(() => {
+          pendingDispatchInFlightRef.current = false;
+          setPendingDecisionSubmit(null);
+        });
       return;
     }
     const run = async () => {
@@ -6278,8 +6290,11 @@ const App: React.FC = () => {
       answersOnly: answersOnlyFeedback,
       agentName,
       approveTarget: planApproveTarget,
+      ...(hasOnlySavedFileChanges ? { savedFilesOnly: savedFileAwarenessOnlyText } : {}),
     },
   }), [
+    hasOnlySavedFileChanges,
+    savedFileAwarenessOnlyText,
     agentName,
     answersOnlyFeedback,
     approvalNotesSupported,

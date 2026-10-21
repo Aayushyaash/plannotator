@@ -112,6 +112,8 @@ interface Decision {
 
 let decisions: Decision[] = [];
 let agents: Array<{ id: string; name: string }> = [];
+/** Upcoming /api/approve POSTs that fail as a network error (recorded first). */
+let approveNetworkFailures = 0;
 
 const PLAN = "# Plan: move tokens\n\nStore refresh tokens in the keychain.\n";
 const QUESTION_PLAN = [
@@ -152,6 +154,10 @@ function makeFetch(plan: unknown): typeof fetch {
         endpoint: url.pathname === "/api/approve" ? "approve" : "deny",
         body: JSON.parse(String(init?.body ?? "{}")),
       });
+      if (url.pathname === "/api/approve" && approveNetworkFailures > 0) {
+        approveNetworkFailures -= 1;
+        throw new TypeError("Failed to fetch");
+      }
       return Response.json({ ok: true });
     }
     return Response.json({});
@@ -210,7 +216,7 @@ async function openMenu(): Promise<void> {
   await settle();
 }
 
-async function chooseComposer(labelPart: string, note: string): Promise<void> {
+async function writeNote(labelPart: string, note: string): Promise<void> {
   await openMenu();
   const item = menuItem(labelPart);
   if (!item) throw new Error(`menu item "${labelPart}" not found`);
@@ -224,7 +230,23 @@ async function chooseComposer(labelPart: string, note: string): Promise<void> {
   await act(async () => {
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true, cancelable: true }));
   });
+  await settle();
+}
+
+async function chooseComposer(labelPart: string, note: string): Promise<void> {
+  await writeNote(labelPart, note);
   await waitFor(() => decisions.length > 0, "the decision POST");
+}
+
+/** After a refused or cancelled "Approve with a note…": nothing is armed, so
+ *  the primary reads Send Feedback (the note is now a general comment) and a
+ *  click posts the deny it names, never the approve. */
+async function expectPrimarySendsFeedback(note: string, before: number): Promise<void> {
+  await waitFor(() => primaryButton()?.textContent?.includes("Send Feedback"), "Send Feedback");
+  await act(async () => primaryButton()!.click());
+  await waitFor(() => decisions.length > before, "the deny");
+  expect(decisions.slice(before).map((d) => d.endpoint)).toEqual(["deny"]);
+  expect(decisions[before]!.body.feedback).toContain(note);
 }
 
 const COMMENT = {
@@ -255,6 +277,7 @@ afterEach(async () => {
   if (hasDom && originalMatchMedia) window.matchMedia = originalMatchMedia;
   decisions = [];
   agents = [];
+  approveNetworkFailures = 0;
   seededExternalAnnotations = [];
   memory.clear();
   configStore.set("agentSwitch", null);
@@ -394,6 +417,51 @@ describe.if(hasDom)("plan review decision control", () => {
     await waitFor(() => decisions.length > 0, "approve");
     expect(decisions[0]!.endpoint).toBe("approve");
     expect(decisions[0]!.body.agentSwitch).toBe("plan");
+  });
+
+  // What regresses (review of #2055): a refused or cancelled "Approve with a
+  // note…" left its approve armed, so the button read Send Feedback while a
+  // click posted /api/approve.
+  test("Approve with a note… cancelled at Agent Not Found: the primary then sends feedback", async () => {
+    agents = [{ id: "build", name: "build" }];
+    await mount(planPayload({ origin: "opencode", approvalNotesSupported: true }));
+    await act(async () => configStore.set("agentSwitch", { switchTo: "ghost" }));
+    await settle();
+    await writeNote("Approve with a note", "note sentinel foxtrot");
+    await waitFor(() => document.body.textContent?.includes("Agent Not Found"), "Agent Not Found");
+    expect(decisions).toHaveLength(0);
+    await act(async () => buttonWithText("Cancel")!.click());
+    await settle();
+    await expectPrimarySendsFeedback("note sentinel foxtrot", 0);
+  });
+
+  test("Approve with a note… whose POST fails: the primary then sends feedback", async () => {
+    approveNetworkFailures = 1;
+    await mount(planPayload({ origin: "pi", approvalNotesSupported: true }));
+    await chooseComposer("Approve with a note", "note sentinel golf");
+    expect(decisions[0]!.endpoint).toBe("approve");
+    await expectPrimarySendsFeedback("note sentinel golf", 1);
+  });
+
+  // Agent Not Found's "Approve Anyway" must run the approve that raised it:
+  // from the discard row that is a bare approval, not one with the comments.
+  test("Agent Not Found on the discard row: Approve Anyway posts a bare approval", async () => {
+    agents = [{ id: "build", name: "build" }];
+    await mountWithComment({ origin: "opencode", approvalNotesSupported: true });
+    await act(async () => configStore.set("agentSwitch", { switchTo: "ghost" }));
+    await settle();
+    await openMenu();
+    await act(async () => menuItem("Approve, discard")!.click());
+    await settle();
+    await act(async () => buttonWithText("Discard & approve")!.click());
+    await waitFor(() => document.body.textContent?.includes("Agent Not Found"), "Agent Not Found");
+    expect(decisions).toHaveLength(0);
+    await act(async () => buttonWithText("Approve Anyway")!.click());
+    await waitFor(() => decisions.length > 0, "approve");
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]!.endpoint).toBe("approve");
+    expect(decisions[0]!.body.feedback).toBeUndefined();
+    expect(decisions[0]!.body.agentSwitch).toBe("ghost");
   });
 
   test("compact touch rows come from the same spec", async () => {

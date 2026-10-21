@@ -10,19 +10,16 @@
  * them (the Claude Code mod, OpenCode, Pi) never gets the row. Absent must
  * read as false so an unknown host is never offered a row that loses text.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startPlanReviewServer } from "./serverPlan.ts";
-import { detectProjectName } from "./project.ts";
-import { generateSlug, getPlanVersionPath } from "../generated/storage.ts";
 
 const MINIMAL_HTML = "<html><body>Plannotator</body></html>";
 const ENV_KEYS = ["PLANNOTATOR_DATA_DIR", "PLANNOTATOR_AI", "PLANNOTATOR_PORT", "PLANNOTATOR_REMOTE", "PLANNOTATOR_FEEDBACK_HISTORY"] as const;
 const saved: Record<string, string | undefined> = {};
 const tempDirs: string[] = [];
-const createdPlans: string[] = [];
 
 beforeEach(() => {
   for (const key of ENV_KEYS) saved[key] = process.env[key];
@@ -43,17 +40,8 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-afterAll(async () => {
-  const project = detectProjectName();
-  for (const plan of createdPlans) {
-    const versionPath = getPlanVersionPath(project, generateSlug(plan), 1);
-    if (versionPath) rmSync(join(versionPath, ".."), { recursive: true, force: true });
-  }
-});
-
 function newPlan(): string {
   const plan = `# Plan notes advert ${Math.random().toString(36).slice(2, 10)}\n\nStep one.\n`;
-  createdPlans.push(plan);
   return plan;
 }
 

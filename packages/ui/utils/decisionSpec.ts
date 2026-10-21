@@ -141,6 +141,14 @@ export interface DecisionPlanInput {
   agentName: string;
   /** OpenCode: the agent approval switches to, shown as "Approve → build". */
   approveTarget?: string;
+  /**
+   * The only feedback is file changes the reviewer already saved to disk
+   * (Edit Mode on a source-backed document). Approving drops nothing, the
+   * agent just isn't told, so the approve-away row says that instead of
+   * "discard". The value is the confirm's sentence ("Your saved file change
+   * is already on disk. The agent won't be told about it.").
+   */
+  savedFilesOnly?: string;
 }
 
 export interface DecisionPlatformInput {
@@ -565,7 +573,26 @@ function buildPlanSpec(input: DecisionSpecInput): DecisionSpec {
   }
 
   const pronoun = plural ? 'them' : 'it';
-  items.push({
+  if (plan.savedFilesOnly) {
+    // Nothing is lost on approval: the changes stay on disk. Same confirm
+    // (one click away from a plain Approve would hide that the agent is not
+    // told), different words.
+    items.push({
+      id: 'discard-and-finish',
+      label: 'Approve without telling the agent…',
+      subtitle: "Already on disk; the agent isn't told. Asks to confirm",
+      tone: 'destructive',
+      icon: 'check',
+      dividerBefore: !input.approvalNotesSupported,
+      confirm: {
+        title: 'Approve without telling the agent?',
+        message: plan.savedFilesOnly,
+        // Frozen copy (maintainer-approved): 'Discard & approve' is the
+        // discard confirm's; this one discards nothing.
+        confirmText: 'Approve',
+      },
+    });
+  } else items.push({
     id: 'discard-and-finish',
     label: `Approve, discard ${what}…`,
     subtitle: input.approvalNotesSupported

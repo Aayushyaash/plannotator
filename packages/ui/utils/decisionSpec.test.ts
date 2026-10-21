@@ -508,6 +508,20 @@ describe('buildDecisionSpec plan arm (#1057)', () => {
     expect(spec.items[2].confirm!.message).toContain('without it');
   });
 
+  // Saved file changes are already on disk: approving drops nothing, the
+  // agent just isn't told, so the row and its confirm must not say "discard".
+  it('saved file changes only: the approve-away row says the agent is not told', () => {
+    const notice = "Your saved file change is already on disk. The agent won't be told about it.";
+    const spec = buildDecisionSpec({
+      app: 'plan', gate: true, count: 0, hasFeedback: true, approvalNotesSupported: false,
+      plan: plan({ savedFilesOnly: notice }),
+    });
+    const row = spec.items.find((item) => item.id === 'discard-and-finish')!;
+    expect(row.label).not.toContain('discard');
+    expect(row.confirm!.title).not.toContain('Discard');
+    expect(row.confirm!.message).toBe(notice);
+  });
+
   // A host that never passes the plan facts still gets a coherent plan arm.
   it('plan facts absent: defaults, no throw', () => {
     const spec = buildDecisionSpec({ app: 'plan', gate: true, count: 2, hasFeedback: true, approvalNotesSupported: false });
