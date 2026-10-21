@@ -42,6 +42,7 @@ export interface RecipientConnection {
  * installed plugin is itself behind this Inbox (`update_plugin`).
  */
 export interface RestartNote {
+  /** The lead in plain words (the window draws it with Copy buttons). */
   text: string;
   fix: InboxSessionOutdated['fix'];
   /** The command that brings the session back as itself; null when the Inbox does not know its folder. */
@@ -66,28 +67,15 @@ export function restartNote(name: string, connection: RecipientConnection | null
   if (!inboxLoadedPredatesSendNow(outdated.loaded)) return null;
   const command = connection.restart_command ?? null;
   if (outdated.fix === 'update_plugin') {
-    const behind = outdated.installed ? ` (${outdated.installed})` : '';
     return {
       fix: outdated.fix,
       command,
       updateCommand: outdated.update_command ?? null,
-      text: `No Send now here: the Plannotator plugin ${name} has installed${behind} is older than this Inbox. Update the plugin, then type /reload-plugins in that ${name} to get Send now.`,
+      text: `Update the plugin, then type /reload-plugins in that ${name} to get Send now.`,
     };
   }
   if (outdated.fix !== 'restart') return null;
-  const versions = outdated.loaded && outdated.installed
-    ? outdated.loaded === outdated.installed
-      ? ` (${outdated.installed}, reinstalled since it started)`
-      : ` (${outdated.loaded}; ${outdated.installed} is installed)`
-    : outdated.installed
-      ? ` (${outdated.installed} is installed)`
-      : '';
-  return {
-    fix: outdated.fix,
-    command,
-    updateCommand: null,
-    text: `No Send now here: this ${name} runs an older Plannotator plugin${versions}. Type /reload-plugins in it to get Send now.`,
-  };
+  return { fix: outdated.fix, command, updateCommand: null, text: `Type /reload-plugins in that ${name} to get Send now.` };
 }
 
 export type DeliveryLineState = InboxDeliveryState;
