@@ -2011,7 +2011,7 @@ describe("install shared behavior", () => {
     // F7 pin: the failure check must appear BEFORE the token clears in file
     // order - `set` can disturb ERRORLEVEL, so every ERRORLEVEL read stays
     // immediately adjacent to the curl it tests.
-    const cmdFailureCheck = cmdScript.indexOf("Failed to get latest version");
+    const cmdFailureCheck = cmdScript.indexOf("API unavailable (anonymous rate limit, proxy)");
     const cmdTokenClear = cmdScript.lastIndexOf('set "GH_TOKEN_VAL="');
     const cmdHeaderClear = cmdScript.lastIndexOf('set "GH_AUTH_HEADER="');
     expect(cmdFailureCheck).toBeGreaterThan(0);
@@ -2290,6 +2290,7 @@ function setupInstallSandbox(opts: {
   writeFileSync(
     join(stub, "curl"),
     `#!/bin/bash
+if [ -n "$STUB_CURL_LOG" ]; then printf '%s\\n' "$*" >> "$STUB_CURL_LOG"; fi
 out=""
 url=""
 prev=""
@@ -2301,7 +2302,10 @@ for a in "$@"; do
   prev="$a"
 done
 case "$url" in
-  */releases/latest) printf '{"tag_name":"v99.9.9"}\\n200' ;;
+  https://github.com/*/releases/latest) printf '%s' "\${STUB_LATEST_URL:-https://github.com/backnotprop/plannotator/releases/tag/v99.9.9}" ;;
+  */releases/latest)
+    if [ -n "$STUB_API_DOWN" ]; then printf '{"message":"API rate limit exceeded"}\\n403'
+    else printf '{"tag_name":"v99.9.9"}\\n200'; fi ;;
   *".sha256") printf '%s  plannotator\\n' "$STUB_CHECKSUM" ;;
   */releases/download/*)
     if [ -n "$STUB_BINARY_SOURCE" ]; then cat "$STUB_BINARY_SOURCE" > "$out"
@@ -2379,6 +2383,125 @@ function runInstallSh(
     out: r.stdout.toString() + r.stderr.toString(),
   };
 }
+
+describe.skipIf(process.platform === "win32" || !Bun.which("node"))(
+  "install.sh latest version without the GitHub API (#1994)",
+  () => {
+    const args = ["--non-interactive", "--skip-skills"];
+    const binary = "#!/bin/sh\necho plannotator-fixture\n";
+    const REDIRECT_PAGE = "https://github.com/backnotprop/plannotator/releases/latest";
+
+    function run(env: Record<string, string>, extraArgs: string[] = []) {
+      const sandbox = setupInstallSandbox({ gh: "pass-all", binary });
+      const log = join(sandbox.home, "curl.log");
+      const result = runInstallSh(sandbox, [...args, ...extraArgs], { STUB_CURL_LOG: log, ...env });
+      const calls = existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : [];
+      return { ...result, calls, home: sandbox.home };
+    }
+
+    test("falls back to the releases/latest redirect when the API is rate-limited, and still checks the checksum", () => {
+      const result = run({ STUB_API_DOWN: "1" });
+      expect(result.code).toBe(0);
+      expect(result.out).toContain("Installing plannotator v99.9.9...");
+      // The only new request is a HEAD on the release page; the binary and
+      // its checksum are fetched exactly as on the API path.
+      const fallback = result.calls.filter((c) => c.includes(REDIRECT_PAGE));
+      expect(fallback).toHaveLength(1);
+      expect(fallback[0]).toContain("-fsSLI");
+      expect(result.calls.some((c) => c.includes("/releases/download/v99.9.9/") && c.endsWith(".sha256"))).toBe(true);
+      expect(existsSync(join(result.home, ".local", "bin", "plannotator"))).toBe(true);
+    });
+
+    test("a wrong checksum still stops an install whose tag came from the redirect", () => {
+      const result = run({ STUB_API_DOWN: "1", STUB_CHECKSUM: "0".repeat(64) });
+      expect(result.code).not.toBe(0);
+      expect(result.out).toContain("Checksum verification failed");
+      expect(existsSync(join(result.home, ".local", "bin", "plannotator"))).toBe(false);
+    });
+
+    test("the redirect is not requested when the API answers", () => {
+      const result = run({});
+      expect(result.code).toBe(0);
+      expect(result.out).toContain("Installing plannotator v99.9.9...");
+      expect(result.calls.some((c) => c.includes(REDIRECT_PAGE))).toBe(false);
+    });
+
+    test("a pinned --version asks neither the API nor the redirect", () => {
+      const result = run({ STUB_API_DOWN: "1" }, ["--version", "v99.9.9"]);
+      expect(result.code).toBe(0);
+      expect(result.calls.some((c) => c.includes("/releases/latest"))).toBe(false);
+    });
+
+    test("fails clearly when neither the API nor the redirect gives a tag", () => {
+      const result = run({ STUB_API_DOWN: "1", STUB_LATEST_URL: REDIRECT_PAGE });
+      expect(result.code).toBe(1);
+      expect(result.out).toContain("Failed to fetch latest version (check your connection, or pass --version vX.Y.Z)");
+      expect(result.calls.some((c) => c.includes("/releases/download/"))).toBe(false);
+    });
+
+    for (const hostile of [
+      "https://github.com/backnotprop/plannotator/releases/tag/v1.2.3?x=1",
+      "https://github.com/backnotprop/plannotator/releases/tag/v1.2.3-evil",
+      "https://github.com/backnotprop/plannotator/releases/tag/v1.2.3$(touch pwned)",
+      "https://github.com/backnotprop/plannotator/releases/tag/v1.2.3/",
+      "https://github.com/backnotprop/plannotator/releases/tag/v1.2.3.4",
+      "https://github.com/backnotprop/plannotator/releases/tag/V1.2.3",
+      "https://github.com/backnotprop/plannotator/releases/tag/v1..3",
+    ]) {
+      test(`rejects a redirect that is not a plain vX.Y.Z tag: ${hostile}`, () => {
+        const result = run({ STUB_API_DOWN: "1", STUB_LATEST_URL: hostile });
+        expect(result.code).toBe(1);
+        expect(result.out).toContain("Failed to fetch latest version");
+        expect(result.calls.some((c) => c.includes("/releases/download/"))).toBe(false);
+        expect(existsSync(join(result.home, "pwned"))).toBe(false);
+      });
+    }
+  },
+);
+
+describe("is_release_tag (install.sh): only a plain vX.Y.Z tag", () => {
+  const script = readScript("install.sh");
+  const fn = script.slice(script.indexOf("is_release_tag() {"), script.indexOf("\n}\n", script.indexOf("is_release_tag() {")) + 3);
+  const check = (tag: string) =>
+    Bun.spawnSync(["bash", "-c", `${fn}\nis_release_tag "$1"`, "bash", tag], { env: { LC_ALL: "en_US.UTF-8", PATH: "/usr/bin:/bin" } }).exitCode === 0;
+
+  test("accepts release tags", () => {
+    for (const t of ["v0.28.25", "v1.2.3", "v10.20.30"]) expect(check(t)).toBe(true);
+  });
+
+  test("rejects everything else", () => {
+    for (const t of ["", "latest", "1.2.3", "V1.2.3", "v1.2", "v1.2.3.4", "v.1.2", "v1..2", "v1.2.", "v1.2.3-rc1", "v1.2.3?x", "v1.2.3/", "v1.2.3 ", "v1.2.3\nx", "-v1.2.3", "v1.2.\u0663", "v1.2.3;id"]) {
+      expect(check(t)).toBe(false);
+    }
+  });
+});
+
+describe("install.ps1 / install.cmd: the latest tag is strictly validated (#1994)", () => {
+  test("install.ps1 checks the API tag and the redirect tag with one anchored, case-sensitive pattern", () => {
+    const ps = readScript("install.ps1");
+    expect(ps).toContain("$releaseTagPattern = '^v[0-9]+\\.[0-9]+\\.[0-9]+\\z'");
+    expect(ps).toContain("if ($latestTag -cnotmatch $releaseTagPattern) { $latestTag = $null }");
+    expect(ps).toContain("if ($candidate -cmatch $releaseTagPattern) { $latestTag = $candidate }");
+    expect(ps).not.toMatch(/-match '\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+'/);
+  });
+
+  test("install.cmd splits the redirect URL without FOR-IN globbing and checks every character of the tag", () => {
+    const cmd = readScript("install.cmd");
+    expect(cmd).not.toContain('for %%t in ("!LATEST_URL:/=" "!")');
+    expect(cmd).toContain('set "LATEST_URL=!LATEST_URL:*/=!"');
+    expect(cmd).toContain("for %%c in (0 1 2 3 4 5 6 7 8 9) do if defined TAG_DOTS");
+    expect(cmd).toContain('if not "!TAG_DOTS!"==".." set "TAG="');
+    expect(cmd).toContain("-cmatch '^v[0-9]+\\.[0-9]+\\.[0-9]+\\z'");
+    // The strict check runs on every latest-resolved tag (API or redirect),
+    // before the empty-tag failure.
+    const check = cmd.indexOf('if not "!TAG_DOTS!"==".." set "TAG="');
+    const redirect = cmd.indexOf("releases/latest\"`) do set \"LATEST_URL=%%u\"");
+    const fail = cmd.indexOf("Failed to get latest version");
+    expect(redirect).toBeGreaterThan(0);
+    expect(check).toBeGreaterThan(redirect);
+    expect(fail).toBeGreaterThan(check);
+  });
+});
 
 describe.skipIf(process.platform === "win32" || !Bun.which("node"))(
   "install.sh optional T3 hook",
@@ -3240,7 +3363,9 @@ describe("latest tag is parsed by key, not by line (#1655)", () => {
   };
 
   function runParse(apiBody: string): string {
-    const cmd = `_api_body="$1"\n${parseLine!.trim()}\ncase "$latest_tag" in v[0-9]*.[0-9]*.[0-9]*) ;; *) latest_tag="" ;; esac\nprintf '%s' "$latest_tag"`;
+    const fnStart = script.indexOf("is_release_tag() {");
+    const fn = script.slice(fnStart, script.indexOf("\n}\n", fnStart) + 3);
+    const cmd = `${fn}\n_api_body="$1"\n${parseLine!.trim()}\nis_release_tag "$latest_tag" || latest_tag=""\nprintf '%s' "$latest_tag"`;
     const proc = Bun.spawnSync(["bash", "-c", cmd, "bash", apiBody]);
     return proc.stdout.toString();
   }
