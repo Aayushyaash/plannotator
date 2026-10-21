@@ -49,6 +49,16 @@ export function replyDraftUnsaved(): boolean {
   return unsaved > 0 || unsavedConflicts.size > 0;
 }
 
+/** Told when replyDraftUnsaved() may have changed (unsent.ts keeps the page's beforeunload question in step). */
+const unsavedListeners = new Set<() => void>();
+export function onReplyDraftUnsavedChange(listener: () => void): () => void {
+  unsavedListeners.add(listener);
+  return () => unsavedListeners.delete(listener);
+}
+function unsavedChanged(): void {
+  for (const listener of unsavedListeners) listener();
+}
+
 let hooks = 0;
 
 export function useReplyDraft(threadId: string) {
@@ -87,6 +97,7 @@ export function useReplyDraft(threadId: string) {
       conflicts.current.set(target, words);
       unsavedConflicts.add(conflictKey(target));
     }
+    unsavedChanged();
   };
   /** The server holds this draft for the thread now: its base and words, as this window knows them. */
   const adopt = (target: string, draft: InboxReplyDraft | null) => {
@@ -100,6 +111,7 @@ export function useReplyDraft(threadId: string) {
 
   const write = useCallback((target: string, text: string) => {
     unsaved += 1;
+    unsavedChanged();
     const generation = generationOf(target);
     if (target === current.current) lastWords.current = text;
     chain.current = chain.current.then(async () => {
@@ -130,6 +142,7 @@ export function useReplyDraft(threadId: string) {
         // Kept in the box; the next pause in typing tries again.
       } finally {
         unsaved -= 1;
+        unsavedChanged();
       }
     });
   }, []);
@@ -169,6 +182,7 @@ export function useReplyDraft(threadId: string) {
     const id = hookId.current;
     return () => {
       for (const key of [...unsavedConflicts]) if (key.startsWith(`${id}:`)) unsavedConflicts.delete(key);
+      unsavedChanged();
     };
   }, []);
 

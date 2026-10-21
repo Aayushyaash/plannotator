@@ -474,8 +474,16 @@ test.skipIf(!hasDom)('event: drafts, sent elsewhere: a box with no edits closes,
   expect(await serverDraft(world.waiting)).toBeNull();
 });
 
+const unloadAsks = () => {
+  const event = new Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(event);
+  return event.defaultPrevented;
+};
+
 test.skipIf(!hasDom)('event: drafts, sent elsewhere while this box has edits: the save is refused, the conflict shows, nothing comes back', async () => {
   const { el, saved } = await openWithSaved('First words.');
+  // Nothing would be lost yet: a reload is not asked about.
+  expect(unloadAsks()).toBe(false);
   type(el, 'First words. And more.');
   await loopback(`/api/inbox/messages/${world.waiting}/reply`, 'POST', JSON.stringify({ idempotency_key: 'elsewhere-2', words: 'First words.', clear_draft: saved.updated_at }));
   await act(async () => emit('drafts', { thread_id: world.waiting }));
@@ -488,8 +496,9 @@ test.skipIf(!hasDom)('event: drafts, sent elsewhere while this box has edits: th
   const line = el.querySelector('[data-draft-conflict] .ib-draft-saved')!;
   expect(line.getAttribute('role')).toBeNull();
   expect(box(el)!.getAttribute('aria-describedby')).toContain(line.id);
-  // The restart guard asks while those words are not saved.
+  // The restart guard and a reload ask while those words are not saved.
   expect(unsentReply()).not.toBeNull();
+  expect(unloadAsks()).toBe(true);
 });
 
 test.skipIf(!hasDom)('event: drafts, the other window typed: a box with no edits takes its words', async () => {

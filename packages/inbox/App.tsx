@@ -70,7 +70,7 @@ import { useInboxSound } from './sound';
 import { notificationLine, SoundIntroDialog } from './components/SoundIntro';
 import { GuidePane } from './components/GuidePane';
 import { AboutBlock, FailedDialog, RestartDialog, UpdateDialog, WhatsNewPage } from './components/Updates';
-import { unsentReply } from './unsent';
+import { leaveOnPurpose, unsentReply } from './unsent';
 import { InboxToast, type InboxToastModel, toastSpeech } from './components/Toast';
 import { canToggleRead, MARK_READ_UNDO_MS, markReadToast } from './markRead';
 import { threadLink, type RowMenuAction } from './rowMenu';
@@ -337,9 +337,6 @@ function platformOf(): ConnectContext['platform'] {
   if (p.includes('mac')) return 'mac';
   return 'linux';
 }
-
-/** A restart the person chose reloads the page: the page's beforeunload question is not asked again. */
-let leavingOnPurpose = false;
 
 /** A reply is being typed: the box holds unsent text, or a text field has focus. The sound dialog waits. */
 function replyInProgress(): boolean {
@@ -760,18 +757,6 @@ function Inbox() {
     } catch {
       return null;
     }
-  }, []);
-
-  // A reload or a closed tab asks while a reply would be lost: files pasted into the box, or words not
-  // saved yet (a conflict's words; a save waiting goes as the page goes, but one on its way may not land).
-  useEffect(() => {
-    const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (leavingOnPurpose || !unsentReply()) return;
-      event.preventDefault();
-      event.returnValue = '';
-    };
-    window.addEventListener('beforeunload', onBeforeUnload);
-    return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, []);
 
   // First read, then the event stream keeps the counts, the open thread and the notice live.
@@ -1607,7 +1592,7 @@ function Inbox() {
         const health = await inboxApi.health();
         if (health.serverSession !== before) {
           // The person already chose to restart (asked first when a reply would be lost): no second question.
-          leavingOnPurpose = true;
+          leaveOnPurpose();
           window.location.reload();
           return;
         }
