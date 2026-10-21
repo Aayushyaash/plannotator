@@ -400,3 +400,83 @@ export function listProjectPlans(
     return [];
   }
 }
+
+/**
+ * How recently a plan's history chain must have been written to for a plan
+ * with the same heading, arriving on a later date, to continue it (#1679).
+ *
+ * 48 hours covers a plan revised across midnight (UTC or local) and a review
+ * resumed the next day, including the reported case (v1 at 20:02Z, the
+ * revision about 39h later). A same-heading plan after two days of silence
+ * starts a fresh chain, so a generic heading such as "Implementation Plan" is
+ * not merged across unrelated work forever. Every saved version refreshes the
+ * window, so a plan that is actively revised keeps one chain however long it
+ * runs.
+ */
+export const PLAN_HISTORY_CONTINUE_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+const HISTORY_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Resolve which history directory a plan under review should append to.
+ *
+ * `generateSlug` stamps the current date into the slug, because the archive
+ * filenames under `~/.plannotator/plans/` are keyed by it: `parseArchiveFilename`
+ * reads the date back out and `listArchivedPlans` sorts on it. Version history
+ * wants a key that stays put, so a review spanning midnight keeps appending to
+ * the chain it started instead of opening a second one that looks like a plan
+ * with no history at all (empty Versions tab, no diff). The date in a history
+ * directory name therefore records when the chain STARTED.
+ *
+ * Given today's dated slug, the rule, in order:
+ *
+ * 1. `current` (the slug an open review server already writes to) is kept while
+ *    the plan's heading still names it, so revisions in one session never
+ *    change chains.
+ * 2. Today's directory, when it already holds versions: same-day behavior is
+ *    unchanged.
+ * 3. The most recently written `{base}-YYYY-MM-DD` chain of this project that
+ *    is not dated after today, when its newest version is within
+ *    PLAN_HISTORY_CONTINUE_WINDOW_MS of `now`. Recency is the saved file's
+ *    mtime, so the UTC date in the directory name plays no part.
+ * 4. Otherwise today's slug: a new chain.
+ *
+ * Directories with no `NNN.md` are skipped by `listProjectPlans`, so an empty
+ * one left by an interrupted run cannot take over. A candidate must match the
+ * date shape exactly, which keeps two plans apart when one slug is a prefix of
+ * another (`wave-s2` vs `wave-s2-inference-capacity`) and leaves annotate
+ * mode's content-hashed slugs alone. Nothing on disk is renamed or migrated.
+ */
+export function resolveHistorySlug(
+  project: string,
+  datedSlug: string,
+  options: { now?: Date; current?: string } = {},
+): string {
+  const dateSuffix = datedSlug.match(/-(\d{4}-\d{2}-\d{2})$/);
+  if (!dateSuffix) return datedSlug;
+
+  const startedOn = dateSuffix[1];
+  const base = datedSlug.slice(0, -dateSuffix[0].length);
+  const chainDate = (slug: string): string | null => {
+    if (!slug.startsWith(`${base}-`)) return null;
+    const date = slug.slice(base.length + 1);
+    return HISTORY_DATE.test(date) ? date : null;
+  };
+
+  if (options.current && chainDate(options.current) !== null) return options.current;
+
+  const now = (options.now ?? new Date()).getTime();
+  let best: { slug: string; date: string; mtime: number } | null = null;
+  for (const plan of listProjectPlans(project)) {
+    if (plan.slug === datedSlug) return datedSlug;
+    const date = chainDate(plan.slug);
+    if (date === null || date > startedOn) continue;
+    const mtime = plan.lastModified ? Date.parse(plan.lastModified) : 0;
+    if (!best || mtime > best.mtime || (mtime === best.mtime && date > best.date)) {
+      best = { slug: plan.slug, date, mtime };
+    }
+  }
+
+  if (best && best.mtime > 0 && now - best.mtime <= PLAN_HISTORY_CONTINUE_WINDOW_MS) return best.slug;
+  return datedSlug;
+}
