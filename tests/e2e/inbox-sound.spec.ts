@@ -236,7 +236,7 @@ test.afterAll(async () => {
 let fresh: World;
 let page: Page;
 
-test('a fresh install: no dialog, the mark set so none ever shows, and the sidebar asks for one click', async ({ browser }) => {
+test('a fresh install: no dialog, the mark set so none ever shows, and no sidebar row asks for a click', async ({ browser }) => {
   fresh = await newWorld(browser);
   await fresh.context.grantPermissions(['notifications'], { origin: new URL(fresh.url).origin });
   const claude = await agent(fresh);
@@ -246,12 +246,11 @@ test('a fresh install: no dialog, the mark set so none ever shows, and the sideb
   await page.waitForTimeout(2500);
   await expect(page.locator('dialog[data-dialog="sound-intro"]')).toHaveCount(0);
   expect(config(fresh).inboxSound).toEqual({ dialogShownFor: VERSION });
-  const hint = page.locator('[data-sound-hint]');
-  await expect(hint).toHaveText('Click to turn on sound');
-  await shot(page, 'sidebar-click-hint');
-  // Any click in the tab turns the sound on, and the hint goes.
+  // Approval "inbox-notify-every-thread": the sidebar says nothing about sound before the first click.
+  await expect(page.locator('.ib-side-foot')).not.toContainText(/sound/i);
+  await shot(page, 'sidebar-no-sound-row');
+  // Any click in the tab arms the sound, silently (the next tests ring only because it did).
   await page.locator('.ib-main h1').first().click();
-  await expect(hint).toHaveCount(0);
 });
 
 test('a question while the tab is hidden rings once, and its notification is silent', async () => {
@@ -319,6 +318,10 @@ test('two Inbox tabs ring once between them; any tab in front keeps both quiet',
   await settled(page, more.thread_id);
   await page.waitForTimeout(800);
   expect((await rings(page)) + (await rings(second))).toBe(quiet);
+  // It goes to the back before it closes, as a tab does when the person moves on: a tab still
+  // "in front" (the page's last word, if its goodbye is lost in a headless close) keeps the other
+  // tab's notifications for itself for up to 15 s.
+  await setFront(second, false, false);
   await second.close();
 });
 
@@ -384,7 +387,7 @@ test('after an update the dialog shows once: in one of two tabs opened together,
   await expect.poll(() => rings(shown)).toBe(before + 1);
   await dialog.getByRole('button', { name: 'Turn it off' }).click();
   await expect(dialog).toHaveCount(0);
-  await expect(shown.locator('[data-inbox-toast]')).toHaveText('Sound off.');
+  await expect(shown.locator('[data-inbox-toast]')).toHaveText('Sound off');
   await expect.poll(() => config(updated).inboxSound).toEqual({ dialogShownFor: VERSION, enabled: false });
   await shot(shown, 'dialog-turned-off-toast');
 

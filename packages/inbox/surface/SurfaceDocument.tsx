@@ -252,6 +252,7 @@ export const SurfaceDocument = forwardRef<SurfaceDocumentHandle, Props>(function
               ref={viewerRef}
               blocks={blocks}
               markdown={open.text}
+              questionDecisionLines={false}
               annotations={annotations}
               onAddAnnotation={() => {}}
               onSelectAnnotation={select}

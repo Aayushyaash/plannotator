@@ -47,6 +47,7 @@ import {
   configuredInboxTool,
   loadConfig,
   parseInboxToolEnv,
+  resolveClaudeCodeMod,
   resolveInboxTool,
   saveConfig,
   type InboxToolHost,
@@ -390,8 +391,8 @@ function at(root: unknown, keys: readonly string[]): unknown {
 /** The raw `plannotator-inbox` value in a file: absent, a value, or why it cannot be read. */
 type RawEntry = { kind: "absent" } | { kind: "value"; value: unknown } | { kind: "unreadable"; reason: string };
 
-function rawJsonEntry(path: string, keys: readonly string[], jsonc: boolean): RawEntry {
-  const read = readAgentFile(path);
+function rawJsonEntry(path: string, keys: readonly string[], jsonc: boolean, maxBytes?: number): RawEntry {
+  const read = readAgentFile(path, maxBytes);
   if (read.kind === "missing") return { kind: "absent" };
   if (read.kind === "refused") return { kind: "unreadable", reason: read.reason };
   if (!read.text.trim()) return { kind: "absent" };
@@ -483,6 +484,30 @@ export function piExtensionInstalled(e: AgentEnvironment): boolean {
   }
 }
 
+/**
+ * Which OpenCode this computer runs, from evidence only: the global config's
+ * own shape first (V2's `plugins`, V1's `plugin`), then the commands on PATH
+ * (`opencode2` is OpenCode 2, whose package also ships `opencode`; `opencode`
+ * alone is OpenCode 1). Undefined when nothing says.
+ */
+export function openCodeGeneration(e: AgentEnvironment): "1" | "2" | undefined {
+  const dir = openCodeConfigDir(e);
+  for (const name of ["opencode.json", "opencode.jsonc", "config.json"]) {
+    const read = readAgentFile(join(dir, name));
+    if (read.kind !== "file") continue;
+    try {
+      const parsed = JSON.parse(stripJsonComments(read.text)) as { plugin?: unknown; plugins?: unknown };
+      if (Array.isArray(parsed.plugins)) return "2";
+      if (Array.isArray(parsed.plugin)) return "1";
+    } catch {
+      // Unreadable: no evidence here.
+    }
+  }
+  if (e.which("opencode2")) return "2";
+  if (e.which("opencode")) return "1";
+  return undefined;
+}
+
 /** Whether Plannotator's OpenCode plugin is listed in the global opencode config: `plugin` (OpenCode 1) or `plugins` (OpenCode 2, strings or `{ package }`). */
 export function openCodePluginInstalled(e: AgentEnvironment): boolean {
   const dir = openCodeConfigDir(e);
@@ -511,16 +536,134 @@ export function openCodePluginInstalled(e: AgentEnvironment): boolean {
   return false;
 }
 
-/** Whether Plannotator's Claude Code plugin is enabled (`enabledPlugins` in Claude Code's settings). */
-export function claudeCodePluginEnabled(e: AgentEnvironment): boolean {
-  const read = readAgentFile(join(claudeConfigDir(e), "settings.json"));
+const CLAUDE_PLUGIN_ID = /^plannotator@/;
+
+/** One Claude Code settings file, parsed (null: missing or unreadable). */
+function readClaudeSettings(path: string): { enabledPlugins?: unknown; env?: unknown } | null {
+  const read = readAgentFile(path);
+  if (read.kind !== "file") return null;
+  try {
+    const parsed = JSON.parse(stripJsonComments(read.text)) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as { enabledPlugins?: unknown; env?: unknown }) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `enabledPlugins` in one Claude Code settings file: true or false when it names Plannotator's plugin, else undefined. */
+function claudeSettingsPluginState(settings: { enabledPlugins?: unknown } | null): boolean | undefined {
+  const enabled = settings?.enabledPlugins;
+  if (!enabled || typeof enabled !== "object") return undefined;
+  const ours = Object.entries(enabled).filter(([id, on]) => CLAUDE_PLUGIN_ID.test(id) && typeof on === "boolean");
+  if (ours.some(([, on]) => on === true)) return true;
+  return ours.length > 0 ? false : undefined;
+}
+
+/** Claude Code's settings scopes the Inbox can read, strongest first: managed, then the user's settings.local.json, then settings.json. */
+function claudeSettingsScopes(e: AgentEnvironment): { scope: "managed" | "user"; settings: { enabledPlugins?: unknown; env?: unknown } | null }[] {
+  const managed = claudeManagedSettingsPath(e);
+  return [
+    ...(managed ? [{ scope: "managed" as const, settings: readClaudeSettings(managed) }] : []),
+    { scope: "user" as const, settings: readClaudeSettings(join(claudeConfigDir(e), "settings.local.json")) },
+    { scope: "user" as const, settings: readClaudeSettings(join(claudeConfigDir(e), "settings.json")) },
+  ];
+}
+
+/**
+ * The plugin's state from the scopes (strongest first) and the registry: the
+ * strongest scope that names it decides (managed settings turning it off win
+ * over the user's true), else the registry. Pure.
+ */
+export function claudePluginStateFromScopes(
+  scopes: readonly { scope: "managed" | "user"; on: boolean | undefined }[],
+  registered: boolean,
+): { state: "enabled" | "disabled" | "absent"; managed: boolean } {
+  const decided = scopes.find((scope) => scope.on !== undefined);
+  if (decided) return { state: decided.on ? "enabled" : "disabled", managed: decided.scope === "managed" };
+  return { state: registered ? "enabled" : "absent", managed: false };
+}
+
+/** Claude Code's managed (enterprise) settings file, per platform. */
+function claudeManagedSettingsPath(e: AgentEnvironment): string | null {
+  // A test's agents never read the machine's own managed settings.
+  if (process.env.PLANNOTATOR_TEST_SANDBOX) return null;
+  if (e.platform === "darwin") return "/Library/Application Support/ClaudeCode/managed-settings.json";
+  if (e.platform === "linux") return "/etc/claude-code/managed-settings.json";
+  if (e.platform === "win32") return "C:\\Program Files\\ClaudeCode\\managed-settings.json";
+  return null;
+}
+
+/** Whether Claude Code's plugin registry (`plugins/installed_plugins.json`, v2 `{ plugins: { id: [...] } }` or the v1 object) records Plannotator's plugin. */
+function claudePluginRegistered(e: AgentEnvironment): boolean {
+  const read = readAgentFile(join(claudeConfigDir(e), "plugins", "installed_plugins.json"));
   if (read.kind !== "file") return false;
   try {
-    const enabled = (JSON.parse(read.text) as { enabledPlugins?: Record<string, unknown> }).enabledPlugins;
-    return !!enabled && Object.entries(enabled).some(([id, on]) => on === true && /^plannotator@/.test(id));
+    const parsed = JSON.parse(read.text) as { plugins?: Record<string, unknown> } & Record<string, unknown>;
+    const table = parsed.plugins && typeof parsed.plugins === "object" ? parsed.plugins : parsed;
+    return Object.entries(table).some(([id, value]) => CLAUDE_PLUGIN_ID.test(id) && (Array.isArray(value) ? value.length > 0 : !!value && typeof value === "object"));
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether Plannotator's Claude Code plugin is enabled for this user: a
+ * settings scope the Inbox can see (user `settings.json` and
+ * `settings.local.json`, managed settings) enables it, or Claude Code's plugin
+ * registry records it and no scope turns it off. A project's own
+ * `.claude/settings.json` and `claude --plugin-dir` are not visible here; the
+ * window counts a live Claude Code session as connected for those.
+ */
+export function claudeCodePluginEnabled(e: AgentEnvironment): boolean {
+  return claudeCodePluginState(e) === "enabled";
+}
+
+/**
+ * Plannotator's Claude Code plugin: `enabled` (see claudeCodePluginEnabled),
+ * `disabled` (a settings scope turns it off by name, as `claude plugin
+ * disable` does: the person's choice), or `absent`.
+ */
+export function claudeCodePluginState(e: AgentEnvironment): "enabled" | "disabled" | "absent" {
+  return claudeCodePluginStatus(e).state;
+}
+
+/** claudeCodePluginState, and whether managed (enterprise) settings decided it. */
+export function claudeCodePluginStatus(e: AgentEnvironment): { state: "enabled" | "disabled" | "absent"; managed: boolean } {
+  const scopes = claudeSettingsScopes(e).map(({ scope, settings }) => ({ scope, on: claudeSettingsPluginState(settings) }));
+  return claudePluginStateFromScopes(scopes, claudePluginRegistered(e));
+}
+
+/**
+ * `PLANNOTATOR_CLAUDE_MOD` as Claude Code's own process sees it: the `env`
+ * block of its settings (the strongest scope that sets it), else this
+ * process's environment (the shell that started the Inbox may be the one that
+ * starts Claude Code). Undefined when nothing sets it.
+ */
+function claudeCodeModEnv(e: AgentEnvironment): string | undefined {
+  for (const { settings } of claudeSettingsScopes(e)) {
+    const env = settings?.env;
+    if (env && typeof env === "object") {
+      const value = (env as Record<string, unknown>).PLANNOTATOR_CLAUDE_MOD;
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+    }
+  }
+  return e.env.PLANNOTATOR_CLAUDE_MOD;
+}
+
+/**
+ * Whether the Claude Code mod, which registers the `plannotator_inbox` tool,
+ * is on, with the mod's own precedence: `PLANNOTATOR_CLAUDE_MOD` (Claude
+ * Code's settings `env`, else this process's environment), then config.json
+ * `claudeCodeMod`. Off, Claude Code has no Inbox tool even with the plugin.
+ */
+export function claudeCodeModOn(e: AgentEnvironment): boolean {
+  const value = claudeCodeModEnv(e);
+  return resolveClaudeCodeMod(loadConfig(), value === undefined ? {} : { PLANNOTATOR_CLAUDE_MOD: value });
+}
+
+/** Claude Code's Inbox tool is on: the plugin's mod is on and `inboxTool` allows it. */
+export function claudeCodeInboxToolOn(e: AgentEnvironment): boolean {
+  return claudeCodeModOn(e) && resolveInboxTool(loadConfig(), e.env as NodeJS.ProcessEnv, "claude-code");
 }
 
 /**
@@ -583,7 +726,8 @@ async function cliWay(
 export const AGENT_SPECS: readonly AgentSpec[] = [
   {
     id: "claude-code",
-    detect: (e) => claudeCodePluginEnabled(e),
+    // The plugin, or `claude` on PATH without it (the first-run screen offers the plugin's install command).
+    detect: (e) => claudeCodePluginEnabled(e) || !!e.which("claude"),
     way: async () => ({ kind: "none" }),
     file: () => null,
     raw: () => null,
@@ -980,7 +1124,7 @@ export async function connectInboxAgents(options: ConnectOptions): Promise<Inbox
   if (!agentHomeAllowed(e)) return { ...empty, skipped: "sandbox" };
   const file = readInboxAgents(options.dataDir);
   const report: InboxConnectReport = { ...empty, first: !file.first_connected_at };
-  report.claude_code = claudeCodePluginEnabled(e) && resolveInboxTool(loadConfig(), e.env as NodeJS.ProcessEnv, "claude-code");
+  report.claude_code = claudeCodePluginEnabled(e) && claudeCodeInboxToolOn(e);
 
   const pending = AGENT_SPECS.filter((spec) => spec.id !== "claude-code" && spec.detect(e));
   // An agent with a record is never added again by itself; an MCP entry it
@@ -989,6 +1133,15 @@ export async function connectInboxAgents(options: ConnectOptions): Promise<Inbox
     const record = file.agents[spec.id];
     if (!record || record.reach !== "mcp" || (record.state !== "added" && record.state !== "found") || record.removed_outside_at) continue;
     if (entryStillThere(spec.id, e, ourCommands(options, record)) === false) record.removed_outside_at = at;
+  }
+  // An agent connected through MCP before its plugin was installed (Pi before `pi install`), whose plugin's tool is
+  // on now: the MCP entry Plannotator added goes, so the agent never carries both. Kept when it cannot be removed.
+  for (const spec of pending) {
+    const record = file.agents[spec.id];
+    if (record?.reach !== "mcp" || record.state !== "added" || record.removed_outside_at) continue;
+    const way = await spec.way(e);
+    if (way.kind !== "tool" || !resolveInboxTool(loadConfig(), e.env as NodeJS.ProcessEnv, way.host)) continue;
+    if ((await removeOurMcpEntry(spec.id, options, record)) === null) file.agents[spec.id] = { state: "found", reach: "tool", path: null, at };
   }
   const toConnect = pending.filter((spec) => !file.agents[spec.id]);
   const deadline = options.totalTimeoutMs ?? INBOX_CONNECT_TOTAL_TIMEOUT_MS;
@@ -1227,17 +1380,74 @@ export interface InboxAgentReachState {
   reason: string | null;
 }
 
+/**
+ * Claude Code's user-scope MCP entry (`claude mcp add --scope user`), in
+ * `.claude.json`: `$CLAUDE_CONFIG_DIR/.claude.json` when that is set, else
+ * `~/.claude.json`. Read only, never written: Claude Code is connected through
+ * its plugin, and this only says that one added by hand already reaches the Inbox.
+ */
+function claudeCodeMcpEntry(e: AgentEnvironment, ours: readonly (readonly string[])[]): InboxEntryRead {
+  const dir = envDir(e, "CLAUDE_CONFIG_DIR");
+  // .claude.json holds Claude Code's per-project history and often passes 1 MiB; this read only looks.
+  return classify(rawJsonEntry(join(dir ?? e.homeDir, ".claude.json"), ["mcpServers"], false, CLAUDE_JSON_MAX_BYTES), ours, true);
+}
+
+/** The most `.claude.json` the read-only MCP lookup reads. */
+const CLAUDE_JSON_MAX_BYTES = 32 * 1024 * 1024;
+
+/** Claude Code reaches the Inbox through Plannotator's plugin (its mod registers the tool); without the plugin only a person can connect it. */
+function claudeCodeWay(e: AgentEnvironment): ConnectWay {
+  return claudeCodePluginEnabled(e) ? { kind: "tool", host: "claude-code" } : { kind: "manual", why: "install Plannotator's Claude Code plugin" };
+}
+
+/** Whether Plannotator's own connection is installed for one of its three hosts (null for every other agent). */
+export function inboxPluginInstalled(id: InboxAgentId, e: AgentEnvironment): boolean | null {
+  if (id === "claude-code") return claudeCodePluginEnabled(e);
+  if (id === "pi") return piExtensionInstalled(e);
+  if (id === "opencode") return openCodePluginInstalled(e);
+  return null;
+}
+
+/**
+ * What `GET /api/inbox/agents` says about Plannotator's own connection on one
+ * of its three hosts (null for every other agent): installed; `disabled`, the
+ * Claude Code plugin is installed and turned off by name (the person's
+ * choice); `generation`, the OpenCode on PATH (`opencode2` is OpenCode 2,
+ * which also ships as `opencode`; `opencode` alone is OpenCode 1), so the
+ * first-run screen shows the plugin line that version reads.
+ */
+export function inboxPluginStatus(id: InboxAgentId, e: AgentEnvironment): { installed: boolean; disabled?: boolean; managed?: boolean; generation?: "1" | "2" } | null {
+  const installed = inboxPluginInstalled(id, e);
+  if (installed === null) return null;
+  if (id === "claude-code" && !installed) {
+    const status = claudeCodePluginStatus(e);
+    if (status.state === "disabled") return status.managed ? { installed, disabled: true, managed: true } : { installed, disabled: true };
+  }
+  if (id === "opencode") {
+    const generation = openCodeGeneration(e);
+    return generation ? { installed, generation } : { installed };
+  }
+  return { installed };
+}
+
 /** How one agent reaches the Inbox now (read only; may ask a CLI its version). */
 export async function inboxAgentReach(id: InboxAgentId, options: ConnectOptions): Promise<InboxAgentReachState> {
   const e = options.environment;
   const spec = agentSpec(id);
-  const way: ConnectWay = id === "claude-code" ? { kind: "tool", host: "claude-code" } : await spec.way(e);
+  const way: ConnectWay = id === "claude-code" ? claudeCodeWay(e) : await spec.way(e);
   const path = displayPath(spec.file(e), e);
   const record = readInboxAgents(options.dataDir).agents[id];
+  // Claude Code connected by hand through MCP, where the plugin gives it no tool (not installed, disabled, or its mod off):
+  // it reaches the Inbox (without the wake). Checked before the agent is called off.
+  if (id === "claude-code" && (way.kind === "manual" || !claudeCodeModOn(e)) && claudeCodeMcpEntry(e, ourCommands(options, record)).kind === "ours") {
+    return { kind: "mcp", on: true, state: "connected", path: displayPath(join(envDir(e, "CLAUDE_CONFIG_DIR") ?? e.homeDir, ".claude.json"), e), locked: false, reason: null };
+  }
   if (way.kind === "tool") {
     const locked = parseInboxToolEnv(e.env as NodeJS.ProcessEnv) !== undefined;
-    const on = resolveInboxTool(loadConfig(), e.env as NodeJS.ProcessEnv, way.host);
-    return { kind: "tool", on, state: on ? "connected" : "off", path: null, locked, reason: null };
+    // Claude Code's tool comes from the plugin's mod: with the mod off it has none, whatever inboxTool says.
+    const modOff = way.host === "claude-code" && !claudeCodeModOn(e);
+    const on = !modOff && resolveInboxTool(loadConfig(), e.env as NodeJS.ProcessEnv, way.host);
+    return { kind: "tool", on, state: on ? "connected" : "off", path: null, locked, reason: modOff ? CLAUDE_CODE_MOD_OFF_REASON : null };
   }
   if (way.kind === "manual") return { kind: "manual", on: false, state: "manual", path, locked: false, reason: way.why };
   if (way.kind === "none") return { kind: "none", on: false, state: "manual", path, locked: false, reason: null };
@@ -1274,16 +1484,39 @@ export function setInboxTool(host: InboxToolHost, on: boolean, e: AgentEnvironme
  * success the agent's failure leaves the last report, so the note dialog's
  * band stops naming it. Returns an error reason, or null.
  */
+/** Why Claude Code has no Inbox tool with its plugin installed. */
+export const CLAUDE_CODE_MOD_OFF_REASON = "Plannotator's Claude Code mod is off (PLANNOTATOR_CLAUDE_MOD or claudeCodeMod), so Claude Code has no Inbox tool";
+
+/**
+ * Remove the MCP entry Plannotator recorded adding for an agent whose own
+ * plugin now gives it the Inbox tool (Pi after `pi install`), so it never
+ * carries both. Only an entry the record says Plannotator added and that still
+ * runs its command. Returns an error reason, or null (removed, or nothing to remove).
+ */
+async function removeOurMcpEntry(id: InboxAgentId, options: ConnectOptions, record: InboxAgentRecord | undefined): Promise<string | null> {
+  if (record?.reach !== "mcp" || record.state !== "added") return null;
+  const item = planInboxAgentRemoval(options.dataDir, options.environment, ourCommands(options, record)[0]!).items.find((candidate) => candidate.agent === id);
+  return item ? item.apply() : null;
+}
+
 export async function setInboxAgentReach(id: InboxAgentId, on: boolean, options: ConnectOptions): Promise<string | null> {
   const e = options.environment;
   if (!agentHomeAllowed(e)) return "not in a test's scratch home";
   const at = (options.now ?? (() => new Date()))().toISOString();
   const spec = agentSpec(id);
-  const way: ConnectWay = id === "claude-code" ? { kind: "tool", host: "claude-code" } : await spec.way(e, true);
+  const way: ConnectWay = id === "claude-code" ? claudeCodeWay(e) : await spec.way(e, true);
   const file = readInboxAgents(options.dataDir);
   if (way.kind === "manual") return `${INBOX_AGENT_LABELS[id]} is connected by hand: ${way.why}`;
   if (way.kind === "none") return `${INBOX_AGENT_LABELS[id]} is connected by hand`;
   if (way.kind === "tool") {
+    // Claude Code's tool comes from the plugin's mod: with the mod off a switch here would change nothing.
+    if (way.host === "claude-code" && !claudeCodeModOn(e)) return CLAUDE_CODE_MOD_OFF_REASON;
+    // The plugin's tool replaces the MCP entry Plannotator added before the plugin was there (`pi mcp add`):
+    // removed first, so the agent never carries both; if it cannot be removed, the tool stays off and MCP keeps working.
+    if (on) {
+      const removed = await removeOurMcpEntry(id, options, file.agents[id]);
+      if (removed) return `Plannotator's earlier MCP entry for ${INBOX_AGENT_LABELS[id]} could not be removed, so its Inbox tool stays off: ${removed}`;
+    }
     const problem = setInboxTool(way.host, on, e);
     if (problem) return problem;
     file.agents[id] = { state: on ? "added" : "off", reach: "tool", path: null, at };

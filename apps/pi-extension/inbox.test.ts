@@ -17,7 +17,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { INBOX_REMINDER_TEXT, INBOX_WAKE_INSTRUCTION, inboxWakeText } from "./generated/inbox/connection.ts";
+import { INBOX_NAME_THREAD_LINE, INBOX_NEW_THREAD_INSTRUCTION, INBOX_REMINDER_TEXT, INBOX_WAKE_INSTRUCTION, inboxWakeText } from "./generated/inbox/connection.ts";
 import { entriesCarryReminder, PI_INBOX_REMINDER_CUSTOM_TYPE } from "./inbox.ts";
 import { INBOX_INSTALL_TEXT } from "./generated/inbox/agent-link.ts";
 import {
@@ -38,6 +38,7 @@ import {
 	worldEnv,
 	type InboxWorld,
 } from "../../tests/helpers/inbox-world.ts";
+import { expectMeasuredCost } from "../../tests/helpers/inbox-tool-cost.ts";
 import { messageText, startScriptedModel, type ScriptedModel, type ScriptedRequest, type ScriptedTurn } from "../../tests/helpers/scripted-model.ts";
 
 /**
@@ -254,6 +255,78 @@ describe.skipIf(!piRuns)("Pi ↔ Plannotator Inbox (the real Pi in RPC mode, a r
 		w.proof(`Inbox running, switch on for pi: plannotator_inbox sent to the model with actions ${JSON.stringify(actions)}\n\n${tool.description}`);
 	}, 120_000);
 
+	test("a long thread read through the tool reaches the model as a windowed transcript, text alone (no JSON after it); search answers one line per message", async () => {
+		const w = world("01c-long-thread");
+		let threadId = "";
+		const m = model(
+			askingScript((request) => {
+				const last = lastMessage(request);
+				if (last.role === "user" && last.text === "Read the long thread.") return { toolCall: { name: "plannotator_inbox", arguments: { action: "read_thread", thread_id: threadId } } };
+				if (last.role === "user" && last.text === "Search for flamingo.") return { toolCall: { name: "plannotator_inbox", arguments: { action: "search", query: "flamingo" } } };
+				return null;
+			}),
+		);
+		startInbox(w);
+		knob(w, true);
+		// Seed 20 rounds as another agent would, over the Inbox's /mcp; the person answers each through the window's route.
+		const mcp = async (name: string, args: Record<string, unknown>) => {
+			const response = await fetch(`http://127.0.0.1:${registry(w).port}/mcp`, {
+				method: "POST",
+				headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+				body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+			});
+			const text = await response.text();
+			return (JSON.parse(text.includes("data:") ? text.split("data:")[1]!.split("\n")[0]! : text) as { result: { structuredContent: { message_id: string; thread_id: string } } }).result.structuredContent;
+		};
+		let last = "";
+		for (let round = 1; round <= 20; round++) {
+			const reply = last ? await personSends(w, last, `Round ${round - 1}: go ahead.`) : null;
+			const sent = await mcp("send_message", {
+				project_path: w.project,
+				agent_session: "seeder",
+				body: `Round ${round}: the queue drains in order.${round === 13 ? " The flamingo budget is set." : ""}`,
+				...(reply ? { reply_to: reply } : {}),
+			});
+			threadId = sent.thread_id;
+			last = sent.message_id;
+		}
+		const pi = await openPi(w, m);
+		await ask(pi, "Read the long thread.");
+		const read = m.requests.map((request) => lastMessage(request)).find((message) => message.role === "tool" && message.text.startsWith(`Thread ${threadId}`));
+		expect(read).toBeDefined();
+		expect(read!.text.split("\n")[0]).toBe(`Thread ${threadId} (Round 1: the queue drains in order.): 39 messages, 19 from the person.`);
+		expect(read!.text).not.toContain('{"thread"');
+		expect(read!.text).toMatch(/\nCursor \d+: read_thread after: \d+ returns only what is new since this read\.$/);
+		expect(Buffer.byteLength(read!.text)).toBeLessThan(12_000);
+		await ask(pi, "Search for flamingo.");
+		const found = m.requests.map((request) => lastMessage(request)).find((message) => message.role === "tool" && message.text.includes('"flamingo"'));
+		expect(found!.text.split("\n")[0]).toMatch(/^1 message matches "flamingo" in /);
+		expect(found!.text).not.toContain('{"query"');
+		w.proof(`read_thread as the model got it:\n${read!.text}\n\nsearch:\n${found!.text}`);
+	}, 120_000);
+
+	test("the tool's cost per request, measured on what Pi sends: the same prompt with the tool off and on (no reminder) differs by the tool alone, and that is the number the window shows", async () => {
+		const w = world("01a-tool-cost");
+		const m = model(askingScript());
+		startInbox(w);
+		knob(w, false);
+		const off = await openPi(w, m);
+		await ask(off, "hello");
+		const without = m.requests.at(-1)!;
+		await off.client.stop();
+		writeFileSync(join(w.dataDir, "config.json"), JSON.stringify({ inboxTool: { pi: true }, inboxReminder: { pi: false } }));
+		const on = await openPi(w, m);
+		await ask(on, "hello");
+		const withTool = m.requests.at(-1)!;
+		expect(withTool.tools).toContain("plannotator_inbox");
+		const added = withTool.bodyBytes - without.bodyBytes;
+		const entry = withTool.toolBytes.plannotator_inbox!;
+		// The request grows by the tool's entry and the comma before it, nothing else.
+		expect(added).toBe(entry + 1);
+		expectMeasuredCost("pi", withTool.toolJson.plannotator_inbox!);
+		w.proof(`Pi request without the tool: ${without.bodyBytes} bytes; with it: ${withTool.bodyBytes} bytes; the plannotator_inbox entry: ${entry} bytes`);
+	}, 120_000);
+
 	test("the reminder: one hidden line at the session's first prompt, only with the tool; later requests keep it in place and add none; reopening the session adds none; inboxReminder off sends none", async () => {
 		const w = world("01b-reminder");
 		const m = model(askingScript());
@@ -350,6 +423,53 @@ describe.skipIf(!piRuns)("Pi ↔ Plannotator Inbox (the real Pi in RPC mode, a r
 		w.proof(`the wake's answer (send_message with reply_to ${replyId}) landed in thread ${asked.thread_id}: Replied`);
 		await Bun.sleep(3_000);
 		expect(wakes(pi)).toHaveLength(1);
+	}, 120_000);
+
+	test("compose: Pi's poll carries its folder, so a session that never wrote is listed under its project; a thread the person starts for it arrives with the new-thread line and the answer lands in it", async () => {
+		const w = world("02b-compose-new-thread");
+		knob(w, true);
+		startInbox(w);
+		// The scripted model does what the wake asks: when it says to name the thread, its reply passes `thread`.
+		const m = model(
+			askingScript((request) => {
+				const last = lastMessage(request);
+				const wake = /^Plannotator Inbox: .* \((msg_[^)]+)\)$/m.exec(last.text.split("\n", 1)[0] ?? "");
+				if (last.role === "tool" || !wake || !last.text.includes(INBOX_NAME_THREAD_LINE)) return null;
+				return { toolCall: { name: "plannotator_inbox", arguments: { action: "send_message", body: "Done: retries reuse the key.", reply_to: wake[1], thread: "Relay retry budget" } } };
+			}),
+		);
+		const pi = await openPi(w, m);
+		await ask(pi, "hello");
+		const { port } = registry(w);
+		const listed = await waitFor("the Pi session in the live list", async () => {
+			const model = (await (await fetch(`http://127.0.0.1:${port}/api/inbox/sessions`)).json()) as {
+				projects: { project: { root: string }; sessions: { session: string; host: string; busy: boolean | null }[] }[];
+			};
+			return model.projects.find((group) => group.project.root === w.project)?.sessions.find((s) => s.session === pi.sessionId) ?? null;
+		});
+		expect(listed).toMatchObject({ host: "pi", busy: false });
+		w.proof(`listed under ${w.project} before it wrote: ${JSON.stringify(listed)}`);
+
+		const health = (await (await fetch(`http://127.0.0.1:${port}/api/inbox/health`)).json()) as { serverSession: string };
+		const response = await fetch(`http://127.0.0.1:${port}/api/inbox/messages`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Origin: `http://127.0.0.1:${port}` },
+			body: JSON.stringify({ serverSession: health.serverSession, to: { host: "pi", session: pi.sessionId }, body: "Idea: a retry budget for the relay.", idempotency_key: "pi-compose-1" }),
+		});
+		expect(response.status).toBe(200);
+		const message = ((await response.json()) as { message: { id: string; thread_id: string } }).message;
+		const wake = await waitFor("the new-thread wake", () => wakes(pi)[0]);
+		expect(wake.split("\n").slice(1, 3)).toEqual([INBOX_NEW_THREAD_INSTRUCTION, INBOX_NAME_THREAD_LINE]);
+		expect(wake).toBe(inboxWakeText({ type: "message", new_thread: true, name_thread: true, id: message.id, subject: "Idea: a retry budget for the relay", body: "Idea: a retry budget for the relay." }));
+		const answered = await waitFor("the answer in the person's thread", async () => {
+			const last = (await thread(w, message.thread_id)).messages.at(-1);
+			return last?.author.kind === "agent" ? last : null;
+		});
+		expect(answered.author.session).toBe(pi.sessionId);
+		// The name round-trips: the thread's chip is the name the agent passed.
+		const named = await waitFor("the thread named", async () => (await thread(w, message.thread_id)).thread_name ?? null);
+		expect(named).toBe("Relay retry budget");
+		w.proof(`the wake:\n${wake}\n\nthe answer landed in ${message.thread_id}, named "${named}"`);
 	}, 120_000);
 
 	test("a typed prompt goes first, and a prompt typed into the wake's turn takes it over: one delivery, no abort", async () => {

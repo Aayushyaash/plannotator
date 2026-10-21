@@ -17,6 +17,7 @@ import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
+import { NO_BROWSER } from '../helpers/no-browser';
 
 const repo = resolve(__dirname, '../..');
 const entry = join(repo, 'apps/hook/server/index.ts');
@@ -62,7 +63,7 @@ test.beforeAll(async () => {
       HOME: home,
       TMPDIR: tmpdir(),
       PLANNOTATOR_DATA_DIR: dataDir,
-      PLANNOTATOR_BROWSER: 'none',
+      PLANNOTATOR_BROWSER: NO_BROWSER,
       PLANNOTATOR_RELAY_URL: 'http://127.0.0.1:9',
       PLANNOTATOR_INBOX_PHONES: '0',
       // Never a real agent's CLI from PATH (packages/server/inbox-agents.ts).
@@ -93,7 +94,7 @@ test.afterAll(async () => {
 
 test('an available release shows Update; the dialog runs the install script once with Update now', async ({ page }) => {
   await page.goto(url);
-  const button = page.locator('.ib-upd[data-update-state="available"]').getByRole('button', { name: 'Update to Plannotator 0.28.12' });
+  const button = page.locator('.ib-upd[data-update-state="available"]').getByRole('button', { name: 'Update to 0.28.12', exact: true });
   await expect(button).toBeVisible();
   await page.screenshot({ path: join(proofDir, '1-available.png') });
 

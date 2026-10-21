@@ -123,9 +123,8 @@ import { plannotatorBundleSubject } from "@plannotator/shared/plannotator-tool";
 import { createWorktreePool, type WorktreePool, type PoolEntry } from "@plannotator/shared/worktree-pool";
 import { parsePRUrl, checkPRAuth, fetchPR, getCliName, getCliInstallUrl, getMRLabel, getMRNumberLabel, getDisplayRepo, getPlatformLabel, getPRNumber, getPRHeadFetchSpec, getPRCloneCommand } from "@plannotator/server/pr";
 import { writeRemoteShareLink } from "@plannotator/server/share-url";
-import { enableTailscaleServe } from "@plannotator/server/tailscale-serve";
+import { announceTailscaleSession, enableTailscaleServe } from "@plannotator/server/tailscale-serve";
 import { discardEnvPullSessionBridgeConfig, takeEnvPullSessionBridgeConfig } from "@plannotator/server/ai-runtime";
-import { writeUrlQr } from "@plannotator/server/qr";
 import { resolveAnnotateTarget } from "./annotate-resolution";
 import { annotateDecisionTarget, reviewDecisionTarget, takeHostReviewId, targetText } from "./decision-target";
 import { formatSessionsJson, formatSessionsTable } from "./sessions-output";
@@ -218,7 +217,8 @@ import {
 } from "./cli";
 import { exitOnUnknownSubcommand } from "./unknown-subcommand";
 import { completeAnnotateCommand } from "./annotate-command";
-import { runInboxCommand, selfCommand as inboxSelfCommand } from "./inbox-command";
+import { ensureInboxRunning, runInboxCommand, selfCommand as inboxSelfCommand } from "./inbox-command";
+import { runCardCommand } from "./card-command";
 import { formatInboxHelp } from "./inbox-help";
 import { getPlannotatorDataDir } from "@plannotator/shared/data-dir";
 import { isAgentSdkEntrypoint } from "@plannotator/shared/t3-hook-command";
@@ -277,6 +277,22 @@ takeHostMessagesPath();
 const hostReviewId = takeHostReviewId();
 
 const rawArgs = process.argv.slice(2);
+// The Board's cards from a shell (unreleased, HIDDEN_SUBCOMMANDS): a thin
+// client over the Inbox's `card` tool, starting a stopped Inbox like the shim.
+// Before the strict-annotate parse, which takes `--json` and other flags for itself.
+{
+  const args = rawArgs;
+  if (args[0] === "card") {
+    const cardDataDir = getPlannotatorDataDir();
+    process.exit(
+      await runCardCommand(args.slice(1), {
+        cwd: process.env.PLANNOTATOR_CWD || process.cwd(),
+        env: process.env,
+        ensureRunning: () => ensureInboxRunning(cardDataDir),
+      }),
+    );
+  }
+}
 // T3 Code (opt-in, unreleased; HIDDEN_SUBCOMMANDS): `t3` is the connection's
 // CLI and worker, `t3-hook` the Claude Bash hook and its settings helper.
 // Loaded only when asked for, so no other subcommand evaluates any of it.
@@ -407,9 +423,7 @@ async function handleTailscaleReady(port: number): Promise<void> {
       }),
     );
   }
-  process.stderr.write(`\n  Plannotator session ready — served over your tailnet:\n  ${url}\n\n`);
-  writeUrlQr(url);
-  await handleServerReady(url, false, port, { skipBrowserOpen: true });
+  await announceTailscaleSession(url, port);
 }
 
 // Global flag: --no-jina (disables Jina Reader for URL annotation)
@@ -935,8 +949,12 @@ if (args[0] === "sessions") {
       console.error(`Session #${n} not found. ${sessions.length} active session(s).`);
       process.exit(1);
     }
-    await openBrowser(session.url);
-    console.error(`Opened ${session.mode} session in browser: ${session.url}`);
+    // false when nothing opened (PLANNOTATOR_BROWSER=none says why on its own
+    // line, a failed launch is left to the URL): never claim a tab that isn't there.
+    const opened = await openBrowser(session.url);
+    console.error(opened
+      ? `Opened ${session.mode} session in browser: ${session.url}`
+      : `${session.mode} session: ${session.url}`);
     process.exit(0);
   }
 

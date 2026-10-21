@@ -81,7 +81,7 @@ describe("GET /api/inbox/search", () => {
     const { status, body } = await w.searchSettled("q=rate%20lim");
     expect(status).toBe(200);
     expect(body).toMatchObject({ q: "rate lim", terms: ["rate", "lim"], indexing: false, recent: null, serverSession: w.server.serverSession });
-    expect(body.totals).toEqual({ threads: 1, messages: 1, files: 0, decisions: 0, projects: 0 });
+    expect(body.totals).toEqual({ threads: 1, messages: 1, files: 0, projects: 0 });
     expect(body.groups.threads[0]).toMatchObject({ type: "thread", id: relay, thread_id: relay, section: "new", archived: false });
     const thread = body.groups.threads[0];
     expect(thread.title_marks.map(([a, l]: [number, number]) => thread.title.slice(a, a + l))).toEqual(["rate", "lim"]);
@@ -95,6 +95,38 @@ describe("GET /api/inbox/search", () => {
     // Filters: the project, and Status.
     const scoped = await w.get(`q=rate&project=${w.project()}&status=new`);
     expect(scoped.body.totals.threads).toBe(1);
+  });
+
+  test("rows in a thread carry its subject and name; there is no decisions group", async () => {
+    const w = await setup();
+    const sent = (await (clients.at(-1)!).callTool({
+      name: "send_message",
+      arguments: {
+        project_path: join(w.root, "api"),
+        agent_session: "ses_search",
+        agent_name: "Claude Code",
+        thread: "nightly-deploy",
+        subject: "Nightly deploy fails on the second retry",
+        body: ":::question\nPin the CDN cache key to the build id?\n\n- [ ] Yes\n- [ ] No\n:::",
+      },
+    })) as { structuredContent: { thread_id: string; message_id: string; questions: { key: string; kind: string; prompt: string }[] } };
+    const { thread_id: threadId, message_id: messageId, questions } = sent.structuredContent;
+    const q = questions[0]!;
+    const windowPost = (path: string, body: Json) =>
+      fetch(`${w.base}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, serverSession: w.server.serverSession }) });
+    const answer = { v: 1, key: q.key, kind: q.kind, prompt: q.prompt, selected: ["Yes"] };
+    expect((await windowPost(`/api/inbox/messages/${messageId}/picks`, { questions: [{ key: q.key, revision: 0, answer }] })).status).toBe(200);
+    expect((await windowPost(`/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k", questions: [{ key: q.key, revision: 1 }] })).status).toBe(200);
+
+    const { body } = await w.searchSettled("q=cdn%20cache%20key");
+    expect(body.groups.messages[0]).toMatchObject({ type: "message", id: messageId, thread_id: threadId, title: "Nightly deploy fails on the second retry", thread_name: "nightly-deploy" });
+    expect(Object.keys(body.groups).sort()).toEqual(["files", "messages", "projects", "threads"]);
+    expect(Object.keys(body.totals).sort()).toEqual(["files", "messages", "projects", "threads"]);
+
+    // The thread deleted: nothing of it is found.
+    expect((await windowPost(`/api/inbox/threads/${threadId}/delete`, {})).status).toBe(200);
+    const after = await w.searchSettled("q=cdn%20cache%20key");
+    expect(after.body.groups.messages).toEqual([]);
   });
 
   test("the first search builds in slices: indexing answers carry the thread count, other routes keep answering, and a later search finds a message sent after the build", async () => {

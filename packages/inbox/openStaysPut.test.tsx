@@ -25,7 +25,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { InboxListSection } from '@plannotator/core/inbox-types';
 import { PHONE_QUERY } from './phone';
-import { rowInSlot, SETTLE_BEAT_MS } from './settle';
+import { rowInSlot, SETTLE_BEAT_MS, SHOW_LIT_AFTER_SLIDE_MS, SHOW_LIT_MS } from './settle';
 
 const hasDom = typeof document !== 'undefined';
 const { InboxApp } = (hasDom ? await import('./App') : {}) as typeof import('./App');
@@ -85,7 +85,7 @@ async function agentSends(body: string, reply_to?: string): Promise<string> {
   return (JSON.parse(await readLine()) as { sent: string }).sent;
 }
 
-const TESTS = 9;
+const TESTS = 10;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -309,6 +309,41 @@ test.skipIf(!hasDom)("an agent's message that arrives while reading stays behind
   expect(document.activeElement).toBe(rowOf(el, late));
 });
 
+// Show's brief light (design record "inbox-polish", item 6): the rows Show
+// brings in light up where they land, once they have slid into place, and
+// nothing else does; the light comes off after it fades. A thread's close
+// settles without it.
+test.skipIf(!hasDom)('Show lights exactly the rows it brought in, after they slid into place, and the light comes off', async () => {
+  const el = await renderApp(`#project=${world.project}`);
+  const first = world.news[0]!;
+  const moved = world.news[2]!;
+  await openRow(el, first);
+  const late = await agentSends('A late note from the agent.');
+  const reply = await agentSends('One more thing on this one.', moved);
+  expect(reply).toBeTruthy();
+  act(() => pokeStream!());
+  await until(() => el.querySelector('[data-inbox-notice]')?.textContent?.includes('2 new in') === true, 'the "2 new" notice');
+  const lit = () => [...el.querySelectorAll('.ib-listcol [data-thread-id][data-lit]')].map((r) => r.getAttribute('data-thread-id')!).sort();
+
+  // A close settles the person's own read and lights nothing.
+  closeThread();
+  await wait(SETTLE_BEAT_MS + 60);
+  await until(() => rowOf(el, first) === null, 'the settle');
+  await wait(SHOW_LIT_AFTER_SLIDE_MS + 60);
+  expect(lit()).toEqual([]);
+
+  const before = order(el);
+  mouseClick(el.querySelector('[data-inbox-notice]') as HTMLButtonElement);
+  await until(() => rowOf(el, late) !== null, 'Show');
+  // Not while the rows slide; then the new row and the row the agent wrote in, and no row that stayed as it was.
+  expect(lit()).toEqual([]);
+  await wait(SHOW_LIT_AFTER_SLIDE_MS + 60);
+  expect(lit()).toEqual([late, moved].sort());
+  expect(order(el).filter((id) => before.includes(id) && id !== moved).every((id) => !lit().includes(id))).toBe(true);
+  await wait(SHOW_LIT_MS);
+  expect(lit()).toEqual([]);
+});
+
 // The failure this guards (design record "inbox-new-in-open-thread", the
 // /seen race): the look sent when a thread opens marked the thread seen up to
 // whatever the server held when it took the look, so a message that landed
@@ -423,7 +458,7 @@ test.skipIf(!hasDom)('Mark read inside an open thread: the toast says the row wi
   await until(() => el.querySelector('[data-mark-read]') !== null && !(el.querySelector('[data-mark-read]') as HTMLButtonElement).disabled, 'Mark read');
   act(() => (el.querySelector('[data-mark-read]') as HTMLButtonElement).click());
   await until(() => document.querySelector('[data-inbox-toast]') !== null, 'the toast');
-  expect(document.querySelector('[data-inbox-toast]')!.textContent).toContain('will move to Quiet');
+  expect(document.querySelector('[data-inbox-toast]')!.textContent).toContain('Moves to Quiet');
   expect(sectionOfRow(el, asked)).toBe('waiting');
   closeThread();
   await wait(SETTLE_BEAT_MS + 60);

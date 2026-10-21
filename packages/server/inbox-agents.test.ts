@@ -198,8 +198,10 @@ describe("agents with their own `mcp add`", () => {
       signal: stop.signal,
     });
     const started = Date.now();
-    while (fake.live().length === 0 && Date.now() - started < 5000) await Bun.sleep(25);
-    expect(fake.live().map((p) => p.name)).toEqual(["amp"]);
+    // Wait for the hanging `mcp add`, not merely any fake: the `--version` probe
+    // that runs first is a fake process too, and it exits before `mcp add` starts.
+    while (fake.calls().length === 0 && Date.now() - started < 5000) await Bun.sleep(25);
+    expect(fake.live().map((p) => [p.name, p.args[0]])).toEqual([["amp", "mcp"]]);
     stop.abort();
     const report = await running;
     expect(report.unfinished).toEqual(["amp"]);

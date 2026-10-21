@@ -11,10 +11,10 @@ import { delimiter, join } from "node:path";
 import { loadConfig, resolveUrlHost, resolveUseGlimpse } from "../generated/config.ts";
 import { parsePortSelection } from "../generated/port-range.ts";
 import { isAutoUrlHost, resolveAutoHostCached } from "../generated/tailscale.ts";
+import { browserNoneReason, isNoOpBrowserSentinel, resolveBrowserIntent } from "../generated/browser-intent.ts";
 
 const DEFAULT_REMOTE_PORT = 19432;
 const LOOPBACK_HOST = "127.0.0.1";
-const NOOP_BROWSER_VALUES = new Set(["true", "false", "none", ":", "0", "1"]);
 
 function isAddressInUseError(err: unknown): boolean {
 	return err instanceof Error && (
@@ -23,10 +23,12 @@ function isAddressInUseError(err: unknown): boolean {
 	);
 }
 
-export function isNoOpBrowserSentinel(value: string | undefined): boolean {
-	if (!value) return false;
-	return NOOP_BROWSER_VALUES.has(value.trim().toLowerCase());
-}
+/**
+ * BROWSER's no-op values (#756) are read as unset; a "none" value on
+ * PLANNOTATOR_BROWSER opens nothing. One rule for both runtimes:
+ * packages/shared/browser-intent.ts.
+ */
+export { isNoOpBrowserSentinel };
 
 /**
  * True for a value that must be handed to cmd.exe under WSL: a Windows-style
@@ -339,14 +341,17 @@ export async function openBrowser(url: string): Promise<{
 	opened: boolean;
 	isRemote?: boolean;
 	url?: string;
+	/** Set when PLANNOTATOR_BROWSER says to open nothing: the sentence to show instead. */
+	notOpening?: string;
 }> {
-	const rawPlannotatorBrowser = process.env.PLANNOTATOR_BROWSER;
-	const rawBrowser = process.env.BROWSER;
-	const plannotatorBrowser = isNoOpBrowserSentinel(rawPlannotatorBrowser)
-		? undefined
-		: rawPlannotatorBrowser;
-	const envBrowser = isNoOpBrowserSentinel(rawBrowser) ? undefined : rawBrowser;
-	const browser = plannotatorBrowser || envBrowser;
+	const intent = resolveBrowserIntent(process.env);
+	// PLANNOTATOR_BROWSER=none: open nothing at all, local or remote.
+	if (intent.kind === "none") {
+		return { opened: false, notOpening: browserNoneReason(intent), url };
+	}
+	const plannotatorBrowser =
+		intent.kind === "explicit" && intent.source === "PLANNOTATOR_BROWSER" ? intent.browser : undefined;
+	const browser = intent.kind === "explicit" ? intent.browser : undefined;
 	if (isRemoteSession() && !browser) {
 		return { opened: false, isRemote: true, url };
 	}

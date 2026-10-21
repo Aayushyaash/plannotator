@@ -27,11 +27,22 @@ import { resolveReferenceLinks } from "./markdown-structure";
 import { cutText } from "./text-cut";
 // The grapheme-safe cuts, re-exported here: core's export map is checked against the published package, and the Inbox is what uses them.
 export { cutText, sliceText } from "./text-cut";
+// The subject of a thread the person starts: beside deriveInboxSubject, so the store and compose's preview share it.
+export {
+  derivePersonThreadSubject,
+  PERSON_THREAD_SUBJECT_COLUMNS,
+  suggestPersonThreadName,
+  PERSON_THREAD_NAME_COLUMNS,
+  PERSON_THREAD_NAME_WORDS,
+} from "./inbox-thread-subject";
 import {
   canonicalQuestionAnswer,
   findQuestionBlocks,
+  formatQuestionAnswerLines,
   formatQuestionAnswersSection,
   isQuestionAnswerEmpty,
+  isRecommendedQuestionAnswer,
+  QUESTION_ANSWERS_HEADING,
   isQuestionAnswered,
   capQuestionPrompt,
   MAX_QUESTION_PROMPT_CHARS,
@@ -44,7 +55,6 @@ import {
   type QuestionKind,
 } from "./question-block";
 import type {
-  InboxDecisionDraft,
   InboxQuestion,
   InboxQuestionFacts,
   InboxQuestionRecord,
@@ -61,7 +71,6 @@ export interface ParsedInboxQuestion {
   parsed: InboxQuestionFacts;
   stopped: string | null;
   holds_up: string[];
-  decision_on_answer: boolean;
   /** The block's `Replaces:` tokens, as written (checked by the store). */
   replaces: string[];
 }
@@ -89,7 +98,8 @@ export function parseInboxQuestionBlocks(markdown: string): ParsedInboxQuestion[
       .replace(/\r\n?/g, "\n")
       .split("\n");
     const inner = lines.slice(1, CLOSE_RE.test(lines.at(-1) ?? "") && lines.length > 1 ? -1 : undefined);
-    const parsed = parseQuestionBlock(location.directiveKind, inner.join("\n"));
+    // The Inbox records no decisions: a `Decision:` line is context.
+    const parsed = parseQuestionBlock(location.directiveKind, inner.join("\n"), { decisionLines: false });
     if (parsed === null) continue;
     const context = parsed.context.trim();
     out.push({
@@ -111,7 +121,6 @@ export function parseInboxQuestionBlocks(markdown: string): ParsedInboxQuestion[
         line: location.startLine + 1 + parsed.promptLine,
       },
       ...waitsOf(context),
-      decision_on_answer: parsed.decisionOnAnswer === true,
       replaces: parsed.replaces ? [...parsed.replaces] : [],
     });
   }
@@ -211,7 +220,6 @@ export function toInboxQuestion(record: InboxQuestionRecord, threadResolved: boo
     choices: record.parsed.choices.map((c) => ({ ...c })),
     recommendation: record.parsed.recommendation,
     suggested_text: record.parsed.suggested_text,
-    decision_on_answer: record.decision_on_answer,
     stopped: record.stopped,
     holds_up: [...record.holds_up],
     asked_by_agent_id: record.asked_by_agent_id,
@@ -223,10 +231,7 @@ export function toInboxQuestion(record: InboxQuestionRecord, threadResolved: boo
     picked_by: record.picked_by,
     picked_at: record.picked_at,
     sent_reply_id: record.sent_reply_id,
-    decision_id: record.decision_id,
     message_id: record.message_id,
-    decision_recording: inboxDecisionRecording(record),
-    decision_draft: record.decision_draft ?? null,
     superseded_by: record.superseded_by ? { message_id: record.superseded_by.message_id, key: record.superseded_by.key ?? null } : null,
     set_aside_at: record.set_aside?.at ?? null,
   };
@@ -387,6 +392,58 @@ export function composeInboxReplyBody(input: {
 }
 
 /**
+ * The body of the person's Re-ask note (approval "inbox-reask"): what the
+ * agent is asked to do with its open questions, then the answers the person
+ * had picked and not sent, which go with the note. `noteId` is the note's
+ * own id, the `reply_to` of the agent's new message.
+ */
+export function composeInboxReaskBody(input: {
+  reask: readonly Pick<InboxQuestionRecord, "id" | "prompt">[];
+  answered: readonly { record: Pick<InboxQuestionRecord, "id" | "prompt" | "parsed">; answer: QuestionAnswer }[];
+  noteId: string;
+  /**
+   * The agent that asked, when the note goes to another session because the
+   * asking one ended: named from its host ("Claude Code"), so the note says
+   * whose questions they are instead of "your".
+   */
+  askedBy?: string | null;
+}): string {
+  const n = input.reask.length;
+  const whose = input.askedBy ? `the ${n === 1 ? "open question" : `${n} open questions`} ${input.askedBy} asked` : `your ${n === 1 ? "open question" : `${n} open questions`}`;
+  const lines = [
+    n === 1
+      ? `Please ask ${whose} in this thread again, in one new message, so the person can answer it in one place.`
+      : `Please ask ${whose} in this thread again, together in one new message, so the person can answer them in one place.`,
+  ];
+  if (input.answered.length > 0) {
+    const k = input.answered.length;
+    lines.push(`The person answered ${k === 1 ? "one more question" : `${k} more questions`} with this note; the ${k === 1 ? "answer is" : "answers are"} below. Don't ask ${k === 1 ? "it" : "them"} again.`);
+  }
+  lines.push(
+    "",
+    "Still open:",
+    ...input.reask.map((q) => `- ${q.id}: ${q.prompt.replace(/\s+/g, " ").trim()}`),
+    "",
+    `Check ${n === 1 ? "it" : "each one"} against where the work is now:`,
+    "- Still needed: ask it again with the context the person needs today (what changed since you asked, your recommendation), and put a `Replaces: <id>` line in its question block.",
+    "- No longer needed: leave it out, put its id in `supersedes`, and say in one line why.",
+    `Send one message (send_message) with reply_to ${input.noteId}. Until every id above is replaced or in \`supersedes\`, the old ${n === 1 ? "question stays" : "questions stay"} open for the person.`,
+  );
+  if (input.answered.length > 0) {
+    let section = `## ${QUESTION_ANSWERS_HEADING}\n\n`;
+    for (const { record, answer } of input.answered) {
+      const recommended = record.parsed.choices.filter((c) => c.recommended).map((c) => c.label);
+      const suggested = record.parsed.suggested_text ?? undefined;
+      section += `### ${record.prompt.replace(/\s+/g, " ").trim()} (${record.id})\n`;
+      section += formatQuestionAnswerLines(answer, { recommended: isQuestionAnswered(answer) && isRecommendedQuestionAnswer(answer, recommended, suggested) });
+      section += "\n";
+    }
+    lines.push("", section.trimEnd());
+  }
+  return lines.join("\n");
+}
+
+/**
  * The line a reply that answers and skips nothing carries (approval
  * "inbox-words-only-reply", 2026-10-13): the message's questions are still
  * open and the person will answer them in the Inbox. Empty when none is left
@@ -427,7 +484,7 @@ function replySentence(answered: number, skipped: number): string {
  * A skip the Inbox writes for the person: a Send's for a question it left
  * unanswered (`by_reply`, so the window says "Skipped with your reply" and
  * the agent can tell it from a Skip the person pressed), or a Mark read's for
- * a question it closed. Never records a decision (a skip decides nothing).
+ * a question it closed.
  */
 export function inboxSkipAnswer(record: Pick<InboxQuestionRecord, "key" | "kind" | "prompt">, options: { byReply: boolean }): QuestionAnswer {
   return {
@@ -478,6 +535,9 @@ const SUBJECT_MAX = 120;
 /**
  * A thread's subject when the agent gave none: the first open question's
  * prompt, else the first heading or non-empty line of the body, plain.
+ * A thread the PERSON starts (compose) is named by
+ * `derivePersonThreadSubject` instead (./inbox-thread-subject, re-exported
+ * below): a short name, not the first 120 characters of a dictated paragraph.
  */
 export function deriveInboxSubject(body: string, questions: readonly Pick<ParsedInboxQuestion, "prompt">[]): string | null {
   const pick = questions[0]?.prompt ?? firstLine(body);
@@ -494,70 +554,4 @@ function firstLine(body: string): string | null {
     if (line && !line.startsWith(":::") && !line.startsWith("```")) return line;
   }
   return null;
-}
-
-// ─────────────────────── Decisions drafted from an answer (step 3) ───────────────────────
-//
-// The words of a decision drafted from an answer, and whether a question
-// records one. The window's decision card shows these words before Send, and
-// the server records the same words at Send when the person left them as
-// drafted. The approved Workspaces words (`inbox-decision-toggle`,
-// 2026-10-06, item 4, "the answer first"): the statement is the answer, the
-// Why line is "Asked by <agent>: <question>".
-
-const oneDecisionLine = (value: string): string => value.replace(/\s+/gu, " ").trim();
-
-/** "A", "A and B", "A, B and C". */
-function joinWords(parts: readonly string[]): string {
-  if (parts.length <= 1) return parts.join("");
-  return `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
-}
-
-/**
- * The statement drafted from an answer: the chosen label(s) as a sentence
- * ("Retry with the same idempotency key."), several joined with commas and
- * "and", Other or a written answer as written. Null when the answer decides
- * nothing: a Skip, or nothing picked or written.
- */
-export function draftInboxDecisionText(answer: Pick<QuestionAnswer, "selected" | "other" | "text" | "skipped"> | null): string | null {
-  if (!answer || answer.skipped) return null;
-  const parts = [...answer.selected, ...(answer.other ? [answer.other] : []), ...(answer.text ? [answer.text] : [])]
-    .map(oneDecisionLine)
-    .filter((part) => part !== "");
-  if (parts.length === 0) return null;
-  const joined = joinWords(parts);
-  const sentence = `${joined.charAt(0).toUpperCase()}${joined.slice(1)}`;
-  return /[.!?…]$/u.test(sentence) ? sentence : `${sentence}.`;
-}
-
-/** The Why line: "Asked by <agent>: <the question>". */
-export function draftInboxDecisionReason(askerName: string, prompt: string): string {
-  return `Asked by ${oneDecisionLine(askerName) || "An agent"}: ${oneDecisionLine(prompt)}`;
-}
-
-/**
- * Whether Send records this question's answer as a decision: the person's
- * switch when they touched it, else on exactly when the block says
- * `Decision: when answered`.
- */
-export function inboxDecisionRecording(record: Pick<InboxQuestionRecord, "decision_recording" | "decision_on_answer">): boolean {
-  return record.decision_recording ?? record.decision_on_answer;
-}
-
-/**
- * The words a decision from this answer records: the card's edits where the
- * person made them, the drafted words elsewhere. `text` is null when there
- * is nothing to record (a Skip, nothing picked, and no edited statement).
- */
-export function inboxDecisionWords(input: {
-  answer: Pick<QuestionAnswer, "selected" | "other" | "text" | "skipped"> | null;
-  prompt: string;
-  askerName: string;
-  draft: InboxDecisionDraft | null | undefined;
-}): { text: string | null; reason: string } {
-  const edited = input.draft?.text?.trim() || null;
-  return {
-    text: input.answer?.skipped ? null : (edited ?? draftInboxDecisionText(input.answer)),
-    reason: input.draft?.reason ?? draftInboxDecisionReason(input.askerName, input.prompt),
-  };
 }

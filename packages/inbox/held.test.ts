@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import type { InboxListRow, InboxListSection } from '@plannotator/core/inbox-types';
-import { heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread } from './held';
+import { addOwnThreads, adoptKeepingOpen, heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread } from './held';
 
 function row(id: string, project: string, last_at: string, last_author: 'agent' | 'person'): InboxListRow {
   return { thread_id: id, project: { id: `prj_${project}`, name: project }, last_at, last_author } as InboxListRow;
@@ -348,5 +348,86 @@ describe('the open thread', () => {
     expect(moved.find((s) => s.id === 'new')!.threads[0]).toBe(other);
     // No row for it in the list read: nothing changes.
     expect(ids(settleThread(before, bySection(q2), 'open'))).toEqual(ids(before));
+  });
+});
+
+// The failure this guards (the owner, 2026-10-16: "When I create a new thread
+// and hit send, why doesn't it show up in the Sent list?"): with a thread open
+// the held list took no new row, so the thread the person had just started
+// was missing from the list until they closed the one they were reading.
+describe('addOwnThreads', () => {
+  const at = (minute: number) => `2026-10-16T22:${String(minute).padStart(2, '0')}:00Z`;
+  const r = (id: string, section: InboxListRow['section'], minute: number, last_author: 'agent' | 'person' = 'agent') =>
+    ({ ...row(id, 'plannotator', at(minute), last_author), section }) as InboxListRow;
+  const bySection = (...rows: InboxListRow[]): InboxListSection[] =>
+    (['stopped', 'holding', 'waiting', 'new', 'sent', 'quiet'] as const).map((id) => ({ id, label: id, threads: rows.filter((t) => t.section === id) }));
+  const ids = (list: InboxListSection[]) => list.filter((s) => s.threads.length > 0).map((s) => `${s.id}:${s.threads.map((t) => t.thread_id).join(',')}`);
+
+  test('the thread the person started goes into Sent at its place; every other row keeps its section and order; agent news still waits', () => {
+    const waiting = r('w', 'waiting', 1);
+    const sentOld = r('s1', 'sent', 2, 'person');
+    const quiet = r('q', 'quiet', 3);
+    const shown = bySection(waiting, sentOld, quiet);
+    const mine = r('mine', 'sent', 9, 'person');
+    // Meanwhile an agent started a thread and the waiting row moved: neither is the person's own, both stay held.
+    const agentNew = r('agent', 'new', 8);
+    const latest = bySection(mine, agentNew, r('s1', 'sent', 2, 'person'), r('w', 'quiet', 1), quiet);
+    const next = addOwnThreads(shown, latest, ['mine']);
+    expect(ids(next)).toEqual(['waiting:w', 'sent:mine,s1', 'quiet:q']);
+    expect(next.find((s) => s.id === 'sent')!.threads[0]).toBe(mine);
+    expect(heldNotice(next, latest).count).toBe(1);
+  });
+
+  test('a thread already on screen, or not in the list read, changes nothing', () => {
+    const shown = bySection(r('s1', 'sent', 2, 'person'));
+    const again = addOwnThreads(shown, bySection(r('s1', 'sent', 5, 'person')), ['s1']);
+    expect(ids(again)).toEqual(['sent:s1']);
+    expect(again.find((s) => s.id === 'sent')!.threads[0]).toBe(shown.find((s) => s.id === 'sent')!.threads[0]);
+    expect(ids(addOwnThreads(shown, bySection(), ['gone']))).toEqual(['sent:s1']);
+  });
+});
+
+// Click Inbox to refresh: a refresh beside an open thread adopts everything,
+// but the open thread's row stays in the group it is drawn in, so the
+// selection never goes into folded Quiet out of view.
+describe('adoptKeepingOpen', () => {
+  const two = (newRows: InboxListRow[], quiet: InboxListRow[]): InboxListSection[] => [
+    { id: 'new', label: 'New since you looked', threads: newRows },
+    { id: 'quiet', label: 'Quiet', threads: quiet },
+  ];
+  const at = (id: string, time: string, section: 'new' | 'quiet') => ({ ...row(id, 'docs', time, 'agent'), section }) as InboxListRow;
+
+  test('the open row keeps its group, at its place there; everything else is the read', () => {
+    // On screen: a is open (already read, so its own section says quiet), b new.
+    const shown = two([at('a', '2026-10-20T10:00:00Z', 'quiet'), at('b', '2026-10-20T09:00:00Z', 'new')], []);
+    // The read: c arrived, a is in Quiet.
+    const latest = two([at('c', '2026-10-20T11:00:00Z', 'new'), at('b', '2026-10-20T09:00:00Z', 'new')], [at('a', '2026-10-20T10:00:00Z', 'quiet')]);
+    const next = adoptKeepingOpen(shown, latest, 'a');
+    expect(next[0]!.threads.map((r) => r.thread_id)).toEqual(['c', 'a', 'b']);
+    expect(next[1]!.threads).toEqual([]);
+  });
+
+  test('without the open row on screen it is the read', () => {
+    const latest = two([at('c', '2026-10-20T11:00:00Z', 'new')], [at('a', '2026-10-20T10:00:00Z', 'quiet')]);
+    expect(adoptKeepingOpen(two([], []), latest, 'a')).toEqual(latest);
+  });
+
+  test('it keeps its place between the same neighbours, never re-sorted by its time', () => {
+    // On screen a sits between x and y, though its time is older than y's (held rows keep their places).
+    const shown = two([at('x', '2026-10-20T12:00:00Z', 'new'), at('a', '2026-10-20T08:00:00Z', 'quiet'), at('y', '2026-10-20T10:00:00Z', 'new')], []);
+    const latest = two([at('x', '2026-10-20T12:00:00Z', 'new'), at('y', '2026-10-20T10:00:00Z', 'new')], [at('a', '2026-10-20T08:00:00Z', 'quiet')]);
+    expect(adoptKeepingOpen(shown, latest, 'a')[0]!.threads.map((r) => r.thread_id)).toEqual(['x', 'a', 'y']);
+  });
+
+  // The window reads without archived threads: a thread the person archived while it is open is
+  // not in the read, and its row (drawn Archived by markHeldRowArchived) must not vanish under them.
+  test('an open thread the read leaves out (archived while open) stays as drawn, still Archived', () => {
+    const archivedRow = { ...at('a', '2026-10-20T10:00:00Z', 'quiet'), resolved_at: '2026-10-20T10:05:00Z' } as InboxListRow;
+    const shown = two([at('b', '2026-10-20T11:00:00Z', 'new'), archivedRow, at('c', '2026-10-20T09:00:00Z', 'new')], []);
+    const latest = two([at('d', '2026-10-20T12:00:00Z', 'new'), at('b', '2026-10-20T11:00:00Z', 'new'), at('c', '2026-10-20T09:00:00Z', 'new')], []);
+    const next = adoptKeepingOpen(shown, latest, 'a');
+    expect(next[0]!.threads.map((r) => r.thread_id)).toEqual(['d', 'b', 'a', 'c']);
+    expect(next[0]!.threads[2]).toBe(archivedRow);
+    expect(next[0]!.threads[2]!.resolved_at).toBe('2026-10-20T10:05:00Z');
   });
 });

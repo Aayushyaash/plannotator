@@ -311,6 +311,13 @@ export interface PlannotatorConfig {
    * shows); once set it never shows again. Both are written by the server
    * only; the claim is a compare-and-set, so only one tab ever shows it.
    */
+  /**
+   * The Plannotator Inbox window's text size: the body size in px (12, 13,
+   * 14 or 15) its whole type ramp scales from. Unset: 14. Written by the
+   * Inbox's Settings → General → Appearance through POST /api/inbox/settings
+   * `{ text_size }`.
+   */
+  inboxTextSize?: number;
   inboxSound?: {
     enabled?: boolean;
     volume?: number;

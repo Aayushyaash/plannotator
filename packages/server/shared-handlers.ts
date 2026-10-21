@@ -9,6 +9,7 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { openBrowser as openBrowserImpl } from "./browser";
+import { browserNoneReason, resolveBrowserIntent } from "@plannotator/shared/browser-intent";
 import { isUrlHostOverridden } from "./remote";
 import { writeUrlQr } from "./qr";
 import { validateImagePath, validateUploadExtension, UPLOAD_DIR } from "./image";
@@ -18,6 +19,10 @@ import { getServerConfig } from "./config";
 import { saveToObsidian, saveToBear, saveToOctarine } from "./integrations";
 import type { ObsidianConfig, BearConfig, OctarineConfig, IntegrationResult } from "./integrations";
 import { listReferenceSkills, readReferenceSkillContent } from "./review-skill-loader";
+import { crossOriginRefusalBody } from "@plannotator/shared/request-origin";
+import { isSameOriginRequest } from "./request-origin-guard";
+import { checkServerSession, serverSessionMismatchBody } from "@plannotator/shared/server-session";
+import { localImageContentType, localImageResponseHeaders } from "@plannotator/shared/local-image";
 
 function normalizeDraftGeneration(value: unknown): number | undefined {
   if (typeof value !== "number") return undefined;
@@ -39,19 +44,27 @@ export function readDraftGenerationFromBody(body: unknown): number | undefined {
 
 /** Serve images from local paths or temp uploads. Used by all 3 servers. */
 export async function handleImage(req: Request): Promise<Response> {
+  // Every answer carries the sandbox CSP, nosniff and CORP (see
+  // @plannotator/shared/local-image): an SVG opened directly must not run
+  // script on the session origin.
+  const text = (body: string, status: number) =>
+    new Response(body, { status, headers: localImageResponseHeaders("text/plain; charset=utf-8") });
+  const image = (file: ReturnType<typeof Bun.file>, path: string) =>
+    new Response(file, { headers: localImageResponseHeaders(localImageContentType(path)) });
+
   const url = new URL(req.url);
   const imagePath = url.searchParams.get("path");
   if (!imagePath) {
-    return new Response("Missing path parameter", { status: 400 });
+    return text("Missing path parameter", 400);
   }
   const validation = validateImagePath(imagePath);
   if (!validation.valid) {
-    return new Response(validation.error!, { status: 403 });
+    return text(validation.error!, 403);
   }
   try {
     const file = Bun.file(validation.resolved);
     if (await file.exists()) {
-      return new Response(file);
+      return image(file, validation.resolved);
     }
     // If not found and a base directory is provided, try resolving relative to it
     const base = url.searchParams.get("base");
@@ -62,13 +75,13 @@ export async function handleImage(req: Request): Promise<Response> {
       if (baseValidation.valid) {
         const baseFile = Bun.file(baseValidation.resolved);
         if (await baseFile.exists()) {
-          return new Response(baseFile);
+          return image(baseFile, baseValidation.resolved);
         }
       }
     }
-    return new Response("File not found", { status: 404 });
+    return text("File not found", 404);
   } catch {
-    return new Response("Failed to read file", { status: 500 });
+    return text("Failed to read file", 500);
   }
 }
 
@@ -226,6 +239,15 @@ interface ServerReadyOptions {
   readyFile?: string;
   skipBrowserOpen?: boolean;
   openBrowser?: typeof openBrowserImpl;
+  /**
+   * Set false to suppress the stderr line(s) this function writes, while
+   * still writing the ready file and opening the browser. For hosts that run
+   * the server in their own process and share stderr with a TUI renderer
+   * (OpenCode's embedded runtime) and already show the URL through their own
+   * surface (a toast or a transcript notice). Default true: every CLI start
+   * prints the line.
+   */
+  announce?: boolean;
 }
 
 export interface ServerReadyMetadata {
@@ -260,11 +282,18 @@ export function writeServerReadyMetadata(readyFile: string, metadata: ServerRead
   appendFileSync(readyFile, `${JSON.stringify(metadata)}\n`, "utf8");
 }
 
-export function isCodexDesktopHost(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.__CFBundleIdentifier === "com.openai.codex";
-}
+/**
+ * Stable prefix of the session URL line written to stderr on every start:
+ * `  Plannotator session ready: <url>`.
+ *
+ * The format is a contract: one line, two leading spaces, this prefix, then
+ * the URL last. Agents and host plugins grep it (the OpenCode CLI bridge's
+ * stderr filter matches it), so anything else worth saying (port forwarding,
+ * a failed browser launch) goes on its own line under it.
+ */
+export const SESSION_READY_LINE_PREFIX = "Plannotator session ready: ";
 
-/** Attempt to open the browser for the session URL. */
+/** Announce the session URL, then attempt to open the browser for it. */
 export async function handleServerReady(
   url: string,
   isRemote: boolean,
@@ -281,44 +310,73 @@ export async function handleServerReady(
     }
   }
 
-  // A remote/SSH session can't pop a browser on the user's machine, so the
-  // session URL must be visible in the terminal — independently of whether URL
-  // sharing is enabled. The share link (gated on sharing) is an extra; this
-  // reachable URL is the lifeline. Without it, a sharing-disabled remote user
-  // saw no URL at all and the agent hung waiting on the review.
-  if (isRemote) {
+  const announce = options.announce ?? true;
+
+  // One line, every session, URL last, printed BEFORE the launch: a launcher
+  // that never exits (a blocking BROWSER) must not hide it, and a local
+  // session whose browser opened fine still needs a way back to a closed tab.
+  // The URL appears exactly once; the lines below only add context.
+  if (announce) process.stderr.write(`\n  ${SESSION_READY_LINE_PREFIX}${url}\n`);
+
+  // A remote/SSH session can't pop a browser on the user's machine, so say
+  // what to do with the URL, independently of whether URL sharing is enabled.
+  if (isRemote && announce) {
     // With an advertised-URL host override the link is directly reachable
     // (e.g. over a tailnet), so the port-forwarding advice would be wrong.
     if (isUrlHostOverridden()) {
-      process.stderr.write(`\n  Plannotator session ready — open on your device:\n  ${url}\n\n`);
+      process.stderr.write(`  Open it on your device (the URL above).\n`);
       // The URL makes a device hop; a QR skips the retyping (TTY only). Only
       // for overridden hosts: a QR of a localhost URL scans to nowhere.
       writeUrlQr(url);
     } else {
-      process.stderr.write(
-        `\n  Plannotator session ready — open on your local machine (forward port ${port} if needed):\n  ${url}\n\n`,
-      );
+      process.stderr.write(`  Open it on your local machine (forward port ${port} if needed).\n`);
     }
-  } else if (isCodexDesktopHost()) {
-    process.stderr.write(`\n  Plannotator session ready:\n  ${url}\n\n`);
   }
 
   const skipBrowserOpen = options.skipBrowserOpen ?? process.env.PLANNOTATOR_SKIP_BROWSER_OPEN === "1";
+  // PLANNOTATOR_BROWSER=none (or --browser none): open nothing, anywhere, and
+  // say so under the URL instead of reporting a failed launch. A host that
+  // opens the browser itself (skipBrowserOpen) has nothing to explain.
+  const intent = resolveBrowserIntent(process.env);
+  if (!skipBrowserOpen && intent.kind === "none") {
+    if (announce) process.stderr.write(`  ${browserNoneReason(intent)}\n\n`);
+    return;
+  }
+  if (announce) process.stderr.write("\n");
   if (skipBrowserOpen) return;
 
   const opened = await (options.openBrowser ?? openBrowserImpl)(url, { isRemote, useGlimpse: true });
 
-  // Local fallback lifeline: if the browser couldn't be opened (headless box,
-  // devcontainer with no display, broken open/xdg-open), the user otherwise has
-  // no URL and the agent hangs at waitForDecision. Remote already printed the
-  // URL above; only cover the local case here to avoid a double print.
-  if (!opened && !isRemote) {
-    process.stderr.write(`\n  Plannotator session ready — open in your browser:\n  ${url}\n\n`);
+  // The URL is already out; say the automatic launch failed (headless box,
+  // devcontainer with no display, broken open/xdg-open) so nobody waits on a
+  // tab that never appears. Remote sessions were told what to do above.
+  if (!opened && !isRemote && announce) {
+    process.stderr.write("  Could not open a browser automatically — open the URL above.\n\n");
   }
 }
 
-/** Save to external note apps (Obsidian, Bear, Octarine). Used by plan + annotate servers. */
-export async function handleSaveNotes(req: Request): Promise<Response> {
+export interface HandleSaveNotesOptions {
+  /**
+   * This server's stale-tab nonce (packages/core/server-session.ts). A body
+   * carrying a different `serverSession` is refused with 409 before anything
+   * is written or opened; a body without one is accepted.
+   */
+  serverSession?: string;
+}
+
+/**
+ * Save to external note apps (Obsidian, Bear, Octarine). Used by plan + annotate servers.
+ *
+ * Writes a file into the vault the body names and opens `bear://` /
+ * `octarine://` URLs, so it refuses another site's page (the servers also do
+ * this before routing; repeated here so the handler is safe wherever it is
+ * mounted) and a stale tab.
+ */
+export async function handleSaveNotes(req: Request, options: HandleSaveNotesOptions = {}): Promise<Response> {
+  if (!isSameOriginRequest(req)) {
+    return Response.json(crossOriginRefusalBody(), { status: 403 });
+  }
+
   const results: { obsidian?: IntegrationResult; bear?: IntegrationResult; octarine?: IntegrationResult } = {};
 
   try {
@@ -327,6 +385,10 @@ export async function handleSaveNotes(req: Request): Promise<Response> {
       bear?: BearConfig;
       octarine?: OctarineConfig;
     };
+
+    if (options.serverSession !== undefined && checkServerSession(body, options.serverSession) === "mismatch") {
+      return Response.json(serverSessionMismatchBody(), { status: 409 });
+    }
 
     const promises: Promise<void>[] = [];
     if (body.obsidian?.vaultPath && body.obsidian?.plan) {

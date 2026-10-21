@@ -412,7 +412,7 @@ describe('register', () => {
     tool('wait_for_reply', { thread_id: { type: 'string' }, timeout_seconds: { type: 'number' }, agent_session: { type: 'string' } }),
     tool('resolve_message', { message_id: { type: 'string' } }),
   ]
-  const DECISION_TOOL = tool('record_decision', { text: { type: 'string' }, project_path: { type: 'string' } })
+  const GUIDE_TOOL = tool('submit_guide', { patch: { type: 'string' }, project_path: { type: 'string' } })
 
   /** An Inbox on port 5150 answering /mcp with `tools`, health, and the bridge from `bridge`. */
   function inbox(tools: unknown[], calls: { url: string; body: any }[], bridge: (path: string, body: any) => unknown = () => ({ commands: [] })) {
@@ -441,7 +441,7 @@ describe('register', () => {
     expect(w.tools.map((t) => t.name)).toEqual(['plannotator_inbox', 'plannotator'])
     const registered = w.tools.find((t) => t.name === 'plannotator_inbox')
     // Every action a real Inbox offers, in the contract's order (INBOX_TOOL_ACTIONS).
-    expect(registered?.inputSchema.properties.action.enum).toEqual(['send_message', 'read_thread', 'wait_for_reply', 'resolve_message', 'list_decisions', 'record_decision', 'submit_guide', 'get_guide_brief'])
+    expect(registered?.inputSchema.properties.action.enum).toEqual(['send_message', 'read_thread', 'wait_for_reply', 'resolve_message', 'submit_guide', 'get_guide_brief'])
     expect(calls).toEqual([])
     expect([...w.files.keys()].filter((path) => path.includes('/inbox'))).toEqual([])
     expect(w.runs.filter((argv) => argv.includes('inbox'))).toEqual([])
@@ -522,24 +522,24 @@ describe('register', () => {
 
   test('an Inbox found: plannotator_inbox carries exactly the tools its /mcp offers, filled arguments left out', async ($: any, on: any) => {
     const calls: { url: string; body: any }[] = []
-    const w = world(on, { files: withRegistry(), fetch: inbox([...TOOLS, DECISION_TOOL], calls) })
+    const w = world(on, { files: withRegistry(), fetch: inbox([...TOOLS, GUIDE_TOOL], calls) })
     await $.session.start(SESSION)
 
     const registered = w.tools.find((t) => t.name === 'plannotator_inbox')
-    expect(registered?.inputSchema.properties.action.enum).toEqual(['send_message', 'read_thread', 'wait_for_reply', 'resolve_message', 'record_decision'])
+    expect(registered?.inputSchema.properties.action.enum).toEqual(['send_message', 'read_thread', 'wait_for_reply', 'resolve_message', 'submit_guide'])
     expect(Object.keys(registered?.inputSchema.properties)).not.toContain('agent_session')
     // project_path is the one filled argument the agent may set (optional): the folder a call is about.
     expect(registered?.inputSchema.properties.project_path?.type).toBe('string')
     expect(registered?.inputSchema.required).toEqual(['action'])
   })
 
-  test('an older Inbox whose /mcp has no record_decision: the tool is registered without it', async ($: any, on: any) => {
+  test('an older Inbox whose /mcp has no submit_guide: the tool is registered without it', async ($: any, on: any) => {
     const w = world(on, { files: withRegistry(), fetch: inbox(TOOLS, []) })
     await $.session.start(SESSION)
 
     const registered = w.tools.find((t) => t.name === 'plannotator_inbox')
     expect(registered?.inputSchema.properties.action.enum).toEqual(['send_message', 'read_thread', 'wait_for_reply', 'resolve_message'])
-    const refused = await $.tool.call({ tool: INBOX_TOOL, action: 'record_decision', text: 'x' })
+    const refused = await $.tool.call({ tool: INBOX_TOOL, action: 'submit_guide', patch: 'x' })
     expect(refused.deny).toContain('update Plannotator')
   })
 
@@ -601,5 +601,82 @@ describe('register', () => {
     for (let second = 0; second < 10; second++) await w.clock.advance(1_000)
     expect(w.submits).toHaveLength(1)
   })
-})
 
+  test('Send now while a turn runs: the poll says the engine can, and the reply goes into the running turn as one user row ($.session.append), with no turn submitted', async ($: any, on: any) => {
+    const calls: { url: string; body: any }[] = []
+    let delivered = false
+    const reply = { type: 'reply', id: 'msg_reply', thread_id: 'msg_1', reply_to: 'msg_1', subject: 'Ship it?', body: 'Yes, now.', url: 'http://localhost:5150/#thread=msg_1', now: true }
+    const w = world(on, {
+      files: withRegistry(),
+      fetch: inbox(TOOLS, calls, (path, body) => {
+        if (path === '/api/inbox/bridge/event' && body.type === 'delivered' && body.id === 'msg_reply') delivered = true
+        return path === '/api/inbox/bridge/poll' ? { commands: delivered ? [] : [reply] } : { ok: true }
+      }),
+    })
+    const session = mock.session(on)
+    on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+    // An engine whose API has `$.session.append` (the version decides: validate refuses testing the noun itself).
+    on('session.version', () => ({ value: { version: '2.1.302', base: '2.1.302' } }))
+    await $.session.start(SESSION)
+    // A main-loop turn starts and keeps running (a subagent's start alone would not count).
+    await $.turn.start({ turnId: 'turn-1', text: 'Refactor the handler.' })
+    for (let second = 0; second < 6; second++) await w.clock.advance(1_000)
+
+    expect(calls.filter((c) => c.url.endsWith('/api/inbox/bridge/poll')).some((c) => c.body.send_now === true && c.body.busy === true)).toBe(true)
+    expect(w.submits).toEqual([])
+    const rows = session.appended().filter((row: any) => row.message?.type === 'user')
+    expect(rows).toHaveLength(1)
+    expect(JSON.stringify(rows[0]!.message.content)).toContain('Plannotator Inbox: Ship it? (msg_reply)')
+    expect(JSON.stringify(rows[0]!.message.content)).toContain('Yes, now.')
+    expect(delivered).toBe(true)
+  })
+
+  // The restart warning (owner approval "restart-warning"): the poll says what this process loaded, so the
+  // Inbox can tell a session on an older plugin. Through the engine's own `$.plugin.root` and `$.session.version()`.
+  test('the poll says what this process loaded: the plugin (its folder and load time) and the engine', async ($: any, on: any) => {
+    const calls: { url: string; body: any }[] = []
+    const w = world(on, { files: withRegistry(), fetch: inbox(TOOLS, calls, (path) => (path === '/api/inbox/bridge/poll' ? { commands: [] } : { ok: true })) })
+    on('session.version', () => ({ value: { version: '2.1.305', base: '2.1.305' } }))
+    await $.session.start(SESSION)
+    for (let second = 0; second < 3; second++) await w.clock.advance(1_000)
+    const polls = calls.filter((c) => c.url.endsWith('/api/inbox/bridge/poll'))
+    expect(polls.length).toBeGreaterThan(0)
+    const last = polls[polls.length - 1]!.body
+    expect(last.engine).toBe('2.1.305')
+    expect(typeof last.plugin?.root).toBe('string')
+    expect(typeof last.plugin?.loaded_at).toBe('number')
+  })
+
+  test("a background subagent's turn does not hold the reply: the main loop is idle, so it arrives as a turn", async ($: any, on: any) => {
+    const calls: { url: string; body: any }[] = []
+    let delivered = false
+    const reply = { type: 'reply', id: 'msg_reply', thread_id: 'msg_1', reply_to: 'msg_1', subject: 'Ship it?', body: 'Yes.', url: 'http://localhost:5150/#thread=msg_1' }
+    const w = world(on, {
+      files: withRegistry(),
+      fetch: inbox(TOOLS, calls, (path, body) => {
+        if (path === '/api/inbox/bridge/event' && body.type === 'delivered' && body.id === 'msg_reply') delivered = true
+        return path === '/api/inbox/bridge/poll' ? { commands: delivered ? [] : [reply] } : { ok: true }
+      }),
+    })
+    on('turn.start', ($: any, e: any) => ({ turnId: e.turnId }))
+    await $.session.start(SESSION)
+    await $.turn.start({ turnId: 'sub-turn-1', text: 'Explore the repo.', agentId: 'agent-1' })
+    for (let second = 0; second < 6; second++) await w.clock.advance(1_000)
+    expect(w.submits).toHaveLength(1)
+    expect(delivered).toBe(true)
+  })
+
+  test('an engine older than the API with $.session.append never says it can take a reply mid-turn', async ($: any, on: any) => {
+    const calls: { url: string; body: any }[] = []
+    const w = world(on, {
+      files: withRegistry(),
+      fetch: inbox(TOOLS, calls, (path) => (path === '/api/inbox/bridge/poll' ? { commands: [] } : { ok: true })),
+    })
+    on('session.version', () => ({ value: { version: '2.1.290', base: '2.1.290' } }))
+    await $.session.start(SESSION)
+    for (let second = 0; second < 4; second++) await w.clock.advance(1_000)
+    const polls = calls.filter((c) => c.url.endsWith('/api/inbox/bridge/poll'))
+    expect(polls.length).toBeGreaterThan(0)
+    expect(polls.some((c) => c.body.send_now === true)).toBe(false)
+  })
+})

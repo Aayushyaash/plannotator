@@ -38,6 +38,7 @@ import { pathToFileURL } from 'node:url';
 import { FIXTURE_V1_LOCAL } from '../../packages/core/guide-format-fixtures';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
+import { NO_BROWSER } from '../helpers/no-browser';
 
 // WebKit, without the Chromium-only launch flags the config sets for the window's specs.
 test.use({ browserName: 'webkit', launchOptions: {} });
@@ -304,7 +305,7 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   const dataDir = join(root, 'data');
   const home = join(root, 'home');
   mkdirSync(home);
-  const env = { PATH: process.env.PATH ?? '', HOME: home, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: 'none' };
+  const env = { PATH: process.env.PATH ?? '', HOME: home, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: NO_BROWSER };
   const started = spawnSync(binary, ['inbox', '--background'], { env, encoding: 'utf8', timeout: 60_000 });
   expect(started.status, started.stderr).toBe(0);
   const url = started.stdout.trim();
@@ -652,6 +653,59 @@ test("a file opened at one of its marks (the shell's annotations sheet) scrolls 
   expect(box.y).toBeGreaterThan(0);
   expect(box.y + box.height).toBeLessThan(852);
   await appearance('light', 1);
+});
+
+test("Send's feedback keeps a video's comments, by time, with their moments and the frame (export_feedback)", async () => {
+  const film = {
+    id: 'att_01K7VVVVVVVVVVVVVVVVVVVVVV',
+    name: 'launch-cut-v3.mp4',
+    path: '/work/launch-site/film/launch-cut-v3.mp4',
+    named_path: null,
+    kind: 'video',
+    media_type: 'video/mp4',
+    duration_ms: 461_000,
+    width: 1920,
+    height: 1080,
+    sent_sha256: 'a'.repeat(64),
+    size: 1000,
+    sent_at: '2026-10-15T10:42:00.000Z',
+    sent_mtime: '2026-10-15T10:42:00.000Z',
+    message_id: 'msg_01K7ZZZZZZZZZZZZZZZZZZZZZZ',
+    current: null,
+    changed_since_sent: false,
+    unavailable: null,
+  };
+  const record = (id: string, time: number, text: string, images?: { path: string; name: string }[]) => ({
+    id,
+    project_id: 'prj_x',
+    thread_id: 'msg_x',
+    message_id: film.message_id,
+    attachment_id: film.id,
+    path: film.path,
+    version: 'current',
+    annotation: { id, blockId: 'video', startOffset: 0, endOffset: 0, type: 'COMMENT', text, originalText: `${film.name} at x`, createdA: 1, inboxVideo: { time }, ...(images ? { images } : {}) },
+    created_at: film.sent_at,
+    updated_at: film.sent_at,
+    removed_at: null,
+    sent_reply_id: null,
+  });
+  const from = mark();
+  // The app saved the later comment first: the text still reads by time.
+  await send({
+    type: 'export_feedback',
+    id: 'fb-video',
+    annotations: [record('ann-b', 247, 'The voice-over says three steps.'), record('ann-a', 102.4, 'Logo is clipped.', [{ path: '/d/inbox/markups/f.jpg', name: 'launch-cut-v3 at 1:42' }])],
+    attachments: [film],
+    texts: [],
+    project_root: '/work/launch-site',
+  });
+  const answer = await next('feedback', from);
+  expect(answer.id).toBe('fb-video');
+  const text = answer.text as string;
+  expect(text).toContain('## film/launch-cut-v3.mp4');
+  expect(text).toContain('At 1:42 (102.4 s of 7:41)\n> Logo is clipped.');
+  expect(text).toContain('- [launch-cut-v3 at 1:42] `/d/inbox/markups/f.jpg`');
+  expect(text.indexOf('At 1:42')).toBeLessThan(text.indexOf('At 4:07 (247 s of 7:41)'));
 });
 
 test('theme and text size apply as the shell sends them', async () => {

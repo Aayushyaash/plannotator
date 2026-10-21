@@ -82,7 +82,7 @@ async function serverSection(threadId: string): Promise<string | undefined> {
   return model.sections.find((s) => s.threads.some((t) => t.thread_id === threadId))?.id;
 }
 
-const TESTS = 13;
+const TESTS = 16;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -289,9 +289,12 @@ test.skipIf(!hasDom)('E marks the open thread read; a stopped thread warns with 
   expect(head().textContent).toContain('Read');
   expect(el.querySelector('[data-read-line]')?.textContent).toContain('2 questions were closed unanswered');
   const toast = document.querySelector('[data-inbox-toast]') as HTMLElement;
-  expect(toast.textContent).toContain('will move to Quiet');
-  expect(toast.textContent).toContain('Claude Code was stopped on it.');
+  expect(toast.querySelector('.ib-tlead')?.textContent).toBe('Marked read');
+  expect(toast.querySelector('.ib-tdetail')?.textContent).toBe('Claude Code was stopped');
   expect(toast.querySelector('[data-toast-reply]')).not.toBeNull();
+  // The window's live region says it once, as sentences (the toast itself is not a live region).
+  await until(() => document.querySelector('[data-inbox-live]')?.textContent === 'Marked read. Claude Code was stopped. Press Z to undo.', 'the live region');
+  expect(toast.getAttribute('role')).toBeNull();
   expect((await questionStates(ids.stopped)).map((q) => q.state)).toEqual(['closed', 'closed']);
   expect(await serverSection(ids.stopped)).toBe('quiet');
   // The row keeps its place while the thread is open.
@@ -313,6 +316,27 @@ test.skipIf(!hasDom)('E marks the open thread read; a stopped thread warns with 
   expect((await questionStates(ids.stopped)).map((q) => q.state)).toEqual(['open', 'open']);
 });
 
+test.skipIf(!hasDom)('the header leads with Mark read; Archive sits beside the close at the right, with nothing between them', async () => {
+  // Owner, 2026-10-16: "the archive button needs to move next to the close button. Mark read should be the furthest."
+  const el = await renderApp(`#thread=${ids.stopped}`);
+  await until(() => el.querySelector('section.ib-pane .ib-phead [data-mark-read]') !== null, 'the header');
+  const head = el.querySelector('section.ib-pane .ib-phead')!;
+  const buttons = [...head.querySelectorAll('button')];
+  const markRead = head.querySelector('[data-mark-read]')!;
+  const archive = head.querySelector('[data-archive]')!;
+  const close = head.querySelector('button[aria-label="Close the thread"]');
+  // DOM order is the tab order: Mark read first, Archive then the close last.
+  expect(buttons[0]).toBe(markRead as HTMLButtonElement);
+  if (close) {
+    expect(buttons.at(-1)).toBe(close as HTMLButtonElement);
+    expect(archive.nextElementSibling).toBe(close);
+  } else {
+    expect(buttons.at(-1)).toBe(archive as HTMLButtonElement);
+  }
+  expect(archive.getAttribute('aria-label')).toBe('Archive the thread');
+  expect(head.querySelectorAll('.ib-vsep').length).toBe(0);
+});
+
 test.skipIf(!hasDom)('the pressed button moves it back; the toast Undo does the same', async () => {
   const el = await renderApp(`#thread=${ids.stopped}`);
   const head = () => el.querySelector('[data-mark-read]') as HTMLButtonElement;
@@ -327,6 +351,30 @@ test.skipIf(!hasDom)('the pressed button moves it back; the toast Undo does the 
   expect(await serverSection(ids.stopped)).toBe('stopped');
 });
 
+test.skipIf(!hasDom)("the toast's × closes it early and drops its Undo: Z no longer undoes, and focus goes back where it was", async () => {
+  // Owner, 2026-10-20: "a way to grab toasts to swipe remove them or way to clear a toast manually".
+  const el = await renderApp(`#thread=${ids.stopped}`);
+  const head = () => el.querySelector('[data-mark-read]') as HTMLButtonElement;
+  head().focus();
+  act(() => head().click());
+  await until(() => document.querySelector('[data-toast-dismiss]') !== null && head().getAttribute('aria-pressed') === 'true', 'the toast');
+  const close = document.querySelector('[data-toast-dismiss]') as HTMLButtonElement;
+  expect(close.getAttribute('aria-label')).toBe('Dismiss');
+  // Tabbed onto the ×, then pressed: the toast goes, focus returns to Mark read (never the page body).
+  act(() => close.focus());
+  expect(document.activeElement).toBe(close);
+  act(() => close.click());
+  expect(document.querySelector('[data-inbox-toast]')).toBeNull();
+  expect(document.activeElement).toBe(head());
+  // Closing never undoes, and Z has nothing left to undo.
+  const before = posted.length;
+  press('z');
+  await settle();
+  expect(posted.length).toBe(before);
+  expect(head().getAttribute('aria-pressed')).toBe('true');
+  expect(await serverSection(ids.stopped)).toBe('quiet');
+});
+
 test.skipIf(!hasDom)('the row hover action marks read without opening the thread; the Quiet row says Read', async () => {
   const el = await renderApp(`#project=${ids.project}`);
   const action = el.querySelector(`[data-row="${ids.waiting}"] [data-row-mark-read]`) as HTMLButtonElement;
@@ -339,12 +387,42 @@ test.skipIf(!hasDom)('the row hover action marks read without opening the thread
   expect(el.querySelector('[data-section-id="quiet"] .ib-n')?.textContent).toBe('1');
   // A plain toast: no warning, no Reply.
   const toast = document.querySelector('[data-inbox-toast]') as HTMLElement;
-  expect(toast.textContent).toContain('It comes back when Claude Code writes again.');
+  expect(toast.textContent).toContain('Moved to Quiet');
   expect(toast.querySelector('[data-toast-reply]')).toBeNull();
   // Quiet is folded: open it, and the row says why it is there, with no action of its own.
   act(() => (el.querySelector('[data-section-id="quiet"] .ib-band') as HTMLButtonElement).click());
   expect(el.querySelector(`[data-row="${ids.waiting}"] .ib-c`)?.textContent).toBe('Read');
   expect(el.querySelector(`[data-row="${ids.waiting}"] [data-row-mark-read]`)).toBeNull();
+});
+
+test.skipIf(!hasDom)('with another thread open, marking a row read names that row, never words that read as the open thread', async () => {
+  const el = await renderApp(`#thread=${ids.stopped}`);
+  await until(() => el.querySelector(`[data-row="${ids.waiting}"] [data-row-mark-read]`) !== null, 'the row action');
+  // The row action names its row: "Mark read: <subject>".
+  const subject = el.querySelector(`[data-row="${ids.waiting}"] [data-row-mark-read]`)?.getAttribute('aria-label')?.replace(/^Mark read: /, '');
+  expect(subject).toBeTruthy();
+  const toastSays = () => {
+    const toast = document.querySelector('[data-inbox-toast]');
+    return toast ? [toast.querySelector('.ib-tlead')?.textContent, toast.querySelector('.ib-tdetail')?.textContent] : null;
+  };
+
+  // The row's hover action.
+  act(() => (el.querySelector(`[data-row="${ids.waiting}"] [data-row-mark-read]`) as HTMLButtonElement).click());
+  await until(() => toastSays() !== null, 'the toast');
+  expect(posted.at(-1)!.path).toBe(`/api/inbox/threads/${ids.waiting}/read`);
+  expect(toastSays()).toEqual(['Marked read', `“${subject}”`]);
+  // The open thread was not marked.
+  expect((el.querySelector('[data-mark-read]') as HTMLButtonElement).getAttribute('aria-pressed')).toBe('false');
+  press('z');
+  await until(() => posted.at(-1)!.path === `/api/inbox/threads/${ids.waiting}/unread` && toastSays() === null, 'Undo');
+
+  // E on the row the keyboard is on says the same.
+  const rowButton = el.querySelector(`.ib-listcol [data-row="${ids.waiting}"] button:not([data-row-mark-read])`) as HTMLButtonElement;
+  act(() => rowButton.focus());
+  press('e', rowButton);
+  await until(() => toastSays() !== null, 'the toast after E');
+  expect(posted.at(-1)!.path).toBe(`/api/inbox/threads/${ids.waiting}/read`);
+  expect(toastSays()).toEqual(['Marked read', `“${subject}”`]);
 });
 
 test.skipIf(!hasDom)("the warning toast's Reply moves the thread back and opens the reply box", async () => {

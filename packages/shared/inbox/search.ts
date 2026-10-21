@@ -16,7 +16,6 @@
  *             Inbox's own notes (set aside, reopened) are not indexed
  *   file      an attachment's name (title) and the last two path segments
  *   guide     a guided review's title
- *   decision  its text (title) and reason
  *   project   its name (title) and root
  *
  * Text rules (normalization, tokens, ranges, snippets) are
@@ -49,10 +48,10 @@ import {
   type InboxSearchThreadRow,
 } from "@plannotator/core/inbox-search";
 import { findQuestionBlocks, QUESTION_ANSWERS_HEADING, type QuestionAnswer } from "@plannotator/core/question-block";
+import { withoutInboxSkillsBlock } from "@plannotator/core/skill-reference-block";
 import {
   inboxAgentName,
   isInboxNote,
-  type InboxDecision,
   type InboxLine,
   type InboxListRow,
   type InboxMessage,
@@ -73,7 +72,6 @@ export {
   INBOX_SEARCH_RECENT_THREADS,
   INBOX_SEARCH_STATUSES,
   type InboxSearchAnswer,
-  type InboxSearchDecisionRow,
   type InboxSearchFileRow,
   type InboxSearchFrom,
   type InboxSearchGroupId,
@@ -154,8 +152,20 @@ export function forEachInboxSearchBodyLine(markdown: string, visit: (line: strin
   }
 }
 
-/** The person's own words in a reply: not the generated first line, not the answers section. */
-export function inboxSearchReplyText(body: string): string {
+/**
+ * The person's own words in a reply: not the generated first line, not the
+ * answers section, and not the skills block the window pastes at the end (a
+ * human-only skill's SKILL.md text, which the person did not write; the
+ * `$name` they typed stays in their words, so the reply is still found by it).
+ */
+export function inboxSearchReplyText(body: string, message?: { reask?: readonly string[] | null }): string {
+  // A Re-ask note carries no words of the person's: its body is the instructions the Inbox wrote for the agent.
+  if ((message?.reask?.length ?? 0) > 0) return "";
+  return replyWordsText(withoutInboxSkillsBlock(body));
+}
+
+/** inboxSearchReplyText for a body whose skills block is already gone (a windowed long reply). */
+function replyWordsText(body: string): string {
   const lines = body.split(/\r?\n/);
   const at = lines.findIndex((line) => ANSWERS_HEADING_LINE.test(line.trim()));
   const kept = (at >= 0 ? lines.slice(0, at) : lines).join("\n");
@@ -187,12 +197,12 @@ function toMarks(ranges: readonly [number, number][]): [number, number][] {
 
 // ─────────────────────────────── Index ───────────────────────────────
 
-type DocType = "thread" | "message" | "file" | "guide" | "decision" | "project";
+type DocType = "thread" | "message" | "file" | "guide" | "project";
 
 interface Doc {
   key: string;
   type: DocType;
-  /** The record's id (thread root, message, attachment, guide's message, decision, project). */
+  /** The record's id (thread root, message, attachment, guide's message, project). */
   ref: string;
   threadId: string | null;
   projectId: string;
@@ -312,7 +322,6 @@ export class InboxSearchIndex {
 
   private dirtyThreads = new Set<string>();
   private dirtyMessages = new Set<string>();
-  private dirtyDecisions = new Set<string>();
   private dirtyProjects = new Set<string>();
   private unsubscribe: (() => void) | null = null;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -376,7 +385,13 @@ export class InboxSearchIndex {
 
   private listen(): void {
     if (this.unsubscribe) return;
-    this.unsubscribe = this.store.subscribe((line) => this.noteLine(line));
+    const lines = this.store.subscribe((line) => this.noteLine(line));
+    // A reply draft writes no line but moves its thread's section (the status filter reads it).
+    const drafts = this.store.onReplyDraftChange((threadId) => this.facts.delete(threadId));
+    this.unsubscribe = () => {
+      lines();
+      drafts();
+    };
   }
 
   /** A store line marks what it touches; the next search (or a short timer) re-indexes it. */
@@ -396,10 +411,11 @@ export class InboxSearchIndex {
         if (message) this.dirtyThreads.add(message.thread_id);
         break;
       }
-      case "decision":
-        this.dirtyDecisions.add(line.record.id);
-        break;
       case "annotation":
+        // Not indexed, but a comment waiting for a Send moves its thread's section (`unsent`).
+        this.facts.delete(line.record.thread_id);
+        return;
+      case "card":
         return;
     }
     if (line.kind === "message" || line.kind === "question") {
@@ -438,7 +454,6 @@ export class InboxSearchIndex {
     this.resetIndex();
     this.dirtyThreads.clear();
     this.dirtyMessages.clear();
-    this.dirtyDecisions.clear();
     this.dirtyProjects.clear();
     const threadIds = this.store.threadIds();
     this.buildTotal = threadIds.length;
@@ -462,10 +477,6 @@ export class InboxSearchIndex {
         if (!(await maybeYield())) return;
       }
       this.indexThread(threadId, false);
-      if (!(await maybeYield())) return;
-    }
-    for (const decision of [...this.store.allDecisions()]) {
-      this.indexDecision(decision as InboxDecision);
       if (!(await maybeYield())) return;
     }
     // Finish a growth of the word table still under way, then give back the arrays' growth slack, each step in a slice of its own.
@@ -526,11 +537,6 @@ export class InboxSearchIndex {
       this.indexThread(threadId, false);
     }
     this.dirtyThreads.clear();
-    for (const id of this.dirtyDecisions) {
-      const decision = this.store.decision(id);
-      if (decision) this.indexDecision(decision);
-    }
-    this.dirtyDecisions.clear();
   }
 
   // ── documents ──
@@ -626,16 +632,6 @@ export class InboxSearchIndex {
     this.put(`p:${project.id}`, "project", { ref: project.id, threadId: null, projectId: project.id, at: project.created_at, from: null }, { title: [project.name], other: [project.root] }, `${project.name}\u0001${project.root}`);
   }
 
-  private indexDecision(decision: InboxDecision): void {
-    this.put(
-      `d:${decision.id}`,
-      "decision",
-      { ref: decision.id, threadId: decision.source.thread_id, projectId: decision.project_id, at: decision.changed_at ?? decision.created_at, from: decision.source.kind === "agent" ? "agent" : "me" },
-      { title: [decision.text], other: decision.reason ? [decision.reason] : [] },
-      `${decision.text}\u0001${decision.reason ?? ""}`,
-    );
-  }
-
   /** A thread's own document; with `withMessages`, its messages' too (the build). */
   private indexThread(threadId: string, withMessages: boolean): void {
     const root = this.store.message(threadId);
@@ -665,7 +661,7 @@ export class InboxSearchIndex {
     if (message.author.kind === "person") {
       if (isInboxNote(message)) return;
       // A message's body never changes once stored: its length stands for it.
-      this.put(`m:${message.id}`, "message", { ...meta, from: "me" }, { title: [], other: [inboxSearchReplyText(message.body)] }, `${message.body.length}`);
+      this.put(`m:${message.id}`, "message", { ...meta, from: "me" }, { title: [], other: [inboxSearchReplyText(message.body, message)] }, `${message.body.length}`);
       return;
     }
     const questions = this.store.questionsOf(message.id).flatMap(questionTexts);
@@ -946,7 +942,7 @@ export class InboxSearchIndex {
       case "message": {
         const message = this.store.message(doc.ref);
         if (!message) return [];
-        if (message.author.kind === "person") return [inboxSearchReplyText(message.body)];
+        if (message.author.kind === "person") return [inboxSearchReplyText(message.body, message)];
         return [inboxSearchBodyText(message.body), ...this.store.questionsOf(message.id).flatMap(questionTexts), inboxAgentName(message.author)];
       }
       case "file": {
@@ -955,10 +951,6 @@ export class InboxSearchIndex {
       }
       case "guide":
         return [this.store.message(doc.ref)?.guide?.title ?? ""];
-      case "decision": {
-        const decision = this.store.decision(doc.ref);
-        return decision ? [decision.text, decision.reason ?? ""] : [];
-      }
       case "project": {
         const project = this.store.project(doc.ref);
         return project ? [project.name, project.root] : [];
@@ -981,7 +973,7 @@ export class InboxSearchIndex {
     if (terms.length === 0 && !filtered) {
       return { ...base, took_ms: this.now() - started, totals: null, groups: null, recent: this.recentThreads(labels) };
     }
-    const groups: Record<InboxSearchGroupId, { doc: number; score: number }[]> = { threads: [], messages: [], files: [], decisions: [], projects: [] };
+    const groups: Record<InboxSearchGroupId, { doc: number; score: number }[]> = { threads: [], messages: [], files: [], projects: [] };
 
     const statusOk = (facts: ThreadFacts | null): boolean => {
       if (!query.status) return true;
@@ -1010,16 +1002,11 @@ export class InboxSearchIndex {
         case "guide":
           group = "files";
           break;
-        case "decision":
-          group = "decisions";
-          break;
         case "project":
           // A project has no section and no author: any Status or From hides it.
           if (query.status || query.from) return null;
           return { group: "projects", facts: null };
       }
-      // A decision recorded from no thread (an agent's record_decision) has no section.
-      if (doc.type === "decision" && !doc.threadId) return query.status ? null : fromOk(doc, null) ? { group, facts: null } : null;
       const facts = doc.threadId ? this.factsOf(doc.threadId) : null;
       if (doc.threadId && !facts) return null;
       if (!statusOk(facts) || !fromOk(doc, facts)) return null;
@@ -1042,8 +1029,7 @@ export class InboxSearchIndex {
         const doc = this.docs[hit.doc]!;
         const admitted = admit(doc);
         if (!admitted) continue;
-        // A decision ranks as its row reads: archived when replaced or retired, whatever its thread's state.
-        const archived = doc.type === "decision" ? this.store.decision(doc.ref)?.state !== "current" : (admitted.facts?.archived ?? false);
+        const archived = admitted.facts?.archived ?? false;
         groups[admitted.group].push({ doc: hit.doc, score: score(hit.tier, hit.title, archived, !!query.current && doc.projectId === query.current, doc.at) });
       }
     }
@@ -1117,6 +1103,7 @@ export class InboxSearchIndex {
           ...where,
           author: message.author.kind === "agent" ? { kind: "agent", name: inboxAgentName(message.author) } : { kind: "me", name: "You" },
           title: facts.subject || "(no subject)",
+          thread_name: facts.threadName,
           snippet: inboxSearchSnippet(best.text, inboxSearchRanges(best.text, terms)),
           question: best.question,
           at: message.created_at,
@@ -1137,6 +1124,7 @@ export class InboxSearchIndex {
           folder: fileFolder(hit.attachment.path),
           kind: fileKind(hit.attachment.kind, name),
           title: facts.subject || "(no subject)",
+          thread_name: facts.threadName,
           at: hit.message.created_at,
         };
       }
@@ -1155,22 +1143,8 @@ export class InboxSearchIndex {
           folder: null,
           kind: "guide",
           title: facts.subject || "(no subject)",
+          thread_name: facts.threadName,
           at: message.created_at,
-        };
-      }
-      case "decision": {
-        const decision = this.store.decision(doc.ref);
-        if (!decision) return null;
-        return {
-          type: "decision",
-          id: decision.id,
-          ...where,
-          archived: decision.state !== "current",
-          text: decision.text,
-          text_marks: toMarks(inboxSearchRanges(decision.text, terms)),
-          state: decision.state,
-          from: decision.source.kind === "agent" ? "agent" : "me",
-          at: decision.changed_at ?? decision.created_at,
         };
       }
       case "project": {
@@ -1188,8 +1162,10 @@ export class InboxSearchIndex {
    */
   private bestMessageText(message: InboxMessage, terms: readonly string[]): { text: string; question: { key: string; replaced: boolean } | null } {
     const candidates: { text: string; question: { key: string; replaced: boolean } | null }[] = [];
-    if (message.author.kind === "person") candidates.push({ text: inboxSearchReplyText(nearFirstHit(message.body, terms)), question: null });
-    else {
+    if (message.author.kind === "person") {
+      // A Re-ask note's body is the Inbox's words, not the person's: nothing to draw a row from.
+      if ((message.reask?.length ?? 0) === 0) candidates.push({ text: replyWordsText(nearFirstHit(withoutInboxSkillsBlock(message.body), terms)), question: null });
+    } else {
       candidates.push({ text: inboxSearchBodyText(nearFirstHit(message.body, terms)), question: null });
       for (const q of this.store.questionsOf(message.id)) {
         const ref = { key: q.key, replaced: q.state === "superseded" };

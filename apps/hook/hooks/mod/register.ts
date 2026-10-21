@@ -60,8 +60,8 @@
 
 import { PlannotatorMod } from './controller'
 import { resolveAgentToolEnabled, resolveClaudeModEnabled, resolveInboxReminderEnabled, resolveInboxToolEnabled } from './enabled'
-import type { Host } from './host'
-import { discoverInboxTools, inboxRegistryPathOf, withInboxReminder } from './inbox'
+import type { Host, LoadedPluginInfo } from './host'
+import { discoverInboxTools, engineHasSessionAppend, inboxRegistryPathOf, pluginVersionOf, withInboxReminder } from './inbox'
 import { inboxAgentTool, type InboxToolInfo } from './inbox-contract'
 import { INBOX_DEFAULT_TOOLS } from './inbox-default-tools'
 import { COMMANDS, dataDirOf, debugAppendArgv, isModCommand, waitArgv } from './launch'
@@ -91,6 +91,49 @@ let debugTag: string | null = null
 /** This plugin's name: what `$.prompt.submit` stamps as the origin of our prompts. */
 const PLUGIN_NAME = 'plannotator'
 
+/**
+ * When this module loaded: the plugin a restart would replace was loaded then.
+ * The Inbox compares it with the plugin registry's `lastUpdated`, which is the
+ * only sign of an update that kept the version and the folder.
+ */
+const MODULE_LOADED_AT = Date.now()
+
+/** The plugin this process loaded (plugin.json's version, its folder, the load time), read once. */
+let loadedPlugin: Promise<LoadedPluginInfo> | null = null
+// Never null: a mod of this release always reports `plugin`, with `root` or `version` null when it could not
+// read them, so a poll without the field only ever means an older mod (the Inbox flags that as outdated).
+function readLoadedPlugin($: Engine): Promise<LoadedPluginInfo> {
+  loadedPlugin ??= (async () => {
+    let root: string | null = null
+    try {
+      const raw: unknown = $.plugin.root
+      root = typeof raw === 'string' && raw ? raw.replace(/\/+$/, '') || null : null
+    } catch {
+      root = null
+    }
+    if (!root) return { version: null, root: null, loaded_at: MODULE_LOADED_AT }
+    // `$.plugin.root` is the folder holding `.claude-plugin/plugin.json`.
+    const text = (await $.fs.read(`${root}/.claude-plugin/plugin.json`).catch(() => null)) ?? (await $.fs.read(`${root}/plugin.json`).catch(() => null))
+    return { version: pluginVersionOf(typeof text === 'string' ? text : null), root, loaded_at: MODULE_LOADED_AT }
+  })()
+  return loadedPlugin
+}
+
+/** Claude Code's own version, read once (`$.session.version()`'s `base`). */
+let engineVersion: Promise<string | null> | null = null
+function readEngineVersion($: Engine): Promise<string | null> {
+  engineVersion ??= (async () => {
+    try {
+      const version = await $.session.version()
+      const base = version?.base ?? version?.version
+      return typeof base === 'string' && base ? base : null
+    } catch {
+      return null
+    }
+  })()
+  return engineVersion
+}
+
 /** Every closure over `$` the logic uses. `debugPath` set: lines go to that file. */
 function hostOf($: Engine, debugPath: string | null): Host {
   return {
@@ -113,6 +156,26 @@ function hostOf($: Engine, debugPath: string | null): Host {
     submit: async (text) => {
       await $.prompt.submit({ text })
     },
+    // Called only where `sessionAppendAvailable` said the engine has it; a refusal stops Send now here (inbox.ts).
+    appendUserRow: async (text) => {
+      const stored = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
+      if (stored && typeof stored.deny === 'string') throw new Error(stored.deny)
+    },
+    appendNotice: async (text) => {
+      const stored = await $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } })
+      if (stored && typeof stored.deny === 'string') throw new Error(stored.deny)
+    },
+    // Decided from the engine's version (validate refuses `typeof $.session.append`): an older engine never offers Send now.
+    sessionAppendAvailable: async () => {
+      try {
+        const version = await $.session.version()
+        return engineHasSessionAppend(version?.base ?? version?.version)
+      } catch {
+        return false
+      }
+    },
+    loadedPlugin: () => readLoadedPlugin($),
+    engineVersion: () => readEngineVersion($),
     suggest: async (text) => {
       await $.prompt.suggest({ text })
     },
@@ -202,7 +265,14 @@ async function currentMod($: Engine): Promise<PlannotatorMod | null> {
       sessionId,
       dataDir: settings.dataDir,
       interactive: true,
-      ...(inboxTools ? { inboxTools, cwd: async () => String(await $.session.cwd()) } : {}),
+      ...(inboxTools
+        ? {
+            inboxTools,
+            cwd: async () => String(await $.session.cwd()),
+            // The session's root (where it started; a shell cd does not move it): its `claude --resume` folder.
+            root: async () => String(await $.session.root()),
+          }
+        : {}),
     })
     mod = instance
     await instance.restore().catch(() => undefined)
@@ -447,13 +517,16 @@ export function register(on: On) {
   on('turn.start', async ($: Engine, e: any, next: Next) => {
     if (allowed && typeof e.turnId === 'string') {
       const instance = await currentMod($).catch(() => null)
-      if (instance) await instance.onTurnStart(e.turnId, typeof e.text === 'string' ? e.text : '')
+      // A subagent's start carries its id: the controller counts only the main loop's turns.
+      if (instance) await instance.onTurnStart(e.turnId, typeof e.text === 'string' ? e.text : '', typeof e.agentId === 'string' ? e.agentId : undefined)
     }
     return next(e)
   })
 
   on('turn.step', async function* ($: Engine, e: any, next: Next) {
     const instance = allowed ? mod : null
+    // A main-loop model request is going out: a reply Send now put into the turn is in it (inbox.ts).
+    if (instance && !instance.isDisposed && !e.agentId && typeof e.turnId === 'string') instance.onMainStep(e.turnId)
     if (!instance || !instance.turns.ownsTurn(e.turnId)) return yield* next(e)
     // A question's turn that someone else's prompt entered settles here: this
     // request carries their prompt, so nothing it says is the question's answer.

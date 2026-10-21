@@ -251,7 +251,8 @@ test.skipIf(!hasDom)('the Inbox sidebar closes while Settings is open and comes 
 test.skipIf(!hasDom)('every control lands in the section the design puts it in', async () => {
   const el = await renderApp('#settings/general');
   await until(() => el.querySelector('[data-settings-notifications]') !== null, 'General');
-  expect([...el.querySelectorAll<HTMLInputElement>('[data-settings-theme] input[type="radio"]')].map((r) => r.value)).toEqual(['light', 'dark', 'system']);
+  expect([...el.querySelectorAll<HTMLInputElement>('[data-settings-theme] input[name="ib-theme"]')].map((r) => r.value)).toEqual(['light', 'dark', 'system']);
+  expect([...el.querySelectorAll<HTMLInputElement>('[data-settings-text-size] input[type="radio"]')].map((r) => r.value)).toEqual(['12', '13', '14', '15']);
   expect(switchNamed(el, 'Desktop notifications')).not.toBeNull();
   expect(switchNamed(el, 'Play a sound')).not.toBeNull();
   expect(el.querySelector('[data-settings-sound] input[type="range"]')).not.toBeNull();

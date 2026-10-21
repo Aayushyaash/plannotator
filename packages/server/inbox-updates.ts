@@ -27,9 +27,12 @@ import { loadConfig, parseAutoUpdateEnv, parseUpdateCheckEnv, resolveAutoUpdate,
 import {
   CLAUDE_PLUGIN_UPDATE_COMMANDS,
   compareStableVersions,
+  fetchReleaseNotesFor,
+  hasReleaseNotesContent,
   installCommandFor,
   installerFlagArgs,
   isNewerStableVersion,
+  isNotesFetchDue,
   knownLatestRelease,
   normalizeStableVersion,
   patchUpdateState,
@@ -54,6 +57,7 @@ import {
   type ManualUpdateOutcome,
 } from "./auto-update";
 import { listSessions as defaultListSessions, type SessionInfo } from "./sessions";
+import { fetchReleaseImagesFor, storedReleaseImageSources } from "./inbox-whats-new-images";
 
 /** While an install runs, the binary is probed this often (the design's 2 s). */
 export const INBOX_UPDATING_TICK_MS = 2_000;
@@ -65,7 +69,10 @@ export type InboxUpdateState = InboxUpdate["state"];
 export interface InboxUpdateDetails {
   update: InboxUpdate | null;
   current: string;
-  /** This Inbox started on a newer version than the one before it: the "What's new in X" link. */
+  /**
+   * This Inbox started on a newer version than the one before it: the "What's
+   * new in X" link. Null while its notes are neither saved nor fetchable.
+   */
   updated: string | null;
   latest: { version: string; fetched_at: string; published_at: string | null } | null;
   check: { on: boolean; env: boolean | null; last_attempt_at: string | null; error: string | null };
@@ -91,8 +98,20 @@ export interface WhatsNew {
   published_at: string | null;
   release_url: string;
   notes: string;
-  /** One-line highlights of the releases between the running version and this one, newest first. */
+  /**
+   * The version `skipped` counts from: the one this Inbox runs, or, for a
+   * release it already runs, the one it ran before the update. Null for a
+   * development build. Added after `current`, which stays the running version.
+   */
+  since: string | null;
+  /** One-line highlights of the releases between `since` and this one, newest first. */
   skipped: ReleaseHighlight[];
+  /**
+   * The image sources (as the notes write them) saved on this computer, which
+   * the page loads from /api/inbox/whats-new/image. Any other image in the
+   * notes is drawn as its alt text, never fetched. Additive.
+   */
+  images: string[];
 }
 
 export interface InboxUpdatesOptions {
@@ -104,6 +123,12 @@ export interface InboxUpdatesOptions {
   healthTickMs: number;
   now?: () => number;
   fetchRelease?: () => Promise<FetchReleaseResult>;
+  /** One release by its tag, for notes a version needs and the daily check never saved. */
+  fetchReleaseTag?: (version: string) => Promise<FetchReleaseResult>;
+  /** How long the What's new route waits for those notes (WHATS_NEW_WAIT_MS). */
+  whatsNewWaitMs?: number;
+  /** The fetch the release notes' images go through (inbox-whats-new-images.ts). Default: global fetch. */
+  fetchImage?: typeof fetch;
   launchInstaller?: (launch: InstallerLaunch) => void;
   isManaged?: () => boolean;
   listSessions?: () => SessionInfo[];
@@ -111,6 +136,12 @@ export interface InboxUpdatesOptions {
   /** The button's model changed. */
   onChange: () => void;
 }
+
+/** How long GET /api/inbox/whats-new waits for a release's notes before answering "still fetching". */
+export const WHATS_NEW_WAIT_MS = 3_000;
+
+/** What the What's new route answers: the notes, still fetching, or nothing for that version. */
+export type WhatsNewAnswer = { kind: "notes"; notes: WhatsNew } | { kind: "loading" } | { kind: "missing" };
 
 /** The installed binary's version (`plannotator X` on stdout), or null. */
 export async function probeBinaryVersion(binaryPath: string): Promise<string | null> {
@@ -208,13 +239,30 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
   let stopped = false;
 
   // "Just updated": this Inbox runs a newer version than the one that ran
-  // before it. Shown as a quiet link for the life of this process.
+  // before it. Shown as a quiet link for the life of this process, while its
+  // notes are saved or can be fetched (computeUpdatedLink).
   let updated: string | null = null;
+  // The version the Inbox ran before this one (inboxPreviousVersion), kept
+  // across restarts until the next update: What's new counts the releases a
+  // person skipped from it, not from the version they now run.
+  let previous: string | null = null;
   if (release) {
     try {
-      const before = readUpdateState(options.dataDir).inboxVersion;
-      if (before && compareStableVersions(options.version, before) === 1) updated = normalizeStableVersion(options.version);
-      if (before !== options.version) patchUpdateState((s) => ({ ...s, inboxVersion: options.version }), options.dataDir);
+      const state = readUpdateState(options.dataDir);
+      const before = state.inboxVersion;
+      const newer = !!before && compareStableVersions(options.version, before) === 1;
+      if (newer) updated = normalizeStableVersion(options.version);
+      if (before !== options.version) {
+        patchUpdateState((s) => {
+          const next: typeof s = { ...s, inboxVersion: options.version };
+          if (newer) next.inboxPreviousVersion = before;
+          else if (before) delete next.inboxPreviousVersion;
+          return next;
+        }, options.dataDir);
+      }
+      const kept = newer ? before : before === options.version ? state.inboxPreviousVersion : undefined;
+      const keptVersion = normalizeStableVersion(kept);
+      if (keptVersion && isNewerStableVersion(options.version, keptVersion)) previous = keptVersion;
     } catch {}
   }
 
@@ -225,6 +273,80 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
       return true;
     }
   };
+
+  // One release's notes fetched by its tag, once per version at a time: a
+  // version installed outside the Inbox (the install script run by hand)
+  // before the daily check saw it has none saved (fetchReleaseNotesFor).
+  const notesInFlight = new Map<string, Promise<void>>();
+
+  /**
+   * The versions whose notes this Inbox may fetch: the one it runs, the
+   * newest known release, the binary on disk, an install in progress. A
+   * request for any other version reads only what is saved.
+   */
+  const fetchableVersion = (version: string): boolean => {
+    if (!release) return false;
+    const state = readUpdateState(options.dataDir);
+    const known = [options.version, knownLatestRelease(state)?.version, onDisk, state.pending?.version];
+    return known.some((v) => normalizeStableVersion(v) === version);
+  };
+
+  const ensureNotes = (version: string): Promise<void> => {
+    const running = notesInFlight.get(version);
+    if (running) return running;
+    if (!fetchableVersion(version)) return Promise.resolve();
+    const job = fetchReleaseNotesFor({
+      version,
+      dataDir: options.dataDir,
+      now,
+      enabled: checksOn,
+      ...(options.fetchReleaseTag && { fetchRelease: options.fetchReleaseTag }),
+    })
+      .then(() => undefined)
+      .catch(() => undefined)
+      .finally(() => {
+        notesInFlight.delete(version);
+        if (!stopped) refresh();
+      });
+    notesInFlight.set(version, job);
+    return job;
+  };
+
+  // The images a release's saved notes show, copied beside them once per
+  // version at a time (inbox-whats-new-images.ts: GitHub's hosts only, the
+  // release check's claim and back-off, never while update checks are off).
+  const imagesInFlight = new Map<string, Promise<void>>();
+  const ensureImages = (version: string): Promise<void> => {
+    const running = imagesInFlight.get(version);
+    if (running) return running;
+    if (!fetchableVersion(version)) return Promise.resolve();
+    const job = fetchReleaseImagesFor({
+      version,
+      dataDir: options.dataDir,
+      now,
+      enabled: checksOn,
+      ...(options.fetchImage && { fetchImpl: options.fetchImage }),
+    })
+      .then(() => undefined)
+      .catch(() => undefined)
+      .finally(() => imagesInFlight.delete(version));
+    imagesInFlight.set(version, job);
+    return job;
+  };
+
+  /** The link shows while the notes are saved, being fetched, or can be fetched now. */
+  const computeUpdatedLink = (): string | null => {
+    if (!updated) return null;
+    try {
+      if (hasReleaseNotesContent(readReleaseNotes(updated, options.dataDir))) return updated;
+      if (!checksOn()) return null;
+      if (notesInFlight.has(updated)) return updated;
+      return isNotesFetchDue(readUpdateState(options.dataDir), updated, now()) ? updated : null;
+    } catch {
+      return null;
+    }
+  };
+  let updatedLink: string | null = null;
 
   const compute = (): InboxUpdate | null => {
     if (!release) {
@@ -247,8 +369,10 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
 
   const refresh = () => {
     const next = compute();
-    if (JSON.stringify(next) !== JSON.stringify(model)) {
+    const link = computeUpdatedLink();
+    if (JSON.stringify(next) !== JSON.stringify(model) || link !== updatedLink) {
       model = next;
+      updatedLink = link;
       options.onChange();
     }
     // While an install runs, look at the binary every 2 s.
@@ -293,6 +417,14 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
           enabled: checksOn,
           ...(options.fetchRelease && { fetchRelease: options.fetchRelease }),
         });
+        // The "What's new" link's notes, when this run started on a newer
+        // version and they are still missing (throttled per version).
+        if (updated && !hasReleaseNotesContent(readReleaseNotes(updated, options.dataDir))) await ensureNotes(updated);
+        // Their images, off the tick (a release's images can take a while).
+        // A no-op once stored, and throttled per version when not.
+        for (const version of new Set([knownLatestRelease(readUpdateState(options.dataDir))?.version, updated])) {
+          if (version && hasReleaseNotesContent(readReleaseNotes(version, options.dataDir))) void ensureImages(version);
+        }
       }
       refresh();
     } catch {
@@ -344,13 +476,15 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
   return {
     /** The button's model (null: nothing to show). */
     current: () => model,
-    updated: () => updated,
+    /** The "What's new in X" link (null: none, or its notes are neither saved nor fetchable). */
+    updated: () => updatedLink,
     /** Work the state out again now (a setting changed). */
     refresh,
     details,
     start() {
       if (!release && !options.binaryPath) return;
       model = compute();
+      updatedLink = computeUpdatedLink();
       void tick();
       tickTimer = setInterval(() => void tick(), options.healthTickMs);
     },
@@ -393,22 +527,47 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
       refresh();
       return outcome.outcome === "failed" ? { ok: false, error: outcome.error } : { ok: true };
     },
-    whatsNew(version: string): WhatsNew | null {
+    /**
+     * The What's new page's notes. Notes that are missing, or saved without a
+     * "What's New" part, are fetched by the release's tag first (once per
+     * version, throttled, never while update checks are off), waiting at most
+     * `waitMs`; past that the answer is `loading` and the page asks again.
+     */
+    async whatsNew(version: string, waitMs: number = options.whatsNewWaitMs ?? WHATS_NEW_WAIT_MS): Promise<WhatsNewAnswer> {
       const v = normalizeStableVersion(version);
-      if (!v) return null;
+      if (!v) return { kind: "missing" };
+      const deadline = Date.now() + waitMs;
+      const waitFor = async (job: Promise<void>) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([job, new Promise<void>((resolve) => (timer = setTimeout(resolve, Math.max(0, deadline - Date.now()))))]);
+        clearTimeout(timer);
+      };
+      if (!hasReleaseNotesContent(readReleaseNotes(v, options.dataDir))) await waitFor(ensureNotes(v));
+      // The notes' images, within the same wait; past it the page shows what is stored.
+      if (hasReleaseNotesContent(readReleaseNotes(v, options.dataDir))) await waitFor(ensureImages(v));
       const notes = readReleaseNotes(v, options.dataDir);
-      if (!notes) return null;
-      const from = normalizeStableVersion(options.version);
+      if (!hasReleaseNotesContent(notes) && notesInFlight.has(v)) return { kind: "loading" };
+      if (!notes) return { kind: "missing" };
+      // The releases in between count from the version this Inbox ran before
+      // an update when the page shows a release it already runs (or an older
+      // one); for a newer release, from the version it runs now.
+      const running = normalizeStableVersion(options.version);
+      const from = previous && running && !isNewerStableVersion(v, running) ? previous : running;
       return {
-        version: v,
-        current: options.version,
-        published_at: notes.publishedAt ?? null,
-        release_url: releaseUrlFor(v),
-        notes: notes.notes,
-        // The releases a person skipped: newer than the one they run, older than this one.
-        skipped: from
-          ? notes.highlights.filter((h) => isNewerStableVersion(h.version, from) && isNewerStableVersion(v, h.version))
-          : [],
+        kind: "notes",
+        notes: {
+          version: v,
+          current: options.version,
+          since: from,
+          published_at: notes.publishedAt ?? null,
+          release_url: releaseUrlFor(v),
+          notes: notes.notes,
+          // The releases a person skipped: newer than `since`, older than this one.
+          skipped: from
+            ? notes.highlights.filter((h) => isNewerStableVersion(h.version, from) && isNewerStableVersion(v, h.version))
+            : [],
+          images: storedReleaseImageSources(v, notes.notes, options.dataDir),
+        },
       };
     },
   };

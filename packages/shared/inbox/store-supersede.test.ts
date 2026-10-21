@@ -34,8 +34,6 @@ const WORKER = [
   "",
   "Stopped: the retry worker cannot ship without this.",
   "",
-  "Decision: when answered",
-  "",
   "- [ ] Retry with the same idempotency key",
   "- [ ] Fail the job and send it to the dead-letter queue",
   ":::",
@@ -230,7 +228,7 @@ describe("refusals: one bad id refuses the whole send and lists the thread's ope
   });
 });
 
-describe("picks, Send and decisions on a superseded question", () => {
+describe("picks and Send on a superseded question", () => {
   test("a pick saved before stays visible and is never sent; picking or sending it is refused with question_superseded", () => {
     const { store, first, q1, q2 } = setup();
     store.savePicks(first.id, [{ key: q1.key, revision: 0, answer: answerFor(q1, "Fail the job and send it to the dead-letter queue") }]);
@@ -249,13 +247,6 @@ describe("picks, Send and decisions on a superseded question", () => {
     expect(reply.reply.body).not.toContain("Which way should the worker go");
     expect(reply.reply.body).not.toContain("dead-letter");
     expect(store.questionsOf(first.id)[0]!.state).toBe("superseded");
-  });
-
-  test("a decision drafted on it is dropped when it is superseded", () => {
-    const { store, first, q1 } = setup();
-    store.writeQuestionDecision(`${first.id}/${q1.key}`, { decision_recording: true, decision_draft: { text: "Dead-letter it.", reason: null } });
-    store.sendMessage({ project_id: first.project_id, author: AGENT, body: queueBlock(), reply_to: first.id, supersedes: [`${first.id}/${q1.key}`] });
-    expect(store.questionRecord(`${first.id}/${q1.key}`)!.decision_draft).toBeNull();
   });
 });
 

@@ -31,6 +31,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
+import { NO_BROWSER } from '../helpers/no-browser';
 
 const repo = resolve(__dirname, '../..');
 const binary = resolve(process.env.PLANNOTATOR_E2E_BINARY ?? join(repo, '.local/plannotator'));
@@ -171,8 +172,14 @@ async function checkSurface(page: Page, label: string, scroller: string, strip: 
 /** A dialog still covers the strip: the table popout, which the Viewer portals into its own article. */
 async function checkTablePopoutCovers(page: Page, label: string, scroller: string, strip: string): Promise<void> {
   await probe(page, scroller, strip, 'table');
+  // The table's own toolbar floats above it: in full screen (no header) the probe leaves the table at the window's
+  // top edge, so give the toolbar room inside the window, and hover its first row (hovering a table taller than the
+  // window would scroll it back to the top).
+  await page.locator(scroller).first().evaluate((el) => {
+    el.scrollTop -= 80;
+  });
   const table = page.locator(`${scroller} table`).first();
-  await table.hover();
+  await table.locator('tr').first().hover();
   await page.getByTitle('Expand table').first().click();
   const popout = page.locator('[data-popout]');
   await expect(popout).toBeVisible();
@@ -189,7 +196,8 @@ async function checkTablePopoutCovers(page: Page, label: string, scroller: strin
 
 /** The stepping bar's list of files opens up over the document and stays above it. */
 async function checkStepListAbove(page: Page, label: string): Promise<void> {
-  await page.locator('[data-attachment-stepper] [aria-haspopup="menu"]').click();
+  // Beside the thread the stepper's label opens it; in full screen, the toolbar's N/M.
+  await page.locator('[data-attachment-stepper] [aria-haspopup="grid"], [data-full-view-position]').first().click();
   const list = page.locator('[data-step-list]');
   await expect(list).toBeVisible();
   const covered = await page.evaluate(() => {
@@ -208,6 +216,22 @@ async function checkStepListAbove(page: Page, label: string): Promise<void> {
   await expect(list).toHaveCount(0);
 }
 
+/**
+ * The move to (400, 400) before goto does not always survive the navigation: on CI's Linux Chromium the new
+ * document can still take the pointer to be at (0, 0), on the peek's edge strip, and once the file closes the
+ * sidebar the peek opens 600 ms later and floats over everything, a full-screen file included (seen on CI: the
+ * sidebar's logo and title "painted over" the full-screen strip, and the peek over the thread beside a file).
+ * The peek closes only when the pointer leaves it, so enter it and leave, then make sure it is gone.
+ */
+async function closeSidebarPeek(page: Page): Promise<void> {
+  const peek = page.locator('[data-sidebar-peek][data-visible]');
+  if ((await peek.count()) > 0) {
+    await page.mouse.move(60, 450);
+    await page.mouse.move(700, 450);
+  }
+  await expect(peek, 'the sidebar peek is closed before the strip is probed').toHaveCount(0);
+}
+
 test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(() => {
@@ -218,7 +242,7 @@ test.beforeAll(() => {
 test('Inbox: the attached document never paints over the toolstrip, beside the thread, full screen, narrow and on a phone', async ({ browser }: { browser: Browser }) => {
   const root = inboxScratch('plannotator-toolstrip-inbox-');
   const dataDir = join(root, 'data');
-  const env = { PATH: process.env.PATH ?? '', HOME: root, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: 'none' };
+  const env = { PATH: process.env.PATH ?? '', HOME: root, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: NO_BROWSER };
   const started = spawnSync(binary, ['inbox', '--background'], { env, encoding: 'utf8', timeout: 60_000 });
   expect(started.status, started.stderr).toBe(0);
   const url = started.stdout.trim();
@@ -242,12 +266,20 @@ test('Inbox: the attached document never paints over the toolstrip, beside the t
         try {
           if (look === 'clean') await context.addCookies([{ name: 'plannotator-grid-enabled', value: 'false', url }]);
           const page = await context.newPage();
+          // Playwright's pointer starts at (0, 0), on the sidebar peek's edge strip: once a file closes the
+          // sidebar, resting there 600 ms opens the peek over everything, full screen included. Rest it in the
+          // middle, where a person reading the file would.
+          await page.mouse.move(400, 400);
           await page.goto(fileUrl);
           await expect(page.locator('[data-attachment-pane] .ib-docscroll table')).toBeVisible();
           if (layout.full) {
             await page.getByRole('button', { name: 'Full screen' }).click();
             await expect(page.locator('.ib-view.ib-full')).toBeVisible();
+            // The comments drawer open beside the page, so the centred document reaches under the toolstrip.
+            await page.locator('[data-full-view-comments]').click();
+            await expect(page.locator('.ib-view.ib-drawer')).toBeVisible();
           }
+          await closeSidebarPeek(page);
           await checkSurface(page, `${layout.label}-${look}`, '[data-attachment-pane] .ib-docscroll', '[data-attachment-pane] .ib-toolstrip');
           await checkTablePopoutCovers(page, `${layout.label}-${look}`, '[data-attachment-pane] .ib-docscroll', '[data-attachment-pane] .ib-toolstrip');
           if (!layout.options.isMobile) await checkStepListAbove(page, `${layout.label}-${look}`);

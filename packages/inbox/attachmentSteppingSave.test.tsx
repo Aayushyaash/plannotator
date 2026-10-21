@@ -166,7 +166,8 @@ function Pane({ start, steps, records = [] }: { start: InboxAttachmentState; ste
       projectRoot="/work/shop"
       version="current"
       onVersion={noop}
-      full
+      // Beside the thread, where the stepper under the file steps (full screen steps from its toolbar and keys).
+      full={false}
       onToggleFull={noop}
       focusId={null}
       readOnly={false}
@@ -174,7 +175,7 @@ function Pane({ start, steps, records = [] }: { start: InboxAttachmentState; ste
       onRemoved={noop}
       onOpenAt={noop}
       onClose={noop}
-      strip={{ picks: 0, annotations: 0, onBack: noop, onWriteReply: noop }}
+      strip={{ picks: 0, annotations: 0, onWriteReply: noop }}
       steps={STEPS}
       onStep={(id) => {
         steps.push({ id });
@@ -249,7 +250,8 @@ async function commentOnPhrase(phrase: string) {
     article.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
   });
   await settle();
-  const comment = [...document.querySelectorAll<HTMLButtonElement>('.annotation-toolbar button')].find((b) => b.title === 'Comment');
+  // Named by a native title, or by its aria-label where ui draws component tooltips (the Inbox window).
+  const comment = [...document.querySelectorAll<HTMLButtonElement>('.annotation-toolbar button')].find((b) => (b.getAttribute('aria-label') ?? b.title) === 'Comment');
   if (comment) await act(async () => comment.click());
   await waitFor(() => expect(popoverBox()).not.toBeNull());
 }
@@ -392,7 +394,7 @@ test.skipIf(!hasDom)('an annotation edited in the panel and not saved asks too, 
   await render(<Pane start={scope} steps={steps} records={[record]} />);
   await waitFor(() => expect(pane().querySelector('[data-annotation-id="ann-1"]')).not.toBeNull());
   // Opening the editor without changing a word does not ask.
-  await act(async () => pane().querySelector<HTMLButtonElement>('[data-annotation-id="ann-1"] button[title="Edit annotation"]')!.click());
+  await act(async () => pane().querySelector<HTMLButtonElement>('[data-annotation-id="ann-1"] button:is([title="Edit annotation"], [aria-label="Edit annotation"])')!.click());
   const box = pane().querySelector<HTMLTextAreaElement>('[data-annotation-id="ann-1"] textarea')!;
   expect(box.value).toBe('Five is fine.');
   await pressNext();
@@ -400,7 +402,7 @@ test.skipIf(!hasDom)('an annotation edited in the panel and not saved asks too, 
   expect(steps.map((s) => s.id)).toEqual([page.id]);
   await act(async () => host!.querySelector<HTMLButtonElement>('[data-step-prev]')!.click());
   await waitFor(() => expect(pane().querySelector('[data-annotation-id="ann-1"]')).not.toBeNull());
-  await act(async () => pane().querySelector<HTMLButtonElement>('[data-annotation-id="ann-1"] button[title="Edit annotation"]')!.click());
+  await act(async () => pane().querySelector<HTMLButtonElement>('[data-annotation-id="ann-1"] button:is([title="Edit annotation"], [aria-label="Edit annotation"])')!.click());
   await type(pane().querySelector<HTMLTextAreaElement>('[data-annotation-id="ann-1"] textarea')!, 'Make it eight for big accounts.');
   await pressNext();
   expect(guard()).not.toBeNull();

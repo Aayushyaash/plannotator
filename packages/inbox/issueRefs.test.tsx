@@ -52,9 +52,6 @@ async function render(body: string, repo: InboxProjectRepo | null | undefined, a
         answers={new Map()}
         onPick={() => {}}
         footerFor={() => null}
-        recordingOf={() => undefined}
-        onToggleDecision={() => {}}
-        onOpenDecision={() => {}}
       />,
     );
   });

@@ -125,7 +125,7 @@ describe.if(hasDom)('the wide list', () => {
     // A badge leads the subject cell, the mark follows it.
     for (const [id, badge] of [['msg_stop', 'Stopped'], ['msg_hold', 'Holds up 2']] as const) {
       const subj = rowEl(el, id).querySelector('.ib-subj')!;
-      expect(subj.children[0]!.className).toBe('ib-badge');
+      expect(subj.children[0]!.classList.contains('ib-badge')).toBe(true);
       expect(subj.children[0]!.textContent).toBe(badge);
       expect(subj.children[1]!.className).toBe('ib-mk');
     }

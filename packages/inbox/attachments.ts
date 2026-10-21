@@ -5,15 +5,25 @@
  */
 
 import { shouldStripFrontmatter } from '@plannotator/core/annotatable';
+import { codeFenceFor } from '@plannotator/core/markdown-structure';
 import { cutText } from '@plannotator/core/inbox-questions';
-import { readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachmentKind, type InboxAttachmentState } from '@plannotator/core/inbox-types';
+import {
+  formatInboxVideoTime,
+  INBOX_VIDEO_BLOCK_ID,
+  readInboxAttachmentKind,
+  readInboxVideoTime,
+  type InboxAnnotationRecord,
+  type InboxAttachmentKind,
+  type InboxAttachmentState,
+} from '@plannotator/core/inbox-types';
 import { AnnotationType, type Annotation, type Block, type CodeAnnotation, type ImageAttachment } from '@plannotator/ui/types';
 import { diagramDocumentBlocks, exportLinkedDocAnnotations, parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
+import { whenTime } from './format';
 
 /** Plannotator's blocks for a file: one diagram block for a diagram source, one code block for code, the markdown pipeline for text, none for HTML or a binary kind. */
 export function attachmentBlocks(kindValue: InboxAttachmentKind | string, text: string, name: string): Block[] {
   const kind = readInboxAttachmentKind(kindValue);
-  if (kind === 'html' || kind === 'image' || kind === 'pdf' || kind === 'file') return [];
+  if (kind === 'html' || kind === 'image' || kind === 'video' || kind === 'pdf' || kind === 'file') return [];
   if (kind === 'mermaid' || kind === 'graphviz') return diagramDocumentBlocks(text, kind);
   if (kind === 'code') return codeDocumentBlocks(text, name);
   return parseMarkdownToBlocks(text, shouldStripFrontmatter(name) ? undefined : { frontmatter: false });
@@ -116,8 +126,9 @@ export function annotationQuote(annotation: Annotation): string {
   return annotation.originalText ?? '';
 }
 
-/** A file's path as the agent knows it: relative to its project when inside it, else the absolute path it attached. */
-export function attachmentLabel(attachment: Pick<InboxAttachmentState, 'path' | 'name'>, projectRoot: string): string {
+/** A file's path as the agent knows it: an image in a message's text by its src as written; an attached file relative to its project when inside it, else the absolute path it attached. */
+export function attachmentLabel(attachment: Pick<InboxAttachmentState, 'path' | 'name' | 'ref'>, projectRoot: string): string {
+  if (attachment.ref !== undefined) return attachment.ref;
   const root = projectRoot.replace(/[\\/]+$/, '');
   if (attachment.path.startsWith(`${root}/`) || attachment.path.startsWith(`${root}\\`)) return attachment.path.slice(root.length + 1);
   return attachment.path || attachment.name;
@@ -128,8 +139,18 @@ export function attachmentImageUrl(attachment: Pick<InboxAttachmentState, 'id'>,
   return `/api/inbox/attachments/${encodeURIComponent(attachment.id)}/image${version === 'sent' ? '?version=sent' : ''}`;
 }
 
+/** A video's bytes for `<video src>` (HTTP Range, by id only). */
+export function attachmentVideoUrl(attachment: Pick<InboxAttachmentState, 'id'>, version: 'current' | 'sent' = 'current'): string {
+  return `/api/inbox/attachments/${encodeURIComponent(attachment.id)}/video${version === 'sent' ? '?version=sent' : ''}`;
+}
+
 export function attachmentDownloadUrl(attachment: Pick<InboxAttachmentState, 'id'>, version: 'current' | 'sent' = 'current'): string {
   return `/api/inbox/attachments/${encodeURIComponent(attachment.id)}/download${version === 'sent' ? '?version=sent' : ''}`;
+}
+
+/** An attached HTML page in a tab of its own, sandboxed, from its own folder ("Open in" → Browser). */
+export function attachmentPageUrl(attachment: Pick<InboxAttachmentState, 'id'>, version: 'current' | 'sent' = 'current'): string {
+  return `/api/inbox/attachments/${encodeURIComponent(attachment.id)}/page${version === 'sent' ? '?version=sent' : ''}`;
 }
 
 /** Wider than this width-to-height ratio, an image is a panorama: the gallery crops it from the left, the viewer scrolls it sideways. */
@@ -271,6 +292,55 @@ export function imageCommentAnnotation(input: { id: string; name: string; text: 
   };
 }
 
+/** A comment's moment kept to the millisecond (contract 4: seconds, millisecond precision). */
+export function videoTimeOf(seconds: number): number {
+  return Math.max(0, Math.round(seconds * 1000) / 1000);
+}
+
+/** The frame's name as a comment carries it: "launch-cut-v3 at 1:42". */
+export function videoFrameName(name: string, time: number): string {
+  return `${name.replace(/\.[^.]+$/, '') || name} at ${formatInboxVideoTime(time)}`;
+}
+
+/**
+ * A comment at a moment of a video (contract 4): `blockId: "video"`,
+ * `inboxVideo: { time }` in seconds, and the frame the window grabbed (or the
+ * person's marked-up copy of it) as `images[0]`.
+ */
+export function videoCommentAnnotation(input: { id: string; name: string; time: number; text: string; frame?: ImageAttachment | null; author?: string; createdA?: number }): Annotation {
+  const time = videoTimeOf(input.time);
+  return {
+    id: input.id,
+    blockId: INBOX_VIDEO_BLOCK_ID,
+    startOffset: 0,
+    endOffset: 0,
+    type: AnnotationType.COMMENT,
+    text: input.text,
+    originalText: `${input.name} at ${formatInboxVideoTime(time)}`,
+    createdA: input.createdA ?? Date.now(),
+    ...(input.author ? { author: input.author } : {}),
+    ...(input.frame ? { images: [input.frame] } : {}),
+    inboxVideo: { time },
+  } as Annotation;
+}
+
+/** Video comments by the moment they are at (the panel, the rail, the export); a comment with no time sorts last. */
+export function compareVideoTimes(a: unknown, b: unknown): number {
+  return (readInboxVideoTime(a) ?? Number.POSITIVE_INFINITY) - (readInboxVideoTime(b) ?? Number.POSITIVE_INFINITY) || 0;
+}
+
+/** "102.4 s", or "14 s" (one decimal, none when whole). */
+function secondsLabel(seconds: number): string {
+  const tenths = Math.round(seconds * 10) / 10;
+  return `${Number.isInteger(tenths) ? tenths : tenths.toFixed(1)} s`;
+}
+
+/** The location line the export prints under a video comment: "At 1:42 (102.4 s of 7:41)" (without "of …" when the length is unknown). */
+export function videoLocationLine(time: number, durationMs?: number): string {
+  const of = typeof durationMs === 'number' && durationMs > 0 ? ` of ${formatInboxVideoTime(durationMs / 1000)}` : '';
+  return `At ${formatInboxVideoTime(time)} (${secondsLabel(time)}${of})`;
+}
+
 /** A comment on a guided review's diff, as the review app made it, or null for an attachment's annotation. */
 export function guideCommentOf(record: InboxAnnotationRecord): CodeAnnotation | null {
   return record.guide ? (record.annotation as unknown as CodeAnnotation) : null;
@@ -284,6 +354,7 @@ function lineRangeLabel(start: number, end: number): string {
 /** The small tag beside a row in the chip's list: the element, diagram part, or a guided-review comment's lines. */
 export function recordTag(record: InboxAnnotationRecord): string | null {
   if (record.guide) return lineRangeLabel(record.guide.line_start, record.guide.line_end);
+  if (record.message) return null;
   return annotationTag(annotationOf(record));
 }
 
@@ -297,6 +368,12 @@ export function recordQuote(record: InboxAnnotationRecord): string {
 }
 
 export const GUIDE_FEEDBACK_TITLE = 'Feedback on the guided review';
+
+/** Quoted code in a fence no line of it can close (the review app's `fenced`). */
+function fenced(code: string): string {
+  const fence = codeFenceFor(code);
+  return `${fence}\n${code}\n${fence}\n`;
+}
 
 /**
  * One comment as the review app's export writes it (exportReviewFeedback in
@@ -315,9 +392,9 @@ function guideCommentEntry(comment: CodeAnnotation, heading: string): string {
   let output = `${heading} ${range} (${comment.side})${token}\n`;
   if (comment.text) output += `${prefix}${comment.text}\n`;
   else if (prefix) output += `${prefix.trimEnd()}\n`;
-  if (comment.selectedText) output += `\n**Highlighted text:**\n\`\`\`\n${comment.selectedText}\n\`\`\`\n`;
-  if ((comment.suggestedCode || comment.text) && comment.originalCode) output += `\n**Replaces:**\n\`\`\`\n${comment.originalCode}\n\`\`\`\n`;
-  if (comment.suggestedCode) output += `\n**Suggested code:**\n\`\`\`\n${comment.suggestedCode}\n\`\`\`\n`;
+  if (comment.selectedText) output += `\n**Highlighted text:**\n${fenced(comment.selectedText)}`;
+  if ((comment.suggestedCode || comment.text) && comment.originalCode) output += `\n**Replaces:**\n${fenced(comment.originalCode)}`;
+  if (comment.suggestedCode) output += `\n**Suggested code:**\n${fenced(comment.suggestedCode)}`;
   return `${output}\n`;
 }
 
@@ -356,14 +433,135 @@ export function guideFeedback(records: readonly InboxAnnotationRecord[]): string
     .join('\n\n');
 }
 
+/**
+ * A file's heading in the export: an attached file by its path; an image the
+ * message's text shows by its src as written plus the message it was in, so
+ * the agent knows which picture it was: `design/checkout-b.png (image in
+ * your 11:22 AM message)`. When another message of `others` shows the same
+ * src within the same minute, the time carries its seconds (`11:22:41 AM`),
+ * and when that still ties, the message's place among them (`message 2`), so
+ * two pictures never share one heading.
+ */
+export function exportFileLabel(
+  attachment: Pick<InboxAttachmentState, 'path' | 'name' | 'ref' | 'sent_at'> & { message_id?: string },
+  projectRoot: string,
+  others: readonly Pick<InboxAttachmentState, 'ref' | 'sent_at' | 'message_id'>[] = [],
+  /** The image is in the person's own message: "(image in my … message)", never "your". */
+  mine = false,
+): string {
+  const label = attachmentLabel(attachment, projectRoot);
+  if (attachment.ref === undefined) return label;
+  const whose = mine ? 'my' : 'your';
+  const minute = whenTime(attachment.sent_at);
+  const sameRef = others.filter((o) => o.ref === attachment.ref && o.message_id !== attachment.message_id && whenTime(o.sent_at) === minute);
+  if (sameRef.length === 0) return `${label} (image in ${whose} ${minute ? `${minute} ` : ''}message)`;
+  const secondsOf = (iso: string) => {
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  };
+  const second = secondsOf(attachment.sent_at);
+  const tied = sameRef.filter((o) => secondsOf(o.sent_at) === second);
+  if (tied.length === 0) return `${label} (image in ${whose} ${second} message)`;
+  const order = [...tied, { sent_at: attachment.sent_at, message_id: attachment.message_id ?? '' }]
+    .map((o) => `${o.sent_at}\0${o.message_id ?? ''}`)
+    .filter((key, index, all) => all.indexOf(key) === index)
+    .sort();
+  const place = order.indexOf(`${attachment.sent_at}\0${attachment.message_id ?? ''}`) + 1;
+  return `${label} (image in ${whose} ${second} message ${place})`;
+}
+
+/** A comment on the text of an agent's message (approval "inbox-message-comments"), or false for any other annotation. */
+export function isMessageComment(record: InboxAnnotationRecord): boolean {
+  return record.message !== undefined;
+}
+
+/** A comment on a file (not a guided review's diff, not a message's text): what the file viewers list. */
+export function isFileComment(record: InboxAnnotationRecord): boolean {
+  return !record.guide && !record.message;
+}
+
+export const MESSAGE_FEEDBACK_HEADING = {
+  title: 'Feedback on your messages',
+  intro: 'The following feedback is on the text of your messages in this thread, one section per message. Each quote is the words I selected (as shown on screen) in your message.',
+};
+
+/** A message comment's section heading: "Feedback on your message from 2:58 PM (msg_…)", the time in the person's own time zone. */
+export function messageFeedbackLabel(record: Pick<InboxAnnotationRecord, 'message_id' | 'message'>, time: (iso: string) => string = whenTime): string {
+  const at = record.message ? time(record.message.at) : '';
+  return `Feedback on your message${at ? ` from ${at}` : ''} (${record.message_id})`;
+}
+
+/**
+ * One comment on a message's text: "Feedback on" the words selected, then
+ * the comment, every line of it quoted. The words are the rendered text, so
+ * they can span paragraphs and hold anything a message can (a code block, a
+ * line starting with `#`): words on one line sit inline in quotes, words on
+ * several lines go in a fenced block no line of theirs can close
+ * (`codeFenceFor`, as the guided-review export quotes code), so nothing in
+ * them reads as a heading or leaves a fence open.
+ */
+function messageCommentEntry(annotation: Annotation, number: number): string {
+  const words = annotation.originalText ?? '';
+  const label = annotation.isQuickLabel && annotation.text ? `[${annotation.text}] ` : '';
+  const multiline = /[\r\n]/.test(words);
+  let out = `### ${number}. ${label}Feedback on${multiline ? ':' : `: "${words}"`}\n`;
+  if (multiline) {
+    const fence = codeFenceFor(words);
+    out += `${fence}\n${words.replace(/\r\n?/g, '\n')}\n${fence}\n`;
+  }
+  if (!annotation.isQuickLabel && annotation.text) out += `${annotation.text.split(/\r\n|\r|\n/).map((line) => `> ${line}`).join('\n')}\n`;
+  return `${out}\n`;
+}
+
+/** Comments in the order their words come in the message: by block, then by where in it. */
+function compareInMessage(a: Annotation, b: Annotation): number {
+  return String(a.blockId ?? '').localeCompare(String(b.blockId ?? ''), undefined, { numeric: true }) || (a.startOffset ?? 0) - (b.startOffset ?? 0);
+}
+
+/**
+ * The comments on the text of agents' messages, as the feedback text a Send
+ * carries (approval "inbox-message-comments"): one section per message,
+ * oldest message first, under "Feedback on your message from <time> (<id>)",
+ * each comment quoting the words selected, then the comment. No line
+ * numbers: the words are what find the place.
+ */
+export function messageFeedback(records: readonly InboxAnnotationRecord[], time: (iso: string) => string = whenTime): string {
+  const messages = records.filter((record) => record.message);
+  if (messages.length === 0) return '';
+  const byMessage = new Map<string, { at: string; annotations: Annotation[] }>();
+  for (const record of messages) {
+    const entry = byMessage.get(record.message_id) ?? { at: record.message!.at, annotations: [] };
+    entry.annotations.push(annotationOf(record));
+    byMessage.set(record.message_id, entry);
+  }
+  const ordered = [...byMessage].sort(([idA, a], [idB, b]) => a.at.localeCompare(b.at) || idA.localeCompare(idB));
+  let out = `# ${MESSAGE_FEEDBACK_HEADING.title}\n\n${MESSAGE_FEEDBACK_HEADING.intro}\n\n`;
+  for (const [id, entry] of ordered) {
+    const list = [...entry.annotations].sort(compareInMessage);
+    out += `## ${messageFeedbackLabel({ message_id: id, message: { at: entry.at } }, time)}\n\n`;
+    out += `I've reviewed this message and have ${list.length} piece${list.length === 1 ? '' : 's'} of feedback:\n\n`;
+    list.forEach((annotation, index) => {
+      out += messageCommentEntry(annotation, index + 1);
+    });
+  }
+  return `${out}---`;
+}
+
 export const ATTACHMENT_FEEDBACK_HEADING = {
   title: 'Feedback on the attached files',
   intro: 'The following feedback is on the files you attached, one section per file and version.',
 };
 
+/** The same heading when the feedback covers an image your message's text showed. */
+export const ATTACHMENT_AND_IMAGE_FEEDBACK_HEADING = {
+  title: ATTACHMENT_FEEDBACK_HEADING.title,
+  intro: 'The following feedback is on the files you attached and the images your messages showed, one section per file and version.',
+};
+
 /**
- * The feedback text a Send carries after the picks: Plannotator's export of
- * the annotations (the same entry renderer `exportAnnotations` uses), one
+ * The feedback text a Send carries after the picks: the comments on the text
+ * of agents' messages (`messageFeedback`), then Plannotator's export of the
+ * files' annotations (the same entry renderer `exportAnnotations` uses), one
  * section per file and version, then the comments on guided reviews' diffs
  * (`guideFeedback`). `texts` holds each version's text, keyed
  * `<attachment id>\0<version>`, so line numbers name the lines the person read.
@@ -373,31 +571,82 @@ export function attachmentFeedback(
   attachments: readonly InboxAttachmentState[],
   texts: ReadonlyMap<string, string>,
   projectRoot: string,
+  /** The person's own messages (their images are named "image in my … message"). */
+  options: {
+    personMessageIds?: ReadonlySet<string>;
+    /**
+     * The names of the agents a comment tags with `@` (approval "inbox-tag-agents"): the export marks
+     * which comment carried a tag ("Tagged Pi"). Absent: tags are not named.
+     */
+    tagNames?: (ids: readonly string[]) => string[];
+  } = {},
 ): string {
   if (records.length === 0) return '';
-  const groups = new Map<string, { annotations: Annotation[]; markdown?: string; blocks: Block[] }>();
+  const messages = messageFeedback(records);
+  let inlineImages = false;
+  const groups = new Map<string, { annotations: Annotation[]; markdown?: string; blocks: Block[]; video?: { durationMs?: number } }>();
   for (const record of records) {
-    // Comments on a guided review's diff go in their own section, after the files'.
-    if (record.guide) continue;
+    // Comments on a guided review's diff go in their own section, after the files'; a message's text has its own, before them.
+    if (record.guide || record.message) continue;
     const attachment = attachments.find((a) => a.id === record.attachment_id) ?? attachments.find((a) => a.path === record.path);
-    if (!attachment) continue;
     const sent = record.version !== 'current';
-    const label = `${attachmentLabel(attachment, projectRoot)}${sent ? ' (the version you sent)' : ''}`;
+    if (!attachment) {
+      // A file the caller does not list (an image a message shows, on a phone app older than
+      // `inline_images`): its comment still rides the Send, under the path it was made on.
+      const label = `${record.path}${sent ? ' (the version you sent)' : ''}`;
+      const group = groups.get(label) ?? { annotations: [], blocks: [] };
+      groups.set(label, group);
+      const { exportLocation: _dropped, ...annotation } = annotationOf(record) as Annotation & { exportLocation?: unknown };
+      group.annotations.push(annotation as Annotation);
+      continue;
+    }
+    if (attachment.ref !== undefined) inlineImages = true;
+    const mine = attachment.ref !== undefined && options.personMessageIds?.has(attachment.message_id) === true;
+    const sentLabel = attachment.captured === 'on_open' ? ' (the version I first saw)' : mine ? ' (the version I sent)' : ' (the version you sent)';
+    const label = `${exportFileLabel(attachment, projectRoot, attachments, mine)}${sent ? sentLabel : ''}`;
     let group = groups.get(label);
     if (!group) {
       const text = texts.get(`${attachment.id}\0${record.version}`) ?? '';
       // Code comments name their own lines; an image has no lines.
       const kind = readInboxAttachmentKind(attachment.kind);
-      group = { annotations: [], blocks: kind === 'code' ? [] : attachmentBlocks(kind, text, attachment.name) };
+      group = {
+        annotations: [],
+        blocks: kind === 'code' ? [] : attachmentBlocks(kind, text, attachment.name),
+        ...(kind === 'video' ? { video: { durationMs: attachment.duration_ms } } : {}),
+      };
       groups.set(label, group);
     }
-    group.annotations.push(annotationOf(record));
+    // Never a client's `exportLocation` (a record from before the store dropped it): only the line computed below prints.
+    const { exportLocation: _stored, ...annotation } = annotationOf(record) as Annotation & { exportLocation?: unknown };
+    group.annotations.push(annotation as Annotation);
   }
   for (const group of groups.values()) {
     const code = codeCommentBlocks(group.annotations);
     if (code.length > 0) group.blocks = [...group.blocks, ...code];
+    // A video's comments go by the moment they are at, each with its "At 1:42 (102.4 s of 7:41)" line.
+    // Export copies only: the exporter orders same-block entries by offset, and prints `exportLocation`.
+    if (group.video) {
+      const durationMs = group.video.durationMs;
+      group.annotations = [...group.annotations].sort(compareVideoTimes).map((annotation, index) => {
+        const time = readInboxVideoTime(annotation);
+        return { ...annotation, startOffset: index, endOffset: index, ...(time !== null ? { exportLocation: videoLocationLine(time, durationMs) } : {}) } as Annotation;
+      });
+    }
+  }
+  // A comment that tags agents says so under its heading, after a video's moment (export copies only).
+  if (options.tagNames) {
+    for (const group of groups.values()) {
+      group.annotations = group.annotations.map((annotation) => {
+        const ids = Array.isArray(annotation.mentions) ? annotation.mentions : [];
+        const names = ids.length > 0 ? options.tagNames!(ids) : [];
+        if (names.length === 0) return annotation;
+        const line = `Tagged ${names.join(', ')}: this comment sends the reply to ${names.length === 1 ? 'it' : 'them'} too.`;
+        const before = (annotation as Annotation & { exportLocation?: string }).exportLocation;
+        return { ...annotation, exportLocation: before ? `${before} · ${line}` : line } as Annotation;
+      });
+    }
   }
   const entries = new Map([...groups].map(([label, group]) => [label, { annotations: group.annotations, globalAttachments: [], blocks: group.blocks }]));
-  const files = records.some((record) => !record.guide) ? exportLinkedDocAnnotations(entries, ATTACHMENT_FEEDBACK_HEADING).trim() : '';
-  return [files, guideFeedback(records)].filter(Boolean).join('\n\n');
+  const files = records.some(isFileComment) ? exportLinkedDocAnnotations(entries, inlineImages ? ATTACHMENT_AND_IMAGE_FEEDBACK_HEADING : ATTACHMENT_FEEDBACK_HEADING).trim() : '';
+  return [messages, files, guideFeedback(records)].filter(Boolean).join('\n\n');
 }

@@ -113,8 +113,8 @@ Every phone request goes to `/api/inbox/device/*`. The door's checks, in order:
 2. `pair`: no token (above).
 3. `Authorization: Bearer tok_...`. None: `401 device_token_missing`. No device with that hash: `401 device_token_invalid`. A revoked device: `401 device_revoked`.
 4. The path is in the allowlist below, else `404 device_route_not_found`.
-5. A POST in the allowlist carries `idempotency_key` in its body (section 6), else `422 validation_error`. The two exceptions are `pair` and `revoke`, which change nothing when repeated.
-6. The request is handed to the window's own handler under the window's path. The door adds nothing and strips nothing; the phone sends no `serverSession`, which the window's guard accepts (`checkServerSession`: absent passes).
+5. A POST in the allowlist carries `idempotency_key` in its body (section 6), else `422 validation_error`. The two exceptions are `pair` and `revoke`, which change nothing when repeated. The two raw-body routes, `uploads` and `markups` (added 2026-10-15), carry it in the query instead (`?idempotency_key=`), since their body is a file.
+6. The request is handed to the window's own handler under the window's path. The door adds nothing to the route, the query or the body; the phone sends no `serverSession`, which the window's guard accepts (`checkServerSession`: absent passes). Of the phone's headers it passes on only `Last-Event-ID` (the event stream), `If-None-Match` (the image routes' cache validator, added 2026-10-14 with `messages/:id/image`), so a phone that cached an image gets the window's `304`, and on a GET `Range` and `If-Range` (a player's byte range, section 11). On the two raw-body routes it also passes on `Content-Type` and `Content-Length` and streams the body through with the query unchanged (key included); a `serverSession` the phone puts in that query is checked by the window like any other, so a wrong one is `409 session_mismatch`. The door bounds a raw body itself, because the window's handler runs in-process where the listener's request size bound does not apply: 100 MB for `uploads` (`413 upload_too_large`), 32 MB for `markups` (`413 markup_too_large`). A declared `Content-Length` past the bound is refused before a byte is read; a body without one (chunked) is counted as it streams and cut at the bound. Either answer carries `Connection: close`, and nothing is recorded under the key. After a replay or a refusal the door reads and drops what is left of the body only up to 1 MiB or 2 s, then answers with `Connection: close` (a client should not reuse that connection). The "referenced in that message's body" rule limits what an agent's message exposes, not what the person's own clients can read: a paired device, like the window, can send a reply that references any image-type file of 10 MB or less under a project root and then read it, so a device token is as powerful as the window (revoke a lost phone), and over the relay the phone gets the image bytes with only a content type, so the app must draw an SVG as an untrusted image.
 
 Where the door answers. On the loopback listener, the door sits beside the window. The tailnet reaches a second loopback listener, open only while "Reach from my tailnet" is on, that serves the door and nothing else: any path outside `/api/inbox/device/` answers `404 device_route_not_found` there, whatever its Host. `tailscale serve` points at that listener, never at the window's port. On the LAN listener only the door exists (section 3).
 
@@ -124,35 +124,53 @@ The allowlist. Each row is the window's handler as it is today, with the request
 
 | Door route | Window route | Request | Answer | Exchange |
 |---|---|---|---|---|
-| `GET health` | `GET /api/inbox/health` | | `{ ok, app, version, serverSession, pid, update }`; the cheapest read, the phone's reachability probe for 9.2 | 7.4 |
-| `GET threads[?project=prj_...][&archived=include\|exclude]` | `GET /api/inbox/threads` | | the list model: `{ serverSession, version, cursor, update, notice, projects, project, sections, decisions_waiting }`. Archived threads stay in the Quiet section unless the phone asks `archived=exclude` (added 2026-10-12, when the window moved them out of its list into Settings; the default keeps this exchange as it was, so a phone that draws the sections loses no thread). "Archived" means resolved and not come back: an agent's `reply_to` reply after the archive line brings the thread back into the sections while something there waits (as news, Waiting when it asks, Sent after the reply), with the additive row fields `agent_after_archive` and `back_from_archive`, in both modes; once handled it is archived again by itself. Its later messages are answerable without unarchiving (picks, reply, decision switch, annotations, the lock-screen answer), its earlier ones stay closed, and the thread stays resolved | 7.5 |
+| `GET health` | `GET /api/inbox/health` | | `{ ok, app, version, serverSession, pid, update, notify_reach? }` (`notify_reach` additive: whether an open Inbox tab on the computer can show a browser notification); the cheapest read, the phone's reachability probe for 9.2 | 7.4 |
+| `GET threads[?project=prj_...][&archived=include\|exclude]` | `GET /api/inbox/threads` | | the list model: `{ serverSession, version, cursor, update, notice, projects, project, sections }` (`decisions_waiting` was removed with Decisions, 2026-10). Archived threads stay in the Quiet section unless the phone asks `archived=exclude` (added 2026-10-12, when the window moved them out of its list into Settings; the default keeps this exchange as it was, so a phone that draws the sections loses no thread). "Archived" means resolved and not come back: an agent's `reply_to` reply after the archive line brings the thread back into the sections while something there waits (as news, Waiting when it asks, Sent after the reply), with the additive row fields `agent_after_archive` and `back_from_archive`, in both modes; once handled it is archived again by itself. Its later messages are answerable without unarchiving (picks, reply, annotations, the lock-screen answer), its earlier ones stay closed, and the thread stays resolved | 7.5 |
 | `GET threads/archived[?project=prj_...&offset=n&limit=n]` | `GET /api/inbox/threads/archived` | | `{ serverSession, cursor, project, projects: [{ id, name, archived }], total, offset, limit, threads: [row] }`: the archived threads, newest archived first, a page at a time (`limit` 1 to 200, default 50). An explicit allowlist row (GET, read only), before `threads/:id`; added 2026-10-12, no exchange of its own | |
-| `GET projects` | `GET /api/inbox/projects` | | `{ serverSession, cursor, projects: [{ id, key, name, root, created_at, threads, unread }] }` | 7.6 |
-| `GET threads/:id` | `GET /api/inbox/threads/:id` | | `{ serverSession, cursor, thread, decisions, row }` (`row`, the thread's list row, and `thread.archive_seq`, the archive line's seq or null, additive since 2026-10-12) | 7.7 |
+| `GET projects` | `GET /api/inbox/projects` | | `{ serverSession, cursor, projects: [{ id, key, name, root, created_at, threads, unread, listed, archived }] }` (`listed` and `archived`, additive: threads the window's list holds and the archived rest; the window hides a project with `listed` 0) | 7.6 |
+| `GET threads/:id` | `GET /api/inbox/threads/:id` | | `{ serverSession, cursor, thread, row }` (`decisions` was removed with Decisions, 2026-10; `row`, the thread's list row, and `thread.archive_seq`, the archive line's seq or null, additive since 2026-10-12) | 7.7 |
 | `POST threads/:id/seen` | same | `{ idempotency_key, through_seq? }` | `{ thread: row }`. `through_seq` (optional, added 2026-10-12 with seen on sight, design record "inbox-new-in-open-thread"; additive, the door forwards it unchanged): an integer, the seq (`thread.messages[].seq`) of the newest message the phone actually showed. The look then covers only the agent messages at or below it, so a message that landed after the phone read the thread stays new. Behind the recorded look (at or below it): no-op, nothing written, the look is never lowered; ahead of the thread's newest message: capped to the newest (the same as no `through_seq`). Absent or `null`: every agent message so far, as before. Anything but a whole number of 0 or more: `422 { "code": "validation_error", "field": "through_seq" }`, nothing written. An Inbox older than the field ignores it and marks everything | 7.8 |
 | `POST threads/:id/read`, `POST threads/:id/unread` | same | `{ idempotency_key }` | `{ thread: row }`: Mark read (the row goes to Quiet, its waiting questions close unanswered; on a thread that came back from the archive it goes back to Archived at once, even while the person's earlier reply there waits on the agent) and its Undo (it reopens only the questions that Mark read closed; one an earlier Mark read closed stays closed); added after section 7, no exchange of its own. Row semantics since 2026-10-12, the wire unchanged: the Inbox's own notes to the agent (person messages carrying `set_aside` or `reopened`) are neither the person's reply nor a look, so a row's `sent`, `unseen`, `waiting_on_person` and `back_from_archive` read past them (and `waiting_on_person` is false while a Mark read stands), and the row gains the additive `last_agent_at` (the latest agent message's time; `last_at` and `last_author` still count the notes). The thread-state model (`adr/implementation/inbox-thread-state.md`) and its trace fixtures say the same | |
-| `GET events[?cursor=n]` | `GET /api/inbox/events` | `Last-Event-ID` or `?cursor=` | SSE: `hello`, `record` per store line (`id:` = seq), `status`, a heartbeat every 15 s | 7.9 |
+| `GET events[?cursor=n]` | `GET /api/inbox/events` | `Last-Event-ID` or `?cursor=` (a valid `Last-Event-ID` header wins over `?cursor=`) | SSE: `hello`, `record` per store line (`id:` = seq), `status`, a heartbeat every 15 s | 7.9 |
 | `POST messages/:id/picks` | same | `{ idempotency_key, questions: [{ key, revision, answer or null }] }` | `{ message_id, questions, reply: null }` | 7.10 |
-| `POST messages/:id/reply` | same | `{ idempotency_key, words?, questions?, feedback?, annotation_ids?, skip_unanswered? }` (`skip_unanswered: true` skips the message's questions left without a pick) | `{ message_id, questions, reply, replayed, decisions, decisions_refused }` | 7.11 |
+| `POST messages/:id/reply` | same | `{ idempotency_key, words?, questions?, feedback?, annotation_ids?, skip_unanswered?, uploads?, tags? }` (`skip_unanswered: true` skips the message's questions left without a pick; a phone sends it only as the window does, see 7.11; `uploads`: `upl_` ids from 7.48, which become attachments on the reply, see 7.57; `tags`: the agent sessions the person tagged with `@`, see 7.60) | `{ message_id, questions, reply, replayed }` | 7.11 |
 | `POST messages/:id/resolve` | same | `{ idempotency_key, resolved? }` | `{ thread: summary }` | 7.12 |
+| `POST messages/:id/ack` | same | `{ idempotency_key, ack? }` (`ack: false` takes it back) | `{ message, thread: row }`: 👍 Looks good (design record "inbox-acknowledge", 2026-10-15). Silent: nothing is sent, no session is woken, no push. The message gains `ack: { label, at, read_seq, made_read, settled_seq, settled_at, seen_at }` and the thread is marked read (Quiet until an agent writes again); the row gains the additive `ack: { label, at }` while that read holds (draw "👍 Looks good" in place of "Read"). `ack: false` removes it and undoes the Mark read when the 👍 made it (`made_read`); `threads/:id/unread` on that read withdraws the ack too. Only the thread's latest agent message, only while no question in the thread is open or picked and the person has not replied after it: `422 ack_not_allowed` (a person's message), `409 ack_stale` (a newer agent message), `409 ack_after_reply`, `409 question_open`, `409 thread_resolved`. An Inbox before it answers `404 device_route_not_found`. Added 2026-10-15. Amended 2026-10-16 (the owner: "send looks good through"): once the Undo window passes with the 👍 standing, the Inbox delivers it to the agent through a note, a person's message carrying `ack_of: <message id>` (body "The person marked your message 👍 Looks good (<message id>). No reply needed unless you have a question."), and the ack gains `note_id`; when the person replied or the agent wrote again inside the window, the ack settles with `not_sent: "replied" \| "wrote_again"` and no note. **A phone never displays a message with `ack_of`**: the thread route leaves it out, but the relay and the event stream send every store line, so a phone that builds threads from lines must drop it (it is one of the Inbox's own notes, like `set_aside` and `reopened`: not the person's reply, not a look). The window's thread adds `ack.delivered_at` (when it reached the agent) | 7.56 |
+| `POST messages/:id/to` | same | `{ idempotency_key, to: { host?, session } }` | `{ message, row }`: Send to another session, for a person message no session took yet. `409 already_delivered`, `409 thread_resolved`, `422 not_addressed`, `409 session_not_live` pass through. Added 2026-10-15 | 7.41 |
 | `POST threads/:id/delete` | same | `{ idempotency_key }` | `{ ok, store }` | 7.13 |
-| `GET threads/:id/attachments` | same | | `{ serverSession, attachments: [state], annotations }` | 7.14 |
+| `GET threads/:id/attachments` | same | | `{ serverSession, attachments: [state], inline_images: [state], annotations }` (`inline_images` additive, 2026-10-15) | 7.14 |
 | `GET attachments/:id/view[?version=sent]` | same | | `{ serverSession, attachment, version, text, html }`; also Share (the "..." menu of section 4 of the record), which writes `text` to a file named `attachment.name` | 7.15 |
 | `GET html-assets/<token>/<path>` | `GET /api/html-assets/<token>/<path>` | | the asset's bytes, as annotate serves them | 7.16 |
+| `GET messages/:id/image?path=<src as written>` | `GET /api/inbox/messages/:id/image` | `If-None-Match` (optional) | an image the message's body shows, its bytes with the window's headers exactly: `Content-Type` sniffed from the bytes (never the name), `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'; style-src 'unsafe-inline'`, `Cross-Origin-Resource-Policy: same-origin`, `Cache-Control: private, no-cache`, `ETag` (the SHA-256 of the bytes served), `X-Image-Width`/`-Height` when the header parses; `304` with the same headers when `If-None-Match` names the current ETag. The body is the whole message, so an image in a `:::question` block's context counts. Refused as the window refuses: `403 image_not_referenced` (not in that message's body), `403 image_hidden` (a dotenv-named file, or a hidden folder outside the project and the folder sent from, as named or through a symlink; since 2026-10-16 an agent's images otherwise load from anywhere the user can read), `403 outside_project` (the person's own message, a reply posted from the phone included, names a file outside the project), `403 image_unreadable` (the system will not let Plannotator read it), `500 image_read_failed`, `404 message_not_found` / `image_missing`, `409 image_changed`, `413 image_too_large` (10 MB or 50 megapixels), `415 not_an_image`. Remote `http(s)` sources are not served. Cache by message id plus `path`, and revalidate with `If-None-Match` (the file lives on disk and can change). Added 2026-10-14 | 7.38 |
+| `GET attachments/:id/video[?version=sent]` | same | `Range`, `If-Range` (headers; with `If-None-Match` and `Last-Event-ID`, the only ones of the phone's the door forwards) | a video's bytes by HTTP Range: `206` with `Content-Range`, `200`, or `416`; kind `video` only, else `415 attachment_not_video`. Added 2026-10-15 (section 11) | 11.3 |
+| `GET attachments/:id/download[?version=sent]` | same | `Range`, `If-Range` | any kind's bytes; honors Range the same way since 2026-10-15 (section 11) | 11.4 |
 | `POST annotations` | same | `{ idempotency_key, attachment_id, version, annotation }` | `{ annotation }` | 7.17 |
 | `POST annotations/:id/remove` | same | `{ idempotency_key }` | `{ annotation }` | 7.18 |
 | `GET messages/:id/guide` | same | | `{ message_id, guide, snapshot }` | 7.19 |
 | `POST messages/:id/guide/reviewed` | same | `{ idempotency_key, reviewed: boolean[] }` | `{ message_id, reviewed }` | 7.20 |
-| `POST messages/:id/decision` | same | `{ idempotency_key, key, recording?, draft? }` | `{ question }` | 7.21 |
-| `GET decisions?project=prj_...` | same | | `{ serverSession, cursor, project_id, waiting, decisions, project_counts }` (`project_counts`, added later, is every project's `{ project_id, waiting, settled }`; a phone may ignore it) | 7.22 |
-| `GET threads/:id/sessions` | same | | `{ serverSession, home, project, sessions }` | 7.23 |
+| `POST messages/:id/guide/annotations` | same | `{ idempotency_key, annotation }` (the review app's line comment: `id`, `filePath` in the guide's patch, `side` `old`/`new`, `lineStart`/`lineEnd`, `text`); an edit is the same annotation id under a new key | `{ annotation: record }`. Removed through `annotations/:id/remove` (7.18). The window's refusals pass through: `422 validation_error` (a file not in the patch, a bad side, lines not in one hunk), `404 guide_not_found` / `message_not_found`, `409 annotation_closed`, `409 thread_resolved`. Added 2026-10-15 | 7.53 |
+| `POST messages/:id/annotations` | same | `{ idempotency_key, annotation }` (Plannotator's text-selection annotation on an agent's message: `id`, `type` `"COMMENT"`, `originalText` the words selected, `text`); an edit is the same annotation id under a new key | `{ annotation: record }` with `message: { at }`. Removed through `annotations/:id/remove` (7.18). The window's refusals pass through: `422 annotation_not_allowed` (the person's own message), `422 validation_error`, `404 message_not_found`, `409 annotation_closed`, `409 thread_resolved`. Added 2026-10-19 | 7.59 |
+| `GET threads/:id/sessions` | same | | `{ serverSession, home, project, sessions }` (`?asker=<session>` adds `asker: { session, live, connection }`, `connection` = `{ busy, idle_since, send_now }` while that session's connection polls, else null; each session carries `send_now`) | 7.23 |
+| `POST messages/:id/send-now` | same | `{ idempotency_key }` | `{ message }` with `deliver_now_at`: Send now (2026-10-16). The session the person's reply or message goes to gets it at once, into its running turn when one runs. Offer it only while `asker.connection.send_now` and `busy` are true (draw "Queued · <agent> is working; it gets this when its turn ends"); `409 send_now_unavailable` when that session's connection does not poll now or cannot take it mid-turn, `409 already_delivered`, `422 not_addressed`. A second press writes nothing. An Inbox before it answers `404 device_route_not_found` | 7.58 |
 | `POST threads/:id/message` | same | `{ idempotency_key, session, body }` | `{ message, replayed }` | 7.24 |
+| `GET threads/:id/taggable` | same | | `{ serverSession, owner, sessions: [{ session, host, kind: "live" \| "mcp", name, project, started_at, last_at, busy, idle_since, taggable, owner, wrote_thread }] }`: who the person can tag with `@` in a reply (added 2026-10-20) | 7.60 |
+| `GET threads/:id/draft` | same | | `{ serverSession, draft }`: the words typed in the thread's reply box on the computer and not sent (`{ v, thread_id, body, created_at, updated_at }`, or null). Read only: the door has no route that writes a reply draft. An Inbox before it answers `404 device_route_not_found` | 7.62 |
+| `GET sessions[?session=ses_...]` | `GET /api/inbox/sessions` | | `{ serverSession, home, projects: [{ project: { id or null, name, root }, sessions: [{ session, host, started_at, last_seen_at, busy, idle_since, last_thread }] }], session? }`: every live session, any project (compose's To). A snapshot: a session may have ended by the time a relayed answer is read. Added 2026-10-15 | 7.39 |
+| `POST messages` | `POST /api/inbox/messages` | `{ idempotency_key, to: { host?, session }, body, uploads?: [upl_...], thread_name? }` | `{ thread_id, message, project, replayed }`: a thread the person starts, addressed to one live session. `draft_id` (which deletes a shared draft) is refused by the door, `422 { "field": "draft_id" }`: drafts stay on the computer. The body key is also the store's own. `409 session_not_live` (nothing written), `503 project_unresolved` (not recorded, so the same call runs again), `422 validation_error`, `409 idempotency_key_reused` pass through. `thread_name` (optional, added 2026-10-16) is the thread's name, its chip, checked by the thread-name rules (`422 validation_error`) and refused with `409 thread_name_taken` (nothing written) while another open thread of the project has the name; an agent never replaces it. `thread_name_auto: true` (optional, added 2026-10-16) marks `thread_name` as compose's own suggestion: dropped instead of refused when not valid or taken, and replaced by the agent's first name. A name refused here (`409 thread_name_taken`, `422`) is stored by the door under the idempotency key like any 4xx, so a retry with another name, or none, must use a NEW idempotency key; the same key answers the stored refusal again. Added 2026-10-15 | 7.40 |
+| `GET search?q=&project=&status=&from=&group=&offset=&limit=&current=` | `GET /api/inbox/search` | | the window's search answer: `{ serverSession, q, terms, took_ms, indexing, threads, totals, groups, recent, recent_searches? }`. `indexing: true` with no groups: ask again. Read only; the window's cross-site check passes because the door sends no `Origin` and forwards no fetch metadata. Added 2026-10-15 | 7.42 |
+| `POST projects/:id/read`, `POST projects/:id/unread`, `POST projects/:id/resolve` | same | `{ idempotency_key }`; Undo of read `{ idempotency_key, threads: [ids] }`; Archive all `{ idempotency_key, resolved?: true }`, its Undo `{ idempotency_key, resolved: false, threads: { resolved: [ids], read: [ids] } }` | `{ project, batch?, threads, skipped?, error?, replayed }`: the project menu. The door's log (on disk) replays a batch's recorded answer, `threads` lists included, so a retry never runs a second batch; the window's own `batch_id` (in memory) may also be sent. An Undo that lands after the 10 s set-aside delay sends the agents the "Set aside" notes and then the "reopened" notes. Added 2026-10-15 | 7.43, 7.44, 7.45 |
+| `GET skills` | `GET /api/inbox/skills` | | `{ skills: [{ name, root, description?, humanOnly, dir }] }`. Added 2026-10-15 | 7.46 |
+| `GET skills/content?name=` | `GET /api/inbox/skills/content` | | `{ skill: { name, dir, path, content, truncated, humanOnly } }`, content capped at 20,000 characters; `404` for a name not discovered. Added 2026-10-15 | 7.47 |
+| `POST uploads?name=<name>&idempotency_key=<key>` | `POST /api/inbox/uploads?name=` | the file's bytes, raw | `{ upload: { upload_id, name, size, kind, sha256, created_at, media_type?, width?, height? } }`; `413 upload_too_large` (100 MB), `422 upload_refused` (dotenv names, path separators). A retry with the key answers the same `upl_` id. Not carried by the relay (section 4). Added 2026-10-15 | 7.48 |
+| `POST markups?idempotency_key=<key>` | `POST /api/inbox/markups` | a PNG, JPEG or WebP, raw, at most 32 MB | `{ path, name, url }` (the name is the bytes' SHA-256; read back with `GET markups/<name>`); `422` when the body is not one of those images; `413 markup_too_large` past 32 MB. Not carried by the relay (section 4). Added 2026-10-15 | 7.49 |
 | `POST revoke` | (the door's own) | `{}` | `{ device }` | 7.25 |
 | `POST pair` | (the door's own) | `{ secret or code, name, platform }` | see above | 7.2, 7.3 |
 
 Door routes are written relative to `/api/inbox/device/`; window routes keep their full paths.
 
-What the door never answers, by construction (none is in the allowlist, and the tailnet's listener serves nothing else): `/`, `/favicon.png`, `/mcp`, `/api/inbox/bridge/*`, `/api/inbox/control/*`, `/api/inbox/attachments/:id` (raw bytes; every attachment kind is text and `view` carries it), `/api/inbox/settings`, `/api/inbox/restart`, `/api/inbox/projects/:id/delete`, `/api/inbox/decisions/:id/retire` and `replace`, `/api/inbox/pairing`, `/api/inbox/devices*`, `/api/inbox/tailnet`, `/api/inbox/lan`. The computer chores stay on the computer (decision 5). The bridge and control routes keep their own guards and refuse a device token like any other wrong token (`401 unauthorized`).
+**Decisions removed (2026-10).** The owner removed Decisions from the Inbox (and from Workspaces): the routes `POST messages/:id/decision` (7.21) and `GET decisions` (7.22) are gone from the allowlist and answer `404 device_route_not_found`, 7.54 and 7.55 (retire, replace) will never be built, and these fields left the wire: the list model's `decisions_waiting`, the thread read's `decisions`, a Send's `decisions` and `decisions_refused`, and each question's `decision_on_answer`, `decision_id`, `decision_recording` and `decision_draft`. A `Decision:` line an older agent wrote in a question block is context now. A phone app drops the Decisions screen, the card's decision switch and any reader of those fields.
+
+What the door never answers, by construction (none is in the allowlist, and the tailnet's listener serves nothing else): `/`, `/favicon.png`, `/mcp`, `/api/inbox/bridge/*`, `/api/inbox/control/*`, `/api/inbox/attachments/:id` (raw bytes; every attachment kind is text and `view` carries it), `/api/inbox/settings`, `/api/inbox/restart`, `/api/inbox/projects/:id/delete`, every Decisions route (removed: `/api/inbox/decisions`, `/api/inbox/decisions/:id/retire` and `replace`, `/api/inbox/messages/:id/decision`), `/api/inbox/drafts*` (shared drafts: exchanges 7.50 to 7.52 are held for them, not built), `/api/inbox/search/recent` (the phone keeps its own recent searches), `/api/inbox/open-in*` and `/api/inbox/attachments/:id/page`, `/api/inbox/pairing`, `/api/inbox/devices*`, `/api/inbox/tailnet`, `/api/inbox/lan`. The computer chores stay on the computer (decision 5). The bridge and control routes keep their own guards and refuse a device token like any other wrong token (`401 unauthorized`).
 
 ### Error codes
 
@@ -173,6 +191,9 @@ The door answers in the window's shape, `{ error, code, ...details }`, with thes
 | 409 | `tailnet_unavailable` | the window's tailnet switch: Tailscale cannot publish (window route) |
 | 409 | `lan_unavailable` | the window's Wi-Fi switch: `openssl` cannot make the certificate (window route, section 3) |
 | 400 | `code_not_accepted_here` | a redemption by six digits on the LAN listener: over the Wi-Fi a phone pairs by the QR only (section 3) |
+| 413 | `upload_too_large`, `markup_too_large` | a raw body past its bound (100 MB, 32 MB), declared or counted as it streams; answered with `Connection: close`, not recorded under the key |
+| 422 | `validation_error` with `field: "draft_id"` | `POST messages` naming a draft: drafts stay on the computer |
+| 413 | `relay_upload_unavailable` | `uploads` or `markups` as an up command through the relay: files go over the Wi-Fi or the tailnet in v1 (section 4) |
 
 ## 3. The LAN listener
 
@@ -262,10 +283,12 @@ The drain order (written in by R2). The Inbox handles the socket's frames one at
 
 Down item plaintexts:
 
-- `{ "v": 1, "type": "record", "after", "seq", "kind", "id", "<kind>": record }`: one store line, exactly the `record` event of the event stream (`eventPayload` in `packages/server/inbox.ts`) with `v`, `type` and `after` added. After a device's `cursor`, every line goes down, in seq order. `after` is the seq the device's previous item on this socket reached (the cursor the relay held, for the first after a `hello` or a `carriage` frame): a phone whose last seen seq is lower than an item's `after` knows an item was delayed or dropped and reads the list again (written in by R2 after the review). A line whose `item` frame would pass Cloudflare's 32 MiB WebSocket message limit goes down as the placeholder `{ "v": 1, "type": "record", "after", "seq", "kind", "id", "too_large": true }`, and the cursor moves past it; the phone reads that record over the Wi-Fi or the tailnet, or shows that it is too large to show here (M6 draws the words). Written in by R2 after the review: the store caps nothing, and one line over the limit closed the socket at every resend, held every later line and every command behind the reconnect loop. A phone reading over the Wi-Fi or the tailnet acknowledges by store cursor (`ack { cursor }`), so its queue holds only what it missed.
+- `{ "v": 1, "type": "record", "after", "seq", "kind", "id", "<kind>": record }`: one store line, exactly the `record` event of the event stream (`eventPayload` in `packages/server/inbox.ts`) with `v`, `type` and `after` added. Kinds are added over time and an app skips a kind it does not know: since the Board's step 1 (approval "inbox-board") that includes `card` (`{ "card": InboxCardWire }`), which no thread or list reads. After a device's `cursor`, every line goes down, in seq order. `after` is the seq the device's previous item on this socket reached (the cursor the relay held, for the first after a `hello` or a `carriage` frame): a phone whose last seen seq is lower than an item's `after` knows an item was delayed or dropped and reads the list again (written in by R2 after the review). A line whose `item` frame would pass Cloudflare's 32 MiB WebSocket message limit goes down as the placeholder `{ "v": 1, "type": "record", "after", "seq", "kind", "id", "too_large": true }`, and the cursor moves past it; the phone reads that record over the Wi-Fi or the tailnet, or shows that it is too large to show here (M6 draws the words). Written in by R2 after the review: the store caps nothing, and one line over the limit closed the socket at every resend, held every later line and every command behind the reconnect loop. A phone reading over the Wi-Fi or the tailnet acknowledges by store cursor (`ack { cursor }`), so its queue holds only what it missed.
 - `{ "v": 1, "type": "result", "id", "status", "content_type", "body_b64" }`: the door's answer to an up command, its status, its `Content-Type` and its body bytes exactly, as base64 (standard alphabet, padded). It goes only to a device with carriage on. `id` is the id sealed inside the command, never the relay's plaintext frame `id`, and the Inbox refuses a command whose sealed `id` is not its frame's (written in by R2 after its review: otherwise the relay could file one command's authentic result under another command's id, a GET's 200 under a Send it dropped). A result whose `item` frame would pass Cloudflare's WebSocket message limit (32 MiB, the platform's own) is replaced by `status: 413`, `content_type: application/json; charset=utf-8` and the body `{ "error", "code": "result_too_large", "limit_bytes": 33554432 }`, and the command is reported applied (written in by R2 after its review: one frame over the limit closed the socket, the command was handed over again at every `hello`, and every command behind it waited forever). The phone opens such a file over the Wi-Fi or the tailnet.
 
-Files have no item of their own (written in by R2): a file is the result of a GET. An attachment is `GET attachments/:id/view` (the current version) or `GET attachments/:id/view?version=sent` (the version the agent sent), whose result carries 7.15's JSON with `text` and `html`; an HTML asset is `GET html-assets/<token>/<path>`, whose result carries the asset's bytes and type as 7.16 answers them. A result is one envelope whatever its size (kept in parts at the relay, above).
+Files have no item of their own (written in by R2): a file is the result of a GET. An attachment is `GET attachments/:id/view` (the current version) or `GET attachments/:id/view?version=sent` (the version the agent sent), whose result carries 7.15's JSON with `text` and `html`; an HTML asset is `GET html-assets/<token>/<path>`, whose result carries the asset's bytes and type as 7.16 answers them; a message's image is `GET messages/:id/image?path=...` (7.38), its bytes and sniffed type. A result frame carries the body base64 twice (`body_b64`, then the sealed envelope as base64url), about 16/9 of the body, so the route's 10 MB image cap (`MAX_REVIEW_IMAGE_PREVIEW_BYTES`) is a frame of about 17.8 MiB, inside the 32 MiB limit: every image the route serves fits one result (`inbox-relay-bounds.test.ts`, and the relay proof fetches one at the cap). A command carries no headers, so there is no `If-None-Match` through the relay: the result is always the bytes. A result is one envelope whatever its size (kept in parts at the relay, above).
+
+Files do not go up either (written in 2026-10-15 with 7.48 and 7.49). A command's `body` is JSON, so a file would ride base64 inside the sealed envelope, about 16/9 of its size, and Cloudflare's 32 MiB message would cap a relayed upload near 18 MiB, under the window's 100 MB. In v1 the Inbox answers an up command for `uploads` or `markups` with `413 { "code": "relay_upload_unavailable" }` without running the window's route, beside `pair` and `events` as the door routes the relay does not carry. The phone uploads over the Wi-Fi or the tailnet (as section 11.5 does for video) and may then send the message naming the `upl_` id through the relay. Every other row added 2026-10-15 (7.39 to 7.47, 7.53) is an ordinary command: a GET with a fresh random `id`, a POST with its `idempotency_key` as `id`.
 
 Up command plaintext: `{ "v": 1, "id", "method", "path", "body" }`, sealed under the up key `U`, where `path` is a door path (`/api/inbox/device/...`, with its query string when the route takes one, `?version=sent` or `?project=prj_...`) and `body` is the JSON body the phone would have sent directly (a POST only). The Inbox applies it in-process through the door as that device (never as a loopback HTTP call), so the allowlist, the revocation check and the idempotency rule are the same on every path: every POST goes through the door's idempotency log per device and key, so a command the relay hands over again, or replays later, answers the stored result and writes nothing. A GET through the relay (the list after a long absence, an attachment's view, an HTML asset) is a command whose `id` is a fresh random id; a POST's `id` is its `idempotency_key` (section 6). Two door routes are not carried, and answer a result of `404 device_route_not_found`: `pair` (pairing through the relay is not in v1) and `events` (the down items are the relay's event stream; an endless answer cannot be one result).
 
@@ -315,7 +338,7 @@ The cleartext alert shows only if the notification service extension cannot run.
 
 Written in by M5 (2026-10-08): `choice.<n>` names the choice by its index in the summary's `choices`, whatever order the actions are drawn in, so the app reads the label from the summary it stored on the notification. A push no paired device key opens reads "Plannotator" and "Question from an agent". Every notification's category, with or without actions, carries the hidden-preview placeholder "Question from an agent", so with previews hidden the lock screen shows no subject and no agent text. The lock-screen answer goes to the computer directly; when that gets no answer it goes up as a command through the relay (exchange 7.34, sealed under `U`) with the same key, and when the relay says the Inbox is not online the phone says "“Yes” sent. Waiting for your computer.". A refusal on the direct path is reported in a notification of its own ("“Yes” was not sent." and the reason); a Send neither path takes reads "“Yes” may not have been sent", since the direct one may have landed before its connection died. A refusal of a Send carried by the relay comes back as a result item, which the phone reads from M6 on; until then it is not reported. The key is one per message and choice, so a different choice later is a new Send. A push opens only when its sealed `type` is `"push"`, so R1's push vector, sealed before `type` existed, is refused by the app's open, and the app's tests read it as a summary only.
 
-Written in by M6 (2026-10-08; behaviour only, no shape changed): the phone tries its paths in 9.2's order on every return to the front, pull to refresh and push: the Wi-Fi listener (from the QR's `lan` and `fp` only, never from the network), then the tailnet, each asked for `health` with a 3 s wait, then the relay while its switch is on. On the relay it reads `items?after=n`, applies each record whose seq it has not seen to the threads it keeps (records are full snapshots in the thread's shape), reads the list and the open threads as GET commands while `inbox_online` is true (never while it is false, so GETs do not pile up at the relay), and acks through `n` after applying. A command reads back its own result for about 15 s (reads at 0.25 s doubling to 4 s); with no result, or with the Inbox offline, the command is held and a Send shows "Sent. Waiting for your computer" until its reply's `idempotency_key` appears in the thread or its result arrives, on any path: back on the Wi-Fi or the tailnet the phone reads the relay once for the results of its held Sends (a refusal never shows in the thread), and with its relay switch off it posts each held Send again directly with the same key, which the door answers from its log. Only Sends are kept as held: a held pick, resolve, delete or decision switch that the computer refuses shows as the next read of the thread shows it, without words of its own. A `seen` does not wait for its result. The lock-screen answer asks the Wi-Fi and the tailnet at once (3 s), then sends with a 5 s wait directly or to the relay, so it fits the background time an action gets. A `too_large` record draws its words only through the thread's read through the relay answering 413 `result_too_large` (the placeholder names a message the phone does not hold); while the computer is asleep such a message is absent. Reading directly, the phone acks by store cursor once each time it connects (not after every read: a mailbox answers its requests one at a time, and a push would wait behind them). The relay switch is the phone's: on from pairing as R1 registers it (the fallback by default, pick 5 of the iPhone record); 9.2's switch turns carriage off and on again (7.35, with the phone's cursor). Allowing notifications registers the APNs token and changes nothing about carriage (ruled 2026-10-08 on PR 1801).
+Written in by M6 (2026-10-08; behaviour only, no shape changed): the phone tries its paths in 9.2's order on every return to the front, pull to refresh and push: the Wi-Fi listener (from the QR's `lan` and `fp` only, never from the network), then the tailnet, each asked for `health` with a 3 s wait, then the relay while its switch is on. On the relay it reads `items?after=n`, applies each record whose seq it has not seen to the threads it keeps (records are full snapshots in the thread's shape), reads the list and the open threads as GET commands while `inbox_online` is true (never while it is false, so GETs do not pile up at the relay), and acks through `n` after applying. A command reads back its own result for about 15 s (reads at 0.25 s doubling to 4 s); with no result, or with the Inbox offline, the command is held and a Send shows "Sent. Waiting for your computer" until its reply's `idempotency_key` appears in the thread or its result arrives, on any path: back on the Wi-Fi or the tailnet the phone reads the relay once for the results of its held Sends (a refusal never shows in the thread), and with its relay switch off it posts each held Send again directly with the same key, which the door answers from its log. Only Sends are kept as held: a held pick, resolve or delete that the computer refuses shows as the next read of the thread shows it, without words of its own. A `seen` does not wait for its result. The lock-screen answer asks the Wi-Fi and the tailnet at once (3 s), then sends with a 5 s wait directly or to the relay, so it fits the background time an action gets. A `too_large` record draws its words only through the thread's read through the relay answering 413 `result_too_large` (the placeholder names a message the phone does not hold); while the computer is asleep such a message is absent. Reading directly, the phone acks by store cursor once each time it connects (not after every read: a mailbox answers its requests one at a time, and a push would wait behind them). The relay switch is the phone's: on from pairing as R1 registers it (the fallback by default, pick 5 of the iPhone record); 9.2's switch turns carriage off and on again (7.35, with the phone's cursor). Allowing notifications registers the APNs token and changes nothing about carriage (ruled 2026-10-08 on PR 1801).
 
 ## 5. The surface bridge
 
@@ -387,16 +410,22 @@ Every command a phone sends carries one key: `idempotency_key` in the request bo
 | Delete | `POST threads/:id/delete` | body `idempotency_key` |
 | Annotation save, remove | `POST annotations`, `POST annotations/:id/remove` | body `idempotency_key` |
 | Tick | `POST messages/:id/guide/reviewed` | body `idempotency_key` |
-| Decision switch | `POST messages/:id/decision` | body `idempotency_key` |
 | New message | `POST threads/:id/message` | body `idempotency_key` (also the store's own key) |
+| Compose | `POST messages` | body `idempotency_key` (also the store's own key) |
+| Send to another session | `POST messages/:id/to` | body `idempotency_key` (the door's log only) |
+| Project menu, its Undo | `POST projects/:id/read`, `unread`, `resolve` | body `idempotency_key` (the door's log; the window's in-memory `batch_id` is optional) |
+| Guided-review comment | `POST messages/:id/guide/annotations` | body `idempotency_key` (an edit is the same annotation id under a new key) |
+| Comment on a message's text | `POST messages/:id/annotations` | body `idempotency_key` (an edit is the same annotation id under a new key) |
+| Upload | `POST uploads?name=` | query `idempotency_key` (the body is the file) |
+| Drawing | `POST markups` | query `idempotency_key` (the body is the image; its name is its SHA-256, so a replay writes nothing new anyway) |
 
-- **The door** keeps `inbox/device-commands.jsonl`, one line per applied command: `{ v: 1, at, device_id, key, method, path, status, body }`, with the answer's status and JSON body. It is read at start. A key seen before for that device on the same method and path answers the recorded status and body, adds `Idempotent-Replayed: true`, and writes nothing. That header is the replay signal: a replayed Send answers its recorded body, whose `replayed` field reads as it did the first time. The log keeps every answer body, reply bodies included, for as long as the store lives. The same key on another route is `409 idempotency_key_reused`. A 5xx is not recorded, so a retry runs again.
+- **The door** keeps `inbox/device-commands.jsonl`, one line per applied command: `{ v: 1, at, device_id, key, method, path, status, body }`, with the answer's status and JSON body. It is read at start. A key seen before for that device on the same method and path answers the recorded status and body, adds `Idempotent-Replayed: true`, and writes nothing. Only the method and the door path are compared, never the query or the body: a raw route's replay answers the first file's upload or drawing whatever bytes or `name` came with it. That header is the replay signal: a replayed Send answers its recorded body, whose `replayed` field reads as it did the first time. The log keeps every answer body, reply bodies included, for as long as the store lives. The same key on another route is `409 idempotency_key_reused`. A 5xx is not recorded, so a retry runs again.
 - **The relay path** carries the key as the up command's `id`. The relay holds one command per `id`, and the Inbox applies it through the door, so a command posted twice, or re-sent after the Inbox applied it but before the relay heard, writes once.
 - **The lock-screen answer** is one Send with the pick inside it (7.11): `{ idempotency_key, questions: [{ key, revision, answer: { v: 1, key, kind: "single", prompt, selected: [label] } }] }`. It tries the direct path first, then the relay, with the same key.
 
 ## 7. The exchanges
 
-P1 replays 7.1 to 7.25, 7.36 and 7.37 against a compiled binary; P2 replays 7.2 over the LAN; R1 and R2 replay 7.26 to 7.35 against `wrangler dev`. Fixture values are placeholders, never secrets: `AAAA...` stands for a 32-byte value, `tok_exampleaaaa...` for a token, repeated hex for a hash.
+P1 replays 7.1 to 7.25, 7.36, 7.37 and 7.53 against a compiled binary, and 7.39 to 7.49 against an Inbox in process (the raw upload over the tailnet's door listener too, and the relay's refusal through `asDevice`); P2 replays 7.2 over the LAN; R1 and R2 replay 7.26 to 7.35 against `wrangler dev`. Fixture values are placeholders, never secrets: `AAAA...` stands for a 32-byte value, `tok_exampleaaaa...` for a token, repeated hex for a hash.
 
 ```sh
 INBOX=https://macbook-pro.tail0000.ts.net:8443   # or http://127.0.0.1:<port> in a proof
@@ -509,8 +538,7 @@ curl -sS "$INBOX/api/inbox/device/threads" -H "Authorization: Bearer $TOKEN"
     { "id": "sent", "label": "Sent", "threads": [] },
     { "id": "new", "label": "New since you looked", "threads": [] },
     { "id": "quiet", "label": "Quiet", "threads": [] }
-  ],
-  "decisions_waiting": 0
+  ]
 }
 ```
 
@@ -563,18 +591,16 @@ curl -sS "$INBOX/api/inbox/device/threads/msg_01K70000000000000000000010" -H "Au
               { "label": "Yes", "description": null, "recommended": true, "settled": false },
               { "label": "No", "description": null, "recommended": false, "settled": false }
             ],
-            "recommendation": "Yes", "suggested_text": null, "decision_on_answer": false,
+            "recommendation": "Yes", "suggested_text": null,
             "stopped": null, "holds_up": [], "asked_by_agent_id": null, "orphaned": false,
             "state": "open", "answer": null, "revision": 0, "sent_revision": 0,
-            "picked_by": null, "picked_at": null, "sent_reply_id": null, "decision_id": null,
-            "message_id": "msg_01K70000000000000000000010",
-            "decision_recording": false, "decision_draft": null
+            "picked_by": null, "picked_at": null, "sent_reply_id": null,
+            "message_id": "msg_01K70000000000000000000010"
           }
         ]
       }
     ]
-  },
-  "decisions": []
+  }
 }
 ```
 
@@ -650,11 +676,15 @@ curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K7000000000000000000001
     "resolved_at": null,
     "idempotency_key": "00000000-0000-4000-8000-000000000003"
   },
-  "replayed": false,
-  "decisions": [],
-  "decisions_refused": []
+  "replayed": false
 }
 ```
+
+**When a Send skips (approval "inbox-words-only-reply", #1903, 0.28.20).** The server skips only what the body asks it to: `skip_unanswered: true` skips that message's open questions, and a body without the field, or with `false`, skips nothing. The decision is the phone's, and it must make it as the window does (`skipsUnanswered` and `sendAnswersAny` in `packages/inbox/components/Thread.tsx`):
+
+- The skip line ("N unanswered questions will be skipped · Keep open") defaults to **Keep open** while the Send carries no answer: words, annotations, or both. It turns to skip only once at least one question is answered in that Send (a pick saved and not sent, or one being saved). A tap on the line wins either way until the Send goes or the thread changes.
+- A Send that keeps them open sends `skip_unanswered: false` and builds its replies with `sendTargetsOf(thread, false)`, then keeps only the targets that carry a pick or a skip, plus the last target when words or annotations ride on it (the trailing latest-message target is dropped when nothing rides on it; `Thread.tsx`, the `targets` filter in `send`): a message with no pick gets no reply, so a words-only Send is ONE reply, to the latest agent message, carrying the words. The Inbox adds the still-open line ("No questions answered yet; all N are still open. …"). Never a skip-only reply to an older message.
+- A phone that keeps the 0.28.16 default (skip on, Keep open off) skips every question of a words-only Send: with one session asking twice it posts a skip-only reply to the first message and the words, also skipping, to the second. That is what the iPhone app sent to a 0.28.20 Inbox on 2026-10-14 (`packages/server/inbox-devices.test.ts`, "a phone's Send with words and no pick"; the window's same Send is proved in `packages/inbox/wordsOnlyTwoAsks.test.tsx`).
 
 The lock-screen answer (render 7.2) is the same route with the pick inside: `"questions":[{"key":"q-1a2b3c4d","revision":0,"answer":{"v":1,"key":"q-1a2b3c4d","kind":"single","prompt":"Run the retry tests against the Stripe test clock?","selected":["Yes"]}}]` and no `words`.
 
@@ -704,9 +734,12 @@ curl -sS "$INBOX/api/inbox/device/threads/msg_01K70000000000000000000010/attachm
       "unavailable": null
     }
   ],
+  "inline_images": [],
   "annotations": []
 }
 ```
+
+`inline_images` (additive, 2026-10-15): the images the thread's messages show, captured as files of the thread (approval "inbox-image-viewer"): the same state shape as an attachment, plus `ref` (the src exactly as the body wrote it) and, for a message sent before images were captured, `captured: "on_open"` and `captured_at` (the copy was taken the first time the thread was read). They are reached by id through the same routes as attachments (`attachments/:id/image`, `download`, annotations), and the message record carries them as `inline_images` too. They are never in `attachments`, so an app that does not know the field draws nothing extra. An app that sends with `export_feedback` (section 5) should pass these states in its `attachments` list too, so comments the person left on them in the window ride the Send; an older app's feedback text leaves them out.
 
 ### 7.15 An attachment's view
 
@@ -789,46 +822,9 @@ curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K7000000000000000000004
 
 `{ "message_id": "msg_01K70000000000000000000040", "reviewed": [true] }`.
 
-### 7.21 The decision switch
+### 7.21, 7.22 (removed)
 
-```sh
-curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000010/decision" \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000009","key":"q-1a2b3c4d","recording":true,"draft":{"text":"Run the retry tests against the test clock before each release.","reason":null}}'
-```
-
-`{ "question": <7.7's question with "decision_recording": true, "decision_draft": { "text": "Run the retry tests against the test clock before each release.", "reason": null }> }`. After the answer was sent: `409 question_already_sent`.
-
-### 7.22 A project's decisions
-
-```sh
-curl -sS "$INBOX/api/inbox/device/decisions?project=prj_01K70000000000000000000002" -H "Authorization: Bearer $TOKEN"
-```
-
-```json
-{
-  "serverSession": "00000000000000000000000000000001",
-  "cursor": 1301,
-  "project_id": "prj_01K70000000000000000000002",
-  "waiting": [],
-  "decisions": [
-    {
-      "id": "dec_01K70000000000000000000030",
-      "project_id": "prj_01K70000000000000000000002",
-      "text": "Run the retry tests against the test clock before each release.",
-      "reason": "Asked by Claude Code: Run the retry tests against the Stripe test clock?",
-      "source": { "kind": "answer", "question_id": "msg_01K70000000000000000000010/q-1a2b3c4d", "message_id": "msg_01K70000000000000000000010", "thread_id": "msg_01K70000000000000000000010", "agent": { "host": "claude-code", "session": "ses_01K70000000000000000000003", "name": null } },
-      "state": "current",
-      "version": 1,
-      "replaces_id": null,
-      "replacement_id": null,
-      "created_at": "2026-10-08T10:52:00.000Z",
-      "changed_at": null,
-      "idempotency_key": null
-    }
-  ]
-}
-```
+The decision switch and a project's decisions: removed with Decisions (2026-10). Both answer `404 device_route_not_found`.
 
 ### 7.23 Live sessions for New message
 
@@ -983,9 +979,245 @@ curl -sS -X POST http://127.0.0.1:52817/api/inbox/devices/dev_01K700000000000000
 
 `{ "device": { "id": "dev_01K70000000000000000000001", "name": "iPhone", "platform": "ios", "created_at": "2026-10-08T10:03:12.000Z", "last_seen_at": "2026-10-08T10:55:01.000Z", "revoked_at": "2026-10-08T11:00:00.000Z", "carriage": true } }`. The Inbox then sends 7.28 to the relay. The phone's next request answers `401 device_revoked`.
 
+### 7.38 An image a message shows
+
+The message body (an agent's question, its context written as markdown):
+
+```markdown
+:::question
+Keep the new header?
+It moves search into the header:
+![mock](shots/header-mock.png)
+- Keep it
+- Go back
+:::
+```
+
+```sh
+curl -sS "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000031/image?path=shots%2Fheader-mock.png" -H "Authorization: Bearer $TOKEN" -D - -o header-mock.png
+```
+
+`200` with the bytes, `Content-Type: image/png` (sniffed), `ETag: "<sha256 of the bytes>"`, `Cache-Control: private, no-cache` and the guard headers of the door table. `path` is the source exactly as the body writes it (percent-encoded in the query). Again with `-H 'If-None-Match: "<that sha256>"'`: `304`, no body, the same headers, while the file is unchanged; a changed file answers `200` with a new ETag. A path the body does not reference: `403 { "code": "image_not_referenced" }`.
+
+### 7.39 Every live session (compose)
+
+Added 2026-10-15 with 7.40 to 7.49 and 7.53, the phone parity rows. Each mirrors a window route as it is in 0.28.21 and adds nothing to it.
+
+```sh
+curl -sS "$INBOX/api/inbox/device/sessions?session=ses_01K70000000000000000000003" -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "serverSession": "00000000000000000000000000000001",
+  "home": "/Users/me",
+  "projects": [
+    {
+      "project": { "id": "prj_01K70000000000000000000002", "name": "billing-svc", "root": "/Users/me/code/billing-svc" },
+      "sessions": [
+        { "session": "ses_01K70000000000000000000003", "host": "claude-code", "started_at": "2026-10-15T09:30:00.000Z", "last_seen_at": "2026-10-15T10:55:01.000Z", "busy": false, "idle_since": "2026-10-15T10:43:00.000Z", "last_thread": { "id": "msg_01K70000000000000000000010", "subject": "Retry worker", "at": "2026-10-15T10:42:00.000Z" } }
+      ]
+    }
+  ],
+  "session": { "session": "ses_01K70000000000000000000003", "live": true }
+}
+```
+
+A folder the Inbox has not seen yet has `project.id: null`. `session` is present only with `?session=`.
+
+### 7.40 Start a thread (compose)
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000040","to":{"host":"claude-code","session":"ses_01K70000000000000000000003"},"body":"Add a retry budget to the webhook worker.","uploads":["upl_01K70000000000000000000048"]}'
+```
+
+`{ "thread_id": "msg_01K70000000000000000000040", "message": { "id": "msg_01K70000000000000000000040", "started_by_person": true, "reply_to": null, "to": { "host": "claude-code", "session": "ses_01K70000000000000000000003" }, "attachments": [{ "name": "notes.txt", "...": "an ordinary attachment" }], "...": "the rest of the message" }, "project": { "id": "prj_01K70000000000000000000002", "name": "billing-svc", "root": "/Users/me/code/billing-svc" }, "replayed": false }`. The same key again: the recorded answer with `Idempotent-Replayed: true`. No live session: `409 session_not_live`, nothing written; the phone keeps the words. Through the relay this is applied only when the computer is online, so `session_not_live` is the likely answer after a long wait.
+
+### 7.41 Send to another session
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000040/to" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000041","to":{"host":"pi","session":"ses_01K70000000000000000000004"}}'
+```
+
+`{ "message": { "id": "msg_01K70000000000000000000040", "to": { "host": "pi", "session": "ses_01K70000000000000000000004" }, "...": "" }, "row": { "...": "the thread's list row" } }`. Once a session took it: `409 already_delivered`; an agent's message: `422 not_addressed`; a session not live: `409 session_not_live`.
+
+### 7.42 Search
+
+```sh
+curl -sS "$INBOX/api/inbox/device/search?q=retry%20budget&status=waiting" -H "Authorization: Bearer $TOKEN"
+```
+
+The window's answer unchanged (CLAUDE.md, "Search"): `{ "serverSession": "…", "q": "retry budget", "terms": ["retry", "budget"], "took_ms": 4, "indexing": false, "threads": 412, "totals": { "threads": 1, "messages": 2, "files": 0, "projects": 0 }, "groups": { "threads": [ { "type": "thread", "id": "msg_01K70000000000000000000040", "...": "" } ], "...": "" }, "recent": null }`. The first search after a start may answer `indexing: true` with `groups: null`: ask again a moment later. A bad parameter: `422`.
+
+### 7.43 Mark a project read
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/projects/prj_01K70000000000000000000002/read" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000043"}'
+```
+
+`{ "project": { "id": "prj_01K70000000000000000000002", "...": "" }, "batch": { "read": ["msg_01K70000000000000000000010", "msg_01K70000000000000000000020"] }, "threads": [ { "...": "each row" } ], "replayed": false }`. A write that failed partway is still `200`, with `error: { code: "batch_incomplete" }` and the threads that did change. The same key again replays this answer and runs nothing.
+
+### 7.44 Undo it
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/projects/prj_01K70000000000000000000002/unread" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000044","threads":["msg_01K70000000000000000000010","msg_01K70000000000000000000020"]}'
+```
+
+`{ "project": { "...": "" }, "threads": [ { "...": "" } ], "skipped": [] }`.
+
+### 7.45 Archive a project, and its Undo
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/projects/prj_01K70000000000000000000002/resolve" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000045"}'
+```
+
+`{ "project": { "...": "" }, "batch": { "resolved": ["msg_01K70000000000000000000010"], "read": [] }, "threads": [ { "...": "" } ], "replayed": false }`. Undo: `{ "idempotency_key": "…046", "resolved": false, "threads": { "resolved": ["msg_01K70000000000000000000010"], "read": [] } }` answers `{ project, threads, skipped }`.
+
+### 7.46 The skill catalog
+
+```sh
+curl -sS "$INBOX/api/inbox/device/skills" -H "Authorization: Bearer $TOKEN"
+```
+
+`{ "skills": [ { "name": "readback", "root": "claude", "description": "State the request back.", "humanOnly": true, "dir": "/Users/me/.claude/skills/readback" } ] }`.
+
+### 7.47 One skill's SKILL.md
+
+```sh
+curl -sS "$INBOX/api/inbox/device/skills/content?name=readback" -H "Authorization: Bearer $TOKEN"
+```
+
+`{ "skill": { "name": "readback", "dir": "/Users/me/.claude/skills/readback", "path": "/Users/me/.claude/skills/readback/SKILL.md", "content": "---\nname: readback\n…", "truncated": false, "humanOnly": true } }`. A name not discovered: `404`.
+
+### 7.48 Upload a file
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/uploads?name=notes.txt&idempotency_key=00000000-0000-4000-8000-000000000048" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: text/plain' --data-binary @notes.txt
+```
+
+`{ "upload": { "upload_id": "upl_01K70000000000000000000048", "name": "notes.txt", "size": 19, "kind": "text", "sha256": "aaaa…", "created_at": "2026-10-15T11:00:00.000Z" } }`. The same key again: the same `upl_` id and `Idempotent-Replayed: true`; of the bytes sent again the door reads and drops at most 1 MiB or 2 s, then answers with `Connection: close`. No key: `422 { "field": "idempotency_key" }`. `.env`: `422 upload_refused`. Over 100 MB, declared or counted as it streams: `413 upload_too_large` with `Connection: close`, nothing recorded under the key. An upload no message names is forgotten after a day. Through the relay: `413 relay_upload_unavailable`.
+
+### 7.49 Upload a drawing
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/markups?idempotency_key=00000000-0000-4000-8000-000000000049" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: image/png' --data-binary @drawing.png
+```
+
+`{ "path": "/Users/me/.plannotator/inbox/markups/aaaa….png", "name": "aaaa….png", "url": "/api/inbox/markups/aaaa….png" }`. Read back with `GET markups/<name>`; name it in an annotation's `images` as the window does. Not an image: `422`. Past 32 MB (declared, or counted as it streams): `413 markup_too_large` with `Connection: close`. Through the relay: `413 relay_upload_unavailable`.
+
+### 7.53 A comment on a guided review's diff
+
+7.50 to 7.52 (shared drafts) are held and not built; 7.54, 7.55 (decision retire and replace) will not be built (Decisions were removed, 2026-10). 7.56 is 👍 Looks good, 7.57 a reply carrying files, 7.58 Send now, 7.59 a comment on the text of an agent's message, 7.60 tagging agents in a reply, 7.61 Re-ask, 7.62 a thread's unsent work and its reply draft (below).
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/guide/annotations" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000053","annotation":{"id":"ann-guide-1","type":"comment","scope":"line","filePath":"src/auth.ts","lineStart":1,"lineEnd":1,"side":"new","text":"Refresh before it expires.","createdAt":1760526000000}}'
+```
+
+`{ "annotation": { "id": "ann-guide-1", "message_id": "msg_01K70000000000000000000020", "attachment_id": "", "path": "src/auth.ts", "version": "<the guide snapshot's sha256>", "guide": { "title": "Token refresh", "file": "src/auth.ts", "side": "new", "line_start": 1, "line_end": 1 }, "sent_reply_id": null, "...": "" } }`. Rides the next Send like the window's (`annotation_ids` on 7.11, the feedback text built as the window builds it). Remove with 7.18. A file not in the patch or lines outside one hunk: `422 validation_error`; no guide on the message: `404 guide_not_found`; removed or sent: `409 annotation_closed`.
+
+### 7.56 👍 Looks good, and its Undo
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/ack" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000056"}'
+```
+
+`{ "message": { "id": "msg_01K70000000000000000000020", "ack": { "label": "Looks good", "at": "2026-10-15T11:00:00.000Z", "read_seq": 41, "made_read": true, "settled_seq": null, "settled_at": null, "seen_at": null }, "...": "" }, "thread": { "section": "quiet", "read_at": "2026-10-15T11:00:00.000Z", "ack": { "label": "Looks good", "at": "2026-10-15T11:00:00.000Z" }, "...": "" } }`. Undo: `{ "idempotency_key": "…057", "ack": false }` answers the same shape with `ack: null`. Ten seconds after it stands, the Inbox writes `settled_seq` (agents see it from then on: `read_thread` carries `ack: { label, at }`, and `wait_for_reply` answers `{ status: "acknowledged" }`), and once an agent reads it, `seen_at` (the window draws "<agent> saw it"). Nothing is pushed for it, ever.
+
+### 7.57 A reply carrying files
+
+The window's reply box takes pasted images (2026-10-16); the door carries the same field. Upload each file first (7.48), then name the ids on the Send:
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/reply" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000057","words":"This is what I see.","questions":[],"uploads":["upl_01K70000000000000000000057"]}'
+```
+
+7.11's answer, with `reply.attachments` holding each file as an ordinary attachment record (the same as 7.40's thread). The agent reads them as `Attached: <name> (<path>)` lines under the words, on its wake and from `wait_for_reply`. A Send of files alone (no words, no answers) is a reply, read as a words-only one. Replaying the key answers the reply it wrote and copies nothing; an id that is gone: `404 upload_not_found`, nothing written. On a Send that answers several messages, name the files on the reply that carries the words (the last), as the window does.
+
+### 7.58 Send now
+
+The line under the person's last reply says where it is (the window's `deliveryLine`, `packages/inbox/deliveryLine.ts`): for a reply to a message with `wakes`, or a message with `to`, read `GET threads/:id/sessions?asker=<that session>`; `asker.connection.busy` true reads "Queued · <agent> is working; it gets this when its turn ends", false reads "Sending to <agent>…", null (the connection does not say) or no `connection` reads "Queued for <agent>; it gets this as its next turn", `connection: null` reads "Queued for <agent>; it gets this when its session is back"; `deliver_now_at` on the message reads "Sending to <agent> now…"; a reply to a message without `wakes` reads "Saved for <agent>. It sees it when it next reads this thread". Offer Send now only while `connection.busy` and `connection.send_now` are true:
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000058/send-now" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000058"}'
+```
+
+`{ "message": { "id": "msg_01K70000000000000000000058", "deliver_now_at": "2026-10-16T17:06:00.000Z", "...": "" } }`. The session's connection then puts it into the running turn (Claude Code: a user row; Pi and OpenCode 2: a steer) and records the delivery as usual ("Delivered to <agent>, <time>").
+
+### 7.59 A comment on the text of an agent's message
+
+Added 2026-10-19 (approval "inbox-message-comments"). The window lets the person select words in an agent's message and comment on them, as on an attached file; the door carries the same route. The annotation is Plannotator's text-selection annotation: `type` `"COMMENT"` (a 👍 is a comment with `isQuickLabel: true` and `text: "👍 Looks good"`), `originalText` the exact words selected (1 to 20,000 characters), `text` the comment.
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/annotations" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000059","annotation":{"id":"ann-message-1","blockId":"block-1","startOffset":0,"endOffset":0,"type":"COMMENT","originalText":"two, four and eight seconds","text":"Cap the total wait too.","createdA":1760526000000}}'
+```
+
+`{ "annotation": { "id": "ann-message-1", "message_id": "msg_01K70000000000000000000020", "attachment_id": "", "path": "msg_01K70000000000000000000020", "version": "current", "message": { "at": "<the message's created_at>" }, "sent_reply_id": null, "...": "" } }`. It is listed with the thread's other annotations (7.14's `annotations`), rides the next Send like the window's (`annotation_ids` on 7.11, the feedback text built as the window builds it: the surface's `export_feedback` writes it under "Feedback on your message from <time> (<message id>)", the time in the phone's own time zone from `message.at`, so pass these records to it as they are). Remove with 7.18. An edit is the same annotation id under a new key. The person's own message: `422 annotation_not_allowed`; not a comment, or an id used on a file, a guide or another message: `422 validation_error`; no such message: `404 message_not_found`; a message an archive closed: `409 thread_resolved`; removed or sent: `409 annotation_closed`. The app draws message bodies natively, so it decides how to offer the selection; the window offers it on an agent's message only, never inside a question card.
+
+### 7.60 Tagging agents in a reply
+
+Added 2026-10-20 (approval "inbox-tag-agents", Lines variant). The person may tag other agent sessions with `@` in a reply; ONE reply goes to its owner (the session it goes to anyway) and to every tagged session, and each records its own delivery. Who can be tagged:
+
+```sh
+curl -sS "$INBOX/api/inbox/device/threads/msg_01K70000000000000000000010/taggable" -H "Authorization: Bearer $TOKEN"
+```
+
+`{ "owner": { "host": "claude-code", "session": "…" }, "sessions": [{ "session": "pi-0193", "host": "pi", "kind": "live", "taggable": true, "owner": false, "project": { "name": "infra", "…": "" }, "…": "" }, { "session": "ses_docs_codex", "host": "codex", "kind": "mcp", "name": "Codex", "…": "" }] }`. A `kind: "live"` session is woken by its connection; `kind: "mcp"` reads the Inbox only (it sees the tag the next time it reads the thread; say so). `taggable: false` is a live session on an older Plannotator: offer "Update Plannotator to tag this session", never the tag. The reply carries the tags additively (forwarded unchanged):
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000010/reply" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000060","words":"Queue it. @Pi raise the timeout.","tags":[{"host":"pi","session":"pi-0193","label":"Pi"}]}'
+```
+
+`reply.tags`: `[{ host, session, label?, name?, wakes, delivery?, deliver_now_at?, read_at? }]`, never the owner. Draw one line per recipient under the reply (the owner first, as 7.58 says, then each tag): `delivery` reads "Delivered to <label>, <time>"; a tag with `wakes` and no delivery reads like 7.58 from `GET threads/:id/sessions?recipients=<session>,<session>` (`recipients: { <session>: connection or null }`), and Send now for that one session is 7.58 with `{ idempotency_key, session }`; a tag without `wakes` reads "Saved for <label>. It sees it the next time it reads this thread", or "<label> read this thread, <time>" once `read_at` is set. The list row's `sent.recipients` (`[{ host, session, name?, owner, wakes, delivered_at }]`) and `participants` (`[{ host, session, name? }]`) are additive. Refusals, nothing written: a live session on an older Plannotator `409 tag_needs_update`; a session known under another host than the tag names `409 tag_host_mismatch`; a session that is neither live nor a known MCP agent `409 session_not_live`; a malformed list `422 validation_error`. Replaying the key answers the reply it wrote, its tags as they were.
+
+### 7.61 Re-ask
+
+Added 2026-10-20 (approval "inbox-reask"). The person asks the agent that asked to ask its questions still open in the thread again, together in one new message, with fresh context. Name the latest message of that session that has an open question:
+
+```sh
+curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K70000000000000000000020/reask" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"idempotency_key":"00000000-0000-4000-8000-000000000061"}'
+```
+
+`{ "message_id": "msg_01K70000000000000000000020", "questions": [ … ], "reply": { "id": "msg_…", "author": { "kind": "person" }, "reask": ["msg_…/q-…", "…"], "body": "Please ask your 3 open questions …", "...": "" }, "replayed": false }`. The note (`reply.reask`, the ids it asked about) is the person's reply: it is delivered like one (7.58's lines and Send now apply), and while it is the thread's last message the row is in Sent (`reask_pending: true` on the row). Every question of that session that is open goes in the list; one the person picked and has not sent goes with the note as an answer (its state becomes `sent`). The old questions stay open until the agent's new message replaces them (their `state` becomes `superseded`); draw the note as one line ("You asked <agent> to ask the N open questions again, together in one message. They stay open here until it does."), its body behind a disclosure. Questions from several sessions: one Re-ask per session, each to that session's own message. The session that asked has ended: `{ idempotency_key, to: { host, session } }` names a live session of the project (as 7.11's `to`); not live `409 session_not_live`, nothing written. Nothing left open for that session: `409 nothing_to_reask`; a person's message: `422 validation_error`; a message an archive closed: `409 thread_resolved`. Replaying the key answers the note it wrote.
+
+### 7.62 The unsent work in a thread, and its reply draft (read only)
+
+A list row carries `unsent` (additive, approval "inbox-reply-drafts"): `{ reply_at, picks, comments }`, or null. `reply_at` is when the words typed in the thread's reply box on the computer were last saved (null when none); `picks` the picks saved and not sent; `comments` the comments waiting for a Send. Draw it in the row's count slot as "Draft · Your reply" (or "Draft · 2 picks", "Draft · Your reply, 1 comment"; "Draft" in the accent colour, the rest muted). A thread holding any of it is never in Quiet unless archived: the Inbox places it in New since you looked, not bold when only the person's own words or comments put it there. A Re-ask that waits (7.61) keeps its row in Sent as before; the row still carries `unsent`. `GET threads/:id/draft` reads the draft's words, so the phone can show them:
+
+```sh
+curl -sS "$INBOX/api/inbox/device/threads/msg_01K70000000000000000000010/draft" -H "Authorization: Bearer $TOKEN"
+```
+
+`{ "serverSession": "…", "draft": { "v": 1, "thread_id": "msg_01K70000000000000000000010", "body": "Cards, but keep the totals column", "created_at": "…", "updated_at": "…" } }`. The door writes no reply draft in v1: the phone composes its own reply, and a Send from the phone leaves the computer's draft alone (the window's own Send clears it). The door forwards a reply's `clear_draft` unchanged, so the phone must not send it for words it did not prefill from this draft: `clear_draft` names the draft's `updated_at` (a compare-and-set, so a stale value clears nothing), and only a reply carrying that draft's own words may name it. A later row can add writes with the window's compare-and-set (`base` = the `updated_at` read; `409 draft_conflict` with the newer draft).
+
 ## 8. What this contract leaves out
 
-The Workspaces app's side (it has its own contract), the iPad, pairing through the relay, deleting a mailbox, a retention sweep at the relay, rates beyond the reused creation brake, raw attachment bytes on the door, device attestation, request signing, re-authentication, and any Settings, restart or storage route on the phone.
+The Workspaces app's side (it has its own contract, and decides how to draw a message's images), the iPad, pairing through the relay, deleting a mailbox, a retention sweep at the relay, rates beyond the reused creation brake, raw attachment bytes on the door, device attestation, request signing, re-authentication, and any Settings, restart or storage route on the phone.
 
 ## 9. Rulings written in (2026-10-08)
 
@@ -1051,3 +1283,91 @@ curl -sS -X PUT "$RELAY/v1/mailboxes/mbx_AAAAAAAAAAAAAAAAAAAAAA/devices/dev_01K7
 ```
 
 `204`. Exchange 7.30 to this device then answers `202 { "sent": true }`; after FCM answers `UNREGISTERED`, `200 { "sent": false, "reason": "fcm_gone" }`.
+
+## 11. Video (2026-10-15)
+
+Design record "inbox-video" (approved by the owner 2026-10-15, not in this repo): an agent attaches a film; the person watches it in the Inbox on the Mac and on the phone, and comments at moments. Everything here is additive.
+
+Before this, a film was an attachment of kind `file`, and the app opened it with the door's `GET attachments/:id/download`, which sent the whole file with no Range, so the app downloaded all of it before it played (AVPlayer from a local file). That fallback stays valid. What follows is the upgrade to streaming playback.
+
+### 11.1 The kind `video`
+
+- `InboxAttachmentState.kind` gets the value `"video"`. The Inbox decides it from the bytes: MP4/MOV with a video `ftyp` brand (an image or audio major brand such as `avif`, `heic`, `M4A ` keeps it out), or WebM by its EBML DocType `webm` (Matroska stays `file`).
+- New optional fields on the state:
+  - `media_type`: `"video/mp4" | "video/quicktime" | "video/webm"`
+  - `duration_ms`: integer, MP4/MOV only (from `moov/mvhd`)
+  - `width`, `height`: pixels of the first video track, MP4/MOV only (from its `tkhd`)
+- An older app reads an unknown kind as `file` (`readInboxAttachmentKind`) and shows Download; `/download` works unchanged for it.
+- An older Inbox sends `file` for the same film. The app plays it through `/download` with Range when the answer carries `Accept-Ranges: bytes` (an Inbox from 2026-10-15 on); otherwise it downloads the whole file first.
+- Display rule for a time: `m:ss`, and `h:mm:ss` from one hour.
+
+### 11.2 Range, the same on `video` and `download`
+
+- Every answer carries `Accept-Ranges: bytes` and an `ETag`.
+- One range (`Range: bytes=a-b`, `bytes=a-` or `bytes=-n`): `206 Partial Content` with `Content-Range: bytes a-b/size`. An end past the file is its last byte.
+- **A `206` may cover less than the range asked for.** No answer carries more than 8 MiB: an open-ended range (`bytes=a-`) or one longer than 8 MiB is answered from its start for 8 MiB, and `Content-Range` says where it ended (RFC 9110 allows this). The client asks again from there. That is what players do (AVPlayer's resource loader and ExoPlayer read `Content-Range` and request the rest); an app that fills a loading request itself must loop until it has the bytes it needs. A full `200` (a `download` with no `Range`) is not capped.
+- No range, a `Range` the Inbox does not read, or several ranges: the full `200`.
+- An unsatisfiable range (a start at or past the end, `bytes=-0`, any range of an empty file): `416` with `Content-Range: bytes */size` and no body.
+- `ETag`: the sent version's `"<sent_sha256>"`; the current file's `"<dev>-<ino>-<size>-<mtime µs>"` (strong, as nginx's stat tag is; `If-Range` compares strongly), from the stat of the descriptor the Inbox opened (never a hash per request: every seek is one). `If-Range` that is not exactly this version's ETag (or is a date) gets the full `200`: the file changed (the agent re-rendered it). Re-read `threads/:id/attachments` and start again.
+- `Content-Length`: on every answer of 1 MiB or less (a player's `bytes=0-1` probe, and a range of up to 1 MiB). A longer answer is streamed and arrives chunked, without `Content-Length` (the Inbox's HTTP server drops it on a streamed body); its size is the length `Content-Range` names (`206`), or the attachment's `size` (`200`).
+- Headers on every answer: `X-Content-Type-Options: nosniff`, `Cross-Origin-Resource-Policy: same-origin` and a sandbox CSP. `video`: `Content-Type` the sniffed `video/*` type, `Content-Disposition: inline`, `Cache-Control: private, no-cache`. `download`: `application/octet-stream` (`application/pdf` for a PDF), `Content-Disposition: attachment`, `Cache-Control: no-store`.
+- The door forwards three request headers of the phone's to the window: `Range` and `If-Range` (on a GET) and `If-None-Match` (the image routes' validator, 7.38), besides the event stream's `Last-Event-ID`; nothing else. It returns the window's status and headers unchanged: `206`, `Content-Range`, `Accept-Ranges`, `Content-Length`, `ETag`.
+- A streamed answer the app stops reading for 30 s is ended by the Inbox (its file handle closes) and the connection errors: a player that paused that long asks again from where it is, with a `Range`.
+- The door is GET only, so there is no HEAD. AVPlayer's first probe (`bytes=0-1`) returns the size in `Content-Range`.
+
+Suggested app shape: `AVURLAsset` on a custom scheme (`plannotator-video://<att id>?version=…`), with an `AVAssetResourceLoaderDelegate` that answers each `AVAssetResourceLoadingRequest` from the door with the app's pinned `URLSession` and bearer token. Set `contentInformationRequest.contentType` from `media_type` (or the `Content-Type` of `/video`), `contentLength` from the total in `Content-Range`, and `isByteRangeAccessSupported = true`. If an answer is a `200` (an older Inbox on `/download`), slice that body for the request, or fall back to the full download. ExoPlayer: a `DataSource` over the same requests.
+
+### 11.3 A video by Range
+
+```sh
+curl -sS "$INBOX/api/inbox/device/attachments/att_01K70000000000000000000030/video" \
+  -H "Authorization: Bearer $TOKEN" -H 'Range: bytes=0-1' -D - -o /dev/null
+```
+
+```
+HTTP/1.1 206 Partial Content
+Content-Type: video/mp4
+Content-Range: bytes 0-1/483393536
+Content-Length: 2
+Accept-Ranges: bytes
+ETag: "1000004-2b1f0a-1cd0b000-6b0d1a2f4c5e0"
+Content-Disposition: inline; filename="launch-cut-v3.mp4"; filename*=UTF-8''launch-cut-v3.mp4
+Content-Security-Policy: sandbox; default-src 'none'; style-src 'unsafe-inline'
+X-Content-Type-Options: nosniff
+Cross-Origin-Resource-Policy: same-origin
+Cache-Control: private, no-cache
+```
+
+A seek: `Range: bytes=104857600-` with `If-Range` set to that ETag gets `206` with the next 8 MiB (`Content-Range: bytes 104857600-113246207/483393536`), and the player asks again from `113246208`; a stale `If-Range` gets the full `200`; `Range: bytes=483393536-` gets `416` with `Content-Range: bytes */483393536`. Another kind: `415 { "code": "attachment_not_video" }`.
+
+### 11.4 A download by Range
+
+The same request to `attachments/:id/download` answers the same way, with the download's own type, disposition and `Cache-Control`. A native player can stream any file from it.
+
+### 11.5 The relay
+
+No relay changes in v1 (the owner's answer 3). A sealed command carries no headers, so no Range reaches the window through the relay: `video` and `download` answer the whole file, which the relay carries when it fits one frame and answers `413 result_too_large` otherwise, without reading it. Over the relay the app shows "Plays when your phone reaches this computer over Wi-Fi or Tailscale" with Download. Planned for v1.1: an optional `headers: { range, if_range }` in the sealed command and `headers: { content_range, accept_ranges, etag }` in the result; the app then fetches pieces of 8 MiB or less.
+
+### 11.6 The comment record
+
+The app saves comments with the existing `POST annotations` (7.17): `{ idempotency_key, attachment_id, version, annotation }`, `version` `"current"` or the sent sha256 as for other files. The annotation:
+
+```json
+{
+  "id": "ann-vid-<uuid>",
+  "blockId": "video",
+  "startOffset": 0,
+  "endOffset": 0,
+  "type": "COMMENT",
+  "text": "Logo is clipped on the right edge at this size.",
+  "originalText": "launch-cut-v3.mp4 at 1:42",
+  "createdA": 1760440000000,
+  "inboxVideo": { "time": 102.4 },
+  "images": [{ "path": "<data dir>/inbox/markups/<sha256>.jpg", "name": "launch-cut-v3 at 1:42" }]
+}
+```
+
+- `inboxVideo.time` is seconds from the start, with millisecond precision. It is the only new field. On a video the Inbox requires `blockId: "video"` and a `time` of 0 or more (`422 validation_error` otherwise).
+- `images` is optional. The Mac attaches the paused frame there (a JPEG kept through its markups route). The phone sends no `images` in v1, because the door has no upload route. When it shows a comment with an image, the phone loads it with `GET markups/<name>` (already on the allowlist).
+- An older Inbox refuses a comment on a video (`422 annotation_not_allowed`), because there the kind reads `file`.
+- Send: the surface's `export_feedback` builds the feedback text with Plannotator's exporter, as for every other kind; the app passes the video records as usual, and `texts` carries no entry for a video. The text lists a film's comments by time, each with a line `At 1:42 (102.4 s of 7:41)` under its heading and the frame's path. The surface needs no new message type, but the app must bundle a `surface.html` built after this shipped: an older surface reads `video` as `file` and leaves these comments out of the text.

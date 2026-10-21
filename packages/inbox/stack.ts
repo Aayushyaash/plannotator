@@ -3,7 +3,7 @@
  * in portrait, a narrow desktop window, a Stage Manager tile): the pane on
  * top covers the one under it, as on a phone, while the window keeps its
  * desktop chrome (the docked sidebar, the headers, the desktop history of a
- * file or a decision).
+ * file).
  *
  * - A thread covers the list when the list's narrowest column (380 px) and a
  *   440 px thread (the column a thread keeps beside an open file) do not both
@@ -11,8 +11,6 @@
  *   thread, as iPad Mail does, and an iPad upright (810 px) stacks.
  * - An open file covers its thread when the thread's 440 px column and a
  *   480 px file do not fit the window.
- * - An open decision covers the Decisions list when the list's 460 px column
- *   and a 380 px decision do not both fit.
  *
  * Wide windows never stack, so a desktop at 1280 px and over is drawn
  * exactly as before.
@@ -28,21 +26,15 @@ export const THREAD_MIN_WIDTH = 480;
 export const THREAD_BESIDE_FILE_WIDTH = 440;
 /** An open file's narrowest readable width beside the thread. */
 export const FILE_MIN_WIDTH = 480;
-/** The Decisions list's column beside an open decision (inbox.css `.ib-dpage.ib-narrow`). */
-export const DECISIONS_LIST_WIDTH = 460;
-/** An open decision's narrowest pane beside the Decisions list. */
-export const DECISION_MIN_WIDTH = 380;
 
 export interface Stack {
   /** A thread covers the list. */
   thread: boolean;
   /** An open file covers its thread. */
   file: boolean;
-  /** An open decision covers the Decisions list. */
-  decision: boolean;
 }
 
-export const NO_STACK: Stack = { thread: false, file: false, decision: false };
+export const NO_STACK: Stack = { thread: false, file: false };
 
 /**
  * Which panes cover which, for the room the list and its pane share
@@ -53,12 +45,11 @@ export function stackFor(mainWidth: number, windowWidth: number): Stack {
   return {
     thread: mainWidth > 0 && mainWidth < LIST_MIN_WIDTH + THREAD_BESIDE_FILE_WIDTH,
     file: windowWidth > 0 && windowWidth < THREAD_BESIDE_FILE_WIDTH + FILE_MIN_WIDTH,
-    decision: mainWidth > 0 && mainWidth < DECISIONS_LIST_WIDTH + DECISION_MIN_WIDTH,
   };
 }
 
 function same(a: Stack, b: Stack): boolean {
-  return a.thread === b.thread && a.file === b.file && a.decision === b.decision;
+  return a.thread === b.thread && a.file === b.file;
 }
 
 /**
@@ -77,6 +68,20 @@ function mainWidthOf(root: HTMLElement): number {
 }
 
 /**
+ * The room the floating panes' gutters take: one on each side of `.ib-main` and one between its two panes,
+ * read from inbox.css's `--ib-gutter`, 8 px while the Soft look's panes switch (`--ib-soft-panes`) is on and
+ * 0 while it is off (today's flat window). Measured rooms leave them out, so two panes stack rather than draw
+ * narrower than their readable widths.
+ */
+export function paneGutters(el?: Element | null): number {
+  if (typeof document === 'undefined') return 0;
+  const root = el ?? document.querySelector('.pn-inbox');
+  if (!root) return 0;
+  const gutter = parseFloat(getComputedStyle(root).getPropertyValue('--ib-gutter'));
+  return Number.isFinite(gutter) ? 3 * gutter : 0;
+}
+
+/**
  * The stack for the window (`.pn-inbox`). Read before paint whenever one of
  * `deps` changes (the caller passes what moves the sidebar's target: the
  * route, the sidebar's open state, an open file), so a thread opened from its
@@ -88,7 +93,8 @@ export function useStack(ref: RefObject<HTMLElement | null>, phone: boolean, dep
   const [stack, setStack] = useState<Stack>(NO_STACK);
   const measure = () => {
     const root = ref.current;
-    const next = phone || !root ? NO_STACK : stackFor(mainWidthOf(root), root.getBoundingClientRect().width);
+    const gutters = paneGutters(root);
+    const next = phone || !root ? NO_STACK : stackFor(mainWidthOf(root) - gutters, root.getBoundingClientRect().width - gutters);
     setStack((current) => (same(current, next) ? current : next));
   };
   // The caller's deps are what change the sidebar's target in the same commit.

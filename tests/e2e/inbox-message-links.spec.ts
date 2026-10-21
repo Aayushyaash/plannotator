@@ -20,6 +20,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
+import { NO_BROWSER } from '../helpers/no-browser';
 
 const repo = resolve(__dirname, '../..');
 const binary = resolve(process.env.PLANNOTATOR_E2E_BINARY ?? join(repo, '.local/plannotator'));
@@ -30,7 +31,7 @@ test('a link to an attached file opens it beside the thread; an unattached one i
   expect(existsSync(binary), `build the binary first: ${binary}`).toBe(true);
   const root = inboxScratch('plannotator-inbox-links-e2e-');
   const dataDir = join(root, 'data');
-  const env = { PATH: process.env.PATH ?? '', HOME: root, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: 'none' };
+  const env = { PATH: process.env.PATH ?? '', HOME: root, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: NO_BROWSER };
   const started = spawnSync(binary, ['inbox', '--background'], { env, encoding: 'utf8', timeout: 60_000 });
   expect(started.status, started.stderr).toBe(0);
   const url = started.stdout.trim();
@@ -70,8 +71,11 @@ test('a link to an attached file opens it beside the thread; an unattached one i
     // Attached: a real link; a click opens the mock in the side pane.
     const mock = body.getByRole('link', { name: 'the mock' });
     await expect(mock).toHaveAttribute('data-local-link', 'open');
-    // The tooltip names the file by its path in the project.
-    await expect(mock).toHaveAttribute('title', 'Open design/mock.html beside the thread');
+    // The tooltip names the file by its path in the project: ui's Tooltip, never a native title.
+    await expect(mock).not.toHaveAttribute('title', /./);
+    await mock.hover();
+    await expect(page.locator('[data-side].bg-popover')).toHaveText('Open design/mock.html beside the thread');
+    await page.mouse.move(1, 1);
     // Its href is the window's deep link to the file: a new tab opens the same file there.
     const deepLink = await mock.getAttribute('href');
     expect(deepLink).toMatch(new RegExp(`^#thread=${sent.thread_id}&file=att_[0-9A-Z]+$`));
@@ -87,17 +91,24 @@ test('a link to an attached file opens it beside the thread; an unattached one i
     // Focus moved into the pane.
     expect(await pane.evaluate((el) => el === document.activeElement)).toBe(true);
 
-    // Close it, then Enter on the focused link opens it again.
+    // HTML opens full screen (approval "inbox-one-fullscreen"): Exit full screen puts it beside the thread, with its header.
+    await expect(pane).toHaveAttribute('data-full-view', '');
+    await page.getByRole('button', { name: 'Exit full screen' }).click();
+    // Close it, then Enter on the focused link opens it again (full screen again).
     await page.getByRole('button', { name: 'Close mock.html' }).click();
     await expect(pane).toHaveCount(0);
     await mock.focus();
     await page.keyboard.press('Enter');
     await expect(page.locator('[data-attachment-pane]')).toBeVisible();
+    await page.getByRole('button', { name: 'Exit full screen' }).click();
     await page.getByRole('button', { name: 'Close mock.html' }).click();
 
     // Not attached: inert text with its reason, never requested.
     const notes = body.locator('[data-local-link="unavailable"]', { hasText: 'working notes' });
-    await expect(notes).toHaveAttribute('title', /Not attached/);
+    await expect(notes).not.toHaveAttribute('title', /./);
+    await notes.hover();
+    await expect(page.locator('[data-side].bg-popover')).toContainText('Not attached');
+    await page.mouse.move(1, 1);
     expect(await notes.evaluate((el) => el.tagName)).toBe('SPAN');
     await notes.click();
     await expect(page.locator('[data-attachment-pane]')).toHaveCount(0);

@@ -164,7 +164,7 @@ function entranceShift(article: HTMLElement): number {
 export function measureFirstLines(article: HTMLElement): FirstLines {
   const shift = entranceShift(article);
   const box = article.getBoundingClientRect();
-  const sender = article.querySelector<HTMLElement>('.ib-sender, .ib-fline');
+  const sender = article.querySelector<HTMLElement>('.ib-fline');
   const head = sender?.getBoundingClientRect() ?? null;
   return firstLines({ top: box.top - shift, bottom: box.bottom - shift }, head ? head.top - shift : null, head ? head.bottom - shift : null);
 }

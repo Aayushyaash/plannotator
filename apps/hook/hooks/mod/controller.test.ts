@@ -33,6 +33,26 @@ function decide(host: FakeHost, call: RunCall, record: Record<string, unknown>) 
 
 const PLAN = '# Ship it\n\n1. Do the thing.\n'
 
+// The owner's report (2026-10-16): replies in the Plannotator Inbox stayed
+// queued because the session always read as busy. Every hook hears a
+// subagent's turn.start (a background one included), while its end is not
+// counted, so counting the start left the session busy after the main turn
+// ended, and the Inbox wake (which waits for idle) never delivered.
+describe('busy counts the main loop only', () => {
+  test("a subagent's turn start does not make the session busy, and the main turn's end leaves it idle", async () => {
+    const mod = new PlannotatorMod(fakeHost(), SESSION)
+    await mod.onTurnStart('main-1', 'Fix the export.')
+    expect(mod.turns.busy).toBe(true)
+    // A background subagent starts while the main turn runs, and keeps running after it.
+    await mod.onTurnStart('sub-1', 'Explore the repo.', 'agent-1')
+    mod.onTurnComplete('main-1', 'Done.', false)
+    expect(mod.turns.busy).toBe(false)
+    // Its next turn (a notification woke it) is still not the session's.
+    await mod.onTurnStart('sub-2', '', 'agent-1')
+    expect(mod.turns.busy).toBe(false)
+  })
+})
+
 describe('plan review', () => {
   test('ExitPlanMode is denied at once and the review starts detached with the plan on stdin', async () => {
     const host = fakeHost()

@@ -6,9 +6,6 @@
  */
 
 import type {
-  InboxDecision,
-  InboxDecisionAgent,
-  InboxDecisionDraft,
   InboxGuideRef,
   InboxHealth,
   InboxListRow,
@@ -17,10 +14,29 @@ import type {
   InboxProject,
   InboxQuestion,
   InboxSoundSettings,
+  InboxTextSize,
   InboxThread,
+  InboxComposeProject,
+  InboxDraft,
+  InboxReplyDraft,
+  InboxReplyDraftRow,
+  InboxDraftStatus,
+  InboxUpload,
 } from '@plannotator/core/inbox-types';
 import type { QuestionAnswer } from '@plannotator/core/question-block';
-import type { InboxAgentId, InboxAgentsModel, InboxAnnotationRecord, InboxAttachmentState, InboxNoteAgentId } from '@plannotator/core/inbox-types';
+import type { RecipientConnection } from './deliveryLine';
+import type { InboxSearchAnswer, InboxSearchFrom, InboxSearchGroupId, InboxSearchStatus } from '@plannotator/core/inbox-search';
+import type {
+  InboxAgentId,
+  InboxAgentsModel,
+  InboxAnnotationRecord,
+  InboxCardWire,
+  InboxAttachmentState,
+  InboxMessageWire,
+  InboxNoteAgentId,
+  InboxNotifyReach,
+  InboxWindowPermission,
+} from '@plannotator/core/inbox-types';
 
 export type AgentToolHost = 'claude-code' | 'pi' | 'opencode';
 
@@ -36,6 +52,20 @@ export interface NotificationSettings {
 export interface ProjectFolder extends InboxProject {
   threads: number;
   unread: number;
+  /** Threads the window's list holds (not archived). Absent from an older Inbox: the folder is always drawn. */
+  listed?: number;
+  /** Archived threads (resolved, none come back). Absent from an older Inbox. */
+  archived?: number;
+}
+
+/** The project menu's batches (POST /api/inbox/projects/:id/read and /resolve): the threads each took. */
+export interface ProjectBatchAnswer<B> {
+  project: ProjectFolder | null;
+  batch: B;
+  threads: InboxListRow[];
+  replayed: boolean;
+  /** The batch stopped partway: `batch` names what it changed (Undo covers those); the rest did not change. */
+  error?: { code: string; message: string };
 }
 
 export interface ListModel {
@@ -45,12 +75,12 @@ export interface ListModel {
   update: InboxHealth['update'];
   /** This Inbox started on a newer version than the one before it: "What's new in X" for this run. Absent from an older Inbox. */
   updated?: string | null;
+  /** Claude Code sessions a /reload-plugins would bring up to date: the sidebar's "Reload Claude Code N". Absent from an older Inbox. */
+  restart_claude_code?: number;
   notice: string | null;
   projects: ProjectFolder[];
   project: string | null;
   sections: InboxListSection[];
-  /** Questions in every project that record a decision once sent: the sidebar's Decisions count. */
-  decisions_waiting: number;
 }
 
 /** GET /api/inbox/threads/archived: Settings' Archived block, newest archived first, a page at a time. */
@@ -71,48 +101,14 @@ export interface ThreadModel {
   serverSession: string;
   cursor: number;
   thread: InboxThread;
-  /** The decisions this thread's questions recorded, for the "Settled: ..." lines. */
-  decisions: InboxDecision[];
   /** The thread's list row, an archived thread's too (the window's list leaves those out). Absent from an older Inbox. */
   row?: InboxListRow | null;
-}
-
-/** A question that records a decision once answered and sent (the Decisions page's Waiting group). */
-export interface WaitingDecision {
-  question_id: string;
-  message_id: string;
-  thread_id: string;
-  project_id: string;
-  prompt: string;
-  agent: InboxDecisionAgent | null;
-  asked_at: string;
-}
-
-/** One project's counts for the Decisions page's project switch. */
-export interface DecisionProjectCounts {
-  project_id: string;
-  /** Questions that record a decision once answered and sent. */
-  waiting: number;
-  /** Decisions that hold (state `current`). */
-  settled: number;
-}
-
-export interface DecisionsModel {
-  serverSession: string;
-  cursor: number;
-  project_id: string;
-  waiting: WaitingDecision[];
-  decisions: InboxDecision[];
-  /** Every project's counts, for the project switch. Absent from an older Inbox. */
-  project_counts?: DecisionProjectCounts[];
 }
 
 export interface ReplyResult {
   reply: unknown;
   questions: InboxQuestion[];
   replayed: boolean;
-  decisions: InboxDecision[];
-  decisions_refused: { key: string; code: string; message: string }[];
 }
 
 export interface UpdateSwitches {
@@ -140,11 +136,28 @@ export interface UpdateDetails {
 
 export interface WhatsNewModel {
   version: string;
+  /** The version this Inbox runs (`dev` for a development build). */
   current: string;
+  /**
+   * The version `skipped` counts from: `current`, or, on the page of a release
+   * this Inbox already runs, the one it ran before the update. Absent from an
+   * older Inbox (read as `current`).
+   */
+  since?: string | null;
   published_at: string | null;
   release_url: string;
   notes: string;
   skipped: { version: string; text: string }[];
+  /**
+   * The notes' image sources (as written) saved on this computer, loaded from
+   * `whatsNewImageUrl`. Absent from an older Inbox (no image is loaded).
+   */
+  images?: string[];
+}
+
+/** Where the What's new page loads one of the notes' saved images. */
+export function whatsNewImageUrl(version: string, src: string): string {
+  return `/api/inbox/whats-new/image?version=${encodeURIComponent(version)}&src=${encodeURIComponent(src)}`;
 }
 
 /** "Over your tailnet" (packages/server/inbox-tailscale.ts): the switch, the address or why not, and who may open it. */
@@ -177,6 +190,8 @@ export interface SettingsModel {
   data_dir: string;
   inbox_tool: { hosts: Record<AgentToolHost, boolean>; env: boolean | null };
   notifications: NotificationSettings;
+  /** Whether a notification can reach the person now (open windows, how many may notify). Absent from an older Inbox. */
+  notify_reach?: InboxNotifyReach;
   /** The question sound (config.json inboxSound). Absent from an Inbox that predates it. */
   sound?: InboxSoundSettings;
   /** Settings → About: update notices and automatic updates (`env`: the env var decides). Absent from an older Inbox. */
@@ -188,6 +203,8 @@ export interface SettingsModel {
    * reads too: null when never chosen. Absent from an Inbox that predates it.
    */
   theme?: InboxThemeConfig | null;
+  /** The window's text size in px (config.json `inboxTextSize`): 12 to 15, 14 unless chosen. Absent from an older Inbox. */
+  text_size?: InboxTextSize;
   store: {
     dir: string;
     bytes: number;
@@ -212,6 +229,8 @@ export interface LiveSession {
   idle_since: string | null;
   /** It wrote in this thread. */
   wrote_thread: boolean;
+  /** Its connection can put a message into a running turn (Send now). Absent from an older Inbox. */
+  send_now?: boolean;
 }
 
 export interface LiveSessionsModel {
@@ -225,7 +244,46 @@ export interface LiveSessionsModel {
    * (with a 60 s grace, packages/server/inbox-sessions.ts). Absent from an
    * older Inbox, which reads as live.
    */
-  asker?: { session: string; live: boolean };
+  asker?: {
+    session: string;
+    live: boolean;
+    /**
+     * How that session is connected now (no grace): null when its connection
+     * does not poll now. Absent from an older Inbox. The line under the
+     * person's message reads it ("Queued", "Sending", Send now).
+     */
+    connection?: RecipientConnection | null;
+  };
+  /**
+   * Asked for with `?recipients=a,b` (approval "inbox-tag-agents"): how each
+   * session a reply tags is connected now (null: its connection does not poll
+   * now). Absent from an older Inbox.
+   */
+  recipients?: Record<string, RecipientConnection | null>;
+}
+
+/** One session the person may tag with `@` (packages/server/inbox-tags.ts). */
+export interface TaggableSession {
+  session: string;
+  host: string | null;
+  /** `live`: its connection polls and wakes it; `mcp`: it reads the Inbox only. */
+  kind: 'live' | 'mcp';
+  name: string | null;
+  project: { id: string | null; name: string; root: string | null } | null;
+  started_at: string | null;
+  last_at: string;
+  busy: boolean | null;
+  idle_since: string | null;
+  /** False: a live session on an older Plannotator; update it to tag it. */
+  taggable: boolean;
+  owner: boolean;
+  wrote_thread: boolean;
+}
+
+export interface TaggableModel {
+  serverSession: string;
+  owner: { host: string | null; session: string } | null;
+  sessions: TaggableSession[];
 }
 
 /** A paired phone as the window lists it (adr/implementation/inbox-mobile.md, 7.36). */
@@ -336,6 +394,11 @@ export function setPageSession(value: string): void {
   if (pageSession === null) pageSession = value;
 }
 
+/** The page's serverSession (null before the first list read), for a keepalive request built by hand. */
+export function pageServerSession(): string | null {
+  return pageSession;
+}
+
 async function post<T>(path: string, body: Record<string, unknown>): Promise<T> {
   return readJson<T>(
     await fetch(path, {
@@ -353,7 +416,109 @@ export interface InboxThemeConfig {
   dark?: string;
 }
 
+/** GET /api/inbox/search's answer (the wire is @plannotator/core/inbox-search). */
+export type SearchModel = InboxSearchAnswer & { serverSession: string; recent_searches?: string[] };
+
+export interface SearchRequest {
+  q: string;
+  project?: string | null;
+  status?: InboxSearchStatus | null;
+  from?: InboxSearchFrom | null;
+  group?: InboxSearchGroupId | null;
+  offset?: number;
+  limit?: number;
+  /** The project open in the list: a tie boost, never a filter. */
+  current?: string | null;
+}
+
+/** GET /api/inbox/sessions: every live session, grouped by project (compose). */
+export interface ComposeSessionsModel {
+  serverSession: string;
+  home: string;
+  projects: InboxComposeProject[];
+  /** Asked for with `?session=`: whether that session is still there (with the asker grace). */
+  session?: { session: string; live: boolean };
+}
+
+/** A draft as the Drafts page lists it, with its chip. */
+export type DraftView = InboxDraft & { status: InboxDraftStatus };
+
+/** What compose sends: a new thread to one live session. */
+export interface StartThreadInput {
+  to: { host: string; session: string };
+  body: string;
+  idempotency_key: string;
+  uploads?: string[];
+  draft_id?: string;
+  /** The thread's name (its chip): typed by the person (an agent never replaces it), or compose's suggestion with `thread_name_auto`. */
+  thread_name?: string;
+  /** `thread_name` is compose's suggestion the person left as it was: dropped when it cannot be used, and the agent may rename it. */
+  thread_name_auto?: true;
+}
+
+/**
+ * Upload one file (compose): the raw bytes, streamed by the browser, with
+ * progress. XHR because fetch reports no upload progress. `serverSession`
+ * rides the query (the body is the file).
+ */
+export function uploadFile(
+  file: File,
+  options: { onProgress?: (loaded: number, total: number) => void; signal?: AbortSignal } = {},
+): Promise<InboxUpload> {
+  return new Promise((resolve, reject) => {
+    const query = new URLSearchParams({ name: file.name });
+    if (pageSession) query.set('serverSession', pageSession);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/inbox/uploads?${query}`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = (event) => options.onProgress?.(event.loaded, event.lengthComputable ? event.total : file.size);
+    xhr.onload = () => {
+      let body: Record<string, unknown> = {};
+      try {
+        body = JSON.parse(xhr.responseText) as Record<string, unknown>;
+      } catch {
+        // Not JSON: the status says it.
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && body.upload) resolve(body.upload as InboxUpload);
+      else
+        reject(
+          new InboxApiError(
+            xhr.status,
+            typeof body.code === 'string' ? body.code : 'error',
+            typeof body.error === 'string' ? body.error : xhr.status === 413 ? 'Not attached: the file is too large.' : 'Not attached: the upload failed.',
+          ),
+        );
+    };
+    xhr.onerror = () => reject(new InboxApiError(0, 'network', 'Not attached: the upload failed.'));
+    xhr.onabort = () => reject(new DOMException('Aborted', 'AbortError'));
+    options.signal?.addEventListener('abort', () => xhr.abort(), { once: true });
+    xhr.send(file);
+  });
+}
+
+/** Search (read only). `signal` aborts a request a newer query replaced. */
+export async function searchInbox(request: SearchRequest, signal?: AbortSignal): Promise<SearchModel> {
+  const query = new URLSearchParams({ q: request.q });
+  if (request.project) query.set('project', request.project);
+  if (request.status) query.set('status', request.status);
+  if (request.from) query.set('from', request.from);
+  if (request.group) query.set('group', request.group);
+  if (request.offset) query.set('offset', String(request.offset));
+  if (request.limit) query.set('limit', String(request.limit));
+  if (request.current) query.set('current', request.current);
+  return readJson<SearchModel>(await fetch(`/api/inbox/search?${query}`, { headers: { Accept: 'application/json' }, cache: 'no-store', signal }));
+}
+
+/** Remember a search the person opened a result from (the last 6), or forget them all. */
+export function saveRecentSearch(input: { q: string } | { clear: true }): Promise<{ recent_searches: string[] }> {
+  return post<{ recent_searches: string[] }>('/api/inbox/search/recent', input);
+}
+
 export const inboxApi = {
+  /** The global skills the composers' `/` and `$` picker lists (raw entries; ui's catalog layer normalizes them). */
+  skills: () => get<{ skills?: unknown }>('/api/inbox/skills'),
+  /** One human-only skill's SKILL.md, read when the person sends a message that references it. */
+  skillContent: (name: string) => get<{ skill?: unknown }>(`/api/inbox/skills/content?name=${encodeURIComponent(name)}`),
   // Archived threads leave the window's list (Settings lists them): an older
   // window and the phone, which ask without this, still get them in Quiet.
   list: () => get<ListModel>('/api/inbox/threads?archived=exclude'),
@@ -380,6 +545,21 @@ export const inboxApi = {
   /** Mark read (the thread leaves the top for Quiet, its waiting questions closed) or its Undo. */
   markRead: (threadId: string, read: boolean) =>
     post<{ thread: InboxListRow }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/${read ? 'read' : 'unread'}`, {}),
+  /** 👍 Looks good on the agent's latest message (the thread is marked read; sent to the agent after the Undo window), or its Undo. */
+  ack: (messageId: string, on: boolean) =>
+    post<{ message: InboxMessageWire; thread: InboxListRow }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/ack`, { ack: on }),
+  /** The project menu's Mark all as read: Mark read on every thread waiting on the person. */
+  markProjectRead: (projectId: string, batchId: string) =>
+    post<ProjectBatchAnswer<{ read: string[] }>>(`/api/inbox/projects/${encodeURIComponent(projectId)}/read`, { batch_id: batchId }),
+  /** Its Undo: exactly the threads the batch took. */
+  unmarkProjectRead: (projectId: string, threads: readonly string[]) =>
+    post<{ threads: InboxListRow[]; skipped: string[] }>(`/api/inbox/projects/${encodeURIComponent(projectId)}/unread`, { threads }),
+  /** The project menu's Archive all: every listed thread resolved (one that came back is marked read instead). */
+  archiveProject: (projectId: string, batchId: string) =>
+    post<ProjectBatchAnswer<{ resolved: string[]; read: string[] }>>(`/api/inbox/projects/${encodeURIComponent(projectId)}/resolve`, { resolved: true, batch_id: batchId }),
+  /** Its Undo: exactly the threads the batch took. */
+  unarchiveProject: (projectId: string, threads: { resolved: readonly string[]; read: readonly string[] }) =>
+    post<{ threads: InboxListRow[]; skipped: string[] }>(`/api/inbox/projects/${encodeURIComponent(projectId)}/resolve`, { resolved: false, threads }),
   pick: (messageId: string, key: string, revision: number, answer: QuestionAnswer | null) =>
     post<{ questions: InboxQuestion[] }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/picks`, {
       questions: [{ key, revision, answer }],
@@ -396,16 +576,24 @@ export const inboxApi = {
       to?: { host: string; session: string };
       /** Skip this message's questions the Send leaves unanswered (false: Keep open). */
       skip_unanswered?: boolean;
+      /** Files pasted into the reply box (upload ids): attachments on this reply. */
+      uploads?: string[];
+      /** The sessions the person tagged with `@` (approval "inbox-tag-agents"): each one gets this reply too. */
+      tags?: { host?: string | null; session: string; label?: string }[];
+      /**
+       * This reply carries the reply box's words: their draft goes (approval "inbox-reply-drafts"),
+       * named by the `updated_at` they were saved as, so a newer draft from another window stays.
+       */
+      clear_draft?: string;
     },
   ) => post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reply`, input),
-  /** The card's switch and its words on one question: `recording`, and `draft` on Done. */
-  setDecision: (messageId: string, key: string, input: { recording?: boolean; draft?: InboxDecisionDraft | null }) =>
-    post<{ question: InboxQuestion }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/decision`, { key, ...input }),
-  decisions: (projectId: string) => get<DecisionsModel>(`/api/inbox/decisions?project=${encodeURIComponent(projectId)}`),
-  retireDecision: (id: string, version: number) =>
-    post<{ decision: InboxDecision }>(`/api/inbox/decisions/${encodeURIComponent(id)}/retire`, { version }),
-  replaceDecision: (id: string, input: { version: number; text: string; reason: string }) =>
-    post<{ decision: InboxDecision; replaced: InboxDecision }>(`/api/inbox/decisions/${encodeURIComponent(id)}/replace`, input),
+  /**
+   * Re-ask (approval "inbox-reask"): a note asking the session that wrote this
+   * message for its open questions again, in one message. `to`: another live
+   * session, because the one that asked has ended.
+   */
+  reask: (messageId: string, input: { idempotency_key: string; to?: { host: string; session: string } }) =>
+    post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reask`, input),
   resolve: (messageId: string, resolved: boolean) =>
     post<unknown>(`/api/inbox/messages/${encodeURIComponent(messageId)}/resolve`, { resolved }),
   health: () => get<InboxHealth>('/api/inbox/health'),
@@ -418,6 +606,9 @@ export const inboxApi = {
   /** A comment on that guide's diff (the review app's line comment), new or edited; removed through `removeAnnotation`. */
   saveGuideAnnotation: (messageId: string, annotation: object) =>
     post<{ annotation: InboxAnnotationRecord }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/guide/annotations`, { annotation }),
+  /** A comment on the text of an agent's message (the words selected), new or edited; removed through `removeAnnotation`. */
+  saveMessageAnnotation: (messageId: string, annotation: object) =>
+    post<{ annotation: InboxAnnotationRecord }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/annotations`, { annotation }),
   restart: () => post<{ ok: true }>('/api/inbox/restart', {}),
   // The update control: the dialogs' facts, Update now, Remind me tomorrow, Check now, What's new.
   updateDetails: () => get<UpdateDetails>('/api/inbox/update'),
@@ -431,20 +622,43 @@ export const inboxApi = {
     post<{ inbox_tool: SettingsModel['inbox_tool'] }>('/api/inbox/settings', { inbox_tool: hosts }),
   saveNotifications: (change: Partial<NotificationSettings>) =>
     post<{ notifications: NotificationSettings }>('/api/inbox/settings', { notifications: change }),
+  /**
+   * This window's notification permission for its own origin (notify.ts); an
+   * older Inbox answers 404. Sent without the page's serverSession on purpose:
+   * it changes nothing the person decided, and it must reach an Inbox that
+   * restarted under this tab (whose serverSession is new) so the count of
+   * windows that may notify is right again.
+   */
+  reportWindow: async (report: { window: string; permission: Exclude<InboxWindowPermission, 'unknown'>; origin: string }) =>
+    readJson<{ notify_reach: InboxNotifyReach }>(
+      await fetch('/api/inbox/window', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(report),
+      }),
+    ),
   saveSound: (change: { enabled?: boolean; volume?: number }) => post<{ sound: InboxSoundSettings }>('/api/inbox/settings', { sound: change }),
   /** Ask to show the one-time sound dialog: `show` is true for the first page that ever asks after an update, and only that one. */
   claimSoundDialog: () => post<{ show: boolean; sound: InboxSoundSettings }>('/api/inbox/sound/dialog', {}),
   /** Plannotator's appearance, written to config.json `theme` (shared with plan review). */
   saveTheme: (theme: InboxThemeConfig) => post<{ theme: InboxThemeConfig | null }>('/api/inbox/settings', { theme }),
+  /** The window's text size, written to config.json `inboxTextSize`. */
+  saveTextSize: (textSize: InboxTextSize) => post<{ text_size: InboxTextSize }>('/api/inbox/settings', { text_size: textSize }),
   saveTailscale: (on: boolean, replaceExposed = false) =>
     post<{ tailscale: TailscaleSettings }>('/api/inbox/settings', { tailscale: replaceExposed ? { on, replace_exposed: true } : { on } }),
   // Step 2: attachments (by id only), annotations, deleting.
   attachments: (threadId: string) => get<AttachmentsModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}/attachments`),
   view: (attachmentId: string, version: 'current' | 'sent') =>
     get<AttachmentView>(`/api/inbox/attachments/${encodeURIComponent(attachmentId)}/view${version === 'sent' ? '?version=sent' : ''}`),
+  /** A page an attached HTML page links to (not attached itself), by a path relative to that page's folder: read-only. */
+  linkedPage: (attachmentId: string, path: string) =>
+    get<LinkedPageView>(`/api/inbox/attachments/${encodeURIComponent(attachmentId)}/linked-page?path=${encodeURIComponent(path)}`),
   saveAnnotation: (attachmentId: string, version: string, annotation: object) =>
     post<{ annotation: InboxAnnotationRecord }>('/api/inbox/annotations', { attachment_id: attachmentId, version, annotation }),
   removeAnnotation: (id: string) => post<{ annotation: InboxAnnotationRecord }>(`/api/inbox/annotations/${encodeURIComponent(id)}/remove`, {}),
+  /** "Open in": the file as it is now, in a catalog app or the default app, by the attachment's id (on this computer only). */
+  openIn: (attachmentId: string, appId: string) =>
+    post<{ ok: boolean; error?: string }>('/api/inbox/open-in', { attachment_id: attachmentId, app_id: appId }),
   /** Keep a marked-up image (a comment drawn on an image attachment): its path rides the comment's `images`. */
   uploadMarkup: async (image: Blob) =>
     readJson<{ path: string; name: string; url: string }>(
@@ -456,8 +670,43 @@ export const inboxApi = {
     ),
   deleteThread: (threadId: string) => post<{ store: SettingsModel['store'] }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/delete`, {}),
   // Step 8: New message to a live session of the thread's project.
-  sessions: (threadId: string, asker?: string | null) =>
-    get<LiveSessionsModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}/sessions${asker ? `?asker=${encodeURIComponent(asker)}` : ''}`),
+  // Compose: every live session, a new thread, Send to another session, and drafts.
+  composeSessions: (session?: string | null) =>
+    get<ComposeSessionsModel>(`/api/inbox/sessions${session ? `?session=${encodeURIComponent(session)}` : ''}`),
+  startThread: (input: StartThreadInput) =>
+    post<{ thread_id: string; message: InboxMessage; project?: { id: string; name: string; root: string }; replayed: boolean }>('/api/inbox/messages', { ...input }),
+  readdress: (messageId: string, to: { host: string; session: string }) =>
+    post<{ message: InboxMessage; row: InboxListRow | null }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/to`, { to }),
+  /** `replies` (additive): open threads holding unsent work; an older Inbox sends none. */
+  drafts: () => get<{ serverSession: string; drafts: DraftView[]; replies?: InboxReplyDraftRow[] }>('/api/inbox/drafts'),
+  // Reply drafts (approval "inbox-reply-drafts"): the reply box's words per thread.
+  replyDraft: (threadId: string) => get<{ draft: InboxReplyDraft | null }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/draft`),
+  /** Save (compare-and-set on `base`, the `updated_at` last read; null to create); an empty body deletes it. */
+  saveReplyDraft: (threadId: string, body: string, base: string | null, baseBody: string | null = null) =>
+    post<{ draft: InboxReplyDraft | null }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/draft`, {
+      body,
+      base,
+      ...(baseBody !== null ? { base_body: baseBody } : {}),
+    }),
+  discardReplyDraft: (threadId: string) => post<{ ok: true; deleted: boolean }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/draft/delete`, {}),
+  saveDraft: (id: string, input: { body: string; to: InboxDraft['to']; project: InboxDraft['project']; files: string[]; base: string | null; thread_name?: string }) =>
+    post<{ draft: DraftView }>(`/api/inbox/drafts/${encodeURIComponent(id)}`, { ...input }),
+  deleteDraft: (id: string) => post<{ ok: true; deleted: boolean }>(`/api/inbox/drafts/${encodeURIComponent(id)}/delete`, {}),
+  sessions: (threadId: string, asker?: string | null, recipients: readonly string[] = []) => {
+    const query = [
+      ...(asker ? [`asker=${encodeURIComponent(asker)}`] : []),
+      ...(recipients.length > 0 ? [`recipients=${recipients.map(encodeURIComponent).join(',')}`] : []),
+    ].join('&');
+    return get<LiveSessionsModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}/sessions${query ? `?${query}` : ''}`);
+  },
+  /** Who the person can tag with `@` in this thread (approval "inbox-tag-agents"). */
+  taggable: (threadId: string) => get<TaggableModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}/taggable`),
+  /**
+   * Send now: deliver the person's reply or message at once, into the running turn when one runs.
+   * `session`: one tagged session's own line (absent: the session the reply goes to).
+   */
+  sendNow: (messageId: string, session?: string | null) =>
+    post<{ message: InboxMessage }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/send-now`, session ? { session } : {}),
   newMessage: (threadId: string, input: { session: string; body: string; idempotency_key: string }) =>
     post<{ message: InboxMessage; replayed: boolean }>(`/api/inbox/threads/${encodeURIComponent(threadId)}/message`, input),
   // Phones: pairing, the paired devices, the tailnet and Wi-Fi switches (packages/server/inbox-devices.ts).
@@ -488,14 +737,19 @@ export type InboxNoteResult = { ok: true; agent: InboxNoteAgentId; action: strin
 /** One store line as the event stream carries it (packages/server/inbox.ts, `eventPayload`). */
 export type InboxEvent =
   | { seq: number; kind: 'project'; id: string; project: InboxProject }
-  | { seq: number; kind: 'message'; id: string; message: InboxMessage }
+  /** `first`: the message's first line, not a later rewrite of it (a look, an archive, an Unarchive). Absent from an older Inbox. */
+  | { seq: number; kind: 'message'; id: string; first?: boolean; message: InboxMessage }
   | { seq: number; kind: 'question'; id: string; question: InboxQuestion }
-  | { seq: number; kind: 'annotation'; id: string; annotation: InboxAnnotationRecord };
+  | { seq: number; kind: 'annotation'; id: string; annotation: InboxAnnotationRecord }
+  /** A Board card (approval "inbox-board"); absent from an older Inbox. */
+  | { seq: number; kind: 'card'; id: string; card: InboxCardWire };
 
 /** A thread's attachments as they are now, and the person's annotations waiting for a Send. */
 export interface AttachmentsModel {
   serverSession: string;
   attachments: InboxAttachmentState[];
+  /** The images the messages show, captured as files (additive; absent from an older Inbox). */
+  inline_images?: InboxAttachmentState[];
   annotations: InboxAnnotationRecord[];
 }
 
@@ -509,6 +763,18 @@ export interface AttachmentView {
   html: string | null;
 }
 
+/** A page an attached HTML page links to, as `/linked-page` answers it. */
+export interface LinkedPageView {
+  serverSession: string;
+  /** Its realpath. */
+  path: string;
+  name: string;
+  /** The page with a `<base href>` at its own folder's asset route. */
+  html: string;
+  /** Its asset-route URL, for Open in new tab. */
+  url: string | null;
+}
+
 /**
  * The server's event stream: `onRecord` for every store line after the
  * cursor (the line, for the notifications), `onStatus` for restart-to-update. EventSource reconnects on its
@@ -516,9 +782,57 @@ export interface AttachmentView {
  */
 export function subscribeInboxEvents(
   cursor: number,
-  handlers: { onRecord: (event: InboxEvent | null) => void; onStatus: (update: InboxHealth['update']) => void },
+  handlers: {
+    onRecord: (event: InboxEvent | null) => void;
+    /**
+     * `updated` is undefined from an Inbox older than the field (the "What's new in X" link stays as the list said);
+     * `restartClaudeCode` too (the sidebar's "Reload Claude Code N" stays as the list said).
+     */
+    onStatus: (update: InboxHealth['update'], updated?: string | null, restartClaudeCode?: number) => void;
+    /** Whether a notification can reach the person now (inbox-windows.ts); never called by an older Inbox. */
+    onReach?: (reach: InboxNotifyReach) => void;
+    /**
+     * A row's delivery may have moved with the live sessions (a turn started or
+     * ended, a session went away): no store line, so the list is read again.
+     * Never called by an older Inbox.
+     */
+    onDeliveries?: () => void;
+    /**
+     * The stream (re)connected: the server's `hello`. A reconnect carries the
+     * URL it was first opened with, so its `permission=` may be stale (a grant
+     * since, a restarted Inbox that forgot the window): report again here.
+     */
+    onConnect?: () => void;
+    /** A reply draft was saved or discarded (`event: drafts`, approval "inbox-reply-drafts"); never called by an older Inbox. */
+    onDrafts?: (threadId: string) => void;
+  },
+  /** This window, so the server counts it (and what its browser allows) while the stream is open. */
+  win?: { id: string; permission: InboxWindowPermission; origin: string },
 ): () => void {
-  const source = new EventSource(`/api/inbox/events?cursor=${cursor}`);
+  const query = new URLSearchParams({ cursor: String(cursor) });
+  if (win) {
+    query.set('window', win.id);
+    query.set('permission', win.permission);
+    query.set('origin', win.origin);
+  }
+  const source = new EventSource(`/api/inbox/events?${query}`);
+  source.addEventListener('hello', () => handlers.onConnect?.());
+  source.addEventListener('reach', (event) => {
+    try {
+      handlers.onReach?.(JSON.parse((event as MessageEvent<string>).data) as InboxNotifyReach);
+    } catch {
+      // A malformed frame changes nothing.
+    }
+  });
+  source.addEventListener('drafts', (event) => {
+    try {
+      const data = JSON.parse((event as MessageEvent<string>).data) as { thread_id?: unknown };
+      if (typeof data.thread_id === 'string') handlers.onDrafts?.(data.thread_id);
+    } catch {
+      // A malformed frame changes nothing.
+    }
+  });
+  source.addEventListener('deliveries', () => handlers.onDeliveries?.());
   source.addEventListener('record', (event) => {
     let parsed: InboxEvent | null = null;
     try {
@@ -530,7 +844,12 @@ export function subscribeInboxEvents(
   });
   source.addEventListener('status', (event) => {
     try {
-      handlers.onStatus((JSON.parse((event as MessageEvent<string>).data) as { update: InboxHealth['update'] }).update);
+      const data = JSON.parse((event as MessageEvent<string>).data) as { update: InboxHealth['update']; updated?: string | null; restart_claude_code?: unknown };
+      handlers.onStatus(
+        data.update,
+        'updated' in data ? (data.updated ?? null) : undefined,
+        typeof data.restart_claude_code === 'number' ? data.restart_claude_code : undefined,
+      );
     } catch {
       // A malformed frame changes nothing.
     }

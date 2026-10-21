@@ -9,6 +9,7 @@
 import { isInboxNote, type InboxMessageWire, type InboxQuestion, type InboxThread } from '@plannotator/core/inbox-types';
 import { QUESTION_ANSWERS_HEADING, type QuestionAnswer } from '@plannotator/core/question-block';
 import { INBOX_STILL_OPEN_LINE, sliceText } from '@plannotator/core/inbox-questions';
+import { withoutInboxSkillsBlock } from '@plannotator/core/skill-reference-block';
 
 /**
  * Where "new since you looked" starts: the seq of the person's last look at
@@ -154,10 +155,11 @@ const ANSWERS_HEADING_LINE = new RegExp(`^#{1,6}\\s+${QUESTION_ANSWERS_HEADING}\
  * "Answered N questions, skipped M." and
  * everything from the "Answers to your questions" heading on (the answers,
  * then the annotations' feedback), or, on a reply that answered nothing,
- * from the "No questions answered yet; …" line on.
+ * from the "No questions answered yet; …" line on, and the skills block the
+ * window pasted at the end (a human-only skill's SKILL.md text).
  */
 export function replyWords(body: string): string {
-  const lines = body.split(/\r?\n/);
+  const lines = withoutInboxSkillsBlock(body).split(/\r?\n/);
   const at = lines.findIndex((line) => ANSWERS_HEADING_LINE.test(line.trim()) || INBOX_STILL_OPEN_LINE.test(line.trim()));
   const kept = (at >= 0 ? lines.slice(0, at) : lines).join('\n');
   return kept.replace(/^\s*(?:Answered \d+ questions?(?:, skipped \d+)?|Skipped \d+ questions?)\.\s*/, '');
@@ -168,16 +170,22 @@ export function replyWords(body: string): string {
  * sent shows the answers: what the person decided is the reason to look
  * back. Otherwise its first words; a message that is only a question block,
  * its first live question's prompt. A person's reply shows its own words;
- * with none, the answers it sent (from `messages`, the thread); else its
- * first words.
+ * with none, the answers it sent (from `messages`, the thread); else the
+ * names of the files it carries; else its first words.
  */
 export function foldSnippet(message: InboxMessageWire, messages: readonly InboxMessageWire[] = [message]): FoldSnippet {
   if (message.author.kind === 'person') {
+    // A Re-ask note: what the person did, not the instructions the agent got.
+    const reasked = message.reask?.length ?? 0;
+    if (reasked > 0) return { kind: 'words', text: reasked === 1 ? 'Asked to re-ask the open question' : `Asked to re-ask ${reasked} open questions in one message` };
     const words = firstWords(replyWords(message.body));
     if (words) return { kind: 'words', text: words };
     const sent = messages.flatMap((m) => (m.questions ?? []).filter((q) => q.sent_reply_id === message.id && q.answer !== null));
     if (sent.length > 0) return { kind: 'answers', parts: answeredParts(sent) };
-    return { kind: 'words', text: firstWords(message.body) };
+    // Files pasted in with no words: name them, not the still-open line the agent reads.
+    const files = message.attachments ?? [];
+    if (files.length > 0) return { kind: 'words', text: files.map((file) => file.name).join(', ') };
+    return { kind: 'words', text: firstWords(withoutInboxSkillsBlock(message.body)) };
   }
   const questions = (message.questions ?? []).filter(live);
   if (questions.length > 0 && questions.every((q) => q.state === 'sent' && q.answer !== null)) {
@@ -283,7 +291,7 @@ export function holdingsOf(message: InboxMessageWire, options: { delivered: bool
   const picks = questions.filter((q) => q.state !== 'sent' && isPicked(q)).length;
   const open = questions.filter((q) => q.state !== 'sent' && !isPicked(q)).length;
   const sent = questions.filter((q) => q.state === 'sent').length;
-  if (picks > 0) out.push({ kind: 'picks', text: `${plural(picks, 'pick')}, not sent`, say: `${plural(picks, 'pick')} not sent`, count: picks });
+  if (picks > 0) out.push({ kind: 'picks', text: `${plural(picks, 'pick')} in your draft`, say: `${plural(picks, 'pick')} in your draft`, count: picks });
   if (open > 0) out.push({ kind: 'open', text: `${open} open ${open === 1 ? 'question' : 'questions'}`, say: `${open} open ${open === 1 ? 'question' : 'questions'}`, count: open });
   if (sent > 0 && open === 0 && picks === 0) out.push({ kind: 'answered', text: `${sent} answered`, say: `${plural(sent, 'question')} answered`, count: sent });
   const files = message.attachments?.length ?? 0;

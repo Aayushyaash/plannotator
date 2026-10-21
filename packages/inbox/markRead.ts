@@ -4,21 +4,18 @@
  * Pure.
  *
  * Mark read moves a thread out of the top to Quiet without archiving it: its
- * questions still waiting on the person close unanswered (each a skip, never
- * a decision), and once the Undo window has passed the asking agent is told
+ * questions still waiting on the person close unanswered (each a skip), and once the Undo window has passed the asking agent is told
  * once not to wait on them. It comes back when an agent writes again.
  */
 
-import type { InboxListRow } from '@plannotator/core/inbox-types';
+import { inboxRowOffersMarkRead, inboxRowWaitsOnPerson, type InboxListRow } from '@plannotator/core/inbox-types';
 import { agentName, plural } from './format';
 
 /** How long the Undo toast stays (the server's set-aside note waits a little longer). */
 export const MARK_READ_UNDO_MS = 7_000;
 
 /** Something here waits on the person: a question, or news they have not looked at. */
-export function waitsOnPerson(row: Pick<InboxListRow, 'section' | 'unseen' | 'answered_not_sent'>): boolean {
-  return row.section === 'stopped' || row.section === 'holding' || row.section === 'waiting' || (row.section === 'new' && (row.unseen > 0 || row.answered_not_sent));
-}
+export const waitsOnPerson = inboxRowWaitsOnPerson;
 
 /**
  * The thread can be marked read now, or is marked read (the pressed button
@@ -32,50 +29,52 @@ export function canToggleRead(row: Pick<InboxListRow, 'section' | 'unseen' | 'an
 }
 
 /** The list row's quiet hover action: on rows that wait on the person, never on Sent or Quiet. */
-export function offersRowMarkRead(row: Pick<InboxListRow, 'section' | 'unseen' | 'answered_not_sent' | 'resolved_at' | 'back_from_archive'>): boolean {
-  return (row.resolved_at === null || row.back_from_archive === true) && waitsOnPerson(row);
-}
+export const offersRowMarkRead = inboxRowOffersMarkRead;
 
 export interface MarkReadToast {
-  text: string;
-  sub: string;
-  /** A phone's one line (the thread's banner says the rest). */
-  short: string;
+  /** The bold first words. */
+  lead: string;
+  /** What a phone says instead ("Read": the pressed Read button says the same). */
+  phoneLead?: string;
+  /** The muted rest of the line, cut with "…" when it does not fit. */
+  detail: string;
   /** An agent was stopped or held up on the thread: the toast warns and offers Reply. */
   warn: boolean;
 }
 
 /**
- * The toast after Mark read, from the row as it was before (`before`) and the
- * number of questions the Mark read closed. `deferred`: a thread is open, so
- * the list holds still and the row moves to Quiet when the list next settles
- * (settle.ts); the toast must not say it already moved.
+ * Where the thread marked read was when the person marked it:
+ * - `open`: it is the thread open on screen (its header names it);
+ * - `held`: another thread is open, so the list holds still (settle.ts) and
+ *   the row has not moved yet;
+ * - `list`: no thread is open, and the row has moved.
+ */
+export type MarkReadPlace = 'open' | 'held' | 'list';
+
+/**
+ * The toast after Mark read (design record "inbox-toast", approved
+ * 2026-10-14), from the row as it was before (`before`). On the open thread
+ * it says where the row goes (the header names the thread); on any other row
+ * the subject says which one, since the toast sits over the open thread's
+ * pane. What the agent is told is the thread's Read banner's to say.
  */
 export function markReadToast(
-  before: Pick<InboxListRow, 'subject' | 'author' | 'questions'> & { resolved_at?: string | null },
-  closed: number,
-  deferred = false,
+  before: Pick<InboxListRow, 'subject' | 'author' | 'questions'> & { resolved_at?: string | null; unsent?: InboxListRow['unsent'] },
+  place: MarkReadPlace,
 ): MarkReadToast {
-  const agent = agentName(before.author);
   const subject = `“${before.subject ?? '(no subject)'}”`;
-  // A thread that came back from the archive goes back there; any other goes to Quiet. With a thread
-  // open the row holds its place until the list settles (settle.ts), so the move is still to come.
-  const archived = (before.resolved_at ?? null) !== null;
-  const text = archived
-    ? `Read: ${subject} ${deferred ? 'will go' : 'went'} back to Archived.`
-    : `Read: ${subject} ${deferred ? 'will move' : 'moved'} to Quiet.`;
-  const what = closed === 1 ? 'the question' : plural(closed, 'question');
-  const told = closed > 0 ? `${agent} is told not to wait on ${what}.` : '';
-  const short = archived
-    ? deferred
-      ? 'Read. Will go back to Archived.'
-      : 'Read. Back in Archived.'
-    : deferred
-      ? 'Read. Will move to Quiet.'
-      : 'Read. Moved to Quiet.';
-  if (before.questions.stopped) return { text, short, sub: `${agent} was stopped on it. ${told}`.trim(), warn: true };
+  const warn = before.questions.stopped || before.questions.holds_up.length > 0;
+  // Another thread is open: name the row marked, or the toast reads as if the open thread was.
+  if (place === 'held') return { lead: 'Marked read', phoneLead: 'Read', detail: subject, warn };
+  if (before.questions.stopped) return { lead: 'Marked read', phoneLead: 'Read', detail: `${agentName(before.author)} was stopped`, warn: true };
   if (before.questions.holds_up.length > 0) {
-    return { text, short, sub: `It held up ${plural(before.questions.holds_up.length, 'thing')}. ${told}`.trim(), warn: true };
+    return { lead: 'Marked read', phoneLead: 'Read', detail: `Held up ${plural(before.questions.holds_up.length, 'thing')}`, warn: true };
   }
-  return { text, short, sub: `It comes back when ${agent} writes again.${told ? ` ${told}` : ''}`, warn: false };
+  // A thread that came back from the archive goes back there; any other goes to Quiet.
+  const archived = (before.resolved_at ?? null) !== null;
+  // Words typed in the reply box, or comments waiting, keep it out of Quiet (approval "inbox-reply-drafts"; Mark read closes the picks).
+  const kept = !archived && before.unsent != null && (before.unsent.reply_at !== null || before.unsent.comments > 0);
+  if (kept) return { lead: 'Marked read', phoneLead: 'Read', detail: place === 'open' ? 'Your draft keeps it in New' : `${subject} · your draft keeps it in New`, warn: false };
+  if (place === 'open') return { lead: 'Marked read', phoneLead: 'Read', detail: archived ? 'Goes back to Archived' : 'Moves to Quiet', warn: false };
+  return { lead: archived ? 'Back in Archived' : 'Moved to Quiet', detail: subject, warn: false };
 }

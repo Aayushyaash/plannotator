@@ -21,6 +21,7 @@ import {
 import { tmpdir } from "os";
 import { join } from "path";
 import { removeStubbedHtml, stubHookDistHtml } from "../../../tests/helpers/hook-dist-stub";
+import { NO_BROWSER } from "../../../tests/helpers/no-browser";
 
 const serverDir = import.meta.dir;
 const cliEntry = join(serverDir, "index.ts");
@@ -250,7 +251,7 @@ describe("annotate CLI on an occupied fixed port", () => {
           PLANNOTATOR_DATA_DIR: dataDir,
           PLANNOTATOR_REMOTE: "1",
           PLANNOTATOR_PORT: String(blocker.port),
-          PLANNOTATOR_BROWSER: "none",
+          PLANNOTATOR_BROWSER: NO_BROWSER,
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -283,4 +284,62 @@ describe("annotate CLI on an occupied fixed port", () => {
     expect(result.stderr).toContain("is already in use");
     expect(result.stdout).toBe("");
   }, 20_000);
+});
+
+/**
+ * The stdout contract for the always-printed session URL (#1134).
+ *
+ * `--json`, `--hook` and `--gate` put the decision on stdout for an agent to
+ * parse, so the ready line stays on stderr. Checked through a real session:
+ * the bytes an agent reads are the process's, not one function's. The gate
+ * never settles by itself here (no client connects), so the test ends the
+ * child it started once the ready line is out.
+ */
+describe("annotate CLI keeps stdout clean while a session is live", () => {
+  async function runUntilReady(args: string[]): Promise<{ stdout: string; stderr: string }> {
+    const child = Bun.spawn([process.execPath, cliEntry, "annotate", ...args], {
+      cwd: fixtureDir,
+      env: {
+        ...process.env,
+        PLANNOTATOR_CWD: fixtureDir,
+        PLANNOTATOR_DATA_DIR: dataDir,
+        PLANNOTATOR_REMOTE: "0",
+        PLANNOTATOR_BROWSER: NO_BROWSER,
+        PLANNOTATOR_AI: "disabled",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const sinks = { stdout: "", stderr: "" };
+    const drain = async (stream: ReadableStream<Uint8Array>, key: "stdout" | "stderr") => {
+      const decoder = new TextDecoder();
+      try {
+        for await (const chunk of stream) sinks[key] += decoder.decode(chunk, { stream: true });
+      } catch {
+        // The child ends mid-read; what arrived is enough.
+      }
+    };
+    const drained = Promise.all([drain(child.stdout, "stdout"), drain(child.stderr, "stderr")]);
+    const deadline = Date.now() + 30_000;
+    while (!sinks.stderr.includes("Plannotator session ready: ") && Date.now() < deadline) {
+      await Bun.sleep(50);
+    }
+    // Give a launch-failure line, or a stray stdout write, its moment.
+    await Bun.sleep(300);
+    child.kill();
+    await child.exited;
+    await drained;
+    return sinks;
+  }
+
+  test.each([
+    ["--gate --json", ["notes.md", "--gate", "--json"]],
+    ["--hook", ["notes.md", "--hook"]],
+    ["--gate", ["notes.md", "--gate"]],
+  ])("%s: the ready line goes to stderr, stdout stays empty", async (_label, args) => {
+    const result = await runUntilReady(args as string[]);
+    // Literal text, not the exported constant.
+    expect(result.stderr).toMatch(/\n {2}Plannotator session ready: http:\/\/localhost:\d+\n/);
+    expect(result.stdout).toBe("");
+  }, 40_000);
 });

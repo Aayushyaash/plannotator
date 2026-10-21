@@ -48,8 +48,7 @@
         "archived": [],
         "counts": {
           "waiting": 0,
-          "unread": 1,
-          "decisions_waiting": 0
+          "unread": 1
         },
         "threads": {
           "t1": {
@@ -97,8 +96,7 @@
         "archived": [],
         "counts": {
           "waiting": 0,
-          "unread": 0,
-          "decisions_waiting": 0
+          "unread": 0
         },
         "threads": {
           "t1": {
@@ -146,8 +144,7 @@
         ],
         "counts": {
           "waiting": 0,
-          "unread": 0,
-          "decisions_waiting": 0
+          "unread": 0
         },
         "threads": {
           "t1": {
@@ -195,8 +192,7 @@
         "archived": [],
         "counts": {
           "waiting": 0,
-          "unread": 0,
-          "decisions_waiting": 0
+          "unread": 0
         },
         "threads": {
           "t1": {
@@ -249,8 +245,7 @@
         "archived": [],
         "counts": {
           "waiting": 0,
-          "unread": 1,
-          "decisions_waiting": 0
+          "unread": 1
         },
         "threads": {
           "t1": {

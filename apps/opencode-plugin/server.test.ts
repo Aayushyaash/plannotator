@@ -432,11 +432,11 @@ describe("V2 plan review URL delivery", () => {
     });
   });
 
-  // Regression: the fallback must stay SILENT, not fall back to app.log. That
-  // is console.error, the same stderr handleServerReady has already printed the
-  // URL to, so logging here would duplicate the line in remote mode and add a
-  // stray one locally. This hook was empty for exactly that reason.
-  test("without session.synthetic the plan path stays silent", () => {
+  // Without session.synthetic the URL falls back to the console log, which an
+  // older host shows with OPENCODE_PRINT_LOGS=1. handleServerReady no longer
+  // prints the ready line here (the embedded path passes announce: false), so
+  // this log is the only place the URL can reach on such a host.
+  test("without session.synthetic the plan path logs the URL once", () => {
     const log = mock((_entry: unknown) => {});
     const client = createV2BridgeClient({
       ctx: { session: {} },
@@ -447,7 +447,8 @@ describe("V2 plan review URL delivery", () => {
 
     expect(client.notifyUrl).toBeUndefined();
     expect(() => createPlanReadyNotifier(client)(SESSION_URL)).not.toThrow();
-    expect(log).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0]![0]).toEqual({ level: "info", message: formatSessionUrlNotice(SESSION_URL) });
   });
 
   // Regression: the notifier tests above all pass while the plan path itself is

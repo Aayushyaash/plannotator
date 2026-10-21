@@ -1,6 +1,11 @@
 /**
- * New message (PLAN step 8, the record's 5.1 to 5.3), proved in a real
- * browser against the compiled binary. Nothing is mocked: the binary runs
+ * New message (PLAN step 8, the record's 5.1 and 5.2), proved in a real
+ * browser against the compiled binary. The in-thread New message button is
+ * off since 👍 Looks good (approval "inbox-acknowledge", 2026-10-15), so the
+ * message is sent through its route, `POST /api/inbox/threads/:id/message`,
+ * and the window still draws it: "to <host>", the queued line, then
+ * "Delivered to <host>". The live sessions come from the route the button
+ * read (`GET /api/inbox/threads/:id/sessions`). Nothing is mocked: the binary runs
  * `plannotator inbox --background` under a temp PLANNOTATOR_DATA_DIR and HOME,
  * a Pi agent writes through `plannotator inbox mcp` with the MCP SDK's stdio
  * client (scripts/inbox-sim.ts), and Chromium drives the window. The agent
@@ -28,6 +33,7 @@ import {
 } from '../../packages/shared/inbox/connection';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
+import { NO_BROWSER } from '../helpers/no-browser';
 
 const repo = resolve(__dirname, '../..');
 const binary = resolve(process.env.PLANNOTATOR_E2E_BINARY ?? join(repo, '.local/plannotator'));
@@ -145,9 +151,19 @@ async function threadMessages(): Promise<{ id: string; author: { kind: string };
   return ((await response.json()) as { thread: { messages: never[] } }).thread.messages;
 }
 
-const clock = (ms: number) => new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(new Date(ms));
 
 test.describe.configure({ mode: 'serial' });
+
+/** A window write, as the page sends it (no Origin from the test runner: the same-origin guard passes it). */
+async function windowPost(path: string, body: Record<string, unknown>): Promise<{ status: number; json: Record<string, any> }> {
+  const response = await world.page.request.post(`${world.url.replace(/\/$/, '')}${path}`, { data: body });
+  return { status: response.status(), json: (await response.json()) as Record<string, any> };
+}
+
+async function liveSessions(): Promise<{ session: string; started_at: string; busy: boolean; wrote_thread: boolean }[]> {
+  const response = await world.page.request.get(`${world.url.replace(/\/$/, '')}/api/inbox/threads/${world.threadId}/sessions`);
+  return ((await response.json()) as { sessions: { session: string; started_at: string; busy: boolean; wrote_thread: boolean }[] }).sessions;
+}
 
 test.beforeAll(async ({ browser }: { browser: Browser }) => {
   expect(existsSync(binary), `build the binary first: ${binary}`).toBe(true);
@@ -156,7 +172,7 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   // HOME is the temp root, so the project reads as ~/src/ledger, as the record draws it.
   const root = inboxScratch('plannotator-inbox-new-message-e2e-');
   const dataDir = join(root, 'data');
-  const env = { PATH: process.env.PATH ?? '', HOME: root, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: 'none' };
+  const env = { PATH: process.env.PATH ?? '', HOME: root, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: NO_BROWSER };
   const started = spawnSync(binary, ['inbox', '--background'], { env, encoding: 'utf8', timeout: 60_000 });
   expect(started.status, started.stderr).toBe(0);
   const url = started.stdout.trim();
@@ -199,47 +215,25 @@ test.afterAll(async () => {
   }
 });
 
-test('no live session: the button greys and says why (5.3), sends nothing, and Reply instead opens the reply box', async () => {
+test('one live session (5.1): a message sent through the route is drawn "to Pi", delivered once through the wake path, and the thread says Delivered', async () => {
   const { page } = world;
   await page.goto(`${world.url}#thread=${world.threadId}`);
   const pane = page.locator('section.ib-pane');
   await expect(pane.getByRole('heading', { name: SUBJECT })).toBeVisible();
-  const button = pane.locator('[data-new-message]');
-  await expect(button).toHaveAttribute('data-live', 'none');
-  await button.click();
-  const state = pane.locator('[data-not-running]');
-  await expect(state.getByRole('heading', { level: 5 })).toHaveText('Pi is not running in ledger');
-  await expect(state).toContainText(
-    'A new message goes to a live session. Start Pi in ~/src/ledger and press New message again, or reply here: Pi reads replies when it next checks the Inbox.',
-  );
-  await shot('5.3-not-running');
-  expect(await threadMessages()).toHaveLength(1);
-
-  await state.getByRole('button', { name: 'Reply instead' }).click();
-  await expect(state).toHaveCount(0);
-  await expect(pane.getByRole('textbox', { name: 'Reply to Pi' })).toBeFocused();
-  await pane.getByRole('button', { name: 'Cancel' }).click();
-});
-
-test('one live session: the box opens addressed to it (5.1); Send delivers once through the wake path, and the thread says Delivered', async () => {
-  const { page } = world;
+  // The button is gone from the thread; its route stays.
+  await expect(pane.locator('[data-new-message]')).toHaveCount(0);
   const startedAt = Date.now() - 60 * 60_000;
   const writer = await connect(world.writer, startedAt);
-  const pane = page.locator('section.ib-pane');
-  const button = pane.locator('[data-new-message]');
-  await expect(button).toHaveAttribute('data-live', 'some', { timeout: 15_000 });
-  await button.click();
-  await expect(pane.locator('.ib-reply-l')).toHaveText('New message to Pi in ledger (live session, idle)');
-  await expect(pane.getByText('Pi takes it as its next turn.')).toBeVisible();
+  await expect.poll(async () => (await liveSessions()).map((l) => l.session), { timeout: 15_000 }).toEqual([world.writer]);
   const words = 'While you are in there, add a header row to the CSV export.';
-  await pane.getByRole('textbox', { name: 'New message to Pi' }).fill(words);
-  await shot('5.1-new-message-one-live');
-  await pane.getByRole('button', { name: 'Send' }).click();
+  const sent = await windowPost(`/api/inbox/threads/${world.threadId}/message`, { session: world.writer, body: words, idempotency_key: 'nm-1' });
+  expect(sent.status).toBe(200);
 
   // The person's message in the thread, addressed to that session, waiting for its turn.
   const mine = pane.locator('article.ib-message[data-author="person"]');
   await expect(mine).toHaveCount(1);
-  await expect(mine.locator('.ib-who')).toHaveText('You in ledger');
+  await expect(mine.locator('.ib-who')).toHaveText('You');
+  await expect(mine.locator('.ib-fl-meta')).toContainText('in ledger');
   await expect(mine.locator('.ib-to')).toHaveText('to Pi');
   await expect(mine).toContainText(words);
   const command = await waitFor('the message command', () => writer.commands[0]);
@@ -249,45 +243,33 @@ test('one live session: the box opens addressed to it (5.1); Send delivers once 
   expect(wake.endsWith(`\n\n${words}`)).toBe(true);
   const messages = await threadMessages();
   expect(messages.at(-1)).toMatchObject({ id: command.id, author: { kind: 'person' }, to: { host: 'pi', session: world.writer } });
-  await expect(pane.locator('[data-delivery="queued"]')).toHaveText('Pi takes it as its next turn.');
+  // The session's connection polls idle: it takes it within seconds.
+  await expect(pane.locator('[data-delivery="sending"]')).toHaveText('Sending to Pi…');
 
   await writer.deliver(command.id);
-  await expect(pane.locator('[data-delivery="delivered"]')).toHaveText(/^Delivered to Pi, \d{1,2}:\d{2} [AP]M$/);
+  await expect(pane.locator('[data-delivery="delivered"]')).toHaveText(/^Delivered to Pi, (?:[A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d{2} [AP]M$/);
   // Handed out once: a delivered message is never handed out again.
   await page.waitForTimeout(2_500);
   expect(writer.commands).toHaveLength(1);
   await shot('5.1-delivered');
 });
 
-test('two live sessions: New message opens the list, the writer first (5.2); the picked session gets it, the other nothing', async () => {
+test('two live sessions (5.2): the list puts the writer first; the picked session gets the message, the other nothing', async () => {
   const { page } = world;
   const writer = world.connections[0]!;
   const laterStart = Date.now() - 5 * 60_000;
   const second = await connect('pi-session-two', laterStart, true);
   const pane = page.locator('section.ib-pane');
-  const button = pane.locator('[data-new-message]');
-  // The list is read when the button is pressed: the second session is in it once it polled.
-  await page.waitForTimeout(1_500);
-  await button.click();
-  const picker = pane.locator('[data-session-picker]');
-  await expect(picker.locator('.ib-mh')).toHaveText('Two Pi sessions are live in ledger');
-  const items = picker.getByRole('menuitem');
-  await expect(items).toHaveCount(2);
-  await expect(items.nth(0)).toHaveAttribute('data-session', world.writer);
-  await expect(items.nth(0).locator('.ib-t')).toHaveText(`Started ${clock(writer.startedAt)}`);
-  await expect(items.nth(0).locator('.ib-d')).toHaveText(/^Wrote this thread\. Idle since \d{1,2}:\d{2} [AP]M\.$/);
-  await expect(items.nth(1)).toHaveAttribute('data-session', 'pi-session-two');
-  await expect(items.nth(1).locator('.ib-t')).toHaveText(`Started ${clock(laterStart)}`);
-  await expect(items.nth(1).locator('.ib-d')).toHaveText('Working now; takes it when the turn ends.');
-  await expect(button).toHaveClass(/ib-on/);
-  await shot('5.2-pick-a-session');
+  await expect.poll(async () => (await liveSessions()).length, { timeout: 15_000 }).toBe(2);
+  const sessions = await liveSessions();
+  expect(sessions.map((l) => l.session)).toEqual([world.writer, 'pi-session-two']);
+  expect(sessions[0]).toMatchObject({ wrote_thread: true, busy: false, started_at: new Date(writer.startedAt).toISOString() });
+  expect(sessions[1]).toMatchObject({ wrote_thread: false, busy: true, started_at: new Date(laterStart).toISOString() });
 
-  await items.nth(1).click();
-  await expect(pane.locator('.ib-reply-l')).toHaveText('New message to Pi in ledger (live session, working)');
-  await expect(pane.getByText('Pi takes it when its turn ends.')).toBeVisible();
   const words = 'When this turn ends, rerun the March export and post the peak memory.';
-  await pane.getByRole('textbox', { name: 'New message to Pi' }).fill(words);
-  await pane.getByRole('button', { name: 'Send' }).click();
+  const sent = await windowPost(`/api/inbox/threads/${world.threadId}/message`, { session: 'pi-session-two', body: words, idempotency_key: 'nm-2' });
+  expect(sent.status).toBe(200);
+  await expect(pane.locator('article.ib-message[data-author="person"]').last()).toContainText(words);
   const command = await waitFor('the second session handed the message', () => second.commands[0]);
   expect(command).toMatchObject({ type: 'message', body: words });
   await page.waitForTimeout(2_000);
@@ -297,20 +279,18 @@ test('two live sessions: New message opens the list, the writer first (5.2); the
   // Its turn ends, then the turn goes in.
   await second.setBusy(false);
   await second.deliver(command.id);
-  await expect(pane.locator('[data-delivery="delivered"]')).toHaveText(/^Delivered to Pi, \d{1,2}:\d{2} [AP]M$/);
+  await expect(pane.locator('[data-delivery="delivered"]')).toHaveText(/^Delivered to Pi, (?:[A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d{2} [AP]M$/);
   await shot('5.2-delivered-to-the-picked-session');
 });
 
-test('a session that stops polling leaves the list; the page logged no errors', async () => {
+test('a session that stops polling leaves the list, and a message to it is refused; the page logged no errors', async () => {
   const { page } = world;
   for (const connection of world.connections) await connection.stop();
   world.connections = [];
   // Live means a poll within 30 s.
   await page.waitForTimeout(31_000);
-  const pane = page.locator('section.ib-pane');
-  await pane.locator('[data-new-message]').click();
-  await expect(pane.locator('[data-not-running]')).toBeVisible();
-  await page.keyboard.press('Escape');
-  await expect(pane.locator('[data-not-running]')).toHaveCount(0);
+  expect(await liveSessions()).toEqual([]);
+  const refused = await windowPost(`/api/inbox/threads/${world.threadId}/message`, { session: world.writer, body: 'Anyone there?', idempotency_key: 'nm-3' });
+  expect([refused.status, refused.json.code]).toEqual([409, 'session_not_live']);
   expect(world.errors).toEqual([]);
 });

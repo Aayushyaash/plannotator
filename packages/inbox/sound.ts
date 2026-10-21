@@ -232,6 +232,8 @@ export interface InboxSound {
   preview: (volume?: number) => void;
   /** New questions arrived (notify.ts's items, after the list read). */
   questionsArrived: () => void;
+  /** Another Inbox tab said it is in front (within the last 15 s): it handles what arrives (notify.ts). */
+  otherTabInFront: () => boolean;
   /** Save the switch; false when the Inbox did not keep it (the switch goes back). */
   setEnabled: (next: boolean) => Promise<boolean>;
   setVolume: (next: number) => Promise<boolean>;
@@ -383,10 +385,14 @@ export function useInboxSound(options: {
     [],
   );
 
+  const otherTabInFront = useCallback(() => {
+    const now = Date.now();
+    return [...others.current.values()].some((tab) => tab.front && now - tab.at < FRONT_FRESH_MS);
+  }, []);
+
   const questionsArrived = useCallback(() => {
     const now = Date.now();
-    const otherTabInFront = [...others.current.values()].some((tab) => tab.front && now - tab.at < FRONT_FRESH_MS);
-    const decided = decideRing(gate.current, { now, enabled: settingsRef.current.enabled, inFront: pageInFront(), otherTabInFront });
+    const decided = decideRing(gate.current, { now, enabled: settingsRef.current.enabled, inFront: pageInFront(), otherTabInFront: otherTabInFront() });
     gate.current = decided.gate;
     // Before the first click Chrome keeps the context suspended: the ring would be lost, so none is tried.
     if (!decided.ring || !armedRef.current) return;
@@ -398,7 +404,7 @@ export function useInboxSound(options: {
         // Closed.
       }
     });
-  }, []);
+  }, [otherTabInFront]);
 
   const preview = useCallback((volume?: number) => {
     // Play is a click: it arms the sound too.
@@ -425,5 +431,5 @@ export function useInboxSound(options: {
   const setEnabled = useCallback((next: boolean) => save({ enabled: next }), [save]);
   const setVolume = useCallback((next: number) => save({ volume: next }), [save]);
 
-  return { settings, armed, playing, preview, questionsArrived, setEnabled, setVolume };
+  return { settings, armed, playing, preview, questionsArrived, otherTabInFront, setEnabled, setVolume };
 }

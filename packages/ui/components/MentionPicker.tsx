@@ -34,6 +34,18 @@ export function mentionAnchorOf(element: HTMLElement | null): MentionAnchor | nu
   return { top: rect.top, bottom: rect.bottom, left: rect.left, width: rect.width };
 }
 
+/** Consecutive runs of people with the same `group`, with each run's first index in the flat list. */
+export function mentionGroups(people: readonly MentionPerson[]): { group: string; start: number; people: MentionPerson[] }[] {
+  const runs: { group: string; start: number; people: MentionPerson[] }[] = [];
+  people.forEach((person, index) => {
+    const group = person.group ?? '';
+    const last = runs[runs.length - 1];
+    if (last && last.group === group) last.people.push(person);
+    else runs.push({ group, start: index, people: [person] });
+  });
+  return runs;
+}
+
 /** The optional avatar column: an image, else initials on a tinted disc. */
 function MentionAvatar({
   avatar,
@@ -116,6 +128,45 @@ export function MentionPicker({
         <p data-mention-empty className="px-2 py-1 text-[11px] text-muted-foreground">
           {emptyNotice}
         </p>
+      ) : people.some((person) => person.group) ? (
+        // Grouped (a host set `group`): each run of one group is a `role="group"` labelled by its heading.
+        mentionGroups(people).map((run) => {
+          const headingId = id ? `${id}-group-${run.start}` : undefined;
+          return (
+            <div key={`${run.group}-${run.start}`} role="group" aria-labelledby={headingId} data-mention-group={run.group}>
+              <p id={headingId} data-mention-group-heading className="px-2 pb-1 pt-1.5 text-[10px] font-medium text-muted-foreground">
+                {run.group}
+              </p>
+              {run.people.map((person, offset) => {
+                const index = run.start + offset;
+                return (
+                  <button
+                    key={person.id}
+                    type="button"
+                    role="option"
+                    id={id ? `${id}-option-${index}` : undefined}
+                    aria-selected={active === index}
+                    data-mention-option={person.id}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      onPick(person);
+                    }}
+                    onMouseEnter={() => onHover(index)}
+                    className={`flex w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-1 text-left text-xs transition-colors ${
+                      active === index ? 'bg-muted text-foreground' : 'text-foreground/85 hover:bg-muted/60'
+                    }`}
+                  >
+                    {person.avatar && <MentionAvatar avatar={person.avatar} label={person.label} />}
+                    <span className="min-w-0 flex-1 truncate">{person.label}</span>
+                    {person.detail && (
+                      <span className="min-w-0 max-w-[44%] shrink-0 truncate text-[10px] text-muted-foreground">{person.detail}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })
       ) : (
         people.map((person, index) => (
           <button

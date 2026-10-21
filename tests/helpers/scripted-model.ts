@@ -14,6 +14,12 @@ export interface ScriptedRequest {
   /** The tool definitions as sent. */
   toolDefinitions: { name: string; description: string; parameters: unknown }[];
   messages: { role: string; content: unknown; tool_call_id?: string }[];
+  /** The request body's size in bytes, as the host sent it. */
+  bodyBytes: number;
+  /** Each tool entry's size in bytes, as it sat in the body (its compact JSON), by name. */
+  toolBytes: Record<string, number>;
+  /** Each tool entry's compact JSON, by name. */
+  toolJson: Record<string, string>;
 }
 
 export type ScriptedTurn =
@@ -50,7 +56,8 @@ export function startScriptedModel(script: (request: ScriptedRequest) => Scripte
       const url = new URL(req.url);
       if (url.pathname.endsWith("/models")) return Response.json({ object: "list", data: [{ id: "scripted", object: "model" }] });
       if (!url.pathname.endsWith("/chat/completions")) return new Response("not found", { status: 404 });
-      const body = (await req.json()) as {
+      const raw = await req.text();
+      const body = JSON.parse(raw) as {
         tools?: { function?: { name?: string; description?: string; parameters?: unknown } }[];
         messages?: ScriptedRequest["messages"];
       };
@@ -59,7 +66,16 @@ export function startScriptedModel(script: (request: ScriptedRequest) => Scripte
         description: tool.function?.description ?? "",
         parameters: tool.function?.parameters,
       }));
-      const request: ScriptedRequest = { tools: toolDefinitions.map((tool) => tool.name), toolDefinitions, messages: body.messages ?? [] };
+      const toolJson: Record<string, string> = Object.fromEntries((body.tools ?? []).map((tool) => [tool.function?.name ?? "", JSON.stringify(tool)]));
+      const toolBytes = Object.fromEntries(Object.entries(toolJson).map(([name, text]) => [name, Buffer.byteLength(text)]));
+      const request: ScriptedRequest = {
+        tools: toolDefinitions.map((tool) => tool.name),
+        toolDefinitions,
+        messages: body.messages ?? [],
+        bodyBytes: Buffer.byteLength(raw),
+        toolBytes,
+        toolJson,
+      };
       requests.push(request);
       const turn = script(request);
       const id = `chatcmpl-${++calls}`;

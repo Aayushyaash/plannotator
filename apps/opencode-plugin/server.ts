@@ -43,7 +43,7 @@ import type { SessionBridge } from "@plannotator/ai/session-bridge";
 import { createOpenCodeSessionBridge, markPlanReviewPending } from "./opencode-session-bridge";
 import type { PlanEdit } from "./plan-edits";
 import { getPlanningPrompt } from "./planning-prompt";
-import { findInboxConnection, registerInboxOpenCode2, type InboxToolDomainLike } from "./inbox";
+import { dropInboxDuplicates, findInboxConnection, registerInboxOpenCode2, type InboxToolDomainLike } from "./inbox";
 
 const DEFAULT_PLAN_TIMEOUT_SECONDS = 345_600;
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -141,6 +141,8 @@ const serverPlugin = {
       try {
         await ctx.session.hook("context", (event) => {
           dropSessionUrlNotices(event.messages as unknown[]);
+          // A Send now reply that reached the session twice (its steer row and the fallback queued turn): one copy.
+          dropInboxDuplicates(event.messages as unknown[]);
         });
         // `session.generate` (plan review's "Quick answer from this session")
         // builds its request through its own hook with the same shape
@@ -148,6 +150,7 @@ const serverPlugin = {
         // notice is kept out of those answers too.
         await ctx.session.hook("generate", (event) => {
           dropSessionUrlNotices(event.messages as unknown[]);
+          dropInboxDuplicates(event.messages as unknown[]);
         });
       } catch (error) {
         console.error(`[Plannotator] Could not register the session-URL notice filter: ${error instanceof Error ? error.message : String(error)}`);
@@ -458,16 +461,19 @@ function getPlanHtml(): string {
  * The embedded runtime's ready hook: put the session URL where a reviewer can
  * see it, and nowhere else.
  *
- * This still must NOT go to `client.app.log`. That is `console.error`, the same
- * stderr stream `handleServerReady` has already printed the URL to, so logging
- * here would duplicate the line in remote mode and add a stray one locally
- * (which is why this hook used to be empty). The transcript notice is a
- * different surface entirely, and on OpenCode 2 it is the only one a remote
- * reviewer can actually see: the host discards a server plugin's stderr unless
- * it was started with `OPENCODE_PRINT_LOGS=1`.
+ * The transcript notice comes first. `client.app.log` is no substitute for it:
+ * that is `console.error`, and on OpenCode 2 the host discards a server
+ * plugin's stderr unless it was started with `OPENCODE_PRINT_LOGS=1`, so it is
+ * only the fallback below for a host without the notice. (`runEmbeddedPlanReview`,
+ * this hook's caller, passes `handleServerReady` `{ announce: false }`: the
+ * embedded runtime shares stderr with OpenCode's TUI renderer, so the raw ready
+ * line is not printed there.) The transcript notice is the surface a reviewer
+ * can actually see, remote or local.
  *
- * Best-effort in both directions: an older host exposes no `session.synthetic`,
- * so `notifyUrl` is absent and this stays silent, exactly as before.
+ * An older host exposes no `session.synthetic`, so `notifyUrl` is absent; the
+ * URL then goes to `client.app.log`, the console output such a host shows only
+ * with `OPENCODE_PRINT_LOGS=1`. (That used to be the ready line
+ * `handleServerReady` printed itself; with `announce: false` it is this log.)
  */
 export function createPlanReadyNotifier(
   client: V2Client,
@@ -481,7 +487,14 @@ export function createPlanReadyNotifier(
       // The list entry is best-effort.
     }
     const notify = client.notifyUrl;
-    if (typeof notify !== "function") return;
+    if (typeof notify !== "function") {
+      try {
+        client.app.log({ level: "info", message: formatSessionUrlNotice(url) });
+      } catch {
+        // Logging is best-effort.
+      }
+      return;
+    }
     try {
       void notify({ url, message: formatSessionUrlNotice(url) }).catch(() => {
         // A cosmetic notice must never surface as an unhandled rejection.

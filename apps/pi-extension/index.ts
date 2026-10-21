@@ -78,7 +78,8 @@ import {
 	type Phase,
 	stripPlanningOnlyTools,
 } from "./tool-scope.ts";
-import { getServerPorts, isRemoteSession, isUrlHostOverridden } from "./server/network.ts";
+import { getServerPorts, isRemoteSession } from "./server/network.ts";
+import { sessionOpenedMessage } from "./session-opened.ts";
 import { isBrowserSessionStoppedError } from "./browser-session-error.ts";
 import { classifyAnnotateOutcome } from "./annotate-outcome.ts";
 import { classifyReviewOutcome } from "./review-outcome.ts";
@@ -221,20 +222,6 @@ function safeNotify(
 		if (notifyCurrentPiSession(message, type, origin)) return;
 		console.error(`Plannotator notification failed: ${err instanceof Error ? err.message : String(err)}`);
 	}
-}
-
-/**
- * Foreground "session opened" notice. For a remote session the auto-opened
- * browser is unreachable, so the URL must ride in THIS in-turn message — the
- * after-turn notify inside openBrowserForServer fires too late to render.
- */
-function sessionOpenedMessage(label: string, url: string): string {
-	if (!isRemoteSession()) return `${label}. You can keep chatting while it runs.`;
-	// With an advertised-URL host override the link is directly reachable
-	// (e.g. over a tailnet), so the port-forwarding advice would be wrong.
-	return isUrlHostOverridden()
-		? `${label} — open ${url} on your device. You can keep chatting while it runs.`
-		: `${label} — open ${url} on your local machine (forward the port if needed). You can keep chatting while it runs.`;
 }
 
 function reportBackgroundError(ctx: ExtensionContext, message: string, err: unknown, origin?: PiSessionIdentity): void {
@@ -995,6 +982,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				// `--no-git-remote-check` (#1553): session-only, and only ever a
 				// disable — undefined leaves the env var / config deciding.
 				gitRemoteCheck: reviewArgs.gitRemoteCheck,
+				announcedInTurn: true,
 			});
 			ctx.ui.notify(sessionOpenedMessage("Code review opened", session.url), "info");
 			const subject = reviewArgs.patchFile
@@ -1342,6 +1330,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				liveTargetUrl,
 				sessionBridgeFor(ctx, origin),
 				bundleFiles,
+				true,
 			);
 			ctx.ui.notify(sessionOpenedMessage("Annotation opened", session.url), "info");
 			const errors = {
@@ -1443,6 +1432,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				gate,
 				pickerMessages,
 				sessionBridgeFor(ctx, origin),
+				true,
 			);
 			ctx.ui.notify(sessionOpenedMessage("Last-message annotation opened", session.url), "info");
 			const errors = {
@@ -1922,6 +1912,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				session = await startPlanReview(ctx, planContent, undefined, {
 					sessionBridge: sessionBridgeFor(ctx, origin),
 					planRevisions: true,
+					announcedInTurn: true,
 				});
 			} catch (err) {
 				const message = `Failed to start plan review UI: ${getStartupErrorMessage(err)}`;

@@ -126,7 +126,7 @@ beforeEach(() => {
       const box = article ? (boxes[article.getAttribute('data-message-article')!] ?? { top: 5000, height: 300 }) : null;
       if (!box) return rect(0, 0);
       // The sender row: the top 30 px of its message.
-      if (this.classList.contains('ib-sender') || this.classList.contains('ib-fline')) return rect(box.top, 30);
+      if (this.classList.contains('ib-fline')) return rect(box.top, 30);
       return this === article ? rect(box.top, box.height) : rect(box.top, 0);
     },
   });
@@ -136,7 +136,7 @@ beforeEach(() => {
       if (covers.some((c) => y >= c.top && y < c.bottom)) return coverElement;
       for (const article of document.querySelectorAll<HTMLElement>('[data-message-article]')) {
         const box = boxes[article.getAttribute('data-message-article')!];
-        if (box && y >= box.top && y < box.top + box.height) return article.querySelector('.ib-sender, .ib-fline') ?? article;
+        if (box && y >= box.top && y < box.top + box.height) return article.querySelector('.ib-fline') ?? article;
       }
       return document.querySelector('.ib-pbody');
     },
@@ -220,8 +220,6 @@ function pane({ thread, onSeen, file = null, phone = false, covered = false, loo
         onQuestions={() => {}}
         onChanged={async () => {}}
         onClose={() => {}}
-        decisions={[]}
-        onOpenDecisionPage={() => {}}
         file={file}
         onOpenFile={() => {}}
         onOpenGuide={() => {}}
@@ -373,7 +371,7 @@ describe.skipIf(!hasDom)('seen on sight in the thread pane', () => {
     expect(pill.hasAttribute('data-off')).toBe(true);
   });
 
-  // The failure this guards: a phone's New message sheet (or the decision card,
+  // The failure this guards: a phone's New message sheet (or
   // the annotations list, the Mark read toast) drawn over the end of the thread
   // hid the arrival, and it was still marked seen.
   test('something drawn over the first lines (a sheet) hides them: nothing is seen until it goes, and a cover mid-dwell restarts it', async () => {
@@ -494,11 +492,99 @@ describe.skipIf(!hasDom)('seen on sight in the thread pane', () => {
     expect(scrolls).toEqual([]);
   });
 
+  // The failures these guard (the owner, 2026-10-16: "Why does this whole
+  // 'one new' thing keep showing, even though I've seen the whole message?
+  // Shows when I scroll up."): the pill counted every message below the view
+  // that was new at the open or not yet seen on sight, so a message the person
+  // had read came back into its count as soon as they scrolled up past it.
+  test('an arrival read with the window in the background (no dwell) leaves the pill for good: scrolling up never brings it back', async () => {
+    focused = false;
+    boxes = { msg_A1: { top: 0, height: 300 }, msg_P1: { top: 300, height: 200 }, msg_A2: { top: 2000, height: 200 } };
+    const seen: number[] = [];
+    const el = await openThenArrive({ onSeen: (through) => seen.push(through) }, A2);
+    const pill = el.querySelector<HTMLButtonElement>('[data-new-pill]')!;
+    const body = el.querySelector('.ib-pbody')!;
+    expect(pill.hasAttribute('data-off')).toBe(false);
+    // The person scrolls down and reads it while typing in another window: not seen on sight (no focus)...
+    boxes = { msg_A1: { top: -1700, height: 300 }, msg_P1: { top: -1400, height: 200 }, msg_A2: { top: 300, height: 200 } };
+    act(() => void body.dispatchEvent(new Event('scroll')));
+    await wait(SEEN_DWELL_MS + 200);
+    expect(seen).toEqual([]);
+    expect(pill.hasAttribute('data-off')).toBe(true);
+    // ...but it was on screen: back up at the top, the pill stays away.
+    boxes = { msg_A1: { top: 0, height: 300 }, msg_P1: { top: 300, height: 200 }, msg_A2: { top: 2000, height: 200 } };
+    act(() => void body.dispatchEvent(new Event('scroll')));
+    expect(pill.hasAttribute('data-off')).toBe(true);
+  });
+
+  test('messages new at the open: the pill counts only those not yet on screen, and one read never comes back on scroll up', async () => {
+    const R = message(ROOT, AGENT, 2, 'The refund webhook is wired.');
+    const B1 = message('msg_B1', AGENT, 3, 'Retries next.');
+    const B2 = message('msg_B2', AGENT, 5, 'Retries are on.');
+    // B1 on screen at the open, B2 below it.
+    boxes = { [ROOT]: { top: 0, height: 300 }, msg_B1: { top: 400, height: 200 }, msg_B2: { top: 1200, height: 200 } };
+    const el = await openThenArrive({ onSeen: () => {}, base: [R, B1, B2], lookSeq: 2, seenThrough: 5 });
+    const pill = el.querySelector<HTMLButtonElement>('[data-new-pill]')!;
+    const body = el.querySelector('.ib-pbody')!;
+    expect(pill.textContent).toBe('1 new');
+    // Scrolled down to B2, then back to the top: both have been on screen.
+    boxes = { [ROOT]: { top: -800, height: 300 }, msg_B1: { top: -400, height: 200 }, msg_B2: { top: 400, height: 200 } };
+    act(() => void body.dispatchEvent(new Event('scroll')));
+    expect(pill.hasAttribute('data-off')).toBe(true);
+    boxes = { [ROOT]: { top: 0, height: 300 }, msg_B1: { top: 900, height: 200 }, msg_B2: { top: 1200, height: 200 } };
+    act(() => void body.dispatchEvent(new Event('scroll')));
+    expect(pill.hasAttribute('data-off')).toBe(true);
+  });
+
+  test('scrolled to the end, nothing is below: a short arrival whose top sits in the pill band shows no pill, and is seen', async () => {
+    stub(HTMLElement.prototype, 'scrollHeight', { get: () => 1200 });
+    stub(HTMLElement.prototype, 'clientHeight', { get: () => 800 });
+    stub(HTMLElement.prototype, 'scrollTop', { get: () => 400, set: () => {} });
+    stub(HTMLElement.prototype, 'scrollBy', { value: () => {} });
+    // The last message, fully visible above the foot, its top inside the pill's 56 px band.
+    boxes = { msg_A2: { top: 752, height: 40 } };
+    const seen: number[] = [];
+    const el = await openThenArrive({ onSeen: (through) => seen.push(through) }, A2);
+    const pill = el.querySelector<HTMLButtonElement>('[data-new-pill]')!;
+    expect(pill.hasAttribute('data-off')).toBe(true);
+    await wait(SEEN_DWELL_MS + 200);
+    expect(seen).toEqual([6]);
+  });
+
+  test('a short arrival at the end that lands while the tab is hidden: on return, with no scroll, the pill goes and it is seen', async () => {
+    stub(HTMLElement.prototype, 'scrollHeight', { get: () => 1200 });
+    stub(HTMLElement.prototype, 'clientHeight', { get: () => 800 });
+    stub(HTMLElement.prototype, 'scrollTop', { get: () => 400, set: () => {} });
+    stub(HTMLElement.prototype, 'scrollBy', { value: () => {} });
+    visibility = 'hidden';
+    boxes = { msg_A2: { top: 752, height: 40 } };
+    const seen: number[] = [];
+    const el = await openThenArrive({ onSeen: (through) => seen.push(through) }, A2);
+    const pill = el.querySelector<HTMLButtonElement>('[data-new-pill]')!;
+    visibility = 'visible';
+    act(() => void document.dispatchEvent(new Event('visibilitychange')));
+    await wait(SEEN_DWELL_MS + 400);
+    expect({ off: pill.hasAttribute('data-off'), seen }).toEqual({ off: true, seen: [6] });
+  });
+
+  test('a hidden tab marks nothing: an arrival on screen while the tab is hidden still counts once the person scrolls away', async () => {
+    visibility = 'hidden';
+    boxes = { msg_A2: { top: 400, height: 200 } };
+    const el = await openThenArrive({ onSeen: () => {} }, A2);
+    const pill = el.querySelector<HTMLButtonElement>('[data-new-pill]')!;
+    const body = el.querySelector('.ib-pbody')!;
+    act(() => void body.dispatchEvent(new Event('scroll')));
+    visibility = 'visible';
+    boxes = { msg_A2: { top: 2000, height: 200 } };
+    act(() => void body.dispatchEvent(new Event('scroll')));
+    expect(pill.textContent).toBe('1 new');
+  });
+
   test("an arrival's first lines are measured where it sits, not where its entrance draws it", () => {
     const article = document.createElement('article');
     article.setAttribute('data-message-article', 'msg_X');
     const sender = document.createElement('div');
-    sender.className = 'ib-sender';
+    sender.className = 'ib-fline';
     article.appendChild(sender);
     document.body.appendChild(article);
     try {

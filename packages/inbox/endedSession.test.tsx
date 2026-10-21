@@ -48,7 +48,6 @@ function questions(picked: boolean, messageId = M1): InboxQuestion[] {
     choices: q.parsed.choices,
     recommendation: null,
     suggested_text: null,
-    decision_on_answer: false,
     stopped: q.stopped,
     holds_up: q.holds_up,
     asked_by_agent_id: 'ses_asker',
@@ -60,10 +59,7 @@ function questions(picked: boolean, messageId = M1): InboxQuestion[] {
     picked_by: null,
     picked_at: picked ? '2026-10-11T10:51:00.000Z' : null,
     sent_reply_id: null,
-    decision_id: null,
     message_id: messageId,
-    decision_recording: false,
-    decision_draft: null,
     superseded_by: null,
   }));
 }
@@ -121,7 +117,7 @@ beforeEach(() => {
   posted = [];
   sessions = { sessions: [], asker: { session: 'ses_asker', live: false } };
   liveness = null;
-  replyAnswer = () => Response.json({ reply: {}, questions: [], replayed: false, decisions_refused: [] });
+  replyAnswer = () => Response.json({ reply: {}, questions: [], replayed: false });
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
     if (init?.method === 'POST') {
@@ -168,8 +164,6 @@ async function render(thread: InboxThread, sent: { at: string; checked_at: strin
           onQuestions={() => {}}
           onChanged={async () => {}}
           onClose={() => {}}
-          decisions={[]}
-          onOpenDecisionPage={() => {}}
           file={null}
           onOpenFile={() => {}}
           onOpenGuide={() => {}}
@@ -433,7 +427,7 @@ test.skipIf(!hasDom)('a Send answering two sessions: `to` rides only the ended a
   replyAnswer = () =>
     posted.at(-1)!.path.includes(M1)
       ? Response.json({ error: 'That session is not live any more.', code: 'session_not_live' }, { status: 409 })
-      : Response.json({ reply: {}, questions: [], replayed: false, decisions_refused: [] });
+      : Response.json({ reply: {}, questions: [], replayed: false });
   const el = await render({ ...threadOf(other, mine), thread_id: M0 });
   act(() => button(el, 'Send').click());
   await settle();

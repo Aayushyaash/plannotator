@@ -1,7 +1,7 @@
 import { generateId } from '../utils/generateId';
 import React, { useRef, useState, useEffect, useLayoutEffect, useMemo, forwardRef, useImperativeHandle, useCallback, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
-import { ImageLightbox } from './ImageLightbox';
+import { collectDocumentImages, ImageLightbox, type LightboxImage } from './ImageLightbox';
 import { AnnotationType, type Block, type Annotation, type EditorMode, type InputMethod, type ImageAttachment, type ActionsLabelMode, type HostDraft } from '../types';
 import { applyHighlight, codeBlockClassName, onCodeHighlightSwap } from '../utils/codeHighlight';
 import { paintCodeBlockMark } from '../utils/codeBlockMark';
@@ -163,6 +163,18 @@ export interface ViewerProps {
    */
   resolveLocalLink?: LocalLinkResolver;
   imageBaseDir?: string;
+  /**
+   * A click on an image in the document. Given: the host handles it (the
+   * Inbox opens a message's image in its own viewer) and no lightbox opens.
+   * Absent: the lightbox, as always.
+   */
+  onImageClick?: (src: string, alt: string) => void;
+  /**
+   * The lightbox steps through every image the document shows (← →, the
+   * peek; approval "inbox-image-viewer": plan review and annotate's light
+   * version). Absent or false: the single image overlay, as always.
+   */
+  imageLightboxStepping?: boolean;
   /** Directory the active document lives in — used by the code-path validator
    *  so out-of-tree relative references (e.g. `../foo.ts` in a linked doc)
    *  resolve against the doc's own directory rather than only cwd. */
@@ -249,6 +261,11 @@ export interface ViewerProps {
    *  `Decision: when answered`. `'any'`: also a question with no decision
    *  line, when `questionDecisionRecording` returns a boolean for it. */
   questionDecisionScope?: 'when-answered' | 'any';
+  /** Whether `:::question` cards read `Decision:` lines (default true). False
+   *  (a host that records no decisions, such as the Plannotator Inbox): a
+   *  `Decision:` line is shown as context and no question carries a decision
+   *  tag or row from it. The prompt, key and numbering are unchanged. */
+  questionDecisionLines?: boolean;
   /** Makes a question's "Records a decision" tag a toggle button
    *  (`aria-pressed`); a click calls this with the question's key and the
    *  next state, which the host stores and returns from
@@ -265,6 +282,12 @@ export interface ViewerProps {
    *  (a host whose message holds one sent and one open question). Absent:
    *  every question follows `readOnly`. */
   questionDecisionLocked?: (question: IndexedQuestion) => boolean;
+  /** Per question, true draws that card read-only, as under `readOnly` (no
+   *  picks, no Other, no note, no Skip, no Accept recommended, and its
+   *  decision tag a plain tag), while the other questions stay answerable (a
+   *  host whose message holds one sent and one open question). Absent: every
+   *  question follows `readOnly`. */
+  questionReadOnly?: (question: IndexedQuestion) => boolean;
   /** `'none'` hides each question card's own status tag (Open / Answered /
    *  Settled / Skipped) so the host can draw its own; the decision tags stay.
    *  Default `'card'`. */
@@ -303,6 +326,18 @@ export interface ViewerProps {
    * blocks and no comments on its text. Absent → unchanged.
    */
   answerOnly?: boolean;
+  /**
+   * Opt-in host capability, with `answerOnly`: the reader may comment on the
+   * text. A text selection opens the selection toolbar, comment-only
+   * (Comment and the one-click 👍; no Delete, no label picker), and its
+   * comment composer; `annotations` are drawn as highlights. Question cards
+   * are left out of selection (their text is not commented on), and nothing
+   * else of authoring comes back (no pinpoint, code-block toolbar, Global
+   * comment or Copy, no Vim). For a host that shows a message whose words
+   * can be commented on (the Plannotator Inbox's agent messages). Ignored
+   * without `answerOnly` and under `readOnly`. Absent → unchanged.
+   */
+  textComments?: boolean;
   /** Opt-in Vim-style keyboard selection. Default false for compatibility. */
   vimModeEnabled?: boolean;
   /** Replace the compact Vim badge with the live video-style key HUD. */
@@ -675,6 +710,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   resolveLocalLink,
   linkedDocInfo,
   imageBaseDir,
+  onImageClick: hostImageClick,
+  imageLightboxStepping = false,
   codePathBaseDir,
   disableCodePathValidation,
   onRestoreReport,
@@ -693,9 +730,11 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   renderQuestionFooter,
   questionDecisionRecording,
   questionDecisionScope,
+  questionDecisionLines = true,
   onToggleQuestionDecisionRecording,
   onOpenQuestionDecision,
   questionDecisionLocked,
+  questionReadOnly,
   questionStatusTag,
   questionStatusLabel,
   renderQuestionCard,
@@ -704,6 +743,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   allowImages = true,
   readOnly = false,
   answerOnly = false,
+  textComments = false,
   vimModeEnabled = false,
   vimHudEnabled = false,
   vimHudKeyPanelEnabled = true,
@@ -713,13 +753,27 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   // Annotation authoring is off when read-only, and when the host only wants
   // answers (`answerOnly`); question cards and checkboxes follow `readOnly`.
   const authoringOff = readOnly || answerOnly;
+  // `textComments`: an answer-only document whose words still take comments
+  // (the selection toolbar, comment-only, and its composer); everything else
+  // of authoring stays off. Without it this is exactly `!authoringOff`.
+  const textCommentsOnly = answerOnly && textComments && !readOnly;
+  const selectionCommentsOn = !authoringOff || textCommentsOnly;
   const hostComposes = onHostDraft !== undefined && !authoringOff;
   const viewerAnnotationHeader = authoringOff ? undefined : annotationHeader;
   const hasViewerAnnotationHeader = viewerAnnotationHeader !== undefined;
   // Where `#123` / `@user` link: `refRepo` when the host gave one, else `repoInfo`.
   const linkRepo = refRepo ?? repoInfo;
   const [copied, setCopied] = useState(false);
-  const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
+  const [lightbox, setLightboxState] = useState<{ src: string; alt: string; images?: LightboxImage[] } | null>(null);
+  // A host that handles image clicks (the Inbox) gets them; otherwise the lightbox opens, stepping through
+  // the document's images when the host asked for it.
+  const setLightbox = (image: { src: string; alt: string }) => {
+    if (hostImageClick) {
+      hostImageClick(image.src, image.alt);
+      return;
+    }
+    setLightboxState(imageLightboxStepping ? { ...image, images: collectDocumentImages(containerRef.current) } : image);
+  };
   const [locationHash, setLocationHash] = useState(() => window.location.hash);
   const globalCommentButtonRef = useRef<HTMLButtonElement>(null);
   // Read through a ref: only the imperative removeHighlight path below needs
@@ -774,9 +828,9 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   // annotations that carry `questionAnswer` (matched by question key, so an
   // answer follows its question across re-parses).
   const questionIndex = useMemo(() => {
-    const list = indexQuestionBlocks(blocks);
+    const list = indexQuestionBlocks(blocks, { decisionLines: questionDecisionLines });
     return { byBlock: new Map(list.map((q) => [q.blockId, q])), total: list.length };
-  }, [blocks]);
+  }, [blocks, questionDecisionLines]);
   // A host that keeps answers itself (`questionAnswers`) replaces the
   // annotation-derived map; each entry is validated like any other reader.
   const answersByKey = useMemo(
@@ -847,7 +901,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     onSelectAnnotation,
     selectedAnnotationId,
     mode,
-    enabled: !authoringOff,
+    enabled: selectionCommentsOn,
     // Markdown documents drift between the moment a draft/share is written and
     // the moment it is restored (a plan revision, a re-rendered block, a
     // renderer change that adds or drops elements — #1509 hoisted an alert's
@@ -1661,12 +1715,12 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 : undefined;
               if (hostCard !== undefined) {
                 return (
-                  <div key={group.block.id} data-block-id={group.block.id} data-block-type="directive">
+                  <div key={group.block.id} data-block-id={group.block.id} data-block-type="directive" className={textCommentsOnly ? 'annotation-exclude' : undefined}>
                     {hostCard}
                   </div>
                 );
               }
-              return (
+              const rendered = (
                 <BlockRenderer
                   imageBaseDir={imageBaseDir}
                   onImageClick={(src, alt) => setLightbox({ src, alt })}
@@ -1683,29 +1737,41 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                   question={question}
                   questionTotal={questionIndex.total}
                   questionAnswer={question ? answersByKey.get(question.question.key) : undefined}
-                  onAnswerQuestion={readOnly ? undefined : onAnswerQuestion}
-                  onSaveQuestionAnswer={readOnly ? undefined : onSaveQuestionAnswer}
+                  onAnswerQuestion={readOnly || (question && questionReadOnly?.(question)) ? undefined : onAnswerQuestion}
+                  onSaveQuestionAnswer={readOnly || (question && questionReadOnly?.(question)) ? undefined : onSaveQuestionAnswer}
                   saveQuestionAnswerLabel={saveQuestionAnswerLabel}
                   renderQuestionFooter={renderQuestionFooter}
                   questionDecisionRecording={question ? questionDecisionRecording?.(question) : undefined}
                   questionDecisionScope={questionDecisionScope}
-                  onToggleQuestionDecisionRecording={readOnly || (question && questionDecisionLocked?.(question)) ? undefined : onToggleQuestionDecisionRecording}
-                  onOpenQuestionDecision={readOnly || (question && questionDecisionLocked?.(question)) ? undefined : onOpenQuestionDecision}
+                  onToggleQuestionDecisionRecording={readOnly || (question && (questionDecisionLocked?.(question) || questionReadOnly?.(question))) ? undefined : onToggleQuestionDecisionRecording}
+                  onOpenQuestionDecision={readOnly || (question && (questionDecisionLocked?.(question) || questionReadOnly?.(question))) ? undefined : onOpenQuestionDecision}
                   questionStatusTag={questionStatusTag}
                   questionStatusLabel={questionStatusLabel}
                   renderQuestionBelowPrompt={renderQuestionBelowPrompt}
                 />
               );
+              // `textComments`: a question card's words are not commented on
+              // (its own controls already are excluded); a box-less wrapper
+              // keeps its layout.
+              if (question && textCommentsOnly) {
+                return (
+                  <div key={group.block.id} className="annotation-exclude" style={{ display: 'contents' }}>
+                    {rendered}
+                  </div>
+                );
+              }
+              return rendered;
             })()
           )
         )}
 
         {/* Text selection toolbar */}
-        {!authoringOff && !hostComposes && toolbarState && (
+        {selectionCommentsOn && !hostComposes && toolbarState && (
           <ToolbarErrorBoundary>
             <AnnotationToolbar
               element={toolbarState.element}
               positionMode="center-above"
+              commentOnly={textCommentsOnly || undefined}
               onAnnotate={handleAnnotate}
               onClose={handleToolbarClose}
               onRequestComment={handleRequestComment}
@@ -1840,7 +1906,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         )}
 
         {/* Comment popover — hook handles text selection, Viewer handles global + code block */}
-        {!authoringOff && !hostComposes && hookCommentPopover && (
+        {selectionCommentsOn && !hostComposes && hookCommentPopover && (
             <CommentPopover
               anchorEl={hookCommentPopover.anchorEl}
               contextText={hookCommentPopover.contextText}
@@ -1892,7 +1958,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         )}
 
         {/* Quick Label floating picker — hook handles text selection, Viewer handles code blocks */}
-        {!authoringOff && !hostComposes && hookQuickLabelPicker && (
+        {selectionCommentsOn && !hostComposes && hookQuickLabelPicker && (
           <FloatingQuickLabelPicker
             anchorEl={hookQuickLabelPicker.anchorEl}
             cursorHint={hookQuickLabelPicker.cursorHint}
@@ -1924,7 +1990,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
 
       {/* Image lightbox */}
       {lightbox && createPortal(
-        <ImageLightbox src={lightbox.src} alt={lightbox.alt} onClose={() => setLightbox(null)} />,
+        <ImageLightbox src={lightbox.src} alt={lightbox.alt} images={lightbox.images} onClose={() => setLightboxState(null)} />,
         document.body
       )}
     </div>

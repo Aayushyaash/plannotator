@@ -7,7 +7,7 @@
  * and one from last year; long, near-identical and Arabic file names, a file
  * changed since it was sent with comments on it; a message table and a
  * 390 by 4000 screenshot; a replaced question with a long prompt; a long URL
- * as a subject; a long archived thread; a 2,000-character decision; a log,
+ * as a subject; a long archived thread; a log,
  * YAML, CSV, JSON, PDF, panorama, 1×1 image and minified bundle in one
  * message; a guided review with an unplaced file; question cards with an
  * unmatched recommendation, an unsent pick and a closed card; 46
@@ -40,7 +40,6 @@ import { recordInboxAttachments, writeBlob } from '../packages/shared/inbox/atta
 import { FIXTURE_V1_LOCAL } from '../packages/core/guide-format-fixtures';
 import { checkInboxGuide, describeInboxGuide, inboxGuideInputHash } from '../packages/server/inbox-guides';
 import { InboxStore } from '../packages/shared/inbox/store';
-import { recordAgentDecision } from '../packages/server/inbox-decisions';
 import { refuseRealDataDir } from '../tests/helpers/real-data-dir';
 
 type Agent = { kind: 'agent'; host: string; session: string; name: string | null };
@@ -97,9 +96,6 @@ export interface WorstCaseWorld {
   /** The attachment names in the `kinds` thread, by kind. */
   kinds: { log: string; yaml: string; csv: string; json: string; pdf: string; pano: string; dot: string; minified: string };
 }
-
-/** A 2,000-character decision, one paragraph. */
-export const LONG_DECISION = `Refunds for partial captures go through the ledger's reversal path, never a direct balance edit: ${'each reversal carries the original capture id, the refunded amount in minor units, the currency, the operator who approved it, and the reason code from the support macro, and the nightly reconciliation compares the reversal total against the processor settlement report before the books close; '.repeat(8)}`.slice(0, 2000);
 
 /** A message table, wide enough to fold a phone's cells to one letter a line before the fix. */
 const METRICS_TABLE = [
@@ -351,15 +347,8 @@ export async function seedWorstCase(options: { dataDir: string; src?: string; no
   tick();
   store.resolveThread(archived.id, true);
 
-  // Decisions: a 2,000-character decision and a few ordinary ones, and one question that records a decision.
-  const agent = { host: 'claude-code', session: 'ses_wc_claude', name: 'Claude Code' };
   tick();
-  recordAgentDecision(store, { project_id: ids.billing, text: LONG_DECISION, reason: 'Agreed in the refunds review.', agent });
-  for (const text of ['JPY refunds round half-even.', 'The retry worker ships behind a flag.', 'Partner rate limits apply per API key, not per account.']) {
-    tick();
-    recordAgentDecision(store, { project_id: ids.billing, text, agent });
-  }
-  send('billing', CLAUDE, question('Which ledger owns reversal entries?', ['The refunds ledger', 'The main ledger'], ['Decision: when answered']), { subject: 'Ledger ownership' });
+  send('billing', CLAUDE, question('Which ledger owns reversal entries?', ['The refunds ledger', 'The main ledger']), { subject: 'Ledger ownership' });
 
   // Batch 2 (the fix plan's PR 8): every kind of file the file view broke on, in one message.
   at(new Date(today.getTime() - 30 * 60_000));

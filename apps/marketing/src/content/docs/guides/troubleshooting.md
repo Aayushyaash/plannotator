@@ -51,6 +51,14 @@ plannotator sessions --open 2     # reopens session #2
 
 Stale sessions from crashed processes are cleaned up automatically. You can also force cleanup with `plannotator sessions --clean`.
 
+Every session also prints its URL on one line to stderr when it starts, before it opens a browser:
+
+```
+  Plannotator session ready: http://localhost:54321
+```
+
+The format is stable (two spaces, the prefix, then the URL), so an agent or a script can find the line in the output it already captures. A remote session adds a line under it about forwarding the port, and a browser that could not be opened adds "Could not open a browser automatically". For a session whose output you no longer have, use `plannotator sessions`: it lists only the servers that are still running.
+
 ## Where does Plannotator store data?
 
 Plannotator-managed files live under `~/.plannotator/` by default:
@@ -70,6 +78,7 @@ If the UI doesn't open automatically, check:
 
 - **Remote/SSH session?** Set `PLANNOTATOR_REMOTE=1` and `PLANNOTATOR_PORT` to a port you'll forward. See the [remote guide](/docs/guides/remote-and-devcontainers/).
 - **Wrong browser?** Set `PLANNOTATOR_BROWSER` to the app name or path, or use `--browser` for a one-off override.
+- **`Not opening a browser (PLANNOTATOR_BROWSER=none)`?** That is on purpose: `PLANNOTATOR_BROWSER` (or `--browser`) is set to `none`, `false`, `0`, `off`, `no`, `true`, `1` or `:`. Open the printed URL, or unset the variable. (`BROWSER=true` does not do this; only `PLANNOTATOR_BROWSER` does.)
 - **URL still works** — even if the browser didn't open, the server is running. Check `plannotator sessions` for the URL and open it manually.
 
 ## Hook doesn't fire

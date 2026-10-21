@@ -17,7 +17,12 @@
  *             stays resolved until the person acts
  *   quiet     the person marked it read (Mark read) and nothing but a
  *             set-aside note came after; an agent's next message (or the
- *             person's own reply) brings it back, with no write
+ *             person's own reply) brings it back, with no write; but a
+ *             thread holding unsent work is placed in new instead (below)
+ *   sent      the person's Re-ask note is the last message (approval
+ *             "inbox-reask"): it waits on the agent to ask again, whatever
+ *             is still open, read by the agent or not; a draft there keeps
+ *             its Draft label but never moves the row out of Sent
  *   stopped   an open question says the agent cannot go on (`Stopped:`)
  *   holding   an open question names work that waits (`Holds up:`)
  *   waiting   any other open question
@@ -26,7 +31,18 @@
  *   sent      the person's reply is the last message and the agent has not
  *             read it yet; once it has, the row is Quiet
  *   new       agent messages the person has not looked at
+ *   new       the person's unsent work: words typed in the reply box (a
+ *             reply draft), picks not sent, comments waiting for a Send
+ *             (`unsent`; approval "inbox-reply-drafts": a thread holding
+ *             any of it never sinks to Quiet). New, because New already
+ *             holds "Answered, not sent" (work that waits only for the
+ *             person's Send) and sits above Quiet without claiming a
+ *             question waits; the row is not bold for a draft alone
  *   quiet     the remainder
+ *
+ * An archived thread is the exception: archiving is the person's explicit
+ * "done", so it stays archived with its draft kept (the archive already
+ * closes its questions, and comments cannot be added to it).
  *
  * The sections are shown in INBOX_SECTIONS' order, which puts Sent (waiting
  * on the agent, not on the person) below New since you looked (owner
@@ -52,6 +68,8 @@ import {
   INBOX_SECTIONS,
   type InboxListRow,
   type InboxListSection,
+  inboxHasUnsent,
+  type InboxRowUnsent,
   type InboxSectionId,
 } from "@plannotator/core/inbox-types";
 
@@ -59,11 +77,17 @@ import {
 export type InboxSectionFacts = Pick<
   InboxListRow,
   "resolved_at" | "questions" | "answered_not_sent" | "sent" | "unseen"
-> & { read_at?: string | null; back_from_archive?: boolean };
+> & { read_at?: string | null; back_from_archive?: boolean; reask_pending?: boolean; unsent?: InboxRowUnsent | null };
+
+export { inboxHasUnsent };
 
 export function inboxSectionOf(row: InboxSectionFacts): InboxSectionId {
   if (row.resolved_at !== null && row.back_from_archive !== true) return "quiet";
-  if (row.read_at != null) return "quiet";
+  const unsent = inboxHasUnsent(row.unsent);
+  // Re-ask first: while its note waits on the agent, unsent work never moves the row (approval "inbox-reask").
+  if (row.read_at != null) return unsent && row.reask_pending !== true ? "new" : "quiet";
+  // The person's Re-ask note is the last message: it waits on the agent (approval "inbox-reask").
+  if (row.reask_pending === true) return "sent";
   if (row.questions.open > 0) {
     if (row.questions.stopped) return "stopped";
     if (row.questions.holds_up.length > 0) return "holding";
@@ -72,11 +96,16 @@ export function inboxSectionOf(row: InboxSectionFacts): InboxSectionId {
   if (row.answered_not_sent) return "new";
   if (row.sent !== null && row.sent.checked_at === null) return "sent";
   if (row.unseen > 0) return "new";
-  return "quiet";
+  return unsent ? "new" : "quiet";
 }
 
-/** Bold in the list: something waits on the person, or is new to them. */
-export function inboxRowUnread(section: InboxSectionId): boolean {
+/**
+ * Bold in the list: something waits on the person, or is new to them. A row in
+ * New only for the person's own unsent words or comments (`draftOnly`) is not
+ * bold: nothing new arrived, and its "Draft" label says what is there.
+ */
+export function inboxRowUnread(section: InboxSectionId, draftOnly = false): boolean {
+  if (section === "new" && draftOnly) return false;
   return section === "stopped" || section === "holding" || section === "waiting" || section === "new";
 }
 

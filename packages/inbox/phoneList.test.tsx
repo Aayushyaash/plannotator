@@ -124,7 +124,7 @@ describe.if(hasDom)('the list on a phone', () => {
     // A Sent row says where the reply is, and has nothing to list after it.
     expect(lines(el, 'msg_sent')).toEqual({
       l1: ['mark', 'ib-p:payments-reconciliation-service-v2', expect.stringMatching(/^ib-t:/)],
-      subject: 'Saved for Pi. It sees it when it checks.',
+      subject: 'Saved for Pi. It sees it when it next reads this thread.',
       chips: null,
     });
   });

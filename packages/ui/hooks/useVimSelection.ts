@@ -317,8 +317,16 @@ export function useVimSelection({
     return next;
   }, [containerRef, setState]);
 
+  // Whether vim was on since the last reset. The disabled branch below resets
+  // only when vim actually goes from on to off: on a mount where vim was never
+  // on there is nothing to reset, and `window.getSelection()` in
+  // `clearSelectionWithin` forces a layout on every document open.
+  const wasEnabledRef = useRef(enabled);
+
   useEffect(() => {
     if (!enabled) {
+      if (!wasEnabledRef.current) return;
+      wasEnabledRef.current = false;
       setState(createInitialVimSelectionState());
       setFocused(false);
       setHelpOpen(false);
@@ -326,6 +334,7 @@ export function useVimSelection({
       clearSelectionWithin(containerRef.current);
       return;
     }
+    wasEnabledRef.current = true;
     if (!focused) return;
     if (restoringFocusRef.current) {
       restoringFocusRef.current = false;

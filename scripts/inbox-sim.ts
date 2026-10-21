@@ -107,16 +107,6 @@ export class SimAgent {
     return this.call('wait_for_reply', { thread_id: threadId, timeout_seconds: timeoutSeconds, ...(cursor === undefined ? {} : { cursor }) });
   }
 
-  /** The project's decisions as an agent reads them (`state`: current by default, or replaced, retired, all). */
-  async listDecisions(projectPath: string, state?: 'current' | 'replaced' | 'retired' | 'all'): Promise<Structured[]> {
-    return (await this.call('list_decisions', { project_path: projectPath, ...(state ? { state } : {}) })).decisions as Structured[];
-  }
-
-  /** An agent records a decision it settled with the person. */
-  recordDecision(input: { project_path: string; text: string; reason?: string; idempotency_key?: string }): Promise<Structured> {
-    return this.call('record_decision', { ...input, agent_name: this.name, agent_host: this.host });
-  }
-
   close(): Promise<void> {
     return this.client.close();
   }
@@ -124,13 +114,12 @@ export class SimAgent {
 
 /** The demo messages: one per section the record draws first. */
 export const DEMO_MESSAGES = {
-  /** Stopped on you: two questions, one records a decision, one holds up two pieces of work. */
+  /** Stopped on you: two questions, one stops the agent, one holds up two pieces of work. */
   stopped: [
     'I checked the 409 row against the Stripe docs. Two things before I go on.',
     '',
     ':::question',
     'Which way should the worker go on a Stripe 409?',
-    'Decision: when answered',
     'Stopped: the retry worker cannot ship without this.',
     '',
     '- [ ] Retry with the same idempotency key',

@@ -23,11 +23,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { questionKey, type QuestionAnswer } from "@plannotator/core/question-block";
 import { parseInboxQuestionBlocks } from "@plannotator/core/inbox-questions";
-import { INBOX_SECTIONS, inboxThreadNameKey, type InboxListRow, type InboxListSection, type InboxSectionId } from "@plannotator/core/inbox-types";
-// The sidebar's counts and the decisions the Send route records, from the code that computes them.
+import { INBOX_SECTIONS, inboxHasUnsent, inboxRowOffersMarkRead, inboxThreadNameKey, type InboxListRow, type InboxListSection, type InboxSectionId } from "@plannotator/core/inbox-types";
+// The sidebar's counts, from the code that computes them.
 import { waitingCount } from "../../inbox/held";
-import { recordDecisionsForReply, waitingDecisionCount } from "../../server/inbox-decisions";
 import { inboxArchivedRows, inboxListSections, inboxRowArchived } from "./list";
+import { archiveProject, markProjectRead, unarchiveProject, unmarkProjectRead } from "./project-batch";
 import { InboxError, parseInboxLine } from "./schema";
 import { InboxStore } from "./store";
 
@@ -51,6 +51,7 @@ function view(store: InboxStore) {
       sections: store.listSections(project.id),
     })),
     sections: store.listSections(),
+    cards: store.listCards().map((card) => store.cardWire(card)),
   };
 }
 
@@ -99,8 +100,10 @@ type Op =
   | { op: "reply"; target: number; body: string }
   | { op: "pick"; target: number; choice: number; question?: number }
   // The person's Send: the message's picks and words; `skip` is the Send that skips (false: Keep open).
-  | { op: "personSend"; target: number; key: string; words: string; skip?: boolean }
+  | { op: "personSend"; target: number; key: string; words: string; skip?: boolean; tag?: string | null }
   | { op: "resolve"; target: number; resolved: boolean }
+  // A tagged session's connection delivered what the person tagged it in, in the thread (bridge `delivered`).
+  | { op: "tagDeliver"; target: number; session: string }
   | { op: "supersede"; target: number; whole: boolean; body: string }
   // The person opened the thread (POST /api/inbox/threads/:id/seen). `through`
   // (an index like `target`): the look stops at that agent message's seq
@@ -111,34 +114,113 @@ type Op =
   // An agent read the thread (read_thread, or wait_for_reply handed it the reply).
   | { op: "agentRead"; target: number }
   // The Undo window passed: the server tells the asking agent what a Mark read set aside.
-  | { op: "tell"; target: number };
+  | { op: "tell"; target: number }
+  // The person starts a thread addressed to a live session (compose, POST /api/inbox/messages).
+  | { op: "personStart"; root: number; key: string; session: string; body: string }
+  // The addressed session's connection delivered what the person sent it in the thread (bridge `delivered`).
+  | { op: "deliver"; target: number }
+  // 👍 Looks good on a message, or its Undo (POST /api/inbox/messages/:id/ack): silent, and a Mark read.
+  | { op: "ack"; target: number; on: boolean }
+  // The person types in the thread's reply box (a reply draft, saved), or empties it (deleted).
+  // Approval "inbox-reply-drafts": a thread holding unsent work never sits in Quiet.
+  | { op: "draft"; target: number; words: boolean }
+  // Re-ask (POST /api/inbox/messages/:id/reask): a note asking the session that wrote it for its open questions again.
+  | { op: "reask"; target: number; key: string }
+  // The Board (approval "inbox-board"): an agent's card call, or the person's move, on a card linked to a thread.
+  | { op: "card"; target: number; card: CardOp };
+
+/** One card call: made from the target's thread, or a write to the n-th card (wrapping). */
+type CardOp = { kind: "create" } | { kind: "move"; n: number; column: string; person: boolean; you: boolean; reason: boolean } | { kind: "say"; n: number } | { kind: "restore"; n: number };
+
+const cardOpArb: fc.Arbitrary<CardOp> = fc.oneof(
+  fc.record({ kind: fc.constant("create" as const) }),
+  fc.record({
+    kind: fc.constant("move" as const),
+    n: fc.nat(),
+    column: fc.constantFrom("asked", "designing", "your_look", "building", "your_review", "shipped", "icebox", "dropped"),
+    person: fc.boolean(),
+    you: fc.boolean(),
+    reason: fc.boolean(),
+  }),
+  fc.record({ kind: fc.constant("say" as const), n: fc.nat() }),
+  fc.record({ kind: fc.constant("restore" as const), n: fc.nat() }),
+);
+
+/** Run one card op; card ids are kept apart from message ids. Refusals (InboxError) are part of the space. */
+function runCard(store: InboxStore, op: CardOp, target: string | undefined, cardIds: string[]): void {
+  const agent = { kind: "agent" as const, host: "test", session: "ses_x", name: null };
+  if (op.kind === "create") {
+    if (!target) return;
+    const message = store.message(target)!;
+    cardIds.push(store.createCard({ project_id: message.project_id, by: agent, threads: [target] }).card.id);
+    return;
+  }
+  const id = cardIds[op.n % Math.max(1, cardIds.length)];
+  if (!id) return;
+  if (op.kind === "say") store.updateCard(id, { by: agent, say: "still on it" });
+  else if (op.kind === "restore") store.updateCard(id, { by: { kind: "person" }, restore: true });
+  else
+    store.updateCard(id, {
+      by: op.person ? { kind: "person" } : agent,
+      column: op.column,
+      ...(op.you ? { you: "look at it" } : {}),
+      ...(op.reason ? { reason: "moot" } : {}),
+    });
+}
+
+/** What the person writes when they start a thread (compose). */
+const PERSON_BODIES = ["Idea: group the list by session.", "Add a retry budget to the relay."] as const;
 
 const opArb: fc.Arbitrary<Op> = fc.oneof(
   fc.record({ op: fc.constant("send" as const), root: fc.nat(2), body: bodyArb, key: fc.option(fc.constantFrom("a", "b", "c"), { nil: null }) }),
   fc.record({ op: fc.constant("reply" as const), target: fc.nat(), body: bodyArb }),
   fc.record({ op: fc.constant("pick" as const), target: fc.nat(), choice: fc.nat(3) }),
-  fc.record({ op: fc.constant("personSend" as const), target: fc.nat(), key: fc.constantFrom("s1", "s2"), words: fc.constantFrom("", "ok", "go ahead"), skip: fc.boolean() }),
+  fc.record({
+    op: fc.constant("personSend" as const),
+    target: fc.nat(),
+    key: fc.constantFrom("s1", "s2"),
+    words: fc.constantFrom("", "ok", "go ahead"),
+    skip: fc.boolean(),
+    // Tags (approval "inbox-tag-agents"): another session, or the owner itself (dropped).
+    tag: fc.constantFrom(null, null, "ses_t1", "ses_t2", "ses_x"),
+  }),
   fc.record({ op: fc.constant("resolve" as const), target: fc.nat(), resolved: fc.boolean() }),
+  fc.record({ op: fc.constant("tagDeliver" as const), target: fc.nat(), session: fc.constantFrom("ses_t1", "ses_t2") }),
   // An agent replaces an earlier question (or a whole message's), replying in its thread.
   fc.record({ op: fc.constant("supersede" as const), target: fc.nat(), whole: fc.boolean(), body: bodyArb }),
   fc.record({ op: fc.constant("seen" as const), target: fc.nat() }),
   fc.record({ op: fc.constant("read" as const), target: fc.nat(), read: fc.boolean() }),
   fc.record({ op: fc.constant("agentRead" as const), target: fc.nat() }),
   fc.record({ op: fc.constant("tell" as const), target: fc.nat() }),
+  fc.record({
+    op: fc.constant("personStart" as const),
+    root: fc.nat(2),
+    key: fc.constantFrom("p1", "p2", "p3"),
+    session: fc.constantFrom("ses_a", "ses_b"),
+    body: fc.constantFrom(...PERSON_BODIES),
+  }),
+  fc.record({ op: fc.constant("deliver" as const), target: fc.nat() }),
+  fc.record({ op: fc.constant("ack" as const), target: fc.nat(), on: fc.boolean() }),
+  fc.record({ op: fc.constant("card" as const), target: fc.nat(), card: cardOpArb }),
 );
+
+/** The card ids the generic ops made, per store (a card op aims at them, not at messages). */
+const cardIdsOf = new WeakMap<InboxStore, string[]>();
 
 /** What one op did: wrote, wrote nothing (no target, or no question to pick), replayed a key, or was refused with a code. */
 type Outcome = "ok" | "noop" | "replayed" | `refused:${string}`;
 
-/** The message an op aims at (every op but `send`): the n-th message an agent wrote, wrapping. */
+/**
+ * The message an op aims at (every op but `send` and `personStart`): the n-th
+ * message an agent wrote or the person started a thread with, wrapping.
+ */
 function targetOf(op: Op, messageIds: readonly string[]): string | undefined {
-  return op.op === "send" ? undefined : messageIds[op.target % Math.max(1, messageIds.length)];
+  return op.op === "send" || op.op === "personStart" ? undefined : messageIds[op.target % Math.max(1, messageIds.length)];
 }
 
 /**
  * Run one op as the server's route does; expected refusals (InboxError) are
- * part of the space and write nothing. A Send also records the decisions its
- * answers carry, as POST /messages/:id/reply does after the reply lands.
+ * part of the space and write nothing.
  */
 function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
   const target = targetOf(op, messageIds);
@@ -189,15 +271,23 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
           idempotency_key: op.key,
           questions: picked.map((q) => ({ key: q.key, revision: q.revision })),
           skip_unanswered: op.skip === true,
+          ...(op.tag ? { tags: [{ host: "test", session: op.tag, wakes: op.tag !== "ses_t2" }] } : {}),
         });
         if (result.replayed) return "replayed";
-        recordDecisionsForReply(store, result.reply.id);
         return "ok";
       }
       case "resolve": {
         if (!target) return "noop";
         store.resolveThread(target, op.resolved);
         return "ok";
+      }
+      case "tagDeliver": {
+        if (!target) return "noop";
+        const waiting = store
+          .thread(threadOf(target))!
+          .messages.filter((m) => m.author.kind === "person" && m.tags?.some((t) => t.session === op.session && !t.delivery));
+        for (const message of waiting) store.recordDelivery(message.id, { host: "test", session: op.session });
+        return waiting.length > 0 ? "ok" : "noop";
       }
       case "supersede": {
         if (!target) return "noop";
@@ -231,6 +321,39 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
         if (!target) return "noop";
         store.tellSetAside(threadOf(target), 0);
         return "ok";
+      case "personStart": {
+        const project = store.ensureProject({ name: `repo${op.root}`, root: `/work/repo${op.root}` });
+        const result = store.startPersonThread({ project_id: project.id, body: op.body, to: { host: "test", session: op.session }, idempotency_key: op.key });
+        if (result.replayed) return "replayed";
+        messageIds.push(result.message.id);
+        return "ok";
+      }
+      case "deliver": {
+        if (!target) return "noop";
+        const waiting = store.thread(threadOf(target))!.messages.filter((m) => m.author.kind === "person" && m.to && !m.delivery);
+        for (const message of waiting) store.recordDelivery(message.id, message.to!);
+        return waiting.length > 0 ? "ok" : "noop";
+      }
+      case "ack":
+        if (!target) return "noop";
+        store.ackMessage(target, op.on);
+        return "ok";
+      case "draft": {
+        if (!target) return "noop";
+        const thread = threadOf(target);
+        store.saveReplyDraft(thread, { body: op.words ? "Cards, but keep the totals" : "", base: store.replyDraft(thread)?.updated_at ?? null });
+        return "ok";
+      }
+      case "card": {
+        const cardIds = cardIdsOf.get(store) ?? [];
+        cardIdsOf.set(store, cardIds);
+        runCard(store, op.card, target, cardIds);
+        return "ok";
+      }
+      case "reask": {
+        if (!target) return "noop";
+        return store.sendReask(target, { idempotency_key: op.key }).replayed ? "replayed" : "ok";
+      }
     }
   } catch (error) {
     if (!(error instanceof InboxError)) throw error;
@@ -252,6 +375,39 @@ describe("InboxStore invariants", () => {
         expect(reopened.changesSince(0)).toEqual(store.changesSince(0));
       }),
       { numRuns: 60 },
+    );
+  });
+
+  test("a reply that tags agents is settled for each recipient only by its own delivery: no agent's read, and no other recipient's delivery, moves it", () => {
+    fc.assert(
+      fc.property(fc.array(opArb, { maxLength: 40 }), (ops) => {
+        const dir = dataDir();
+        const store = InboxStore.open(dir);
+        const ids: string[] = [];
+        for (const op of ops) run(store, op, ids);
+        for (const session of ["ses_x", "ses_t1", "ses_t2"]) {
+          const pending = new Set(store.pendingReplies(session).map((m) => m.id));
+          for (const id of ids) {
+            for (const message of store.thread(store.message(id)!.thread_id)!.messages) {
+              if (message.author.kind !== "person" || !message.tags?.length) continue;
+              const stored = store.message(message.id)!;
+              // The owner never appears among its own tags.
+              expect(stored.tags!.some((t) => store.isOwner(stored, t.session))).toBe(false);
+              if (store.isOwner(stored, session)) expect(pending.has(stored.id)).toBe(!stored.delivery);
+              const tag = stored.tags!.find((t) => t.session === session);
+              if (tag && !store.isOwner(stored, session)) expect(pending.has(stored.id)).toBe(!tag.delivery);
+            }
+          }
+          // A connection that does not understand tags is handed only what it owns.
+          for (const message of store.pendingReplies(session, { tags: false })) expect(store.isOwner(message, session)).toBe(true);
+        }
+        // And it survives a reopen exactly.
+        const reopened = InboxStore.open(dir);
+        for (const session of ["ses_x", "ses_t1", "ses_t2"]) {
+          expect(reopened.pendingReplies(session).map((m) => m.id)).toEqual(store.pendingReplies(session).map((m) => m.id));
+        }
+      }),
+      { numRuns: 80 },
     );
   });
 
@@ -280,45 +436,74 @@ describe("InboxStore invariants", () => {
   });
 
   test("a torn last line is skipped, and the next append reads back whole", () => {
+    // Every store file in turn, each on its own copy of the store: which file a
+    // directory listing names first differs by filesystem (creation order on
+    // APFS, hash order on ext4), and a card line torn on Linux CI once read as a
+    // failure because the next write was a message, which never lands in
+    // cards.jsonl. The next write is now one that lands in the torn file.
     fc.assert(
       fc.property(fc.array(opArb, { minLength: 1, maxLength: 20 }), fc.double({ min: 0.05, max: 0.95, noNaN: true }), (ops, cut) => {
         const dir = dataDir();
         const store = InboxStore.open(dir);
         const ids: string[] = [];
         for (const op of ops) run(store, op, ids);
-        const jsonl = storeFiles(dir).filter((f) => f.endsWith(".jsonl") && statSync(f).size > 0);
-        if (jsonl.length === 0) return;
-        const file = jsonl[0]!;
-        const text = readFileSync(file, "utf8");
-        const lastStart = text.lastIndexOf("\n", text.length - 2) + 1;
-        const lastLength = text.length - 1 - lastStart;
-        const tornLine = parseInboxLine(text.slice(lastStart))!;
-        // Crash mid-append: keep only part of the last line, no newline.
-        truncateSync(file, lastStart + Math.max(1, Math.floor(lastLength * cut)));
+        const torn = storeFiles(dir)
+          .filter((f) => f.endsWith(".jsonl") && statSync(f).size > 0)
+          .map((f) => f.slice(dir.length))
+          .sort();
+        for (const relative of torn) {
+          const copy = dataDir();
+          cpSync(dir, copy, { recursive: true });
+          const file = join(copy, relative);
+          const text = readFileSync(file, "utf8");
+          const lastStart = text.lastIndexOf("\n", text.length - 2) + 1;
+          const lastLength = text.length - 1 - lastStart;
+          const tornLine = parseInboxLine(text.slice(lastStart))!;
+          // Crash mid-append: keep only part of the last line, no newline.
+          truncateSync(file, lastStart + Math.max(1, Math.floor(lastLength * cut)));
 
-        const recovered = InboxStore.open(dir);
-        // Everything but the torn record's last snapshot survives; the torn line is gone.
-        expect(recovered.changesSince(0).some((l) => l.seq === tornLine.seq)).toBe(false);
-        expect(recovered.changesSince(0).length).toBeGreaterThan(0);
+          const recovered = InboxStore.open(copy);
+          // Everything but the torn record's last snapshot survives; the torn line is gone.
+          expect(recovered.changesSince(0).some((l) => l.seq === tornLine.seq)).toBe(false);
+          expect(recovered.changesSince(0).length).toBeGreaterThan(0);
 
-        // The next write to THAT file (a message, with a question, in the torn
-        // file's project) lands on its own line and reads back whole.
-        const key = file.split("/").at(-2)!;
-        const project = recovered.listProjects().find((p) => p.key === key)!;
-        const before = recovered.cursor();
-        const body = ":::question\nWritten after the crash?\n\n- [ ] Yes\n- [ ] No\n:::";
-        const written = recovered.sendMessage({
-          project_id: project.id,
-          author: { kind: "agent", host: null, session: null, name: null },
-          body,
-        });
-        const again = InboxStore.open(dir);
-        const after = again.changesSince(before);
-        expect(after.some((l) => l.kind === "message" && l.record.body === body)).toBe(true);
-        expect(after.some((l) => l.kind === "question" && l.record.message_id === written.message.id)).toBe(true);
-        expect(readFileSync(file, "utf8").endsWith("\n")).toBe(true);
+          // The next write to THAT file, in the torn file's project, lands on its own line and reads back whole.
+          const key = file.split("/").at(-2)!;
+          const project = recovered.listProjects().find((p) => p.key === key)!;
+          const before = recovered.cursor();
+          const again = () => InboxStore.open(copy).changesSince(before);
+          if (relative.endsWith("/cards.jsonl")) {
+            const card = recovered.createCard({ project_id: project.id, by: { kind: "person" }, title: "Written after the crash" }).card;
+            expect(again().some((l) => l.kind === "card" && l.record.id === card.id && l.record.title === "Written after the crash")).toBe(true);
+          } else {
+            const body = ":::question\nWritten after the crash?\n\n- [ ] Yes\n- [ ] No\n:::";
+            const written = recovered.sendMessage({
+              project_id: project.id,
+              author: { kind: "agent", host: null, session: null, name: null },
+              body,
+            });
+            const after = again();
+            expect(after.some((l) => l.kind === "message" && l.record.body === body)).toBe(true);
+            expect(after.some((l) => l.kind === "question" && l.record.message_id === written.message.id)).toBe(true);
+          }
+          expect(readFileSync(file, "utf8").endsWith("\n")).toBe(true);
+        }
       }),
-      { numRuns: 60 },
+      {
+        numRuns: 60,
+        // The two counterexamples CI found (Linux, where cards.jsonl was listed first): a card line torn.
+        examples: [
+          [
+            [
+              { op: "personStart", root: 0, key: "p1", session: "ses_a", body: "Idea: group the list by session." },
+              { op: "card", target: 0, card: { kind: "create" } },
+              { op: "personStart", root: 0, key: "p1", session: "ses_a", body: "Idea: group the list by session." },
+            ],
+            0.05,
+          ],
+          [[{ op: "send", root: 0, body: ":::question-text\nA,??\n:::", key: null }, { op: "card", target: 0, card: { kind: "create" } }], 0.05],
+        ],
+      },
     );
   });
 
@@ -413,7 +598,10 @@ describe("InboxStore invariants", () => {
       | { op: "reply"; target: number; session: string | null; thread: string | null }
       | { op: "resolve"; target: number; resolved: boolean }
       | { op: "seen"; target: number }
-      | { op: "personReply"; target: number; key: string };
+      | { op: "personReply"; target: number; key: string }
+      | { op: "personStart"; project: number; key: string; session: string; name: string | null; auto: boolean }
+      | { op: "name"; target: number; session: string; thread: string }
+      | { op: "card"; target: number; card: CardOp };
     const routeOpArb: fc.Arbitrary<RouteOp> = fc.oneof(
       {
         arbitrary: fc.record({
@@ -430,6 +618,21 @@ describe("InboxStore invariants", () => {
       { arbitrary: fc.record({ op: fc.constant("resolve" as const), target: fc.nat(), resolved: fc.boolean() }), weight: 2 },
       fc.record({ op: fc.constant("seen" as const), target: fc.nat() }),
       fc.record({ op: fc.constant("personReply" as const), target: fc.nat(), key: fc.constantFrom("p1", "p2", "p3") }),
+      // A thread the person starts (compose): it must never become a session's default thread.
+      // It may carry a name the person gave (compose), which routes named sends to it.
+      fc.record({
+        op: fc.constant("personStart" as const),
+        project: fc.nat(1),
+        key: fc.constantFrom("c1", "c2", "c3"),
+        session: fc.constantFrom("ses_a", "ses_b"),
+        name: fc.constantFrom(null, null, "alpha", "BETA"),
+        // Compose's suggestion (thread_name_auto): dropped when taken, and an agent's name replaces it.
+        auto: fc.boolean(),
+      }),
+      // An agent's reply that names a thread the person started (approval "inbox-agent-names-own-thread").
+      fc.record({ op: fc.constant("name" as const), target: fc.nat(), session: fc.constantFrom("ses_a", "ses_b"), thread: fc.constantFrom("alpha", "Beta", "gamma") }),
+      // The Board's cards (approval "inbox-board"), mixed in: they must route nothing and move no row.
+      { arbitrary: fc.record({ op: fc.constant("card" as const), target: fc.nat(), card: cardOpArb }), weight: 3 },
     );
 
     fc.assert(
@@ -437,10 +640,19 @@ describe("InboxStore invariants", () => {
         const dir = dataDir();
         const store = InboxStore.open(dir);
         const ids: string[] = [];
+        const cardIds: string[] = [];
         const pick = (n: number) => ids[n % Math.max(1, ids.length)];
         for (const op of ops) {
           try {
-            if (op.op === "send") {
+            if (op.op === "card") {
+              // A card line changes no thread, no section and no list row: the person's list reads the same.
+              const before = JSON.stringify({ sections: store.listSections(), threads: store.threadIds().map((id) => store.threadSummary(id)) });
+              try {
+                runCard(store, op.card, pick(op.target), cardIds);
+              } finally {
+                expect(JSON.stringify({ sections: store.listSections(), threads: store.threadIds().map((id) => store.threadSummary(id)) })).toBe(before);
+              }
+            } else if (op.op === "send") {
               const project = store.ensureProject({ name: `repo${op.project}`, root: `/work/repo${op.project}` });
               const r = store.sendMessage({
                 project_id: project.id,
@@ -467,6 +679,21 @@ describe("InboxStore invariants", () => {
             } else if (op.op === "seen") {
               const target = pick(op.target);
               if (target) store.markSeen(store.message(target)!.thread_id);
+            } else if (op.op === "personStart") {
+              const project = store.ensureProject({ name: `repo${op.project}`, root: `/work/repo${op.project}` });
+              const r = store.startPersonThread({ project_id: project.id, body: "an idea", to: { host: "test", session: op.session }, idempotency_key: op.key, thread_name: op.name, thread_name_auto: op.auto });
+              if (!r.replayed) ids.push(r.message.id);
+            } else if (op.op === "name") {
+              const target = pick(op.target);
+              if (!target) continue;
+              const r = store.sendMessage({
+                project_id: store.message(target)!.project_id,
+                author: { kind: "agent", host: "test", session: op.session, name: null },
+                body: "named",
+                reply_to: target,
+                thread: op.thread,
+              });
+              ids.push(r.message.id);
             } else {
               const target = pick(op.target);
               if (target) store.sendReply(target, { words: "ok", idempotency_key: op.key });
@@ -484,24 +711,43 @@ describe("InboxStore invariants", () => {
         const bySession = new Map<string, string>();
         // Every root of a name, oldest first: a name joins its newest OPEN one.
         const byName = new Map<string, string[]>();
+        // Each root's name now (an agent's name replaces compose's suggestion). Only agent-started roots and
+        // roots an AGENT named route by name; a compose name (typed or suggested) is only "taken".
+        const current = new Map<string, string>();
+        const agentNamed = new Set<string>();
         const nameKey = inboxThreadNameKey;
+        const rootsNamed = (key: string) => (byName.get(key) ?? []).filter((root) => current.get(root) === key);
+        const holders = (key: string) => [...current].filter(([, k]) => k === key).map(([root]) => root);
         for (const line of lines) {
           if (line.kind !== "message") continue;
           const m = line.record;
           if (threadOf.has(m.id)) {
             if (m.id === m.thread_id) resolved.set(m.id, m.resolved_at !== null);
+            // A thread the person started gains a name when an agent names it: from that line on, the name routes to it.
+            if (m.id === m.thread_id && m.started_by_person && m.thread_name != null && m.named_by?.kind === "agent" && !agentNamed.has(m.id)) {
+              const key = `${m.project_id}\0${nameKey(m.thread_name)}`;
+              // Only compose's suggestion is ever replaced, and only by an agent's name.
+              if (current.has(m.id)) expect(m.named_by?.kind).toBe("agent");
+              // Naming never takes a name another open thread has (it would pull that thread's sends in).
+              expect(holders(key).filter((root) => root !== m.id && !resolved.get(root))).toEqual([]);
+              current.set(m.id, key);
+              agentNamed.add(m.id);
+              byName.set(key, [...(byName.get(key) ?? []), m.id]);
+            }
             continue;
           }
           let expected: string;
           if (m.reply_to) {
             expected = threadOf.get(m.reply_to)!;
           } else if (m.author.kind === "person") {
-            throw new Error("a person's message always replies");
+            // Only a thread the person started has no reply_to: it is its own root.
+            expect(m.started_by_person).toBe(true);
+            expected = m.id;
           } else {
             const name = m.thread_name ?? null;
             const candidate =
               name !== null
-                ? (byName.get(`${m.project_id}\0${nameKey(name)}`) ?? []).filter((root) => !resolved.get(root)).at(-1)
+                ? rootsNamed(`${m.project_id}\0${nameKey(name)}`).filter((root) => !resolved.get(root)).at(-1)
                 : m.author.session
                   ? bySession.get(`${m.project_id}\0${m.author.session}`)
                   : undefined;
@@ -513,6 +759,11 @@ describe("InboxStore invariants", () => {
             resolved.set(m.id, m.resolved_at !== null);
             if (m.thread_name != null) {
               const key = `${m.project_id}\0${nameKey(m.thread_name)}`;
+              // A name the person gave in compose (or compose's suggestion) is never one another open thread has,
+              // and it routes nothing.
+              if (m.started_by_person) expect(holders(key).filter((root) => !resolved.get(root))).toEqual([]);
+              current.set(m.id, key);
+              if (m.started_by_person) continue;
               byName.set(key, [...(byName.get(key) ?? []), m.id]);
             }
             else if (m.author.kind === "agent" && m.author.session) bySession.set(`${m.project_id}\0${m.author.session}`, m.id);
@@ -575,8 +826,8 @@ describe("InboxStore invariants", () => {
 // that predicts every op's outcome and every row's section. After every step
 // the two must agree, and the invariants below must hold on the store's own
 // output, in both list views. The model learns only what a message ASKS from
-// the store (its question records: keys, `Stopped:`, `Holds up:`,
-// `Decision:`); parsing is core's and is tested there.
+// the store (its question records: keys, `Stopped:`, `Holds up:`); parsing
+// is core's and is tested there.
 
 /** Bodies an agent sends in the model runs and the trace fixtures. */
 const STATE_BODIES = {
@@ -584,6 +835,7 @@ const STATE_BODIES = {
   ask: [":::question", "Ship it today?", "", "- [ ] Yes", "- [ ] No", ":::"].join("\n"),
   stop: [":::question", "Which layout should the list use?", "", "Stopped: the list cannot be built without this.", "", "- [ ] Cards", "- [ ] Table", ":::"].join("\n"),
   hold: [":::question", "Should overdue invoices sort first?", "", "Holds up: invoice list; export", "", "- [ ] Yes", "- [ ] No", ":::"].join("\n"),
+  // An older agent's `Decision:` line: the Inbox records no decisions, so it is context, and nothing else changes.
   decide: [":::question", "Which database should we use?", "", "Decision: when answered", "", "- [ ] Postgres", "- [ ] SQLite", ":::"].join("\n"),
   text: [":::question-text", "Anything the empty state should say?", ":::"].join("\n"),
   two: [
@@ -659,6 +911,29 @@ function stateOpArbOf(body: fc.Arbitrary<string>, agentKeys: boolean): fc.Arbitr
     { arbitrary: fc.record({ op: fc.constant("resolve" as const), target: fc.nat(), resolved: fc.boolean() }), weight: 3 },
     { arbitrary: fc.record({ op: fc.constant("agentRead" as const), target: fc.nat() }), weight: 2 },
     { arbitrary: fc.record({ op: fc.constant("tell" as const), target: fc.nat() }), weight: 2 },
+    // Threads the person starts and their delivery, in the property runs only
+    // (the generated trace fixtures were drawn without them).
+    ...(agentKeys
+      ? [
+          {
+            arbitrary: fc.record({
+              op: fc.constant("personStart" as const),
+              root: fc.nat(1),
+              key: fc.constantFrom("p1", "p2", "p3"),
+              session: fc.constantFrom("ses_a", "ses_b"),
+              body: fc.constantFrom(...PERSON_BODIES),
+            }),
+            weight: 1,
+          },
+          { arbitrary: fc.record({ op: fc.constant("deliver" as const), target: fc.nat() }), weight: 1 },
+          // 👍 Looks good and its Undo, in the property runs only (the trace fixtures were drawn without it).
+          { arbitrary: fc.record({ op: fc.constant("ack" as const), target: fc.nat(), on: fc.boolean() }), weight: 2 },
+          // A reply draft saved or emptied, in the property runs only (outside the event log: traces never see it).
+          { arbitrary: fc.record({ op: fc.constant("draft" as const), target: fc.nat(), words: fc.boolean() }), weight: 2 },
+          // Re-ask, in the property runs only; "s1" is also a Send's key, so a key used by the other is exercised.
+          { arbitrary: fc.record({ op: fc.constant("reask" as const), target: fc.nat(), key: fc.constantFrom("r1", "r2", "s1") }), weight: 2 },
+        ]
+      : []),
   );
 }
 
@@ -677,13 +952,11 @@ interface ModelQuestion {
   id: string;
   stopped: boolean;
   holds: boolean;
-  decision: boolean;
   answer: ModelAnswer;
   sent: boolean;
   /** Closed by a Mark read (`by`: the step of that Mark read); what an Undo puts back. */
   setAside: { answer: ModelAnswer; sent: boolean; by: number } | null;
   superseded: boolean;
-  decided: boolean;
 }
 
 interface ModelMessage {
@@ -696,6 +969,16 @@ interface ModelMessage {
   questions: ModelQuestion[];
   /** The person's Send keys on this message (a replayed key writes nothing). */
   replyKeys: Set<string>;
+  /** The Re-ask keys on this message (also in `replyKeys`: one key space per message). */
+  reaskKeys?: Set<string>;
+  /** An agent message's session (null: it named none); the store's host is always "test". */
+  session?: string | null;
+  /** The person's Re-ask note: the session it went to (writing again ends its wait) and the questions it lists. */
+  reask?: { session: string | null; ids: string[] };
+  /** A thread the person started: addressed to a session, until that session's connection delivers it. */
+  addressed?: { delivered: boolean };
+  /** The person's 👍 on this agent message: the step of the Mark read it stands on, and whether the 👍 made it. */
+  ack?: { readTick: number | null; made: boolean } | null;
 }
 
 interface ModelThread {
@@ -714,6 +997,8 @@ interface ModelThread {
   checked: number;
   /** Questions a set-aside note named and no reopened note took back. */
   told: Set<string>;
+  /** Words in the reply box, saved as a reply draft. */
+  draft?: boolean;
 }
 
 const SHW: readonly InboxSectionId[] = ["stopped", "holding", "waiting"];
@@ -724,6 +1009,8 @@ class ThreadStateModel {
   private readonly byMessage = new Map<string, { thread: ModelThread; message: ModelMessage }>();
   /** An agent's idempotency key per project, and the body it was first sent with. */
   private readonly keyed = new Map<string, string>();
+  /** The person's compose keys (one namespace across projects), and the body each first sent. */
+  private readonly personKeyed = new Map<string, string>();
   /** The newest unnamed thread each agent session started, per project. */
   private readonly sessionRoots = new Map<string, string>();
   private created: readonly string[] = [];
@@ -824,10 +1111,18 @@ class ThreadStateModel {
     return t.resolved && !this.back(t);
   }
 
+  /** The person's unsent work: reply-box words, or picks not sent (comments are not modelled). */
+  unsent(t: ModelThread): boolean {
+    return t.draft === true || this.counts(t).picked > 0;
+  }
+
   /** The section, strongest reason first (the doc's table "Sections"). */
   section(t: ModelThread): InboxSectionId {
     if (this.archived(t)) return "quiet";
-    if (this.readHolds(t)) return "quiet";
+    // A thread holding unsent work never sits in Quiet (unless archived): it is in New, unless a Re-ask waits.
+    if (this.readHolds(t)) return this.unsent(t) && !this.reaskPending(t) ? "new" : "quiet";
+    // A Re-ask note waits until the session it went to writes again: Sent, whatever is open.
+    if (this.reaskPending(t)) return "sent";
     const c = this.counts(t);
     if (c.open > 0) return c.stopped ? "stopped" : c.holds ? "holding" : "waiting";
     if (c.picked > 0) return "new";
@@ -835,20 +1130,31 @@ class ThreadStateModel {
     const last = [...t.messages].reverse().find((m) => m.note === null)!;
     if (last.author === "person" && t.checked < last.tick) return "sent";
     if (this.unseen(t) > 0) return "new";
-    return "quiet";
+    return this.unsent(t) ? "new" : "quiet";
   }
 
-  decisionsWaiting(): number {
-    let n = 0;
-    for (const t of this.threads.values()) {
-      for (const m of t.messages) {
-        for (const q of m.questions) {
-          const s = this.state(t, m, q);
-          if (q.decision && !q.decided && (s === "open" || s === "picked")) n += 1;
-        }
-      }
-    }
-    return n;
+  /** Bold: a section that waits on the person, except New held only by the person's own words. */
+  unread(t: ModelThread): boolean {
+    const section = this.section(t);
+    if (section === "new") return this.unseen(t) > 0 || this.counts(t).picked > 0;
+    return SHWN.includes(section);
+  }
+
+  /**
+   * Rule 2a, in the model's own terms: every open question is listed in a
+   * note that still waits (its session has not written since, and something
+   * it lists is still open).
+   */
+  reaskPending(t: ModelThread): boolean {
+    const open = new Set<string>();
+    for (const m of t.messages) for (const q of m.questions) if (this.state(t, m, q) === "open") open.add(q.id);
+    const covered = new Set<string>();
+    t.messages.forEach((note, i) => {
+      if (!note.reask) return;
+      if (t.messages.slice(i + 1).some((m) => m.author === "agent" && m.session === note.reask!.session)) return;
+      for (const id of note.reask.ids) if (open.has(id)) covered.add(id);
+    });
+    return open.size > 0 && [...open].every((id) => covered.has(id));
   }
 
   threadOf(messageId: string): ModelThread | undefined {
@@ -864,11 +1170,12 @@ class ThreadStateModel {
     return id;
   }
 
-  private addAgent(thread: ModelThread, tick: number, store: InboxStore): void {
+  private addAgent(thread: ModelThread, tick: number, store: InboxStore, session: string | null = "ses_x"): void {
     const id = this.take();
     const message: ModelMessage = {
       id,
       author: "agent",
+      session,
       note: null,
       tick,
       replyKeys: new Set(),
@@ -876,12 +1183,10 @@ class ThreadStateModel {
         id: `${id}/${q.key}`,
         stopped: q.stopped !== null,
         holds: q.holds_up.length > 0,
-        decision: q.decision_recording,
         answer: null,
         sent: false,
         setAside: null,
         superseded: false,
-        decided: false,
       })),
     };
     thread.messages.push(message);
@@ -919,6 +1224,22 @@ class ThreadStateModel {
   }
 
   private event(op: Op, target: string | undefined, store: InboxStore, tick: number): Outcome {
+    if (op.op === "personStart") {
+      // Compose: a new thread, the person's root, addressed to a session. It
+      // is no session's default thread, so routing never joins it.
+      const body = this.personKeyed.get(op.key);
+      if (body !== undefined) return body === op.body ? "replayed" : "refused:idempotency_key_reused";
+      const id = this.created[this.used]!;
+      const thread: ModelThread = { id, messages: [], seen: 0, read: null, seenBeforeRead: undefined, resolved: false, archive: 0, checked: 0, told: new Set() };
+      this.threads.set(id, thread);
+      this.addPerson(thread, tick, null);
+      const root = thread.messages[0]!;
+      root.addressed = { delivered: false };
+      // An op can aim at it, as at an agent message.
+      this.agentMessages.push(root);
+      this.personKeyed.set(op.key, op.body);
+      return "ok";
+    }
     if (op.op === "send") {
       const project = `repo${op.root}`;
       const key = op.key?.trim() || null;
@@ -937,7 +1258,7 @@ class ThreadStateModel {
         this.threads.set(id, thread);
         if (route) this.sessionRoots.set(route, id);
       }
-      this.addAgent(thread, tick, store);
+      this.addAgent(thread, tick, store, session);
       if (key !== null) this.keyed.set(`${project}\0${key}`, op.body);
       return "ok";
     }
@@ -978,17 +1299,16 @@ class ThreadStateModel {
         if (picks.length === 0 && skips.length === 0 && op.words.trim() === "") {
           return op.skip ? "refused:nothing_to_send" : "refused:validation_error";
         }
-        for (const q of picks) {
-          q.sent = true;
-          // The Send route records a decision for a sent pick whose question records one.
-          if (q.decision) q.decided = true;
-        }
+        for (const q of picks) q.sent = true;
         for (const q of skips) {
           q.answer = "skip";
           q.sent = true;
         }
         message.replyKeys.add(op.key);
         this.addPerson(thread, tick, null);
+        // More words on the person's own root (a thread they started) go where
+        // it is addressed: the store stamps its `to`, so only a delivery settles them.
+        if (message.addressed) thread.messages[thread.messages.length - 1]!.addressed = { delivered: false };
         return "ok";
       }
       case "resolve":
@@ -1044,6 +1364,8 @@ class ThreadStateModel {
         const own = (q: ModelQuestion) => q.setAside !== null && q.setAside.by === ownRead;
         const closed = live.flatMap((m) => m.questions).filter(own);
         if (ownRead === null && closed.length === 0) return "ok";
+        // Move back withdraws a 👍 standing on this Mark read.
+        if (ownRead !== null) for (const m of thread.messages) if (m.ack && m.ack.readTick === ownRead) m.ack = null;
         if (ownRead !== null) {
           if (this.readHolds(thread) && thread.seenBeforeRead !== undefined) thread.seen = thread.seenBeforeRead;
           thread.read = null;
@@ -1082,6 +1404,73 @@ class ThreadStateModel {
           for (const q of qs) thread.told.add(q.id);
         }
         return "ok";
+      case "deliver": {
+        // A delivery counts as the agent having read the thread up to that message.
+        const waiting = thread.messages.filter((m) => m.addressed && !m.addressed.delivered);
+        for (const m of waiting) {
+          m.addressed!.delivered = true;
+          thread.checked = Math.max(thread.checked, m.tick);
+        }
+        return waiting.length > 0 ? "ok" : "noop";
+      }
+      case "ack": {
+        if (!op.on) {
+          const ack = message.ack;
+          if (!ack) return "ok";
+          message.ack = null;
+          // Undo the Mark read the ack made, while it is still the thread's.
+          if (ack.made && ack.readTick !== null && thread.read === ack.readTick && !thread.resolved) {
+            this.event({ op: "read", target: op.target, read: false }, target, store, tick);
+          }
+          return "ok";
+        }
+        if (message.author !== "agent") return "refused:ack_not_allowed";
+        if (thread.resolved) return "refused:thread_resolved";
+        const latest = [...thread.messages].reverse().find((m) => m.author === "agent");
+        if (latest !== message) return "refused:ack_stale";
+        // The person already wrote back after it (the Inbox's own notes aside).
+        if (thread.messages.some((m) => m.tick > message.tick && m.author === "person" && m.note === null)) return "refused:ack_after_reply";
+        const waiting = thread.messages
+          .filter((m) => m.author === "agent")
+          .flatMap((m) => m.questions)
+          .some((q) => {
+            const s = this.recordState(q);
+            return s === "open" || s === "picked";
+          });
+        if (waiting) return "refused:question_open";
+        if (message.ack) return "ok";
+        const before = thread.read;
+        this.event({ op: "read", target: op.target, read: true }, target, store, tick);
+        message.ack = { readTick: thread.read, made: thread.read !== before };
+        return "ok";
+      }
+      case "draft":
+        thread.draft = op.words;
+        return "ok";
+      case "reask": {
+        // The store's order: a replayed key, the archive, the person's own message, then what is open.
+        if (message.reaskKeys?.has(op.key)) return "replayed";
+        if (message.replyKeys.has(op.key)) return "refused:idempotency_key_reused";
+        if (this.closedByArchive(thread, message)) return "refused:thread_resolved";
+        if (message.author !== "agent") return "refused:validation_error";
+        const session = message.session ?? null;
+        const group = thread.messages.filter(
+          (m) => m.author === "agent" && (session !== null ? m.session === session : m === message) && !this.closedByArchive(thread, m),
+        );
+        const questions = group.flatMap((m) => m.questions);
+        const asked = questions.filter((q) => this.recordState(q) === "open");
+        if (asked.length === 0) return "refused:nothing_to_reask";
+        // Picks not sent go with the note.
+        for (const q of questions) if (this.recordState(q) === "picked") q.sent = true;
+        message.replyKeys.add(op.key);
+        (message.reaskKeys ??= new Set()).add(op.key);
+        this.addPerson(thread, tick, null);
+        thread.messages[thread.messages.length - 1]!.reask = { session, ids: asked.map((q) => q.id) };
+        return "ok";
+      }
+      case "personStart":
+      case "send":
+        return "noop";
     }
   }
 }
@@ -1117,6 +1506,8 @@ interface StateWorld {
   timeOf: Map<number, number>;
   /** The last successful Mark read, for the Mark read then Undo check. */
   lastRead: { threadId: string; before: ReturnType<typeof readSnapshot> } | null;
+  /** The last successful 👍 that made a Mark read, for the 👍 then Undo check. */
+  lastAck?: { threadId: string; before: ReturnType<typeof readSnapshot> } | null;
   /** Rows the tie-break ordered: equal `last_at` in a section, equal `resolved_at` in the archived list. */
   ties: { sections: number; archived: number };
 }
@@ -1199,6 +1590,10 @@ function checkThreadState(world: StateWorld): void {
       last_agent_at: row.last_agent_at ?? null,
       waiting_on_person: row.waiting_on_person,
       messages: row.message_count,
+      ack: (row.ack ?? null) !== null,
+      unread: row.unread,
+      draft: (row.unsent?.reply_at ?? null) !== null,
+      picks: row.unsent?.picks ?? 0,
     }).toEqual({
       section: model.section(t),
       archived: model.archived(t),
@@ -1210,21 +1605,42 @@ function checkThreadState(world: StateWorld): void {
       last_agent_at: lastAgent ? new Date(world.timeOf.get(lastAgent.tick)!).toISOString() : null,
       waiting_on_person: model.waitingOnPerson(t),
       messages: t.messages.length,
+      ack: model.readHolds(t) && (lastAgent?.ack ?? null) !== null,
+      unread: model.unread(t),
+      draft: t.draft === true,
+      picks: model.unsent(t) ? row.questions.picked : 0,
     });
+    // Unsent work (reply words, picks, comments) never sits in Quiet unless the thread is archived.
+    if (inboxHasUnsent(row.unsent) && !inboxRowArchived(row)) expect(row.section).not.toBe("quiet");
     // ...on where each message landed and on every question's state.
     for (const m of t.messages) {
       expect(store.message(m.id)?.thread_id).toBe(t.id);
       expect(store.questionsOf(m.id).map((q) => q.state)).toEqual(m.questions.map((q) => model.state(t, m, q)));
     }
-    // A question still waiting on the person keeps its thread in Stopped, Holding or Waiting.
-    if (t.messages.some((m) => store.questionsOf(m.id).some((q) => q.state === "open"))) expect(SHW).toContain(row.section);
+    // Invariant 3, read from the questions and the notes themselves (never the row's flag): every open
+    // question is either in a Re-ask note that still waits, or keeps the thread in Stopped, Holding or Waiting.
+    const thread = store.thread(row.thread_id)!;
+    const openIds = thread.messages.flatMap((m) => (m.questions ?? []).filter((q) => q.state === "open").map((q) => `${m.id}/${q.key}`));
+    const inWaitingNote = (id: string) =>
+      thread.messages.some((note, i) => {
+        if (!note.reask?.includes(id)) return false;
+        const asked = thread.messages.find((m) => m.id === note.reply_to);
+        const by = note.to ?? (asked?.author.kind === "agent" ? { host: asked.author.host ?? "", session: asked.author.session } : null);
+        if (!by) return false;
+        // Host and session, as the store compares them.
+        return !thread.messages
+          .slice(i + 1)
+          .some((m) => m.author.kind === "agent" && m.author.session === by.session && (m.author.host ?? "") === (by.host ?? ""));
+      });
+    if (openIds.some((id) => !inWaitingNote(id))) expect(SHW).toContain(row.section);
+    expect(row.reask_pending === true).toBe(!model.archived(t) && model.reaskPending(t));
     // An archived thread never counts.
     if (inboxRowArchived(row)) expect(row.unread).toBe(false);
   }
-  // Counts. The first two follow from the sections by construction (the
+  // Counts. Both follow from the sections by construction (the
   // sidebar counts the rows in Stopped, Holding and Waiting; `unread` is
   // defined from the section), so they guard the counting code more than the
-  // rules. The Decisions count is checked against the model's own account.
+  // rules.
   const inSections = (sections: readonly InboxListSection[], ids: readonly InboxSectionId[]) =>
     sections.filter((s) => ids.includes(s.id)).reduce((n, s) => n + s.threads.length, 0);
   const waiting = rows.filter((r) => SHW.includes(r.section)).length;
@@ -1234,10 +1650,12 @@ function checkThreadState(world: StateWorld): void {
   for (const project of store.listProjects()) {
     expect(waitingCount(views.exclude, project.id)).toBe(rows.filter((r) => r.project.id === project.id && SHW.includes(r.section)).length);
   }
+  // Bold is every row in Stopped, Holding, Waiting and New, except one in New only for the person's own words.
   const unread = rows.filter((r) => r.unread).length;
-  expect(inSections(views.include, SHWN)).toBe(unread);
-  expect(inSections(views.exclude, SHWN)).toBe(unread);
-  expect(waitingDecisionCount(store)).toBe(model.decisionsWaiting());
+  const draftOnly = rows.filter((r) => r.section === "new" && !r.unread).length;
+  for (const r of rows) if (r.section === "new" && !r.unread) expect(r.unseen === 0 && !r.answered_not_sent && inboxHasUnsent(r.unsent)).toBe(true);
+  expect(inSections(views.include, SHWN) - draftOnly).toBe(unread);
+  expect(inSections(views.exclude, SHWN) - draftOnly).toBe(unread);
   // Replay determinism: the store read again from disk gives the same rows and threads.
   expect(windowView(InboxStore.open(world.dir))).toEqual(windowView(store));
 }
@@ -1278,6 +1696,8 @@ function stateStep(world: StateWorld, op: Op, sameTick = false): StepResult {
 
   const lastRead = world.lastRead;
   world.lastRead = null;
+  const lastAck = world.lastAck ?? null;
+  world.lastAck = null;
   if (outcome !== "ok" || !thread) return { outcome, target, created };
   const row = world.store.listRow(thread.id)!;
   const inList = () => placedIds(listViews(world.store.listRows()).exclude).includes(thread.id);
@@ -1311,6 +1731,14 @@ function stateStep(world: StateWorld, op: Op, sameTick = false): StepResult {
     // Mark read then Undo, back to back, gives the thread back exactly as it was.
     if (lastRead?.threadId === thread.id) expect(readSnapshot(world, thread.id)).toEqual(lastRead.before);
   }
+  if (op.op === "ack" && op.on && readBefore && readBefore.read_at === null) {
+    // 👍 then its Undo, back to back, gives the thread back exactly as it was (as Mark read's does).
+    world.lastAck = { threadId: thread.id, before: readBefore };
+  }
+  if (op.op === "ack" && !op.on) {
+    expect(world.store.message(target!)!.ack ?? null).toBeNull();
+    if (lastAck?.threadId === thread.id) expect(readSnapshot(world, thread.id)).toEqual(lastAck.before);
+  }
   if (op.op === "resolve" && !op.resolved && readAfterArchive) {
     // Unarchive clears a read made while archived, in the same root line.
     expect(world.store.message(thread.id)!.person_read_seq ?? null).toBeNull();
@@ -1337,6 +1765,38 @@ describe("the thread-state model", () => {
     );
     // The sections' tie-break on the thread id was exercised, not only defined.
     expect(ties.sections).toBeGreaterThan(0);
+  });
+
+  test("a message's images captured on first read (one more line for it) change nothing the model sees, and replay the same", () => {
+    fc.assert(
+      fc.property(fc.array(fc.tuple(stateOpArb, fc.nat(4)), { minLength: 15, maxLength: 40, size: "max" }), (steps) => {
+        const world = stateWorld();
+        let captures = 0;
+        for (const [op, roll] of steps) {
+          stateStep(world, op);
+          if (roll !== 0) continue;
+          // The first read of a thread whose agent message was sent before capture existed.
+          const message = world.ids.map((id) => world.store.message(id)!).find((m) => m.author.kind === "agent" && m.inline_images === undefined);
+          if (!message) continue;
+          const rows = JSON.stringify(world.store.listRows());
+          const cursor = world.store.messageCursor(message.id);
+          const image = { id: `att_${"0".repeat(25)}${captures % 10}`, path: "/p/a.png", named_path: null, name: "a.png", kind: "image" as const, sent_sha256: "a".repeat(64), size: 1, sent_at: message.created_at, sent_mtime: message.created_at, ref: "a.png", captured: "on_open" as const };
+          world.store.addCapturedImages(message.id, [image]);
+          captures += 1;
+          // Written once; the message keeps its place and every row reads the same.
+          expect(world.store.message(message.id)!.inline_images).toHaveLength(1);
+          world.store.addCapturedImages(message.id, []);
+          expect(world.store.message(message.id)!.inline_images).toHaveLength(1);
+          expect(world.store.messageCursor(message.id)).toBe(cursor);
+          expect(JSON.stringify(world.store.listRows())).toBe(rows);
+        }
+        // Read back from disk: the same view, the captures included.
+        const reopened = InboxStore.open(world.dir);
+        expect(JSON.stringify(reopened.listRows())).toBe(JSON.stringify(world.store.listRows()));
+        for (const id of world.ids) expect(reopened.message(id)).toEqual(world.store.message(id));
+      }),
+      { numRuns: 120, seed: 20261015 },
+    );
   });
 
   test("the archived list breaks ties on the thread id: every open thread archived in one clock tick", () => {
@@ -1373,18 +1833,38 @@ describe("the thread-state model", () => {
     );
   });
 
-  test("Archive then Unarchive loses no message, question, pick or decision", () => {
+  test("Re-ask (rule 2a): another session's question after a note, the note's questions superseded by someone else, the person's words after it", () => {
+    const sectionAfter = (ops: Op[]) => {
+      const world = stateWorld();
+      for (const op of ops) expect(stateStep(world, op).outcome).toBe("ok");
+      return world.store.listRow(world.ids[0]!)!.section;
+    };
+    const ask: Op = { op: "send", root: 0, body: STATE_BODIES.two, key: null, session: "ses_a" };
+    const reask: Op = { op: "reask", target: 0, key: "r1" };
+    // The note waits on ses_a: Sent.
+    expect(sectionAfter([ask, reask])).toBe("sent");
+    // Another session (the reply op writes as ses_x) asks a Stopped question in the thread: it waits on the person.
+    expect(sectionAfter([ask, reask, { op: "reply", target: 0, body: STATE_BODIES.stop }])).toBe("stopped");
+    // Someone else supersedes every question the note lists: the note stops waiting, though ses_a never wrote.
+    expect(sectionAfter([ask, reask, { op: "supersede", target: 0, whole: true, body: STATE_BODIES.news }])).not.toBe("sent");
+    // The person writes words after the note: still Sent (the note still waits, and their reply waits on the agent).
+    expect(sectionAfter([ask, reask, { op: "personSend", target: 0, key: "s1", words: "ok", skip: false }])).toBe("sent");
+    // ses_a writes again: the note no longer waits, and its open questions ask again.
+    expect(sectionAfter([ask, reask, { op: "send", root: 0, body: STATE_BODIES.news, key: null, session: "ses_a" }])).toBe("stopped");
+  });
+
+  test("Archive then Unarchive loses no message, question or pick", () => {
     fc.assert(
       fc.property(fc.array(stateOpArb, { minLength: 10, maxLength: 30, size: "max" }), (ops) => {
         const world = stateWorld();
         for (const op of ops) stateStep(world, op);
         for (const threadId of [...world.model.threads.keys()]) {
           if (world.store.message(threadId)!.resolved_at !== null) continue;
-          const before = { thread: world.store.windowThread(threadId), row: world.store.listRow(threadId), decisions: [...world.store.allDecisions()] };
+          const before = { thread: world.store.windowThread(threadId), row: world.store.listRow(threadId) };
           const target = rootIndex(world, threadId);
           stateStep(world, { op: "resolve", target, resolved: true });
           stateStep(world, { op: "resolve", target, resolved: false });
-          expect({ thread: world.store.windowThread(threadId), row: world.store.listRow(threadId), decisions: [...world.store.allDecisions()] }).toEqual(before);
+          expect({ thread: world.store.windowThread(threadId), row: world.store.listRow(threadId) }).toEqual(before);
         }
       }),
       { numRuns: 100, seed: 20261014 },
@@ -1393,6 +1873,169 @@ describe("the thread-state model", () => {
 
   test("every hand-written edge runs clean through the model", () => {
     for (const trace of HAND_TRACES) runTrace(trace.events);
+  });
+});
+
+// ─────────────────────────── the project menu's batches ───────────────────────────
+//
+// Mark all as read and Archive all (packages/shared/inbox/project-batch.ts)
+// are loops over the single actions. The model decides on its own which
+// threads each takes (Mark all: every listed thread waiting on the person;
+// Archive all: every listed thread, Mark read for one that came back), then
+// applies the single rules thread by thread; the store runs the real batch.
+// Every invariant holds after every batch and every Undo, between generated
+// steps, and a batch undone back to back gives the project back as it was.
+
+type BatchItem =
+  | { kind: "op"; op: Op }
+  | { kind: "batch"; action: "read" | "archive"; root: number }
+  // The Undo of the last batch, whatever happened since.
+  | { kind: "undo" };
+
+const batchItemArb: fc.Arbitrary<BatchItem> = fc.oneof(
+  { arbitrary: stateOpArb.map((op) => ({ kind: "op" as const, op })), weight: 8 },
+  { arbitrary: fc.record({ kind: fc.constant("batch" as const), action: fc.constantFrom("read" as const, "archive" as const), root: fc.nat(1) }), weight: 2 },
+  { arbitrary: fc.constant({ kind: "undo" as const }), weight: 1 },
+);
+
+interface BatchDone {
+  projectId: string;
+  action: "read" | "archive";
+  read: string[];
+  resolved: string[];
+}
+
+/** Each thread of the project, as the store's routing placed it (the model checks routing step by step). */
+function modelThreadsOf(world: StateWorld, projectId: string): ModelThread[] {
+  return [...world.model.threads.values()].filter((t) => world.store.message(t.id)!.project_id === projectId);
+}
+
+/** A project's rows as a batch then its Undo must give them back (revisions move; nothing else may). */
+function projectSnapshot(world: StateWorld, projectId: string) {
+  return world.store
+    .listRows({ projectId })
+    .map((row) => ({ id: row.thread_id, resolved: row.resolved_at !== null, back: row.back_from_archive === true, ...readSnapshot(world, row.thread_id) }));
+}
+
+/** Apply one thread's single action to the model, with the messages the store wrote for that thread. */
+function modelSingle(world: StateWorld, op: Op, threadId: string, created: readonly string[], tick: number): void {
+  const mine = created.filter((id) => world.store.message(id)!.thread_id === threadId);
+  expect(world.model.apply(op, threadId, mine, world.store, tick)).toBe("ok");
+}
+
+function batchStep(world: StateWorld, item: Exclude<BatchItem, { kind: "op" }>, last: BatchDone | null): BatchDone | null {
+  const tick = ++world.tick;
+  world.clock.now += STATE_STEP_MS;
+  world.timeOf.set(tick, world.clock.now);
+  world.lastRead = null;
+  const created: string[] = [];
+  const stop = world.store.subscribe((line) => {
+    if (line.kind === "message" && world.store.messageCursor(line.id) === line.seq) created.push(line.id);
+  });
+  let done: BatchDone | null = null;
+  // What the model must skip on Undo: a thread the single action now refuses (archived, and no agent wrote after the line).
+  const refusesUnread = (id: string) => {
+    const t = world.model.threads.get(id)!;
+    return t.resolved && !world.model.agentAfter(t);
+  };
+  const skipRead = item.kind === "undo" && last ? new Set(last.read.filter(refusesUnread)) : new Set<string>();
+  try {
+    if (item.kind === "undo") {
+      if (!last) return null;
+      if (last.action === "read") {
+        expect(new Set(unmarkProjectRead(world.store, last.projectId, last.read).skipped)).toEqual(skipRead);
+      } else {
+        const result = unarchiveProject(world.store, last.projectId, { resolved: last.resolved, read: last.read });
+        expect(new Set(result.skipped)).toEqual(skipRead);
+      }
+    } else {
+      const project = world.store.listProjects().find((p) => p.name === `repo${item.root}`);
+      if (!project) return null;
+      if (item.action === "read") done = { projectId: project.id, action: "read", resolved: [], ...markProjectRead(world.store, project.id) };
+      else done = { projectId: project.id, action: "archive", ...archiveProject(world.store, project.id) };
+    }
+  } finally {
+    stop();
+  }
+
+  if (item.kind === "undo") {
+    // The model, thread by thread, in the order the store wrote (resolved before read).
+    for (const id of last!.resolved) modelSingle(world, { op: "resolve", target: 0, resolved: false }, id, created, tick);
+    for (const id of last!.read) if (!skipRead.has(id)) modelSingle(world, { op: "read", target: 0, read: false }, id, created, tick);
+  } else {
+    // The model decides which threads the batch takes, by its own rules.
+    const threads = modelThreadsOf(world, done!.projectId).filter((t) => !world.model.archived(t));
+    if (item.action === "read") {
+      // Every bold row: a row in New only for the person's own unsent words waits on nobody (approval "inbox-reply-drafts"),
+      // and a thread whose Mark read still stands (unsent work keeps it in New) is not marked again.
+      const waits = threads.filter((t) => world.model.unread(t) && !world.model.readHolds(t)).map((t) => t.id);
+      expect(new Set(done!.read)).toEqual(new Set(waits));
+      for (const id of done!.read) modelSingle(world, { op: "read", target: 0, read: true }, id, created, tick);
+    } else {
+      expect(new Set(done!.resolved)).toEqual(new Set(threads.filter((t) => !t.resolved).map((t) => t.id)));
+      expect(new Set(done!.read)).toEqual(new Set(threads.filter((t) => t.resolved).map((t) => t.id)));
+      for (const id of done!.resolved) modelSingle(world, { op: "resolve", target: 0, resolved: true }, id, created, tick);
+      for (const id of done!.read) modelSingle(world, { op: "read", target: 0, read: true }, id, created, tick);
+    }
+    // A batch never writes a message (the set-aside notes go later, thread by thread).
+    expect(created).toEqual([]);
+  }
+  checkThreadState(world);
+  if (done) {
+    const rows = world.store.listRows({ projectId: done.projectId });
+    // Mark all as read leaves nothing waiting on the person; Archive all leaves nothing listed (the project hides).
+    if (done.action === "read") expect(rows.filter((r) => inboxRowOffersMarkRead(r))).toEqual([]);
+    else expect(rows.filter((r) => !inboxRowArchived(r))).toEqual([]);
+  }
+  return done;
+}
+
+describe("the thread-state model: the project menu's batches", () => {
+  test("generated histories with batches and their Undo between the steps: the store agrees with the model after every step", () => {
+    let batches = 0;
+    let undone = 0;
+    fc.assert(
+      fc.property(fc.array(batchItemArb, { minLength: 15, maxLength: 50, size: "max" }), (items) => {
+        const world = stateWorld();
+        let last: BatchDone | null = null;
+        for (const item of items) {
+          if (item.kind === "op") {
+            stateStep(world, item.op);
+            continue;
+          }
+          const done = batchStep(world, item, last);
+          if (item.kind === "undo") {
+            if (last) undone += 1;
+            last = null;
+          } else if (done) {
+            last = done;
+            batches += 1;
+          }
+        }
+      }),
+      { numRuns: 200, seed: 20261014 },
+    );
+    expect(batches).toBeGreaterThan(0);
+    expect(undone).toBeGreaterThan(0);
+  });
+
+  test("a batch undone back to back gives the project back exactly as it was", () => {
+    let touched = 0;
+    fc.assert(
+      fc.property(fc.array(stateOpArb, { minLength: 10, maxLength: 35, size: "max" }), fc.constantFrom("read" as const, "archive" as const), (ops, action) => {
+        const world = stateWorld();
+        for (const op of ops) stateStep(world, op);
+        for (const project of world.store.listProjects()) {
+          const before = projectSnapshot(world, project.id);
+          const done = batchStep(world, { kind: "batch", action, root: Number(project.name.slice(4)) }, null)!;
+          touched += done.read.length + done.resolved.length;
+          batchStep(world, { kind: "undo" }, done);
+          expect(projectSnapshot(world, project.id)).toEqual(before);
+        }
+      }),
+      { numRuns: 100, seed: 20261016 },
+    );
+    expect(touched).toBeGreaterThan(0);
   });
 });
 
@@ -1411,7 +2054,10 @@ type TraceEvent =
   // `through` (seen only, optional): the look stops at that agent message (`through_seq`).
   | { type: "seen" | "mark_read" | "unread" | "archive" | "unarchive" | "agent_read" | "set_aside_note"; thread: string; through?: string }
   | { type: "pick"; message: string; key: string; choice?: string; text?: string }
-  | { type: "send"; message: string; words: string; skip_unanswered: boolean };
+  | { type: "send"; message: string; words: string; skip_unanswered: boolean }
+  // The person starts a thread addressed to a session (compose), and its delivery.
+  | { type: "person_thread"; project: string; session: string; body: string }
+  | { type: "delivered"; thread: string };
 
 interface TraceDef {
   name: string;
@@ -1459,7 +2105,7 @@ class TraceLabels {
 function traceOp(event: TraceEvent, world: StateWorld, labels: TraceLabels, step: number): Op {
   const at = (label: string) => {
     const i = world.ids.indexOf(labels.id(label));
-    if (i < 0) throw new Error(`${label} is not an agent message`);
+    if (i < 0) throw new Error(`${label} is not an agent message or a thread the person started`);
     return i;
   };
   switch (event.type) {
@@ -1502,12 +2148,20 @@ function traceOp(event: TraceEvent, world: StateWorld, labels: TraceLabels, step
       return { op: "agentRead", target: at(event.thread) };
     case "set_aside_note":
       return { op: "tell", target: at(event.thread) };
+    case "person_thread": {
+      const root = /^repo(\d)$/.exec(event.project);
+      if (!root) throw new Error(`project ${event.project}: repo0 or repo1`);
+      return { op: "personStart", root: Number(root[1]), key: `person-${step}`, session: event.session, body: event.body };
+    }
+    case "delivered":
+      return { op: "deliver", target: at(event.thread) };
   }
 }
 
 /** The trace event a generated op is, before it runs (null for an op that aims at nothing). */
 function traceEventOf(op: Op, world: StateWorld, labels: TraceLabels): TraceEvent | null {
   if (op.op === "send") return { type: "agent_message", project: `repo${op.root}`, session: op.session ?? null, reply_to: null, body: op.body };
+  if (op.op === "personStart") return { type: "person_thread", project: `repo${op.root}`, session: op.session, body: op.body };
   const target = targetOf(op, world.ids);
   if (!target) return null;
   const message = world.store.message(target)!;
@@ -1541,6 +2195,13 @@ function traceEventOf(op: Op, world: StateWorld, labels: TraceLabels): TraceEven
       return { type: "agent_read", thread };
     case "tell":
       return { type: "set_aside_note", thread };
+    case "deliver":
+      return { type: "delivered", thread };
+    // Re-ask runs in the property runs only: the trace fixtures were drawn without it.
+    case "reask":
+      return null;
+    case "ack":
+      return { type: op.on ? "ack" : "unack", message: labels.label(target) };
   }
 }
 
@@ -1555,7 +2216,7 @@ function traceExpect(world: StateWorld, labels: TraceLabels) {
     sections: sections(views.include),
     sections_exclude_archived: sections(views.exclude),
     archived: views.archived.map((r) => labels.threadLabel(r.thread_id)),
-    counts: { waiting: waitingCount(views.exclude), unread: rows.filter((r) => r.unread).length, decisions_waiting: waitingDecisionCount(store) },
+    counts: { waiting: waitingCount(views.exclude), unread: rows.filter((r) => r.unread).length },
     threads: Object.fromEntries(
       byLabel.map((row) => {
         const messages = store.thread(row.thread_id)!.messages;
@@ -1624,6 +2285,7 @@ const REPLY = (reply_to: string, body: string, supersedes?: string[]): TraceEven
 const ON = (type: Extract<TraceEvent, { thread: string }>["type"], thread: string): TraceEvent => ({ type, thread });
 const SEEN_THROUGH = (thread: string, through: string): TraceEvent => ({ type: "seen", thread, through });
 const PICK = (message: string, key: string, choice: string): TraceEvent => ({ type: "pick", message, key, choice });
+const PERSON = (body: string, session = "ses_a", project = "repo0"): TraceEvent => ({ type: "person_thread", project, session, body });
 const SEND = (message: string, words: string, skip_unanswered: boolean): TraceEvent => ({ type: "send", message, words, skip_unanswered });
 
 const HAND_TRACES: TraceDef[] = [
@@ -1725,7 +2387,7 @@ const HAND_TRACES: TraceDef[] = [
   },
   {
     name: "hand-12-archive-unarchive-keeps-everything",
-    description: "Archive closes the questions (no Mark read, no pick) and Unarchive gives back every pick and the decision waiting; the Send records the decision.",
+    description: "Archive closes the questions (no Mark read, no pick) and Unarchive gives back every pick; the Send sends them.",
     events: [
       ROOT(STATE_BODIES.decide),
       REPLY("m1", STATE_BODIES.ask),
@@ -1788,6 +2450,22 @@ const HAND_TRACES: TraceDef[] = [
       REPLY("m1", STATE_BODIES.news),
       ROOT(STATE_BODIES.news, null, "repo1"),
       SEEN_THROUGH("t1", "m5"),
+    ],
+  },
+  {
+    name: "hand-19-person-started-thread",
+    description:
+      "The person starts a thread addressed to a session (Sent); its delivery moves it to Quiet; the agent's reply_to answer lands in it (New), and a look makes it Quiet. The session's message without reply_to starts its own thread: a thread the person started is no session's default thread. A second person thread waits in Sent until delivered.",
+    events: [
+      PERSON(PERSON_BODIES[0]),
+      ON("delivered", "t1"),
+      REPLY("m1", STATE_BODIES.news),
+      ON("seen", "t1"),
+      ROOT(STATE_BODIES.ask, "ses_a"),
+      PERSON(PERSON_BODIES[1], "ses_b"),
+      REPLY("m4", STATE_BODIES.ask),
+      ON("mark_read", "t3"),
+      ON("delivered", "t3"),
     ],
   },
 ];

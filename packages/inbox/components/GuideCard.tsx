@@ -7,6 +7,7 @@
 import type { InboxGuideRef } from '@plannotator/core/inbox-types';
 import { formatCount, plural } from '../format';
 import { Icon } from '../icons';
+import { Tip } from './Tip';
 
 export function GuideCard({ guide, onOpen }: { guide: InboxGuideRef; onOpen: () => void }) {
   return (
@@ -20,9 +21,11 @@ export function GuideCard({ guide, onOpen }: { guide: InboxGuideRef; onOpen: () 
             <Icon name="book" size={18} />
           </span>
           <span className="ib-att-text">
-            <span className="ib-nm" data-clip="">
-              Guided review: <bdi>{guide.title}</bdi>
-            </span>
+            <Tip content={`Guided review: ${guide.title}`} cut>
+              <span className="ib-nm">
+                Guided review: <bdi>{guide.title}</bdi>
+              </span>
+            </Tip>
             <span className="ib-kd">
               {plural(guide.sections, 'section')}, {plural(guide.files, 'file')}, <span className="ib-add">+{formatCount(guide.additions)}</span>{' '}
               <span className="ib-del">-{formatCount(guide.deletions)}</span>

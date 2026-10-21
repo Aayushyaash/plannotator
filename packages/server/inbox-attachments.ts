@@ -28,20 +28,28 @@
 
 import { checkServerSession, INBOX_SERVER_SESSION_MISMATCH_ERROR, serverSessionMismatchBody } from "@plannotator/core/server-session";
 import type { FileHandle } from "node:fs/promises";
-import { HTML_ASSET_DOCUMENT_CSP, refusesHiddenHtmlAssetPath } from "@plannotator/shared/html-assets";
+import { constants as fsConstants } from "node:fs";
+import { lstat, open, readlink, realpath } from "node:fs/promises";
+import { basename, dirname, relative as relativeTo, resolve as resolvePath, sep } from "node:path";
+import { htmlAssetPathRefused, isWithinDirectory } from "@plannotator/shared/html-assets-node";
+import { HTML_ASSET_DOCUMENT_CSP, htmlAssetDocumentHeaders, MAX_HTML_ASSET_DOCUMENT_BYTES, refusesHiddenHtmlAssetPath } from "@plannotator/shared/html-assets";
 import { INBOX_ANNOTATION_CURRENT, isInboxTextKind, readInboxAttachmentKind, type InboxAttachment } from "@plannotator/core/inbox-types";
 import {
+  checkCurrent,
   inboxAttachmentState,
   isPdfHead,
   openInboxAttachmentVersion,
   readInboxAttachmentText,
 } from "@plannotator/shared/inbox/attachments";
 import { INBOX_MESSAGE_IMAGE_CSP } from "@plannotator/shared/inbox/message-images";
-import { readInboxMarkup, writeInboxMarkup } from "@plannotator/shared/inbox/markups";
+import { readInboxMarkup, readInboxMarkupBody, writeInboxMarkup } from "@plannotator/shared/inbox/markups";
 import { readImageDimensions, sniffImageContentType } from "@plannotator/shared/review-image";
+import { sniffInboxVideo } from "@plannotator/shared/inbox/video";
+import { byteRangeResponse, decideByteRange, handleRangeStream } from "./inbox-byte-range";
 import { InboxError } from "@plannotator/shared/inbox/schema";
 import type { InboxStore } from "@plannotator/shared/inbox/store";
 import { createHtmlAssetRegistry } from "./html-assets";
+import { MAX_REVIEW_IMAGE_PREVIEW_BYTES, MAX_REVIEW_IMAGE_PREVIEW_PIXELS } from "@plannotator/shared/diff-paths";
 
 const JSON_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
@@ -66,36 +74,14 @@ export function contentDisposition(type: "inline" | "attachment", name: string):
   return `${type}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
 
-/** A file handle as a response body, read in 1 MiB chunks and closed at its end or when the reader goes away. */
-function handleStream(handle: FileHandle): ReadableStream<Uint8Array> {
-  let position = 0;
-  let closed = false;
-  const close = () => {
-    if (closed) return;
-    closed = true;
-    void handle.close().catch(() => {});
-  };
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        const buffer = Buffer.allocUnsafe(1024 * 1024);
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
-        if (bytesRead === 0) {
-          close();
-          controller.close();
-          return;
-        }
-        position += bytesRead;
-        controller.enqueue(buffer.subarray(0, bytesRead));
-      } catch (error) {
-        close();
-        controller.error(error);
-      }
-    },
-    cancel() {
-      close();
-    },
-  });
+/**
+ * A file handle as a response body, read in 1 MiB chunks: the Range routes'
+ * stream (inbox-byte-range.ts), so the handle is closed at the end, on a
+ * cancel (after any read in flight), and by the idle watchdog when a reader
+ * vanishes.
+ */
+function handleStream(handle: FileHandle, idleMs?: number): ReadableStream<Uint8Array> {
+  return handleRangeStream(handle, 0, undefined, { idleMs });
 }
 
 /**
@@ -108,6 +94,107 @@ export const inboxRefusesAssetPath = refusesHiddenHtmlAssetPath;
 
 /** A nested document in an attached page runs scripts but reaches no network. */
 export const INBOX_HTML_DOCUMENT_CSP = `${HTML_ASSET_DOCUMENT_CSP}; connect-src 'none'`;
+
+/**
+ * The page `relativePath` names in the folder of the attached HTML page at
+ * `attachedPath` (its realpath): its realpath and text. Refused (InboxError)
+ * when the path is not a plain relative path, names a hidden segment or a
+ * dotenv file (as requested or by where it leads), is not `.html`/`.htm`,
+ * leads outside that folder, is not a regular file, or is over 2 MB.
+ */
+export async function readInboxLinkedPage(attachedPath: string, relativePath: string | null): Promise<{ path: string; text: string }> {
+  const rel = (relativePath ?? "").replace(/\\/g, "/");
+  if (!rel || rel.length > 2048 || /[\u0000-\u001f\u007f]/.test(rel) || rel.startsWith("/") || /^[a-z]:/i.test(rel)) {
+    throw new InboxError("validation_error", "path: a path relative to the attached page's folder.", { field: "path" });
+  }
+  const segments = rel.split("/").filter((s) => s !== "" && s !== ".");
+  if (segments.length === 0 || segments.includes("..")) {
+    throw new InboxError("linked_page_outside", "Only pages in the attached page's own folder open here.");
+  }
+  const clean = segments.join("/");
+  const name = segments[segments.length - 1]!;
+  if (!/\.html?$/i.test(name)) throw new InboxError("linked_page_not_html", `${name} is not an HTML page.`);
+  const root = dirname(attachedPath);
+  const target = resolvePath(root, clean);
+  if (!isWithinDirectory(target, root)) throw new InboxError("linked_page_outside", "Only pages in the attached page's own folder open here.");
+  if (htmlAssetPathRefused(root, clean, inboxRefusesAssetPath)) {
+    throw new InboxError("linked_page_refused", "Plannotator does not open hidden files or .env files.");
+  }
+  let real: string;
+  try {
+    real = await realpath(target);
+  } catch {
+    throw new InboxError("linked_page_missing", `${name} is not there.`);
+  }
+  // Judged again on the resolved path (a symlink inside the folder that leads out). This alone does not
+  // cover a folder swapped for a link after realpath: the dev/ino check below the open does.
+  if (!isWithinDirectory(real, root)) throw new InboxError("linked_page_outside", "Only pages in the attached page's own folder open here.");
+  if (inboxRefusesAssetPath(relativeTo(root, real).split(sep).join("/"))) {
+    throw new InboxError("linked_page_refused", "Plannotator does not open hidden files or .env files.");
+  }
+  // The handle is opened on the realpath without following a link. O_NOFOLLOW covers
+  // only the last segment, so once open the realpath must still lead to the very
+  // file the descriptor holds (dev and ino): a parent folder swapped for a symlink
+  // between realpath and open is caught.
+  let handle: FileHandle;
+  try {
+    handle = await open(real, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  } catch {
+    throw new InboxError("linked_page_missing", `${name} could not be read.`);
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new InboxError("linked_page_missing", `${name} is not a file.`);
+    if (stat.size > MAX_HTML_ASSET_DOCUMENT_BYTES) throw new InboxError("linked_page_too_large", `${name} is too large to show here (over 2 MB).`);
+    if (!(await openedIsReal(handle, real, stat))) throw new InboxError("linked_page_outside", "Only pages in the attached page's own folder open here.");
+    // At most the cap plus one byte, so a file that grows after the stat is never read whole.
+    const buffer = Buffer.alloc(MAX_HTML_ASSET_DOCUMENT_BYTES + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > MAX_HTML_ASSET_DOCUMENT_BYTES) throw new InboxError("linked_page_too_large", `${name} is too large to show here (over 2 MB).`);
+    return { path: real, text: buffer.subarray(0, length).toString("utf8") };
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
+/**
+ * The descriptor holds the file `real` names. On Linux the descriptor's own
+ * path (`/proc/self/fd/N`) says where it really is, whatever the folders did
+ * since. Elsewhere the realpath must be unchanged and lead to the same dev
+ * and ino, judged with an lstat on both sides of the realpath: a parent
+ * swapped for a symlink between one realpath and one lstat would otherwise
+ * let the lstat follow it to the very file the descriptor holds.
+ */
+async function openedIsReal(handle: FileHandle, real: string, opened: { dev: number; ino: number }): Promise<boolean> {
+  if (process.platform === "linux") {
+    try {
+      return (await readlink(`/proc/self/fd/${handle.fd}`)) === real;
+    } catch {
+      // No /proc (a container without it): the checks below.
+    }
+  }
+  return (await stillSameFile(real, opened)) && (await stillSameFile(real, opened));
+}
+
+/** The path still leads to the file a descriptor holds: the same dev and ino before and after its realpath, which is unchanged. */
+async function stillSameFile(real: string, opened: { dev: number; ino: number }): Promise<boolean> {
+  try {
+    const same = async () => {
+      const at = await lstat(real);
+      return at.isFile() && at.dev === opened.dev && at.ino === opened.ino;
+    };
+    if (!(await same())) return false;
+    if ((await realpath(real)) !== real) return false;
+    return await same();
+  } catch {
+    return false;
+  }
+}
 
 /** A request another site (or another localhost port) made: refused before anything is read. */
 function crossSite(req: Request): boolean {
@@ -125,6 +212,10 @@ export interface InboxAttachmentRoutesContext {
   store: InboxStore;
   serverSession: string;
   readBody: (req: Request) => Promise<Record<string, unknown>>;
+  /** How long a streamed answer may go unread before its file handle closes. Default `STREAM_IDLE_CLOSE_MS`; tests shorten it. */
+  streamIdleMs?: number;
+  /** Ask for the thread's uncaptured message images to be copied in the background (inbox-message-images.ts); a read never waits for it. */
+  scheduleImageCapture?: (threadId: string) => void;
 }
 
 type Version = "current" | "sent";
@@ -172,10 +263,13 @@ export function createInboxAttachmentRoutes(context: InboxAttachmentRoutesContex
       if (crossSite(req)) return json(CROSS_SITE_BODY, 403);
       const threadId = threadAttachments[1]!;
       if (!store.thread(threadId)) throw new InboxError("thread_not_found", `No thread ${threadId}.`);
+      context.scheduleImageCapture?.(threadId);
       return json({
         serverSession,
         // A changed large file is judged by its stat here and hashed when it is opened.
         attachments: await Promise.all(store.threadAttachments(threadId).map(({ attachment, message }) => inboxAttachmentState(attachment, message.id, { hash: "small" }))),
+        // The images the messages show, captured as files (additive: a reader that does not know it draws nothing extra).
+        inline_images: await Promise.all(store.threadInlineImages(threadId).map(({ attachment, message }) => inboxAttachmentState(attachment, message.id, { hash: "small" }))),
         annotations: store.pendingAnnotations(threadId),
       });
     }
@@ -195,6 +289,61 @@ export function createInboxAttachmentRoutes(context: InboxAttachmentRoutesContex
         text,
         // The page as annotate serves it: a <base href> at its own folder's asset route.
         html: attachment.kind === "html" ? htmlAssets.rewriteHtml(text, attachment.path) : null,
+      });
+    }
+
+    // An attached HTML page in a tab of its own ("Open in" → Browser): read only,
+    // under the sandbox attached pages already get, from its own folder.
+    const page = /^\/api\/inbox\/attachments\/(att_[A-Za-z0-9]+)\/page$/.exec(path);
+    if (page) {
+      if (req.method !== "GET" && req.method !== "HEAD") return json({ error: "Use GET." }, 405);
+      if (crossSite(req)) return json(CROSS_SITE_BODY, 403);
+      const { attachment } = attachmentOf(page[1]!);
+      if (readInboxAttachmentKind(attachment.kind) !== "html") {
+        throw new InboxError("attachment_not_html", `${attachment.name} is not an HTML page.`);
+      }
+      const version = versionOf(url);
+      if (version === "current") {
+        const check = checkCurrent(attachment);
+        if (!check.ok) throw new InboxError(check.unavailable.code, check.unavailable.message);
+        // The file at its own folder's asset URL: relative assets, #anchors and frames
+        // resolve natively, with the document CSP. A name the asset route refuses
+        // (a hidden page, `.draft.html`) or a page over its size is served below instead.
+        const target = htmlAssets.documentUrl(attachment.path);
+        const name = basename(attachment.path);
+        if (target && /\.html?$/i.test(name) && !inboxRefusesAssetPath(name) && check.stat.size <= MAX_HTML_ASSET_DOCUMENT_BYTES) {
+          return new Response(null, { status: 303, headers: { Location: target, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" } });
+        }
+      }
+      // The sent bytes (or a page the asset route will not serve), with a <base href> at its folder.
+      const html = htmlAssets.rewriteHtml((await readVersion(store, attachment, version)).toString("utf8"), attachment.path);
+      return new Response(req.method === "HEAD" ? null : html, {
+        headers: { ...htmlAssetDocumentHeaders(INBOX_HTML_DOCUMENT_CSP), ...BYTE_GUARD_HEADERS, "Referrer-Policy": "no-referrer" },
+      });
+    }
+
+    // Another page an attached HTML page links to (`<a href="B-cards.html">`), not
+    // attached itself: shown read-only in the same pane. Reached by the attachment's
+    // id plus a path relative to the attached page's own folder (never an absolute
+    // path), with the asset route's rules: inside that folder by realpath, no hidden
+    // segment or dotenv name, `.html`/`.htm`, at most 2 MB.
+    const linked = /^\/api\/inbox\/attachments\/(att_[A-Za-z0-9]+)\/linked-page$/.exec(path);
+    if (linked) {
+      if (req.method !== "GET") return json({ error: "Use GET." }, 405);
+      if (crossSite(req)) return json(CROSS_SITE_BODY, 403);
+      const { attachment } = attachmentOf(linked[1]!);
+      if (readInboxAttachmentKind(attachment.kind) !== "html") {
+        throw new InboxError("attachment_not_html", `${attachment.name} is not an HTML page.`);
+      }
+      const page = await readInboxLinkedPage(attachment.path, url.searchParams.get("path"));
+      return json({
+        serverSession,
+        path: page.path,
+        name: basename(page.path),
+        // The page as annotate serves it: a <base href> at its own folder's asset route.
+        html: htmlAssets.rewriteHtml(page.text, page.path),
+        // Open in new tab: the file at its folder's asset URL, under the document CSP.
+        url: htmlAssets.documentUrl(page.path),
       });
     }
 
@@ -218,6 +367,35 @@ export function createInboxAttachmentRoutes(context: InboxAttachmentRoutesContex
       });
     }
 
+    // A film for `<video src>` and a native player: Range from the descriptor
+    // the one check opened (inbox-byte-range.ts), never the whole file at once.
+    const videoRoute = /^\/api\/inbox\/attachments\/(att_[A-Za-z0-9]+)\/video$/.exec(path);
+    if (videoRoute) {
+      if (req.method !== "GET") return json({ error: "Use GET." }, 405);
+      if (crossSite(req)) return json(CROSS_SITE_BODY, 403);
+      const { attachment } = attachmentOf(videoRoute[1]!);
+      if (readInboxAttachmentKind(attachment.kind) !== "video") {
+        throw new InboxError("attachment_not_video", `${attachment.name} is not a video; download it instead.`);
+      }
+      const opened = await openInboxAttachmentVersion(store.dir, attachment, versionOf(url), { hash: "none" });
+      if (!opened.ok) throw new InboxError(opened.code, opened.message);
+      // The type of the bytes served, sniffed now (the sent blob too): never the record's, never the name's.
+      const sniffed = sniffInboxVideo(opened.head);
+      if (!sniffed) {
+        await opened.handle.close().catch(() => {});
+        throw new InboxError("attachment_not_video", `${attachment.name} is no longer a video.`);
+      }
+      const decision = decideByteRange(req.headers.get("range"), opened.size, { ifRange: req.headers.get("if-range"), etag: opened.etag });
+      return byteRangeResponse(opened.handle, opened.size, decision, {
+        ...BYTE_GUARD_HEADERS,
+        "Content-Type": sniffed,
+        "Content-Security-Policy": INBOX_MESSAGE_IMAGE_CSP,
+        "Content-Disposition": contentDisposition("inline", attachment.name),
+        "Cache-Control": "private, no-cache",
+        ETag: opened.etag,
+      }, { idleMs: context.streamIdleMs });
+    }
+
     const bytesRoute = /^\/api\/inbox\/attachments\/(att_[A-Za-z0-9]+)\/(image|download)$/.exec(path);
     if (bytesRoute) {
       if (req.method !== "GET" && req.method !== "HEAD") return json({ error: "Use GET." }, 405);
@@ -226,9 +404,21 @@ export function createInboxAttachmentRoutes(context: InboxAttachmentRoutesContex
       const route = bytesRoute[2] as "image" | "download";
       const kind = readInboxAttachmentKind(attachment.kind);
       if (route === "image" && kind !== "image") throw new InboxError("attachment_not_image", `${attachment.name} is not an image; download it instead.`);
+      // An image a message shows: refused by its size before the image route hashes it whole.
+      if ("ref" in attachment && versionOf(url) === "current") {
+        const check = checkCurrent(attachment);
+        if (check.ok && check.stat.size > MAX_REVIEW_IMAGE_PREVIEW_BYTES) {
+          return json({ error: `${attachment.name} is larger than 10 MB; open the version it sent.`, code: "image_too_large" }, 413);
+        }
+      }
       // The image route's ETag is the hash; a download needs none, so a large file is not read twice.
       const opened = await openInboxAttachmentVersion(store.dir, attachment, versionOf(url), { hash: route === "image" ? "always" : "none" });
       if (!opened.ok) throw new InboxError(opened.code, opened.message);
+      // An image a message's body shows keeps the message-image route's byte cap on the file as it is now, for a download too.
+      if ("ref" in attachment && opened.size > MAX_REVIEW_IMAGE_PREVIEW_BYTES) {
+        await opened.handle.close().catch(() => {});
+        return json({ error: `${attachment.name} is larger than 10 MB; open the version it sent.`, code: "image_too_large" }, 413);
+      }
       let contentType: string;
       const extra: Record<string, string> = {};
       if (route === "image") {
@@ -240,6 +430,11 @@ export function createInboxAttachmentRoutes(context: InboxAttachmentRoutesContex
         }
         contentType = sniffed;
         const dims = readImageDimensions(opened.head, sniffed);
+        // An image a message's body shows keeps the message-image route's caps on the file as it is now.
+        if ("ref" in attachment && dims && dims.width * dims.height > MAX_REVIEW_IMAGE_PREVIEW_PIXELS) {
+          await opened.handle.close().catch(() => {});
+          return json({ error: `${attachment.name} is larger than 10 MB or 50 megapixels; open the version it sent.`, code: "image_too_large" }, 413);
+        }
         if (dims) {
           extra["X-Image-Width"] = String(dims.width);
           extra["X-Image-Height"] = String(dims.height);
@@ -247,7 +442,8 @@ export function createInboxAttachmentRoutes(context: InboxAttachmentRoutesContex
       } else {
         contentType = kind === "pdf" && isPdfHead(opened.head) ? "application/pdf" : "application/octet-stream";
       }
-      const etag = opened.sha256 ? `"${opened.sha256}"` : null;
+      // The image's ETag is its hash; a download's is the version's validator (no read: a seek is a request).
+      const etag = route === "image" ? (opened.sha256 ? `"${opened.sha256}"` : null) : opened.etag;
       const headers: Record<string, string> = {
         ...BYTE_GUARD_HEADERS,
         ...extra,
@@ -257,6 +453,11 @@ export function createInboxAttachmentRoutes(context: InboxAttachmentRoutesContex
         "Cache-Control": route === "image" ? "private, no-cache" : "no-store",
         ...(etag ? { ETag: etag } : {}),
       };
+      if (route === "download") {
+        // Any file streams to a native player (or resumes) by Range, from the same descriptor.
+        const decision = decideByteRange(req.headers.get("range"), opened.size, { ifRange: req.headers.get("if-range"), etag: opened.etag });
+        return byteRangeResponse(opened.handle, opened.size, decision, headers, { head: req.method === "HEAD", idleMs: context.streamIdleMs });
+      }
       if (req.method === "HEAD") {
         await opened.handle.close().catch(() => {});
         return new Response(null, { headers: { ...headers, "Content-Length": String(opened.size) } });
@@ -265,7 +466,7 @@ export function createInboxAttachmentRoutes(context: InboxAttachmentRoutesContex
         await opened.handle.close().catch(() => {});
         return new Response(null, { status: 304, headers });
       }
-      return new Response(handleStream(opened.handle), { headers: { ...headers, "Content-Length": String(opened.size) } });
+      return new Response(handleStream(opened.handle, context.streamIdleMs), { headers: { ...headers, "Content-Length": String(opened.size) } });
     }
 
     // The person's marked-up images (a comment drawn on an image attachment).
@@ -276,7 +477,7 @@ export function createInboxAttachmentRoutes(context: InboxAttachmentRoutesContex
       if (session !== null && checkServerSession({ serverSession: session }, serverSession) === "mismatch") {
         return json(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409);
       }
-      const markup = writeInboxMarkup(store.dir, new Uint8Array(await req.arrayBuffer()));
+      const markup = writeInboxMarkup(store.dir, await readInboxMarkupBody(req.body, req.headers.get("content-length")));
       return json({ path: markup.path, name: markup.name, url: `/api/inbox/markups/${markup.name}` });
     }
     const markupFile = /^\/api\/inbox\/markups\/([0-9a-f]{64}\.(?:png|jpg|webp))$/.exec(path);
@@ -306,6 +507,18 @@ export function createInboxAttachmentRoutes(context: InboxAttachmentRoutesContex
         annotation: body.annotation,
       });
       return json({ annotation: record });
+    }
+
+    // A comment on the text of an agent's message (approval
+    // "inbox-message-comments"): the words the person selected, kept with the
+    // attachments' annotations (removed by the same remove route, sent with
+    // the reply the same way).
+    const messageAnnotation = /^\/api\/inbox\/messages\/([A-Za-z0-9_]+)\/annotations$/.exec(path);
+    if (messageAnnotation) {
+      if (req.method !== "POST") return json({ error: "Use POST." }, 405);
+      const body = await guardedBody(req);
+      if (body instanceof Response) return body;
+      return json({ annotation: store.saveMessageAnnotation(messageAnnotation[1]!, body.annotation) });
     }
 
     // A comment on the diff of the guided review a message carries: the review

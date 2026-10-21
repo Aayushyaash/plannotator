@@ -13,6 +13,7 @@ import { countUnsentDraftComments, hostSessionClosedEvent } from "../generated/h
 import { checkServerSession, createServerSessionNonce, serverSessionMismatchBody } from "../generated/server-session.ts";
 import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control.ts";
 import { createRequestHostGuard } from "./request-host-guard.ts";
+import { refuseCrossOriginWrite } from "./request-origin-guard.ts";
 import { createReviewDraftSession, prDraftTargetKey, type ReviewDraftKeys } from "../generated/review-draft.ts";
 import { agentToolSaveFailed, loadConfig, saveConfig, detectGitUser, getServerConfig, parseReviewAnalysisConfig, resolveAIEnabled, resolveSharingEnabled, resolveClaudeSandbox, resolveCursorSandbox, resolveFeedbackHistory, resolveGuideHistory, resolveGuideShareUrl, resolveGitRemoteCheck, resolveReviewProgress } from "../generated/config.ts";
 import { currentPiHost } from "../pi-host.ts";
@@ -131,8 +132,7 @@ import { createPiAIRuntime, handlePiAIRequest } from "./ai-runtime.ts";
 import type { SessionBridge } from "../generated/ai/session-bridge.ts";
 
 import { buildAdvertisedUrl, isRemoteSession, listenOnPort } from "./network.ts";
-import { getAvailableOpenInApps, openFileInApp } from "./open-in-apps.ts";
-import { resolveOpenInTarget } from "../generated/html-assets-node.ts";
+import { getAvailableOpenInApps, handleOpenInRequest } from "./open-in-apps.ts";
 import {
 	fetchPR,
 	fetchPRContext,
@@ -1352,6 +1352,7 @@ export async function startReviewServer(options: {
 		mode: "review",
 		getServerUrl: () => agentApiUrl,
 		getCwd: resolveAgentCwd,
+		getServerSession: () => serverSession,
 
 		async buildCommand(provider, config) {
 			// Snapshot every mutable review selector before any await. A concurrent
@@ -2023,6 +2024,8 @@ export async function startReviewServer(options: {
 	const server = createServer(async (req, res) => {
 		// Host allowlist first, before any route (request-host-guard.ts).
 		if (requestHostGuard.refuse(req, res)) return;
+		// Then no write from another site, before any route (request-origin-guard.ts).
+		if (refuseCrossOriginWrite(req, res)) return;
 		const url = requestUrl(req);
 
 		if (handleHostControl(req, res, url, { token: hostControlToken, getServerPort: () => boundPort, control: hostControl })) return;
@@ -3825,33 +3828,12 @@ export async function startReviewServer(options: {
 				json(res, { ok: false, error: "Open in app is unavailable in remote sessions" }, 400);
 				return;
 			}
-			try {
-				const body = await parseBody(req);
-				const filePath = body.filePath;
-				if (typeof filePath !== "string" || !filePath) {
-					json(res, { ok: false, error: "Missing filePath" }, 400);
-					return;
-				}
-				const appId = typeof body.appId === "string" ? body.appId : undefined;
-				// Resolve repo-relative `git diff` paths against the VCS root
-				// server-side (resolveAgentCwd folds in workspace.root, the PR
-				// local checkout, resolveVcsCwd(gitContext.cwd), and process.cwd())
-				// — not the client `base`, which is wrong when review runs from a
-				// subdirectory — then containment-check.
-				const abs = resolveOpenInTarget(filePath, null, resolveOpenInRoot);
-				if (abs == null) {
-					json(res, { ok: false, error: "Path is outside the allowed directory" }, 403);
-					return;
-				}
-				const result = await openFileInApp(abs, appId);
-				json(res, result, 200);
-			} catch (err) {
-				json(
-					res,
-					{ ok: false, error: err instanceof Error ? err.message : "Failed to open file" },
-					500,
-				);
-			}
+			// Resolve repo-relative `git diff` paths against the VCS root
+			// server-side (resolveAgentCwd folds in workspace.root, the PR
+			// local checkout, resolveVcsCwd(gitContext.cwd), and process.cwd())
+			// — not the client `base`, which is wrong when review runs from a
+			// subdirectory — then containment-check.
+			await handleOpenInRequest(req, res, { serverSession, resolveRoot: resolveOpenInRoot });
 		} else if (url.pathname === "/api/review-progress") {
 			if (req.method === "POST" && !callFlowInstallOriginAllowed(req.headers.origin ?? null, req.headers.host ?? "", req.headers["sec-fetch-site"])) {
 				json(res, { error: "Cross-origin progress updates are not allowed" }, 403);

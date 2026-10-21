@@ -37,7 +37,6 @@ test.skipIf(!hasDom)('a quiet project folder is not styled as a question card', 
           page="inbox"
           projectId={null}
           inboxCount={1}
-          decisionsCount={0}
           projects={[project, busy] as never}
           projectCounts={new Map([['prj_b', 1]])}
           update={null}
@@ -46,7 +45,6 @@ test.skipIf(!hasDom)('a quiet project folder is not styled as a question card', 
           onInbox={noop}
           onProject={noop}
           onSettings={noop}
-          onDecisions={noop}
           onUpdate={noop}
           onWhatsNew={noop}
         />

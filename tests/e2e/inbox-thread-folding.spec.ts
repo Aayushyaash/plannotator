@@ -23,6 +23,7 @@ import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs
 import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
+import { NO_BROWSER } from '../helpers/no-browser';
 
 const repo = resolve(__dirname, '../..');
 const binary = resolve(process.env.PLANNOTATOR_E2E_BINARY ?? join(repo, '.local/plannotator'));
@@ -44,8 +45,6 @@ const ASK = [
   '',
   ':::question',
   LONG_PROMPT,
-  '',
-  'Decision: when answered',
   '',
   '- [ ] Pagefind',
   '- [ ] Algolia DocSearch',
@@ -153,7 +152,7 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   mkdirSync(trap);
   writeFileSync(join(trap, 'tailscale'), "#!/bin/sh\necho 'inbox-thread-folding.spec: tailscale must not run' >&2\nexit 97\n");
   chmodSync(join(trap, 'tailscale'), 0o755);
-  const env = { PATH: `${trap}:${process.env.PATH ?? ''}`, HOME: root, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: 'none' };
+  const env = { PATH: `${trap}:${process.env.PATH ?? ''}`, HOME: root, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: NO_BROWSER };
   const started = spawnSync(binary, ['inbox', '--background'], { env, encoding: 'utf8', timeout: 60_000 });
   expect(started.status, started.stderr).toBe(0);
   const url = started.stdout.trim();
@@ -245,10 +244,14 @@ test('the read run folds: first and last two as lines, the middle behind "3 earl
   await expect(pane().locator('[data-middle-fold]')).toHaveText('3 earlier messages');
   // Every question answered: the line shows the answers, not the first words.
   const first = article(ids[0]!);
-  // A long prompt is cut at a word, so the answer stays on the line; the whole prompt is the line's title.
+  // A long prompt is cut at a word, so the answer stays on the line; the whole prompt is the line's tooltip.
   const answers = first.locator('[data-snippet="answers"]');
   await expect(answers).toHaveText('Which search index should the docs site… → Pagefind · Which sections go in the index → Guides, API reference');
-  await expect(answers).toHaveAttribute('title', `${LONG_PLAIN}: Pagefind; Which sections go in the index: Guides, API reference`);
+  // The whole answers are its component tooltip, never a native title.
+  await expect(answers).not.toHaveAttribute('title', /./);
+  await answers.hover();
+  await expect(world.page.locator('[data-side].bg-popover')).toHaveText(`${LONG_PLAIN}: Pagefind; Which sections go in the index: Guides, API reference`);
+  await world.page.mouse.move(1, 1);
   const line = (await answers.boundingBox())!;
   const answer = (await answers.locator('b').first().boundingBox())!;
   expect(answer.x).toBeGreaterThanOrEqual(line.x);
@@ -275,16 +278,38 @@ test('opening and folding a line keeps it where it was', async () => {
   const { page, ids } = world;
   const id = ids[4]!;
   const before = await top(id);
+  // The head row the person clicks (inbox-polish, item 5): the mark and the name stay exactly where they were.
+  const box = async (selector: string) => (await article(id).locator(selector).first().boundingBox())!;
+  const markBefore = await box('.ib-mk.ib-big');
+  const nameBefore = await box('.ib-fl-nm');
   await article(id).locator('[data-fold-head]').click();
   await expect(article(id)).toHaveAttribute('data-open', '');
   await expect(article(id).locator('.ib-body')).toBeVisible();
   expect(Math.abs((await top(id)) - before)).toBeLessThan(2);
+  const markAfter = await box('.ib-mk.ib-big');
+  const nameAfter = await box('.ib-fl-nm');
+  expect([markAfter.x, markAfter.y, markAfter.width, markAfter.height].map(Math.round)).toEqual([markBefore.x, markBefore.y, markBefore.width, markBefore.height].map(Math.round));
+  expect(markAfter.width).toBe(24);
+  expect(Math.round(nameAfter.x)).toBe(Math.round(nameBefore.x));
+  // The body lines up with the name.
+  const body = (await article(id).locator('.ib-body').first().boundingBox())!;
+  expect(Math.abs(body.x - nameAfter.x)).toBeLessThan(2);
   await expect(page.locator(':focus')).toHaveAttribute('aria-expanded', 'true');
   await shot('3-opened-in-place');
   await article(id).locator('[data-fold-head]').click();
   await expect(article(id)).toHaveAttribute('data-folded', '');
   expect(Math.abs((await top(id)) - before)).toBeLessThan(2);
   await expect(page.locator(':focus')).toHaveAttribute('aria-expanded', 'false');
+  // A 1280 or 1366 px window beside the list keeps the folded line one 44 px row (the two-line row is for a
+  // thread under 560 px of text: beside a file, or a phone).
+  try {
+    for (const width of [1280, 1366]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect.poll(async () => Math.round((await article(id).locator('button.ib-fline').boundingBox())!.height), { message: `${width} px` }).toBe(44);
+    }
+  } finally {
+    await page.setViewportSize({ width: 1440, height: 900 });
+  }
 });
 
 test('keys: n goes to the first new message, k and j move between messages; never while typing', async () => {
@@ -315,7 +340,7 @@ test('keys: n goes to the first new message, k and j move between messages; neve
   await pane().locator('.ib-pfoot').getByRole('button', { name: 'Cancel' }).click();
 });
 
-test("Expand all gives back today's fully open thread; scrolled up, the pill points down to the new message", async () => {
+test("Expand all gives back today's fully open thread; scrolled up past the new message already read, no pill comes back; n goes down to it", async () => {
   const { page, ids } = world;
   await pane().locator('[data-expand-all]').click();
   await expect(pane().locator('[data-expand-all]')).toHaveText('Fold all');
@@ -325,14 +350,20 @@ test("Expand all gives back today's fully open thread; scrolled up, the pill poi
   await expect(article(ids[0]!).getByText(/^Which search index should the docs site use for its first public release/)).toBeVisible();
   await expect(article(ids[3]!).locator('.ib-body')).toContainText('The plan is close.');
   await pane().locator('.ib-pbody').evaluate((el) => el.scrollTo({ top: 0 }));
+  // The new message has been on screen this visit (the tests above opened and
+  // read it), so scrolling back up above it never brings the pill back (the
+  // owner, 2026-10-16: "Why does this whole 'one new' thing keep showing, even
+  // though I've seen the whole message? Shows when I scroll up."). The pill
+  // pointing down to a message not yet on screen is proved in
+  // inbox-seen-on-sight.spec.ts.
   const pill = pane().locator('[data-new-pill]');
-  await expect(pill).not.toHaveAttribute('data-off', '');
-  await expect(pill).toHaveText('1 new');
+  await page.waitForTimeout(300);
+  await expect(pill).toHaveAttribute('data-off', '');
   await expect(pane().locator('[data-header-subject]')).not.toHaveAttribute('data-on', '');
-  await shot('4-expanded-pill');
-  // A real click where the pill floats (a locator click would scroll the sticky pill's own spot into view first).
-  const box = (await pill.boundingBox())!;
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await shot('4-expanded-scrolled-up');
+  // n still goes down to the first new message.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press('n');
   await expect(pane().locator('[data-new-divider]')).toBeInViewport();
   await expect(pill).toHaveAttribute('data-off', '');
   // Fold all: back to lines, the new message's included; the last stays open.
@@ -347,11 +378,11 @@ test('a pick folded says it is not sent; the reply that sends it is a look, so n
   const { page, ids } = world;
   // A pick on the new question: the list and the thread update, the marks stay.
   await article(ids[6]!).getByText('On main and release tags', { exact: true }).click();
-  await expect(pane().locator('.ib-pfoot')).toContainText('Not sent');
+  await expect(pane().locator('.ib-pfoot [data-draft-foot]')).toContainText('Draft');
   await expect(article(ids[6]!)).toHaveAttribute('data-new', '');
   // Folded by hand, its line says the pick is not sent.
   await article(ids[6]!).locator('[data-fold-head]').click();
-  await expect(article(ids[6]!).locator('[data-holding]')).toHaveText(['1 pick, not sent']);
+  await expect(article(ids[6]!).locator('[data-holding]')).toHaveText(['1 pick in your draft']);
   await shot('5-pick-folded');
   await article(ids[6]!).locator('[data-fold-head]').click();
   // Send: the person's reply is a look at everything before it.

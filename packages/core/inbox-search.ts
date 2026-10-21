@@ -19,7 +19,7 @@
  *   the last one as a prefix.
  */
 
-import type { InboxDecision, InboxSectionId } from './inbox-types';
+import type { InboxSectionId } from './inbox-types';
 
 export const INBOX_SEARCH_QUERY_MAX = 200;
 export const INBOX_SEARCH_TERMS_MAX = 8;
@@ -413,10 +413,10 @@ export function middleCutInboxName(name: string, max: number, marks: readonly [n
 
 // ─────────────────────────────── Wire (GET /api/inbox/search) ───────────────────────────────
 
-export type InboxSearchGroupId = 'threads' | 'messages' | 'files' | 'decisions' | 'projects';
-export const INBOX_SEARCH_GROUPS: readonly InboxSearchGroupId[] = ['threads', 'messages', 'files', 'decisions', 'projects'];
+export type InboxSearchGroupId = 'threads' | 'messages' | 'files' | 'projects';
+export const INBOX_SEARCH_GROUPS: readonly InboxSearchGroupId[] = ['threads', 'messages', 'files', 'projects'];
 /** Rows per group in a first answer (the brief's section 7). */
-export const INBOX_SEARCH_CAPS: Readonly<Record<InboxSearchGroupId, number>> = { threads: 5, messages: 8, files: 5, decisions: 5, projects: 3 };
+export const INBOX_SEARCH_CAPS: Readonly<Record<InboxSearchGroupId, number>> = { threads: 5, messages: 8, files: 5, projects: 3 };
 /** The most rows one group answers at a time ('Show all', 'Show 50 more'). */
 export const INBOX_SEARCH_LIMIT_MAX = 50;
 /** Threads listed for filters with no words. */
@@ -453,7 +453,7 @@ interface RowBase {
   /** The thread's section, and whether it is archived (resolved and not come back). */
   section: InboxSectionId | null;
   archived: boolean;
-  /** ISO time: a message's, a thread's latest message's, a decision's. */
+  /** ISO time: a message's, or a thread's latest message's. */
   at: string;
 }
 
@@ -474,6 +474,8 @@ export interface InboxSearchMessageRow extends RowBase {
   author: { kind: 'agent' | 'me'; name: string };
   /** The thread's subject. */
   title: string;
+  /** The thread's name (`thread_name`), null for an unnamed thread. Additive. */
+  thread_name?: string | null;
   snippet: InboxSearchSnippet;
   /** The match is in a question (its prompt, choices or answer): the 'Question' chip. */
   question: { key: string; replaced: boolean } | null;
@@ -491,16 +493,10 @@ export interface InboxSearchFileRow extends RowBase {
   folder: string | null;
   /** The attachment's kind or the file's extension (`md`, `pdf`, `png`), or `guide`. */
   kind: string;
+  /** The thread's subject. */
   title: string;
-}
-
-export interface InboxSearchDecisionRow extends RowBase {
-  type: 'decision';
-  id: string;
-  text: string;
-  text_marks: [number, number][];
-  state: InboxDecision['state'];
-  from: InboxSearchFrom;
+  /** The thread's name (`thread_name`), null for an unnamed thread. Additive. */
+  thread_name?: string | null;
 }
 
 export interface InboxSearchProjectRow {
@@ -513,7 +509,7 @@ export interface InboxSearchProjectRow {
   at: string;
 }
 
-export type InboxSearchRow = InboxSearchThreadRow | InboxSearchMessageRow | InboxSearchFileRow | InboxSearchDecisionRow | InboxSearchProjectRow;
+export type InboxSearchRow = InboxSearchThreadRow | InboxSearchMessageRow | InboxSearchFileRow | InboxSearchProjectRow;
 
 export interface InboxSearchAnswer {
   q: string;

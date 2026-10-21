@@ -83,7 +83,7 @@ test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async ({ browser }: { browser: Browser }) => {
   expect(existsSync(builtBinary), `build the binary first: ${builtBinary}`).toBe(true);
-  // Only this spec's own captures: decisions, attachments and guided reviews keep theirs in proof/decisions/, proof/attachments/ and proof/guides/.
+  // Only this spec's own captures: attachments and guided reviews keep theirs in proof/attachments/ and proof/guides/.
   mkdirSync(proofDir, { recursive: true });
   for (const file of readdirSync(proofDir)) if (file.endsWith('.png') || file === 'index.html') rmSync(join(proofDir, file));
   const root = inboxScratch('plannotator-inbox-e2e-');
@@ -97,7 +97,9 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   const dataDir = join(root, 'data');
   const home = join(root, 'home');
   mkdirSync(home);
-  const env = { PATH: process.env.PATH ?? '', HOME: home, PLANNOTATOR_DATA_DIR: dataDir };
+  // PATH: this world's own bin and the system's tools, never the agents installed on the machine running the
+  // spec (the first-run screen speaks about the agents it finds: none here).
+  const env = { PATH: `${binDir}:/usr/bin:/bin`, HOME: home, PLANNOTATOR_DATA_DIR: dataDir };
   const started = spawnSync(binary, ['inbox', '--background'], { env, encoding: 'utf8', timeout: 60_000 });
   expect(started.status, started.stderr).toBe(0);
   const url = started.stdout.trim();
@@ -164,7 +166,7 @@ async function firstRunLabels(page: Page): Promise<string[]> {
     .evaluateAll((els) => els.map((el) => (el.textContent ?? '').trim()));
 }
 
-test('first run: Try it, the harness picker folded behind Connect another agent by hand, Copy copies the command', async () => {
+test('first run, nothing found: the first step offers Claude Code, Pi or OpenCode (install command to copy, MCP folded), then Try it, then every other agent folded', async () => {
   const { page, url } = world;
   await page.goto(url);
   const empty = page.locator('[data-inbox-empty]');
@@ -186,15 +188,46 @@ test('first run: Try it, the harness picker folded behind Connect another agent 
   expect((await motion()).startsWith('none ')).toBe(true);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
 
-  const byHand = empty.getByRole('button', { name: 'Connect another agent by hand', exact: true });
+  // One next step (inbox-connect-next-step, variant C): Plannotator's own connections first.
+  const step = empty.locator('.ib-cn');
+  await expect(step.getByRole('heading', { name: 'Connect your first agent', exact: true })).toBeVisible();
+  await expect(step.getByRole('radiogroup', { name: 'Your agent' }).getByRole('radio')).toHaveCount(3);
+  const install = 'claude plugin marketplace add backnotprop/plannotator\nclaude plugin install plannotator@plannotator';
+  await expect(step.locator('pre').first()).toHaveText(install);
+  await step.getByRole('button', { name: 'Copy' }).first().click();
+  await expect(step.getByRole('button', { name: 'Copied' })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(install);
+  // MCP stays one fold away, with Claude Code's user-scope command naming the binary by its absolute path.
+  const binary = realpathSync(world.binary);
+  const mcp = step.getByRole('button', { name: 'Use MCP instead', exact: true });
+  await expect(mcp).toHaveAttribute('aria-expanded', 'false');
+  await mcp.click();
+  await expect(step.locator('pre').nth(1)).toHaveText(`claude mcp add --scope user plannotator-inbox -- ${binary} inbox mcp`);
+  expect(binary.startsWith('/') && binary.endsWith('/a-long-install-directory-name-so-every-connect-command-has-to-wrap/bin/plannotator')).toBe(true);
+  await expectCodeUnclipped(page);
+  await page.mouse.move(0, 0);
+  await shot('1.2-first-run-first-step');
+
+  // One rhythm: the same gap between the heading, the step, Try it and the fold.
+  const boxes = await empty.evaluate((el) =>
+    [...el.children].filter((child) => !child.classList.contains('ib-sr')).map((child) => child.getBoundingClientRect()).map((r) => ({ top: r.top, bottom: r.bottom })),
+  );
+  const gaps = boxes.slice(1).map((box, i) => Math.round(box.top - boxes[i]!.bottom));
+  expect(gaps.length).toBe(3);
+  expect(new Set(gaps).size).toBe(1);
+
+  // Every other agent or editor, folded at the end: the picker without Plannotator's three hosts.
+  const byHand = empty.getByRole('button', { name: 'Another agent or editor', exact: true });
   await expect(byHand).toHaveAttribute('aria-expanded', 'false');
   await expect(page.getByRole('tab', { name: 'Codex' })).toHaveCount(0);
   await byHand.click();
   await expect(byHand).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByRole('tab', { name: 'Claude Code' })).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: 'VS Code' })).toHaveAttribute('aria-selected', 'true');
 
-  // Codex is selected: the command with Copy, one note, the folded Another way, no eyebrow repeating the name.
-  const binary = realpathSync(world.binary);
+  // Codex: the command with Copy, one note, the folded Another way, no eyebrow repeating the name.
   const codex = page.getByRole('tab', { name: 'Codex' });
+  await codex.click();
   await expect(codex).toHaveAttribute('aria-selected', 'true');
   const command = `codex mcp add plannotator-inbox -- ${binary} inbox mcp`;
   const panel = page.getByRole('tabpanel', { name: 'Codex' });
@@ -206,21 +239,6 @@ test('first run: Try it, the harness picker folded behind Connect another agent 
   await panel.getByRole('button', { name: 'Copy' }).click();
   await expect(panel.getByRole('button', { name: 'Copied' })).toBeVisible();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(command);
-
-  // One rhythm: the same gap between the heading, Try it, the fold and the picker.
-  const boxes = await empty.evaluate((el) => [...el.children].map((child) => child.getBoundingClientRect()).map((r) => ({ top: r.top, bottom: r.bottom })));
-  const gaps = boxes.slice(1).map((box, i) => Math.round(box.top - boxes[i]!.bottom));
-  expect(gaps.length).toBe(3);
-  expect(new Set(gaps).size).toBe(1);
-
-  // Claude Code is in the picker too, with its user-scope command, the binary named by its absolute path.
-  await page.getByRole('tab', { name: 'Claude Code' }).click();
-  await expect(page.getByRole('tabpanel', { name: 'Claude Code' }).locator('pre').first()).toHaveText(`claude mcp add --scope user plannotator-inbox -- ${binary} inbox mcp`);
-  expect(binary.startsWith('/') && binary.endsWith('/a-long-install-directory-name-so-every-connect-command-has-to-wrap/bin/plannotator')).toBe(true);
-  await expectCodeUnclipped(page);
-  await page.mouse.move(0, 0);
-  await shot('1.3-first-run-claude-code');
-  await page.getByRole('tab', { name: 'Codex' }).click();
 
   // Headers carry no comma: every heading and label, on every tab.
   for (const tab of await page.getByRole('tab').all()) {
@@ -290,8 +308,8 @@ test('agents write three threads in two projects; the rows land in the six secti
   await expect(namedRow.locator('.ib-key')).toHaveText('refund-webhooks');
   await expect(page.locator('.ib-band')).toHaveText([/^Stopped on you\s*1$/, /^Holding up work\s*1$/, /^Waiting on you\s*1$/]);
   await expect(side(page).getByRole('button', { name: /^Inbox/ })).toContainText('3');
-  await expect(side(page).getByRole('button', { name: /^billing-svc/ })).toContainText('2');
-  await expect(side(page).getByRole('button', { name: /^docs-site/ })).toContainText('1');
+  await expect(side(page).getByRole('button', { name: /^billing-svc(?: \d+)?$/ })).toContainText('2');
+  await expect(side(page).getByRole('button', { name: /^docs-site(?: \d+)?$/ })).toContainText('1');
   await shot('1.1-list');
 });
 
@@ -311,13 +329,13 @@ test('a project folder filters the list and the sections still apply', async () 
   expect(await leftOf(page, '.ib-band')).toBe(labelLeft - 12);
   expect(await leftOf(page, `${named} .ib-mk`)).toBeGreaterThan(labelLeft + 200);
 
-  await side(page).getByRole('button', { name: /^docs-site/ }).click();
+  await side(page).getByRole('button', { name: /^docs-site(?: \d+)?$/ }).click();
   await expect(page.getByRole('heading', { level: 1, name: 'docs-site' })).toBeVisible();
   await expect(page.locator('.ib-path')).toHaveText(new RegExp(`docs-site$`));
   await expect(page.locator('.ib-lbody [data-thread-id]')).toHaveCount(1);
   await expect(page.locator('.ib-band')).toHaveText([/^Holding up work\s*1$/]);
 
-  await side(page).getByRole('button', { name: /^billing-svc/ }).click();
+  await side(page).getByRole('button', { name: /^billing-svc(?: \d+)?$/ }).click();
   await expect(page.getByRole('heading', { level: 1, name: 'billing-svc' })).toBeVisible();
   await expect(page.locator('.ib-band')).toHaveText([/^Stopped on you\s*1$/, /^Waiting on you\s*1$/]);
   // One project: no project column at all, and no empty block where it was. The
@@ -333,12 +351,13 @@ test('a project folder filters the list and the sections still apply', async () 
   await expect(page.locator('.ib-lbody [data-thread-id]')).toHaveCount(3);
 });
 
-test('a row opens the thread as an email with the question cards; the decision tag toggles', async () => {
+test('a row opens the thread as an email with the question cards, and no decision tag', async () => {
   const { page } = world;
   await page.locator(`[data-thread-id="${world.threads.stopped}"]`).click();
   const pane = page.locator('section.ib-pane');
   await expect(pane.getByRole('heading', { name: 'Which way should the worker go on a Stripe 409?' })).toBeVisible();
-  await expect(pane.locator('.ib-who').first()).toHaveText('Claude Code in billing-svc');
+  await expect(pane.locator('.ib-who').first()).toHaveText('Claude Code');
+  await expect(pane.locator('.ib-fl-meta').first()).toHaveText('in billing-svc · to you');
   await expect(pane.getByText('Question 1 of 2')).toBeVisible();
   await expect(pane.getByText('Question 2 of 2')).toBeVisible();
   await expect(pane.getByText('Waiting on this answer')).toBeVisible();
@@ -346,31 +365,10 @@ test('a row opens the thread as an email with the question cards; the decision t
   // Opening is a look: the row is no longer new to the person.
   await expect(page.locator(`.ib-nrow[data-thread-id="${world.threads.stopped}"]`)).toHaveAttribute('aria-current', 'true');
 
-  // The tag is on every question (ui 0.52.1, questionDecisionScope "any"):
-  // on where the block says `Decision: when answered`, off on the other. Its
-  // diamond is the switch; its words open the decision card (inbox-decisions.spec.ts).
-  const tags = pane.getByRole('button', { name: 'Record as a decision', exact: true });
-  await expect(tags).toHaveCount(2);
-  await expect(tags.nth(0)).toHaveAttribute('aria-pressed', 'true');
-  await expect(tags.nth(1)).toHaveAttribute('aria-pressed', 'false');
-  await expect(pane.getByText('Answering this records a decision')).toHaveCount(1);
+  // Decisions were removed (2026-10): no card carries a decision tag, switch or row.
+  await expect(pane.locator('[data-question-decision], [data-question-decision-tag], [data-question-decision-toggle], [data-question-decision-row]')).toHaveCount(0);
+  await expect(side(page).getByRole('button', { name: /Decisions/ })).toHaveCount(0);
   await shot('2.1-thread');
-
-  await tags.nth(0).click();
-  await tags.nth(1).click();
-  await expect(tags.nth(0)).toHaveAttribute('aria-pressed', 'false');
-  await expect(tags.nth(1)).toHaveAttribute('aria-pressed', 'true');
-  await expect(pane.getByText('Answering this records a decision')).toHaveCount(1);
-  // Kept on the question record (step 3), so a reload reads it back.
-  await page.reload();
-  const after = page.locator('section.ib-pane').getByRole('button', { name: 'Record as a decision', exact: true });
-  await expect(after.nth(0)).toHaveAttribute('aria-pressed', 'false');
-  await expect(after.nth(1)).toHaveAttribute('aria-pressed', 'true');
-  await shot('3.1-decision-tag-switched');
-  await after.nth(0).click();
-  await after.nth(1).click();
-  await expect(after.nth(0)).toHaveAttribute('aria-pressed', 'true');
-  await expect(after.nth(1)).toHaveAttribute('aria-pressed', 'false');
 });
 
 test('a pick is saved at once and the agent reads it through read_thread', async () => {
@@ -378,7 +376,7 @@ test('a pick is saved at once and the agent reads it through read_thread', async
   const [claude] = world.agents;
   const pane = page.locator('section.ib-pane');
   await pane.getByText('Retry with the same idempotency key', { exact: true }).click();
-  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M, not sent$/)).toBeVisible();
+  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M · in your draft$/)).toBeVisible();
   await expect
     .poll(async () => {
       const thread = await claude!.readThread(world.threads.stopped!);
@@ -388,17 +386,18 @@ test('a pick is saved at once and the agent reads it through read_thread', async
     .toBe('picked:Retry with the same idempotency key');
 
   await pane.getByText('Yes', { exact: true }).click();
-  await expect(pane.getByText(/^Picked .*, not sent$/)).toHaveCount(2);
-  await expect(page.locator('.ib-pfoot .ib-st')).toHaveText('Not sent');
+  await expect(pane.getByText(/^Picked .* · in your draft$/)).toHaveCount(2);
+  // "Draft" replaces "Not sent" (approval "inbox-reply-drafts").
+  await expect(page.locator('.ib-pfoot [data-draft-foot]')).toHaveText('Draft 2 picks');
   await expect(page.locator('.ib-pfoot').getByRole('button', { name: 'Send' })).toBeVisible();
-  await expect(page.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' })).toBeVisible();
-  // Answered, not sent: it waits only for Send.
+  await expect(page.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' })).toBeVisible();
+  // Answered, not sent: it waits only for Send. The row says "Draft · 2 picks".
   const row = page.locator(`.ib-nrow[data-thread-id="${world.threads.stopped}"]`);
   await expect(row).toHaveAttribute('data-section', 'new');
-  await expect(row).toContainText('Answered, not sent');
+  await expect(row.locator('[data-draft-label]')).toHaveText('Draft · 2 picks');
   await shot('3.1-answered-not-sent');
 
-  // "Answered, not sent" is wider than the wide row's 96px count column, and
+  // "Draft · 2 picks" is wider than the wide row's 96px count column, and
   // its text must end before the time's begins: in every project and in one,
   // at full and narrower widths (every project below 900px of list draws the
   // two-line row, which must hold the same). Measured on the text itself (a
@@ -415,7 +414,7 @@ test('a pick is saved at once and the agent reads it through read_thread', async
       const time = rect(el.querySelector('.ib-t')!);
       return { shape: el.className.split(' ')[0], text: el.querySelector('.ib-c')!.textContent, gap: time.left - count.right, sameLine: Math.abs(count.top - time.top) < 4 };
     });
-  for (const [folder, narrowShape] of [[/^Inbox/, 'ib-nrow'], [/^billing-svc/, 'ib-row']] as const) {
+  for (const [folder, narrowShape] of [[/^Inbox/, 'ib-nrow'], [/^billing-svc(?: \d+)?$/, 'ib-row']] as const) {
     await side(page).getByRole('button', { name: folder }).click();
     for (const width of [1440, 1000, 820]) {
       await page.setViewportSize({ width, height: 900 });
@@ -434,7 +433,7 @@ test('a pick is saved at once and the agent reads it through read_thread', async
         }, where)
         .toBe(true);
       const measured = await textGap();
-      expect(measured.text).toBe('Answered, not sent');
+      expect(measured.text).toBe('Draft · 2 picks');
       expect(measured.sameLine).toBe(true);
       expect(measured.gap, `count runs into the time ${where}`).toBeGreaterThanOrEqual(8);
     }
@@ -442,13 +441,13 @@ test('a pick is saved at once and the agent reads it through read_thread', async
   await page.setViewportSize({ width: 1440, height: 900 });
   await side(page).getByRole('button', { name: /^Inbox/ }).click();
   await wide.click();
-  await expect(page.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' })).toBeVisible();
+  await expect(page.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' })).toBeVisible();
 });
 
 test('Send carries the picks and the words, wait_for_reply returns them, and the thread says Delivered', async () => {
   const { page } = world;
   const [claude] = world.agents;
-  await page.locator('.ib-pfoot').getByRole('button', { name: 'Edit the reply' }).click();
+  await page.locator('.ib-pfoot').getByRole('button', { name: 'Edit draft' }).click();
   const box = page.getByRole('textbox', { name: 'Reply to Claude Code' });
   await expect(box).toHaveValue(
     'Which way should the worker go on a Stripe 409: Retry with the same idempotency key. Ship the retry worker behind a flag: Yes.',
@@ -510,17 +509,19 @@ test("a Sent row follows the agent's read in place, without an action: its state
   await page.locator(`[data-thread-id="${world.threads.named}"]`).click();
   const pane = page.locator('section.ib-pane');
   await pane.getByText('Trust the webhook', { exact: true }).click();
-  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M, not sent$/)).toBeVisible();
+  await expect(pane.getByText(/^Picked \d{1,2}:\d{2} [AP]M · in your draft$/)).toBeVisible();
   await page.locator('.ib-pfoot').getByRole('button', { name: 'Send' }).click();
   const row = page.locator(`.ib-lbody [data-thread-id="${world.threads.named}"]`);
   await expect(row).toHaveAttribute('data-section', 'sent');
-  await expect(row).toContainText('Saved for Claude Code');
+  // The delivery glyph (approval "inbox-row-delivery"): saved, an agent reads it later.
+  const tick = row.locator('.ib-tick');
+  await expect(tick).toHaveAttribute('data-tick', 'saved');
   const before = await rowOrder(page);
 
   // The agent reads the reply (as a wake's delivery or wait_for_reply would): the server lists the thread as Quiet.
   await claude2.readThread(world.threads.named!);
   await expect(row).toHaveAttribute('data-section', 'quiet');
-  await expect(row).not.toContainText('Saved for');
+  await expect(tick).toHaveAttribute('data-tick', 'delivered');
   expect(await rowOrder(page)).toEqual(before);
   await page.keyboard.press('Escape');
   await expect(pane).toHaveCount(0);
@@ -606,12 +607,12 @@ test('the Update button follows health ("ready"), and pressing it brings the new
   // The health tick (60 s) stats the file, sees it changed, and asks it.
   const button = page.locator('.ib-upd[data-update-state="ready"]');
   await expect(button).toBeVisible({ timeout: 90_000 });
-  await expect(button.getByRole('button', { name: 'Update to Plannotator 9.9.9' })).toBeVisible();
+  await expect(button.getByRole('button', { name: 'Update to 9.9.9', exact: true })).toBeVisible();
   await shot('1.6-restart-to-update');
 
   // The real binary goes back on disk, then Restart starts it in this one's place.
   renameSync(real, world.binary);
-  await button.getByRole('button', { name: 'Update to Plannotator 9.9.9' }).click();
+  await button.getByRole('button', { name: 'Update to 9.9.9', exact: true }).click();
   await expect.poll(() => registry().serverSession, { timeout: 60_000 }).not.toBe(before.serverSession);
   const after = registry();
   expect(after.pid).not.toBe(before.pid);

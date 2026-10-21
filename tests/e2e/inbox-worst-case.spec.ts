@@ -4,17 +4,16 @@
  * with non-Latin project folders, two folders named "api", a 54-character
  * project name, right-to-left text, long and near-identical file names, a
  * changed file with comments, a message table and a tall screenshot, a
- * thread over four days and one from last year, a 2,000-character decision,
+ * thread over four days and one from last year,
  * 46 projects and 50 live agent sessions. Every screen is loaded at the
  * widths people use (1440, 1280, 1024, an iPad upright, a phone, a phone on
  * its side, and 200% zoom as 720 by 450) and checked for shapes, not pixels:
  *
  * - the page never scrolls sideways;
  * - a primary button is inside the window;
- * - a decision's text column keeps a readable width;
  * - tiles in one grid keep one height, and a changed file keeps its count;
  * - the list's header stays 60 px with a long project name and folder, and
- *   the sidebar's Inbox and Decisions stay 32 px with 46 projects;
+ *   the sidebar's Inbox stays 32 px with 46 projects;
  * - a shortened name has its full text as its hover text;
  * - project names are the folders' own, times say their day and year.
  *
@@ -28,8 +27,9 @@ import { expect, test, type Browser, type BrowserContext, type Page } from '@pla
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
-import { LiveSessions, LONG_DECISION, seedWorstCase, type WorstCaseWorld } from '../../scripts/inbox-worst-case';
+import { LiveSessions, seedWorstCase, type WorstCaseWorld } from '../../scripts/inbox-worst-case';
 import { inboxScratch, rememberInboxOf, removeInboxScratch } from './inbox-scratch';
+import { NO_BROWSER } from '../helpers/no-browser';
 
 const repo = resolve(__dirname, '../..');
 const binary = resolve(process.env.PLANNOTATOR_E2E_BINARY ?? join(repo, '.local/plannotator'));
@@ -71,7 +71,7 @@ test.beforeAll(async () => {
   const root = inboxScratch('plannotator-inbox-worst-case-e2e-');
   const dataDir = join(root, 'data');
   const seed = await seedWorstCase({ dataDir, src: join(root, 'src') });
-  const env = { PATH: process.env.PATH ?? '', HOME: root, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: 'none', PLANNOTATOR_INBOX_CONNECT: '0', PLANNOTATOR_UPDATE_CHECK: '0' };
+  const env = { PATH: process.env.PATH ?? '', HOME: root, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: NO_BROWSER, PLANNOTATOR_INBOX_CONNECT: '0', PLANNOTATOR_UPDATE_CHECK: '0' };
   const started = spawnSync(binary, ['inbox', '--background'], { env, encoding: 'utf8', timeout: 60_000 });
   expect(started.status, started.stderr).toBe(0);
   rememberInboxOf(dataDir);
@@ -140,7 +140,7 @@ async function shot(page: Page, name: string): Promise<void> {
 
 // Every width in light, and the widest and a phone in dark too.
 for (const [w, scheme] of [...WIDTHS.map((w) => [w, 'light'] as const), [WIDTHS[0]!, 'dark'] as const, [WIDTHS[4]!, 'dark'] as const]) {
-  test(`${w.name}${scheme === 'dark' ? ' dark' : ''}: the list, a thread with files, a message table, Decisions and Settings hold their shapes`, async ({ browser }) => {
+  test(`${w.name}${scheme === 'dark' ? ' dark' : ''}: the list, a thread with files, a message table and Settings hold their shapes`, async ({ browser }) => {
     const { context, page } = await open(browser, w, '', scheme);
     try {
       // The list, and the real project names (rows 1 to 5).
@@ -167,16 +167,6 @@ for (const [w, scheme] of [...WIDTHS.map((w) => [w, 'light'] as const), [WIDTHS[
       await expect(img).toHaveCount(1);
       expect((await img.boundingBox())!.height).toBeLessThanOrEqual(481);
       await shot(page, `${w.name}-${scheme}-kitchen`);
-      // Decisions: the text column keeps a readable width (row 62) and a long decision three lines (row 63).
-      await page.goto(`${world.url}/#decisions=${world.ids.billing}`);
-      await page.waitForSelector('[data-decision-id]');
-      await page.waitForTimeout(300);
-      expect(await shapes(page)).toEqual([]);
-      const text = page.locator('[data-decision-id] .ib-st', { hasText: 'Refunds for partial captures' }).first();
-      expect((await text.boundingBox())!.width, 'a decision has room to read').toBeGreaterThan(Math.min(260, w.width - 140));
-      expect(LONG_DECISION.length).toBe(2000);
-      expect((await text.boundingBox())!.height, 'a long decision shows three lines').toBeLessThan(80);
-      await shot(page, `${w.name}-${scheme}-decisions`);
       // Settings: Storage keeps its sizes and Delete in view (rows 64, 65); Archived keeps Unarchive on its row (row 67).
       await page.goto(`${world.url}/#settings/storage`);
       await page.waitForSelector('[data-store-project]');
@@ -216,16 +206,28 @@ test('the names: real folder names, a parent folder for two "api", days and year
     await expect(page.locator(`[data-thread-id="${world.seed.threads.lastYear}"] .ib-t`)).toHaveText(new RegExp(`, ${new Date().getFullYear() - 1}$`));
     // No subject is cut inside a character (row 26).
     for (const subject of await page.locator('.ib-lbody .ib-st').allTextContents()) expect(subject).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
-    // Hovered, what the list cuts with "…" has its full text as its title, and what it does not cut has none (row 23).
-    const titles = await page.evaluate(() =>
-      [...document.querySelectorAll<HTMLElement>('.ib-lbody .ib-st, .ib-lbody .ib-keyt, .ib-lbody .ib-p')].map((el) => {
-        el.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
-        return { cut: el.scrollWidth > el.clientWidth + 1, text: el.textContent, title: el.getAttribute('title') };
-      }),
+    // Hovered, what the list cuts with "…" (the subject, the thread label, the project) shows its full text in
+    // ui's tooltip, only while cut, and nothing in the list carries a native title (row 23; inbox-polish, item 3;
+    // the owner's "an actual component tooltip", 2026-10-17).
+    const items = await page.evaluate(() =>
+      [...document.querySelectorAll<HTMLElement>('.ib-lbody .ib-st, .ib-lbody .ib-keyt, .ib-lbody .ib-p')].map((el) => ({
+        project: el.classList.contains('ib-p'),
+        cut: el.scrollWidth > el.clientWidth + 1,
+        text: el.textContent,
+        title: el.getAttribute('title'),
+      })),
     );
-    expect(titles.filter((t) => t.cut).length, 'the seed cuts something in this list').toBeGreaterThan(0);
-    expect(titles.filter((t) => t.cut && t.title !== t.text)).toEqual([]);
-    expect(titles.filter((t) => !t.cut && t.title !== null)).toEqual([]);
+    expect(items.filter((t) => t.cut).length, 'the seed cuts something in this list').toBeGreaterThan(0);
+    expect(items.filter((t) => t.title !== null)).toEqual([]);
+    for (const project of [false, true]) {
+      const cutIndex = items.findIndex((t) => t.project === project && t.cut);
+      if (project && cutIndex < 0) continue;
+      expect(cutIndex, 'a cut subject or label').toBeGreaterThanOrEqual(0);
+      await page.locator('.ib-lbody :is(.ib-st, .ib-keyt, .ib-p)').nth(cutIndex).hover();
+      // ui's tooltip (portaled into the window's root, out of the row) holds the whole text.
+      await expect(page.locator('[data-pn-tooltip]').getByText(items[cutIndex]!.text!, { exact: true })).toBeVisible();
+      await page.mouse.move(1, 1);
+    }
     // A long project name and its folder stay in the 60 px header (row 25).
     await page.goto(`${world.url}/#project=${world.ids.long}&thread=${world.seed.threads.multiDay}`);
     await page.waitForSelector('section.ib-pane');
@@ -237,7 +239,7 @@ test('the names: real folder names, a parent folder for two "api", days and year
   }
 });
 
-test('things that grow: the reply chooser with 50 sessions, the New message list, a long draft', async ({ browser }) => {
+test('things that grow: the reply chooser with 50 sessions, the compose To picker, a long draft', async ({ browser }) => {
   // The session that asked counts as live for a minute after the Inbox starts.
   await new Promise((r) => setTimeout(r, Math.max(0, world.startedAt + 70_000 - Date.now())));
   for (const [w, thread] of [
@@ -262,16 +264,23 @@ test('things that grow: the reply chooser with 50 sessions, the New message list
       await context.close();
     }
   }
-  // New message with 50 live sessions: the list starts inside the window (row 35).
+  // Compose's To picker over the 50 live sessions (row 35, once New message's list; the in-thread
+  // button is off since approval "inbox-acknowledge"): the list starts inside the window and scrolls.
   const { context, page } = await open(browser, WIDTHS[2]!, `thread=${world.seed.threads.kitchen}`);
   try {
-    await page.waitForSelector('[data-new-message]');
-    await expect(page.locator('[data-new-message]')).not.toHaveClass(/ib-dis/, { timeout: 20_000 });
-    await page.locator('[data-new-message]').click();
-    const picker = page.locator('[data-session-picker]');
+    await page.locator('.ib-side [data-open-compose]').click();
+    const dialog = page.locator('dialog[data-compose]');
+    const to = dialog.locator('.ib-cp-tobtn');
+    await expect(to).not.toHaveAttribute('data-loading', '', { timeout: 20_000 });
+    await to.click();
+    const picker = dialog.locator('[data-compose-picker]');
     await expect(picker).toBeVisible();
-    expect((await picker.boundingBox())!.y).toBeGreaterThanOrEqual(0);
-    await shot(page, 'new-message-1024');
+    await expect.poll(() => dialog.locator('[role="listbox"] [role="option"]').count(), { timeout: 20_000 }).toBeGreaterThanOrEqual(50);
+    const box = (await picker.boundingBox())!;
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height).toBeLessThanOrEqual(WIDTHS[2]!.height);
+    expect(await shapes(page)).toEqual([]);
+    await shot(page, 'compose-to-picker-1024');
   } finally {
     await context.close();
   }
@@ -374,7 +383,8 @@ async function openFile(page: Page, thread: string, name: string): Promise<void>
   await page.waitForTimeout(500);
 }
 
-for (const width of [920, 1024, 1180, 1280]) {
+// 944: the narrowest window with a file beside its thread (a 440 px thread, a 480 px file and the panes' three 8 px gutters).
+for (const width of [944, 1024, 1180, 1280]) {
   test(`${width}: a file beside the thread keeps a readable column; the comments fold into a button below 1280 (rows 45 to 47, 50)`, async ({ browser }) => {
     const { context, page } = await open(browser, { name: String(width), width, height: 800 });
     try {
@@ -431,13 +441,15 @@ for (const width of [920, 1024, 1180, 1280]) {
       expect((await page.locator('section.ib-view [data-download-card] .ib-att-text').boundingBox())!.width).toBeGreaterThan(200);
       await shot(page, `fold-${width}-pdf`);
 
-      // Full screen: the foot wraps rather than cutting "Write the reply" (row 50).
+      // Full screen: the PDF fills the window under its toolbar, which stays whole inside it (row 50); a file
+      // that takes no comments has no count in it.
       await page.locator('section.ib-view').getByRole('button', { name: 'Full screen' }).click();
       await page.waitForTimeout(300);
       expect(await shapes(page)).toEqual([]);
-      const reply = (await page.locator('section.ib-view .ib-vfoot').getByRole('button', { name: 'Write the reply' }).boundingBox())!;
-      const foot = (await page.locator('section.ib-view .ib-vfoot').boundingBox())!;
-      expect(reply.x + reply.width).toBeLessThanOrEqual(foot.x + foot.width + 1);
+      await expect(page.locator('section.ib-view [data-full-view-comments]')).toHaveCount(0);
+      const toolbar = (await page.locator('section.ib-view [data-full-view-bar]').boundingBox())!;
+      expect(toolbar.x).toBeGreaterThanOrEqual(0);
+      expect(toolbar.x + toolbar.width).toBeLessThanOrEqual(width + 1);
       await shot(page, `fold-${width}-full`);
     } finally {
       await context.close();
@@ -526,7 +538,9 @@ test('a phone opens a PDF with no Comments button (row 61)', async ({ browser })
   try {
     await openFile(page, world.seed.threads.kinds, world.seed.kinds.pdf);
     await page.waitForSelector('section.ib-view [data-download-card]');
-    await expect(page.locator('section.ib-view [data-annotations-sheet]')).toHaveCount(0);
+    // A phone's file is full screen: its toolbar has no comment count for a PDF.
+    await expect(page.locator('section.ib-view [data-full-view-bar]')).toBeVisible();
+    await expect(page.locator('section.ib-view [data-full-view-comments]')).toHaveCount(0);
     await shot(page, 'phone-pdf');
   } finally {
     await context.close();

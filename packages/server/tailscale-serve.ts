@@ -37,6 +37,8 @@ import {
   type TailscaleRunner,
 } from "@plannotator/shared/tailscale";
 import { allowServedHostname, resetServedHostnamesForTests } from "./request-host-guard";
+import { handleServerReady, SESSION_READY_LINE_PREFIX } from "./shared-handlers";
+import { writeUrlQr } from "./qr";
 
 const activePorts = new Set<number>();
 let exitCleanupInstalled = false;
@@ -180,6 +182,25 @@ export function enableTailscaleServe(
     process.once("SIGHUP", onSigHup);
   }
   return { url };
+}
+
+/**
+ * Announce a session published over the tailnet, then run the shared ready
+ * handler for its ready file.
+ *
+ * The URL appears exactly once, on the stable ready line agents grep
+ * (`SESSION_READY_LINE_PREFIX`, URL last), followed by the tailnet line and
+ * the QR that encodes it. `handleServerReady` runs with `announce: false` so
+ * it does not print a second ready line, and with `skipBrowserOpen` because
+ * the advertised URL is meant for another device.
+ */
+export async function announceTailscaleSession(url: string, port: number): Promise<void> {
+  process.stderr.write(`\n  ${SESSION_READY_LINE_PREFIX}${url}\n`);
+  process.stderr.write("  Served over your tailnet: open it on your device (the URL above).\n");
+  // The URL makes a device hop; the QR skips the retyping (TTY only).
+  writeUrlQr(url);
+  process.stderr.write("\n");
+  await handleServerReady(url, false, port, { skipBrowserOpen: true, announce: false });
 }
 
 /**

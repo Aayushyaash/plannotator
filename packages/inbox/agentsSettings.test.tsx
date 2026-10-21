@@ -11,7 +11,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { InboxAgentRow, InboxAgentsModel } from '@plannotator/core/inbox-types';
+import { inboxToolCostText, type InboxAgentRow, type InboxAgentsModel } from '@plannotator/core/inbox-types';
 
 const hasDom = typeof document !== 'undefined';
 const { AgentsSettings } = (hasDom ? await import('./components/AgentsSettings') : {}) as typeof import('./components/AgentsSettings');
@@ -115,6 +115,9 @@ test.skipIf(!hasDom)('one group per agent found, with its switches and the state
     { k: 'Note in its instructions', v: '~/.codex/AGENTS.md · marked sectionShow', sw: 'true', sub: null },
   ]);
   expect(rows(group(el, 'pi'))[2]!.sub).toBe("You edited this note, so Plannotator won't update it. Turning it off removes it as you left it.");
+  // Pi and OpenCode send the tool with every request: the measured cost sits under the switch (INBOX_TOOL_COST).
+  expect(rows(group(el, 'pi'))[0]!.sub).toBe(`Adds the tool to every Pi request: ${inboxToolCostText('pi')}.`);
+  expect(rows(group(el, 'opencode'))[0]!.sub).toBe(`Adds the tool to every OpenCode request: ${inboxToolCostText('opencode')}.`);
   const opencode = rows(group(el, 'opencode'))[2]!;
   expect(opencode.sw).toBeNull();
   expect(opencode.sub).toContain('OpenCode 1');
@@ -212,4 +215,26 @@ test.skipIf(!hasDom)('OpenCode with no AGENTS.md says "no file yet", never "woul
   const el = mount(model({ notes_env_off: true }));
   expect(rows(group(el, 'opencode'))[2]!.v).toBe('~/.config/opencode/AGENTS.md · no file yetShow');
   expect([...el.querySelectorAll('[role="note"]')].map((n) => n.textContent).join(' ')).toContain('PLANNOTATOR_INBOX_NOTES=0 is set');
+});
+
+test.skipIf(!hasDom)('Claude Code\'s mod off: "Reaches the Inbox" says why in place of a switch that would do nothing; the reminder needs the tool', () => {
+  const reason = "Plannotator's Claude Code mod is off (PLANNOTATOR_CLAUDE_MOD or claudeCodeMod), so Claude Code has no Inbox tool";
+  const base = model();
+  base.agents[0] = tool('claude-code', 'Claude Code', {
+    reach: { kind: 'tool', on: false, state: 'off', path: null, locked: false, reason },
+    tool: { on: false, locked: false, mod_off: true },
+    reminder: { on: false, locked: false, needs_tool: true },
+  });
+  const el = mount(base);
+  const [reach, reminder] = rows(group(el, 'claude-code'));
+  expect(reach).toEqual({ k: 'Reaches the Inbox', v: 'the plannotator_inbox tool', sw: null, sub: reason });
+  expect(reminder!.v).toBe('Needs the tool');
+  expect((group(el, 'claude-code').querySelectorAll('[role="switch"]')[0] as HTMLButtonElement).disabled).toBe(true);
+});
+
+test.skipIf(!hasDom)('Claude Code connected by hand through MCP: shown, never switched (Plannotator does not own that entry)', () => {
+  const base = model();
+  base.agents[0] = mcp('claude-code', 'Claude Code', '~/.claude.json');
+  const el = mount(base);
+  expect(rows(group(el, 'claude-code'))[0]).toEqual({ k: 'Reaches the Inbox', v: 'plannotator-inbox in ~/.claude.json', sw: null, sub: null });
 });

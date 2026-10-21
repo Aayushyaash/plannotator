@@ -111,6 +111,23 @@ export function heldNotice(
 }
 
 /**
+ * The rows Show brings in (design record "inbox-polish", item 6): each row of
+ * `latest` the list on screen lacks, or that carries agent activity the row on
+ * screen does not show (so it moved or changed). A row that stays as it was,
+ * or that changed only by the person's own hand (already shown in place), is
+ * not one of them.
+ */
+export function showBroughtIn(shown: readonly InboxListSection[], latest: readonly InboxListSection[]): Set<string> {
+  const before = rowsById(shown);
+  const out = new Set<string>();
+  for (const row of rowsById(latest).values()) {
+    const old = before.get(row.thread_id);
+    if (old === undefined || hasNewAgentActivity(old, row)) out.add(row.thread_id);
+  }
+  return out;
+}
+
+/**
  * The held list with each row's own state brought up to date in place. The
  * rows keep their sections and their order, which wait for an action; but a
  * row whose thread changed without new agent activity (the reply was
@@ -200,6 +217,67 @@ export function settleThread(shown: readonly InboxListSection[], latest: readonl
     if (section.id !== next.section) return { ...section, threads };
     const at = threads.findIndex((row) => newestFirst(next, row) < 0);
     threads.splice(at < 0 ? threads.length : at, 0, next);
+    return { ...section, threads };
+  });
+}
+
+/**
+ * The held list with threads the person just started (compose's Send) put in
+ * (the owner, 2026-10-16: "When I create a new thread and hit send, why
+ * doesn't it show up in the Sent list?"). A thread the person started is
+ * their own action, like a pick or a Send in the open thread, which the held
+ * list shows at once; it is not agent activity, so nothing about it waits
+ * behind "N new". Each row `latest` has for `threadIds` and the list on
+ * screen lacks goes into its section at its place there (newest first: the
+ * top of Sent); every other row keeps its section and its order. A thread
+ * already on screen, or not in `latest`, changes nothing.
+ */
+export function addOwnThreads(shown: readonly InboxListSection[], latest: readonly InboxListSection[], threadIds: readonly string[]): InboxListSection[] {
+  const fresh = rowsById(latest);
+  const onScreen = rowsById(shown);
+  const adding = threadIds.map((id) => fresh.get(id)).filter((row): row is InboxListRow => row !== undefined && !onScreen.has(row.thread_id));
+  // The list always carries all six sections (empty ones included), so the row's section is on screen.
+  return shown.map((section) => {
+    const threads = [...section.threads];
+    for (const row of adding) {
+      if (row.section !== section.id) continue;
+      const at = threads.findIndex((other) => newestFirst(row, other) < 0);
+      threads.splice(at < 0 ? threads.length : at, 0, row);
+    }
+    return { ...section, threads };
+  });
+}
+
+/**
+ * Everything `latest` says (Show's adopt), except the thread the person has
+ * open: its row stays in the group it is drawn in and at its place there
+ * (between the same neighbours, never re-sorted by its time), so a refresh
+ * beside an open thread (click Inbox to refresh, the list's title) never
+ * takes the selected row out of view. Its state is the read's, or, when the
+ * read has no row for it (the window reads without archived threads, and the
+ * person archived it while it is open), the row as drawn (shown Archived by
+ * markHeldRowArchived). It takes its own place when the thread closes. A
+ * thread not on screen is the read.
+ */
+export function adoptKeepingOpen(shown: readonly InboxListSection[], latest: readonly InboxListSection[], threadId: string): InboxListSection[] {
+  // The group it is drawn in (a held row's own `section` may already say where it will go).
+  const drawn = shown.find((section) => section.threads.some((row) => row.thread_id === threadId));
+  if (!drawn) return latest.map((section) => ({ ...section }));
+  const at = drawn.threads.findIndex((row) => row.thread_id === threadId);
+  const row = rowsById(latest).get(threadId) ?? drawn.threads[at]!;
+  return latest.map((section) => {
+    const threads = section.threads.filter((other) => other.thread_id !== threadId);
+    if (section.id !== drawn.id) return { ...section, threads };
+    // Before the nearest row that followed it on screen and is still in this group, else after the nearest that preceded it.
+    const here = new Set(threads.map((other) => other.thread_id));
+    const after = drawn.threads.slice(at + 1).find((other) => here.has(other.thread_id));
+    const before = [...drawn.threads.slice(0, at)].reverse().find((other) => here.has(other.thread_id));
+    const index = after
+      ? threads.findIndex((other) => other.thread_id === after.thread_id)
+      : before
+        ? threads.findIndex((other) => other.thread_id === before.thread_id) + 1
+        : 0;
+    threads.splice(index, 0, row);
     return { ...section, threads };
   });
 }

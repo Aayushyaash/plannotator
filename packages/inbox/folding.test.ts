@@ -142,3 +142,12 @@ test("a reply that answered nothing: the store's still-open line and what follow
   // The person's own sentence that merely starts the same way is kept.
   expect(replyWords('No questions answered yet, sorry.')).toBe('No questions answered yet, sorry.');
 });
+
+test('a reply of pasted files alone: the snippet names the files, never the still-open line the agent reads', () => {
+  const line = "No question answered yet; it is still open. Don't re-ask it; the person will answer in the Inbox.";
+  const file = (name: string) => ({ id: `att_${name}`, name }) as NonNullable<InboxMessageWire['attachments']>[number];
+  const reply = msg('m2', PERSON, 5, { body: line, attachments: [file('pasted-image-2026-10-16-0912.png'), file('notes.md')] });
+  expect(foldSnippet(reply)).toEqual({ kind: 'words', text: 'pasted-image-2026-10-16-0912.png, notes.md' });
+  // With words, the words.
+  expect(foldSnippet({ ...reply, body: `See these.\n\n${line}` })).toEqual({ kind: 'words', text: 'See these.' });
+});

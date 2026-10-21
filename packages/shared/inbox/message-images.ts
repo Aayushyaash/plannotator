@@ -2,8 +2,8 @@
  * Plannotator Inbox: images a message shows (#1813).
  *
  * A message body (an agent's, or the person's own) can carry
- * `![alt](shots/after.png)` or `<img src="…">` naming an image in the
- * message's project. The window asks for it through
+ * `![alt](shots/after.png)` or `<img src="…">` naming an image on this
+ * computer. The window asks for it through
  * `GET /api/inbox/messages/<id>/image?path=<the src as written>`
  * (packages/server/inbox-message-images.ts), and this module decides every
  * answer. The rules, in order:
@@ -15,12 +15,16 @@
  *     ico apng, `isReviewImagePath`), before anything is read.
  *  3. A relative path resolves against the folder the agent sent from
  *     (`base_path`, kept on the message when it is a subfolder of the
- *     project), else the project root; an absolute one is taken as it is.
- *     Its realpath must sit inside the project root (a realpath itself), so
- *     `../` and a symlink that leaves the project are refused alike, while
- *     an absolute path spelled through a symlinked prefix (macOS `/tmp`,
- *     really `/private/tmp`) is judged by where it really leads. A path
- *     that is not on disk and lexically leaves the project is refused too.
+ *     project or a linked worktree of its repository), else the project
+ *     root; an absolute one is taken as it is. It may lead anywhere the
+ *     person's user can read, as an attachment may (owner ruling
+ *     2026-10-16: no project boundary), except what attachments and the
+ *     wide asset roots refuse (`403 image_hidden`), judged on the path as
+ *     named AND on its realpath, so a symlink into `~/.ssh` is refused too:
+ *     a dotenv-family name anywhere, and outside the project and the folder
+ *     sent from, any segment starting with `.` (`refusesHiddenHtmlAssetPath`).
+ *     Inside those two folders hidden folders stay allowed, as before
+ *     (screenshots in `.walkthrough/`, a project in `~/.claude/worktrees/`).
  *  4. The realpath is opened once, `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, and
  *     everything after that reads the descriptor: `fstat` must say a regular
  *     file of at most MAX_REVIEW_IMAGE_PREVIEW_BYTES, at most cap + 1 bytes
@@ -32,8 +36,12 @@
  */
 
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, resolve, sep } from "node:path";
+import { open, type FileHandle } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { isDotenvFileName } from "@plannotator/core/annotatable";
 import { MAX_REVIEW_IMAGE_PREVIEW_BYTES, MAX_REVIEW_IMAGE_PREVIEW_PIXELS, isReviewImagePath } from "../diff-paths";
+import { refusesHiddenHtmlAssetPath } from "../html-assets";
 import { isLfsPointer, readImageDimensions, sniffImageContentType } from "../review-image";
 
 /** The longest `path` the route takes. */
@@ -60,17 +68,22 @@ function decodeAttribute(value: string): string {
   });
 }
 
+/** A remote source: `http(s):`, or protocol-relative `//host/x.png` (never a local path). */
+const REMOTE_SRC_RE = /^(https?:|\/\/|\\\\)/i;
+/** A source the server never reads: remote, `data:` or `blob:`. */
+const NOT_LOCAL_SRC_RE = /^(https?:|\/\/|\\\\|data:|blob:)/i;
+
 /**
  * Every image source the body names, as the window sends it: the markdown
  * `![alt](src)` target as written and each `<img src>` value decoded. Remote
- * (`http(s):`), `data:` and `blob:` sources are left out: the window never
- * asks the server for them.
+ * (`http(s):`, protocol-relative `//host/…`), `data:` and `blob:` sources are
+ * left out: the window never asks the server for them.
  */
 export function inboxMessageImageRefs(body: string): Set<string> {
   const refs = new Set<string>();
   const add = (src: string | undefined) => {
     if (!src) return;
-    if (/^(https?:|data:|blob:)/i.test(src)) return;
+    if (NOT_LOCAL_SRC_RE.test(src)) return;
     refs.add(src);
   };
   for (const match of body.matchAll(MARKDOWN_IMAGE_RE)) add(match[1]);
@@ -78,12 +91,154 @@ export function inboxMessageImageRefs(body: string): Set<string> {
   return refs;
 }
 
+/** Fenced code blocks and inline code spans, blanked to spaces (line breaks kept) so the image grammar never matches inside them. */
+function blankCode(body: string): string {
+  const blank = (text: string) => text.replace(/[^\n]/g, " ");
+  const lines = body.split("\n");
+  let fence: string | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const open = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence === null) {
+      if (open) {
+        fence = open[1]!;
+        lines[i] = blank(line);
+      }
+    } else {
+      if (open && open[1]![0] === fence[0] && open[1]!.length >= fence.length && line.trim().replace(/[`~]/g, "") === "") fence = null;
+      lines[i] = blank(line);
+    }
+  }
+  return blankInlineCode(lines.join("\n"));
+}
+
+/**
+ * Inline code spans blanked to spaces (line breaks kept), in one linear pass:
+ * a run of N backticks opens a span that the next run of exactly N closes
+ * (CommonMark); a run with no such closer stays literal. Each run length has
+ * one cursor over the runs of that length, and cursors only move forward, so
+ * a body of many unmatched backticks is still linear.
+ */
+export function blankInlineCode(text: string): string {
+  const runs: { start: number; end: number }[] = [];
+  for (let i = 0; i < text.length; ) {
+    if (text.charCodeAt(i) !== 96) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < text.length && text.charCodeAt(j) === 96) j++;
+    runs.push({ start: i, end: j });
+    i = j;
+  }
+  if (runs.length < 2) return text;
+  const byLength = new Map<number, number[]>();
+  runs.forEach((run, index) => {
+    const n = run.end - run.start;
+    const list = byLength.get(n);
+    if (list) list.push(index);
+    else byLength.set(n, [index]);
+  });
+  const cursor = new Map<number, number>();
+  const spans: { start: number; end: number }[] = [];
+  for (let r = 0; r < runs.length; ) {
+    const run = runs[r]!;
+    const n = run.end - run.start;
+    const list = byLength.get(n)!;
+    let at = cursor.get(n) ?? 0;
+    while (at < list.length && list[at]! <= r) at++;
+    cursor.set(n, at);
+    if (at >= list.length) {
+      r++;
+      continue;
+    }
+    const close = list[at]!;
+    spans.push({ start: run.start, end: runs[close]!.end });
+    r = close + 1;
+  }
+  if (spans.length === 0) return text;
+  let out = "";
+  let last = 0;
+  for (const span of spans) {
+    out += text.slice(last, span.start) + text.slice(span.start, span.end).replace(/[^\n]/g, " ");
+    last = span.end;
+  }
+  return out + text.slice(last);
+}
+
+/**
+ * The images the body shows, each once, in the order the text shows them:
+ * the sources `inboxMessageImageRefs` finds, minus any inside a code block or
+ * an inline code span (drawn as code, never as an image). What the store
+ * captures (inline-images.ts), in the order the window steps through them.
+ */
+export function inboxMessageImageRefsInOrder(body: string): string[] {
+  return imageSourcesInOrder(body).filter((src) => !NOT_LOCAL_SRC_RE.test(src));
+}
+
+/**
+ * The remote images the body shows (`http:`, `https:`, protocol-relative
+ * `//host/…`), each once, in text order, outside code. The window never loads
+ * them (its CSP allows only its own origin, `data:` and `blob:`), so
+ * send_message warns about them.
+ */
+export function inboxMessageRemoteImageRefsInOrder(body: string): string[] {
+  return imageSourcesInOrder(body).filter((src) => REMOTE_SRC_RE.test(src));
+}
+
+/** Every image source the body shows outside code, each once, in text order. */
+function imageSourcesInOrder(body: string): string[] {
+  const text = blankCode(body);
+  const found: { index: number; src: string }[] = [];
+  for (const match of text.matchAll(MARKDOWN_IMAGE_RE)) found.push({ index: match.index ?? 0, src: match[1]! });
+  for (const match of text.matchAll(HTML_IMG_SRC_RE)) found.push({ index: match.index ?? 0, src: decodeAttribute(match[1] ?? match[2] ?? match[3] ?? "") });
+  found.sort((a, b) => a.index - b.index);
+  const out: string[] = [];
+  for (const { src } of found) {
+    if (!src || out.includes(src)) continue;
+    out.push(src);
+  }
+  return out;
+}
+
 export type InboxMessageImageResult =
-  | { ok: true; bytes: Buffer; contentType: string; width?: number; height?: number }
-  | { ok: false; status: number; code: string; error: string };
+  | {
+      ok: true;
+      bytes: Buffer;
+      contentType: string;
+      width?: number;
+      height?: number;
+      /** The realpath read. */
+      real: string;
+      /** The path the src named, resolved to an absolute path before symlinks. */
+      named: string;
+      /** The file's mtime, from the descriptor that was read. */
+      mtime: string;
+    }
+  | {
+      ok: false;
+      status: number;
+      code: string;
+      error: string;
+      /** `image_missing` because nothing is at the path yet (it shows once written), not a folder or FIFO there. */
+      notYet?: true;
+    };
 
 function refuse(status: number, code: string, error: string): InboxMessageImageResult {
   return { ok: false, status, code, error };
+}
+
+/** EACCES / EPERM: the file is there, and Plannotator may not read it (macOS privacy, permissions). */
+function isPermissionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EACCES" || code === "EPERM";
+}
+
+const UNREADABLE = "Plannotator can't read that image (on macOS the terminal or app running it may need to be allowed).";
+/** A read that failed for a reason not foreseen: neither missing nor refused. */
+function readFailed(error: unknown): Refusal {
+  if (isPermissionError(error)) return failRead(403, "image_unreadable", UNREADABLE);
+  return failRead(500, "image_read_failed", `That image could not be read: ${(error as Error | undefined)?.message ?? String(error)}`);
 }
 
 function isInside(path: string, root: string): boolean {
@@ -114,115 +269,302 @@ function hasScheme(src: string): boolean {
   return /^[a-z][a-z0-9+.-]*:/i.test(src) && !/^[a-z]:[\\/]/i.test(src);
 }
 
+export interface InboxMessageImageInput {
+  body: string;
+  /** The project's root: relative paths start here when there is no `base`. */
+  root: string;
+  /** The folder the agent sent from (`base_path`): relative paths start here. */
+  base?: string | null;
+  path: string | null;
+  /**
+   * The message's author is an agent: its images may come from anywhere the
+   * user can read (owner ruling 2026-10-16). A person's own message (which a
+   * paired phone, the relay or an allowed tailnet login can post) keeps the
+   * boundary of before: the project root or the folder sent from, else
+   * `403 outside_project`. Default false.
+   */
+  anywhere?: boolean;
+}
+
+type Refusal = Extract<InboxMessageImageResult, { ok: false }>;
+
 /**
- * Read one image a message shows. `root` is the project's root (a realpath);
- * `base` the folder relative paths start from (the message's `base_path`, or
- * the root). Never throws.
+ * Folders that never exempt hidden segments below them: `/`, the home folder
+ * (`HOME` and `os.homedir()`, each in both spellings) and every folder above
+ * it. A project at `~` must not serve `~/.ssh/key.png` or `~/.cache/…`.
  */
-export function readInboxMessageImage(input: { body: string; root: string; base?: string | null; path: string | null }): InboxMessageImageResult {
+function protectedFolders(): string[] {
+  const homes = new Set<string>();
+  for (const home of [process.env.HOME, homedir()]) if (home && isAbsolute(home)) for (const spelling of spellings(home)) homes.add(spelling);
+  return [...homes];
+}
+
+function exemptsHidden(anchor: string, protectedHomes: readonly string[]): boolean {
+  if (dirname(anchor) === anchor) return false;
+  return !protectedHomes.some((home) => isInside(home, anchor));
+}
+
+/**
+ * The hidden rule for one absolute path. A dotenv-family file name is refused
+ * everywhere. Outside `anchors` (the project root and the folder sent from,
+ * each in both spellings), a segment starting with `.` is refused too
+ * (`refusesHiddenHtmlAssetPath`: `~/.ssh`, `~/.config`). Inside them the
+ * agent's own working tree is trusted as before: screenshots in
+ * `.walkthrough/` or `.playwright-mcp/`, and a project that itself sits in a
+ * hidden folder (`~/.claude/worktrees/…`), still show. An anchor that is `/`,
+ * the home folder or above it exempts nothing (`protectedFolders`).
+ */
+function hiddenPath(path: string, anchors: readonly string[]): boolean {
+  if (isDotenvFileName(basename(path))) return true;
+  return !anchors.some((folder) => isInside(path, folder)) && refusesHiddenHtmlAssetPath(path);
+}
+
+/** A folder and its realpath, when it has one. */
+function spellings(folder: string): string[] {
+  const out = [resolve(folder)];
+  try {
+    const real = realpathSync(folder);
+    if (real !== out[0]) out.push(real);
+  } catch {
+    // Not on disk: the spelling given is all there is.
+  }
+  return out;
+}
+
+/**
+ * Rules 1 to 3: the path the src names, judged before anything is read: a
+ * refusal, or the file to read (its realpath, and the absolute path it was
+ * named by). Never throws.
+ */
+function locateInboxMessageImage(input: InboxMessageImageInput): Refusal | { ok: true; real: string; named: string } {
   const src = input.path;
-  if (typeof src !== "string" || src === "") return refuse(400, "validation_error", "path: required.");
+  if (typeof src !== "string" || src === "") return refuse(400, "validation_error", "path: required.") as Refusal;
   if (src.length > INBOX_MESSAGE_IMAGE_PATH_MAX || /[\u0000-\u001f\u007f]/.test(src)) {
-    return refuse(400, "validation_error", "path: not a usable image path.");
+    return refuse(400, "validation_error", "path: not a usable image path.") as Refusal;
   }
   if (!inboxMessageImageRefs(input.body).has(src)) {
-    return refuse(403, "image_not_referenced", "This message does not show that image.");
+    return refuse(403, "image_not_referenced", "This message does not show that image.") as Refusal;
   }
-  if (hasScheme(src)) return refuse(400, "validation_error", "path: not a file path.");
+  if (hasScheme(src)) return refuse(400, "validation_error", "path: not a file path.") as Refusal;
 
-  let root: string;
-  try {
-    root = realpathSync(input.root);
-  } catch {
-    return refuse(404, "image_missing", "The message's project is no longer on disk.");
-  }
-  let base = root;
-  if (input.base) {
-    try {
-      const real = realpathSync(input.base);
-      if (isInside(real, root)) base = real;
-    } catch {
-      // The folder the agent sent from is gone: paths start at the root.
-    }
-  }
+  const roots = spellings(input.root);
+  const bases = input.base ? spellings(input.base) : [];
+  // Relative paths start at the folder the agent sent from while it is on disk, else at the root.
+  const base = bases.length > 0 && isOnDisk(bases[0]!) ? bases[bases.length - 1]! : roots[roots.length - 1]!;
+  const area = [...roots, ...bases];
+  const protectedHomes = protectedFolders();
+  const anchors = area.filter((folder) => exemptsHidden(folder, protectedHomes));
+  const inArea = (path: string) => input.anywhere === true || area.some((folder) => isInside(path, folder));
 
   const candidates = pathCandidates(src).filter((candidate) => isReviewImagePath(candidate));
-  if (candidates.length === 0) return refuse(415, "not_an_image", "Only png, jpg, gif, webp, svg, avif, bmp and ico images are shown.");
+  if (candidates.length === 0) return refuse(415, "not_an_image", "Only png, jpg, gif, webp, svg, avif, bmp and ico images are shown.") as Refusal;
 
   for (const candidate of candidates) {
     const named = isAbsolute(candidate) ? resolve(candidate) : resolve(base, candidate);
     let real: string;
     try {
       real = realpathSync(named);
-    } catch {
-      // Not on disk under this spelling: one that leaves the project is
+    } catch (error) {
+      if (isPermissionError(error)) return failRead(403, "image_unreadable", UNREADABLE);
+      // Not on disk under this spelling: one a person's message names outside its area is
       // refused as such; otherwise the next spelling is tried.
-      if (!isInside(named, root)) return refuse(403, "outside_project", "That image is outside the message's project.");
+      if (!inArea(named)) return refuse(403, "outside_project", OUTSIDE) as Refusal;
       continue;
     }
-    // Judged by where the path really leads, never by its spelling.
-    if (!isInside(real, root)) return refuse(403, "outside_project", "That image leads outside the message's project.");
-    const read = readImageFile(real);
-    if (!read.ok) return read;
-    const bytes = read.bytes;
-    if (isLfsPointer(bytes)) return refuse(415, "not_an_image", "That image is stored in Git LFS.");
-    const contentType = sniffImageContentType(bytes);
-    if (!contentType) return refuse(415, "not_an_image", "That file is not a recognized image.");
-    const dims = readImageDimensions(bytes, contentType);
-    if (dims && dims.width * dims.height > MAX_REVIEW_IMAGE_PREVIEW_PIXELS) {
-      return refuse(413, "image_too_large", "That image has too many pixels to show.");
+    // A person's message: judged by where the path really leads.
+    if (!inArea(real)) return refuse(403, "outside_project", OUTSIDE) as Refusal;
+    // By where it really leads (a symlink into a hidden folder is refused), and as named: the
+    // name in its folder's real location (a link kept in `~/.config`, whatever spells the folder).
+    if (hiddenPath(real, anchors) || hiddenPath(join(realFolder(dirname(named)), basename(named)), anchors)) {
+      return refuse(403, "image_hidden", HIDDEN) as Refusal;
     }
-    return { ok: true, bytes, contentType, ...(dims ? { width: dims.width, height: dims.height } : {}) };
+    return { ok: true, real, named };
   }
-  return refuse(404, "image_missing", "That image is not on disk.");
+  return { ...(refuse(404, "image_missing", "That image is not on disk.") as Refusal), notYet: true };
+}
+
+const OUTSIDE = "A message you write shows images from its project only.";
+
+const HIDDEN = "That image is in a hidden folder, or is a hidden or .env file.";
+
+function realFolder(folder: string): string {
+  try {
+    return realpathSync(folder);
+  } catch {
+    return folder;
+  }
+}
+
+function isOnDisk(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Rule 4's last part: the bytes read are an image (not an LFS pointer), within the pixel cap. */
+function finishImage(bytes: Buffer, located: { real: string; named: string }, mtime: string): InboxMessageImageResult {
+  if (isLfsPointer(bytes)) return refuse(415, "not_an_image", "That image is stored in Git LFS.");
+  const contentType = sniffImageContentType(bytes);
+  if (!contentType) return refuse(415, "not_an_image", "That file is not a recognized image.");
+  const dims = readImageDimensions(bytes, contentType);
+  if (dims && dims.width * dims.height > MAX_REVIEW_IMAGE_PREVIEW_PIXELS) {
+    return refuse(413, "image_too_large", "That image has too many pixels to show.");
+  }
+  return { ok: true, bytes, contentType, real: located.real, named: located.named, mtime, ...(dims ? { width: dims.width, height: dims.height } : {}) };
+}
+
+/**
+ * Read one image a message shows. `root` is the project's root (a realpath);
+ * `base` the folder relative paths start from (the message's `base_path`, or
+ * the root). Never throws.
+ */
+export function readInboxMessageImage(input: InboxMessageImageInput): InboxMessageImageResult {
+  const located = locateInboxMessageImage(input);
+  if (!located.ok) return located;
+  const read = readImageFile(located.real);
+  if (!read.ok) return read;
+  return finishImage(read.bytes, located, read.mtime);
+}
+
+/**
+ * The same read, asynchronous: the same rules and the same one-descriptor
+ * checks (`O_NOFOLLOW | O_NONBLOCK`, `fstat` a regular file within the cap, at
+ * most cap + 1 bytes, the path still leading to the same dev and ino), with
+ * the bytes read through a file handle, so a capture of many images never
+ * holds the event loop (inline-images.ts). Never throws.
+ */
+export async function readInboxMessageImageAsync(input: InboxMessageImageInput): Promise<InboxMessageImageResult> {
+  const located = locateInboxMessageImage(input);
+  if (!located.ok) return located;
+  const read = await readImageFileAsync(located.real);
+  if (!read.ok) return read;
+  return finishImage(read.bytes, located, read.mtime);
 }
 
 const OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
 const TOO_LARGE = "That image is larger than 10 MB.";
 const CHANGED = "That image changed while it was read.";
 
+const failRead = (status: number, code: string, error: string): Refusal => ({ ok: false as const, status, code, error });
+
+/** How much of a file is read first, to tell its type and size before the rest is read. */
+const HEAD_BYTES = 64 * 1024;
+
+/**
+ * The first bytes decide before the rest is read: not an image (or an LFS
+ * pointer) or over the pixel cap is refused without reading up to 10 MB.
+ */
+function headRefusal(head: Buffer): Refusal | null {
+  if (isLfsPointer(head)) return failRead(415, "not_an_image", "That image is stored in Git LFS.");
+  const type = sniffImageContentType(head);
+  if (!type) return failRead(415, "not_an_image", "That file is not a recognized image.");
+  const dims = readImageDimensions(head, type);
+  if (dims && dims.width * dims.height > MAX_REVIEW_IMAGE_PREVIEW_PIXELS) return failRead(413, "image_too_large", "That image has too many pixels to show.");
+  return null;
+}
+
+/** The path must still lead to the file a descriptor read, so a parent folder swapped for a symlink in between is caught. */
+function stillSameFile(real: string, stat: { dev: number; ino: number }): boolean {
+  try {
+    if (realpathSync(real) !== real) return false;
+    const again = statSync(real);
+    return again.dev === stat.dev && again.ino === stat.ino;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Read a realpath through one descriptor: never follows a final symlink,
  * never blocks on a FIFO, never buffers more than the cap + 1 bytes, and
  * refuses when the path no longer leads to the file that was read.
  */
-function readImageFile(real: string): { ok: true; bytes: Buffer } | Extract<InboxMessageImageResult, { ok: false }> {
-  const fail = (status: number, code: string, error: string) => ({ ok: false as const, status, code, error });
+function readImageFile(real: string): { ok: true; bytes: Buffer; mtime: string } | Refusal {
   let fd: number;
   try {
     fd = openSync(real, OPEN_FLAGS);
   } catch (error) {
     // ELOOP: the last component became a symlink after it was resolved.
-    if ((error as NodeJS.ErrnoException).code === "ELOOP") return fail(409, "image_changed", CHANGED);
-    return fail(404, "image_missing", "That image could not be opened.");
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") return failRead(409, "image_changed", CHANGED);
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return failRead(404, "image_missing", "That image could not be opened.");
+    return readFailed(error);
   }
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile()) return fail(404, "image_missing", "That image is not a file.");
-    if (stat.size > MAX_REVIEW_IMAGE_PREVIEW_BYTES) return fail(413, "image_too_large", TOO_LARGE);
+    if (!stat.isFile()) return failRead(404, "image_missing", "That image is not a file.");
+    if (stat.size > MAX_REVIEW_IMAGE_PREVIEW_BYTES) return failRead(413, "image_too_large", TOO_LARGE);
     // One byte past what fstat said, so a file that grew meanwhile is seen.
     const buffer = Buffer.alloc(Math.min(stat.size, MAX_REVIEW_IMAGE_PREVIEW_BYTES) + 1);
     let total = 0;
+    const head = Math.min(buffer.length, HEAD_BYTES);
+    let checked = false;
     while (total < buffer.length) {
-      const n = readSync(fd, buffer, total, buffer.length - total, null);
+      const n = readSync(fd, buffer, total, (checked ? buffer.length : head) - total, null);
       if (n === 0) break;
       total += n;
+      if (!checked && total >= head) {
+        checked = true;
+        const refused = headRefusal(buffer.subarray(0, total));
+        if (refused) return refused;
+      }
     }
-    if (total > MAX_REVIEW_IMAGE_PREVIEW_BYTES) return fail(413, "image_too_large", TOO_LARGE);
-    if (total === buffer.length) return fail(409, "image_changed", CHANGED);
-    // The path must still lead to the file this descriptor read, so a parent
-    // folder swapped for a symlink in between is caught.
-    let again: ReturnType<typeof statSync> | null = null;
-    try {
-      if (realpathSync(real) === real) again = statSync(real);
-    } catch {
-      again = null;
+    if (!checked) {
+      const refused = headRefusal(buffer.subarray(0, total));
+      if (refused) return refused;
     }
-    if (!again || again.dev !== stat.dev || again.ino !== stat.ino) return fail(409, "image_changed", CHANGED);
-    return { ok: true, bytes: buffer.subarray(0, total) };
-  } catch {
-    return fail(404, "image_missing", "That image could not be read.");
+    if (total > MAX_REVIEW_IMAGE_PREVIEW_BYTES) return failRead(413, "image_too_large", TOO_LARGE);
+    if (total === buffer.length) return failRead(409, "image_changed", CHANGED);
+    if (!stillSameFile(real, stat)) return failRead(409, "image_changed", CHANGED);
+    return { ok: true, bytes: buffer.subarray(0, total), mtime: stat.mtime.toISOString() };
+  } catch (error) {
+    return readFailed(error);
   } finally {
     closeSync(fd);
+  }
+}
+
+/** `readImageFile` through an async file handle, read in 1 MiB slices. */
+async function readImageFileAsync(real: string): Promise<{ ok: true; bytes: Buffer; mtime: string } | Refusal> {
+  let handle: FileHandle;
+  try {
+    handle = await open(real, OPEN_FLAGS);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") return failRead(409, "image_changed", CHANGED);
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return failRead(404, "image_missing", "That image could not be opened.");
+    return readFailed(error);
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) return failRead(404, "image_missing", "That image is not a file.");
+    if (stat.size > MAX_REVIEW_IMAGE_PREVIEW_BYTES) return failRead(413, "image_too_large", TOO_LARGE);
+    const buffer = Buffer.alloc(Math.min(stat.size, MAX_REVIEW_IMAGE_PREVIEW_BYTES) + 1);
+    let total = 0;
+    const head = Math.min(buffer.length, HEAD_BYTES);
+    let checked = false;
+    while (total < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, total, Math.min(1024 * 1024, (checked ? buffer.length : head) - total), total);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      if (!checked && total >= head) {
+        checked = true;
+        const refused = headRefusal(buffer.subarray(0, total));
+        if (refused) return refused;
+      }
+    }
+    if (!checked) {
+      const refused = headRefusal(buffer.subarray(0, total));
+      if (refused) return refused;
+    }
+    if (total > MAX_REVIEW_IMAGE_PREVIEW_BYTES) return failRead(413, "image_too_large", TOO_LARGE);
+    if (total === buffer.length) return failRead(409, "image_changed", CHANGED);
+    if (!stillSameFile(real, stat)) return failRead(409, "image_changed", CHANGED);
+    return { ok: true, bytes: buffer.subarray(0, total), mtime: stat.mtime.toISOString() };
+  } catch (error) {
+    return readFailed(error);
+  } finally {
+    await handle.close().catch(() => {});
   }
 }

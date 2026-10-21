@@ -9,13 +9,15 @@
  *
  * Proves: the bar under the file says "1 of 5 · SCOPE.md" and the header
  * drops the name; `]` and the › button step in thread order across the two
- * messages, keeping full screen and replacing the route; › greys at the end,
- * keeps focus, and says "Last attachment in this thread"; the list opens
+ * messages, keeping the frame (full screen stays full screen, with its
+ * toolbar) and replacing the route; › greys at the end,
+ * keeps focus, and says "Last file in this thread"; the list opens
  * upward, grouped by message, and jumps; inside the HTML page a plain `]`
  * steps while armed (Annotate) and does nothing in Interact or in the page's
  * text field; a typed image comment raises the question row, Keep writing
  * returns to it and "Save it and go on" saves it and steps; one Back returns
- * to the thread.
+ * to the thread; on a phone (always full screen) the toolbar's ⋯ opens every
+ * file of the thread as a sheet.
  *
  * Build the binary first (see inbox.spec.ts), then
  * `bunx playwright test -c tests/e2e/playwright.config.ts inbox-attachment-stepping.spec.ts`.
@@ -106,13 +108,14 @@ async function shot(name: string): Promise<void> {
 }
 
 const pane = () => world.page.locator('[data-attachment-pane]');
-const label = () => world.page.locator('[data-step-label]');
+/** The position: the stepper's label beside the thread, the toolbar's N/M in full screen (both name it the same way). */
+const label = () => world.page.locator('[data-step-label], [data-full-view-position]');
 const nextButton = () => world.page.locator('[data-step-next]');
 const htmlFrame = () => world.page.frameLocator('[data-attachment-pane] iframe').first();
 
 /** "2 of 5, checkout-flow.html": the open file as the stepper names it. */
 async function expectAt(position: number, name: string): Promise<void> {
-  await expect(label()).toHaveAttribute('aria-label', `${position} of 5, ${name}. Show all attachments`);
+  await expect(label()).toHaveAttribute('aria-label', `${position} of 5, ${name}. Show every file in this thread`);
   await expect(pane()).toHaveAttribute('data-attachment-pane', world.ids[name]!);
 }
 
@@ -210,9 +213,9 @@ test('beside the thread: "1 of 5 · SCOPE.md" in the bar, the name gone from the
   await expectAt(1, 'SCOPE.md');
   await expect(page.locator('[data-step-name]')).toHaveText('SCOPE.md');
   await expect(pane().locator('[data-header-name]')).toHaveCount(0);
-  await expect(pane()).toHaveAttribute('aria-label', 'SCOPE.md, attachment 1 of 5');
+  await expect(pane()).toHaveAttribute('aria-label', 'SCOPE.md, file 1 of 5');
   await expect(page.locator('[data-step-prev]')).toHaveAttribute('aria-disabled', 'true');
-  await expect(page.getByRole('navigation', { name: 'Attachments in this thread' })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Files in this thread' })).toBeVisible();
   const tile = page.locator(`.ib-att-t[data-attachment-id="${world.ids['SCOPE.md']}"]`);
   await expect(tile).toHaveAttribute('aria-current', 'true');
   await expect(tile).toContainText('Open beside');
@@ -226,19 +229,23 @@ test('beside the thread: "1 of 5 · SCOPE.md" in the bar, the name gone from the
   await shot('01-side-markdown');
 });
 
-test('] and › step in thread order, keep full screen, and replace the route; inside the HTML page ] steps only while armed', async () => {
+test('] and › step in thread order, keep the frame, and replace the route; inside the HTML page ] steps only while armed', async () => {
   const page = world.page;
+  // Full screen: a step keeps it (and its toolbar), the route is replaced.
   await pane().getByRole('button', { name: 'Full screen' }).click();
   await expect(pane()).toHaveClass(/ib-full/);
-  await pane().focus();
   const historyBefore = await page.evaluate(() => history.length);
   await page.keyboard.press(']');
   await expectAt(2, 'checkout-flow.html');
   await expect(pane()).toHaveClass(/ib-full/);
+  await expect(page.locator('[data-full-view-bar]')).toBeVisible();
   expect(page.url()).toContain(`file=${world.ids['checkout-flow.html']}`);
   expect(await page.evaluate(() => history.length)).toBe(historyBefore);
   await expect(htmlFrame().locator('#pay')).toHaveText('Pay now');
   await shot('02-full-html');
+  // Beside the thread for the rest: a step keeps that frame too.
+  await page.getByRole('button', { name: 'Exit full screen' }).click();
+  await expect(pane()).not.toHaveClass(/ib-full/);
 
   // The page's text field keeps [ and ], armed or not.
   // (A click would pin the field while armed: focus it the way Tab would.)
@@ -279,26 +286,26 @@ test('] and › step in thread order, keep full screen, and replace the route; i
   await expectAt(5, 'refund-policy.pdf');
   await expect(pane().locator('[data-download-card]')).toBeVisible();
   await expect(nextButton()).toHaveAttribute('aria-disabled', 'true');
-  await expect(nextButton()).toHaveAttribute('aria-label', 'Next attachment');
+  await expect(nextButton()).toHaveAttribute('aria-label', 'Next file');
   // aria-disabled, not disabled: it keeps focus, and Enter on it says where you are.
   await nextButton().press('Enter');
-  await expect(page.locator('[data-step-end-note]')).toHaveText('Last attachment in this thread');
+  await expect(page.locator('[data-step-end-note]')).toHaveText('Last file in this thread');
   await expectAt(5, 'refund-policy.pdf');
   await expect(nextButton()).toBeFocused();
   await page.keyboard.press(']');
   await expectAt(5, 'refund-policy.pdf');
-  await expect(page.locator('[data-step-live]')).toContainText('Last attachment in this thread');
+  await expect(page.locator('[data-step-live]')).toContainText('Last file in this thread');
   await shot('03-end');
 });
 
-test('the list opens upward, grouped by message, and jumps; focus returns to the label', async () => {
+test('the peek opens upward, a picture list grouped by message, and jumps; focus returns to the pill', async () => {
   const page = world.page;
   await label().click();
-  const list = page.getByRole('menu', { name: 'Attachments in this thread' });
-  await expect(list).toBeVisible();
-  await expect(list.getByRole('menuitemradio')).toHaveCount(5);
-  await expect(list.locator('.ib-stepgroup')).toHaveCount(2);
-  await expect(list.getByRole('menuitemradio', { checked: true })).toContainText('refund-policy.pdf');
+  const peek = page.getByRole('grid', { name: 'Files in this thread' });
+  await expect(peek).toBeVisible();
+  await expect(peek.getByRole('gridcell')).toHaveCount(5);
+  await expect(peek.getByRole('row')).toHaveCount(2);
+  await expect(peek.locator('[aria-selected="true"]')).toContainText('refund-policy.pdf');
   const placement = await page.evaluate(() => {
     const menu = document.querySelector('[data-step-list]')!.getBoundingClientRect();
     const bar = document.querySelector('[data-view-foot]')!.getBoundingClientRect();
@@ -306,11 +313,11 @@ test('the list opens upward, grouped by message, and jumps; focus returns to the
   });
   expect(placement.menuBottom).toBeLessThanOrEqual(placement.barTop);
   await shot('04-list-open');
-  await list.getByRole('menuitemradio', { name: /SCOPE\.md/ }).click();
+  await peek.getByRole('gridcell', { name: /SCOPE\.md/ }).click();
   await expectAt(1, 'SCOPE.md');
-  await expect(list).toBeHidden();
+  await expect(peek).toBeHidden();
   await expect(label()).toBeFocused();
-  await expect(page.locator('[data-step-live]')).toHaveText(/^1 of 5, SCOPE\.md, Markdown, from Claude's \d{1,2}:\d{2} [AP]M message$/);
+  await expect(page.locator('[data-step-live]')).toHaveText(/^1 of 5, SCOPE\.md, Markdown, attached to Claude's \d{1,2}:\d{2} [AP]M message$/);
 });
 
 test('a file read before opens where it was left: scroll is kept per file until the pane closes', async () => {
@@ -331,7 +338,7 @@ test('a file read before opens where it was left: scroll is kept per file until 
 test('a typed image comment asks before stepping: Keep writing returns to it, Save it and go on saves it and steps', async () => {
   const page = world.page;
   await label().click();
-  await page.getByRole('menuitemradio', { name: /checkout-mobile\.png/ }).click();
+  await page.getByRole('gridcell', { name: /checkout-mobile\.png/ }).click();
   await expectAt(4, 'checkout-mobile.png');
   const box = pane().getByRole('textbox', { name: 'Comment on checkout-mobile.png' });
   await box.fill('The Pay button sits under the fold on an iPhone SE. Move it up?');
@@ -376,63 +383,25 @@ test('one Back returns to the thread, however many files were stepped through', 
   expect(page.url()).toContain(`thread=${world.threadId}`);
 });
 
-test('a phone: Previous / "1 of 5" / Next, the list across the width', async () => {
+test('a phone: the file is full screen under its toolbar; ⋯ opens every file of the thread as a sheet', async () => {
   const page = world.page;
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${world.url}#thread=${world.threadId}`);
   await page.getByRole('button', { name: 'Open checkout-flow.html' }).click();
   await expect(pane()).toHaveClass(/ib-full/);
-  await expect(page.getByRole('button', { name: 'Next attachment: retry-states.mmd' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Previous attachment: SCOPE.md' })).toBeVisible();
-  await shot('06-phone-html');
-  await label().click();
-  await shot('07-phone-list');
-  await page.keyboard.press('Escape');
-  await expect(label()).toBeFocused();
-  await page.setViewportSize({ width: 1440, height: 900 });
-});
-
-test('a phone at an end: the note shows in the bar in place of the count, and nothing of ours covers the HTML page', async () => {
-  const page = world.page;
-  // A second thread whose first file is the page, so the page is on screen at an end.
-  const sent = await world.claude.send({
-    project_path: world.project,
-    thread: 'Phone check',
-    subject: 'The checkout page on a phone',
-    body: 'The page first, then the scope.',
-    attachments: ['proto/checkout-flow.html', 'docs/SCOPE.md'],
-  });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(`${world.url}#thread=${sent.thread_id}`);
-  await page.getByRole('button', { name: 'Open checkout-flow.html' }).click();
-  await expect(pane()).toHaveClass(/ib-full/);
-  await expect(label()).toHaveAttribute('aria-label', '1 of 2, checkout-flow.html. Show all attachments');
+  await expect(page.locator('[data-full-view-bar]')).toBeVisible();
+  await expect(page.locator('[data-attachment-stepper]')).toHaveCount(0);
   await expect(htmlFrame().locator('#pay')).toHaveText('Pay now');
-  // Previous is greyed (aria-disabled) and keeps focus: pressing it says where you are.
-  await page.locator('[data-step-prev]').press('Enter');
-  const note = page.locator('[data-step-end-note]');
-  await expect(note).toHaveText('First attachment in this thread');
-  await expect(label()).not.toContainText('1 of 2');
-  const layout = await page.evaluate(() => {
-    const iframe = document.querySelector('[data-attachment-pane] iframe')!;
-    const frame = iframe.getBoundingClientRect();
-    const bar = document.querySelector('[data-view-foot]')!.getBoundingClientRect();
-    const noteBox = document.querySelector('[data-step-end-note]')!.getBoundingClientRect();
-    // What sits on top at a grid of points over the page: only the frame itself.
-    const covered: string[] = [];
-    for (let x = frame.left + 2; x < frame.right - 1; x += (frame.width - 4) / 6) {
-      for (let y = frame.top + 2; y < frame.bottom - 1; y += (frame.height - 4) / 8) {
-        const top = document.elementFromPoint(x, y);
-        if (top !== iframe) covered.push(`${Math.round(x)},${Math.round(y)} ${top?.tagName}.${top?.className}`);
-      }
-    }
-    return { covered, frameBottom: frame.bottom, barTop: bar.top, noteTop: noteBox.top, noteBottom: noteBox.bottom, barBottom: bar.bottom };
-  });
-  expect(layout.covered).toEqual([]);
-  expect(layout.noteTop).toBeGreaterThanOrEqual(layout.barTop);
-  expect(layout.noteBottom).toBeLessThanOrEqual(layout.barBottom);
-  expect(layout.barTop).toBeGreaterThanOrEqual(layout.frameBottom - 0.5);
-  await shot('08-phone-end-note');
+  await shot('06-phone-html');
+  const more = page.locator('[data-full-view-more]');
+  await more.click();
+  await page.locator('[data-full-view-menu-position]').click();
+  const peek = page.getByRole('grid', { name: 'Files in this thread' });
+  await expect(peek).toBeVisible();
+  await shot('07-phone-list');
+  await peek.getByRole('gridcell', { name: /retry-states\.mmd/ }).click();
+  await expect(pane()).toHaveAttribute('data-attachment-pane', world.ids['retry-states.mmd']!);
+  await expect(pane()).toHaveClass(/ib-full/);
   await page.setViewportSize({ width: 1440, height: 900 });
 });
 
