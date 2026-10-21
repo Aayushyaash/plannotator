@@ -598,13 +598,17 @@ export const inboxApi = {
     input: {
       idempotency_key: string;
       words: string;
-      questions: { key: string; revision: number }[];
+      /** The picks this reply sends; one on another message of the same session names it (`message_id`). */
+      questions: { message_id?: string; key: string; revision: number }[];
       feedback?: string;
       annotation_ids?: string[];
       /** Another live session takes the reply: the session that asked has ended. */
       to?: { host: string; session: string };
-      /** Skip this message's questions the Send leaves unanswered (false: Keep open). */
-      skip_unanswered?: boolean;
+      /**
+       * The open questions the person chose to skip ("Skip them"), on this message or (with
+       * `message_id`) another of the same session. A Send never skips anything else.
+       */
+      skip?: { message_id?: string; key: string }[];
       /** Files pasted into the reply box (upload ids): attachments on this reply. */
       uploads?: string[];
       /** The sessions the person tagged with `@` (approval "inbox-tag-agents"): each one gets this reply too. */

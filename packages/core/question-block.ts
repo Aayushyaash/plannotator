@@ -889,9 +889,9 @@ export interface QuestionAnswer {
   note?: string;
   skipped?: boolean;
   /**
-   * With `skipped`: the Plannotator Inbox skipped it because a Send left it
-   * unanswered, not because the person pressed Skip. Read only with
-   * `skipped: true`.
+   * With `skipped`: the Plannotator Inbox skipped it with a Send, because the
+   * person pressed "Skip them" there (not Skip on the card). Printed as
+   * "Skipped by the person". Read only with `skipped: true`.
    */
   by_reply?: boolean;
   /** Document line of the prompt when answered. */
@@ -1139,7 +1139,7 @@ export const formatQuestionAnswerLines = (
   } else if (picks.length === 1) {
     out += `Answer: ${picks[0]}${rec}\n`;
   } else if (answer.skipped) {
-    out += answer.by_reply ? 'Skipped (not answered in this reply)\n' : 'Skipped\n';
+    out += answer.by_reply ? 'Skipped by the person\n' : 'Skipped\n';
   }
   const note = answer.note?.trim();
   if (note) {
@@ -1229,14 +1229,6 @@ export const formatQuestionAnswersSection = (
   out += `${answered} of ${open.length} question${open.length === 1 ? '' : 's'} answered.`;
   if (settledUntouched > 0) {
     out += ` ${settledUntouched} already settled in the document ${settledUntouched === 1 ? 'was' : 'were'} left as is.`;
-  }
-  // The Inbox's Send skips what it left unanswered: say how the agent should read those skips.
-  const byReply = open.filter((q) => {
-    const a = byKey.get(q.key);
-    return a !== undefined && a.skipped === true && a.by_reply === true && !isQuestionAnswered(a);
-  }).length;
-  if (byReply > 0) {
-    out += ` ${byReply} ${byReply === 1 ? 'was' : 'were'} not answered in this reply; treat ${byReply === 1 ? 'it' : 'them'} as skipped, and ask again if you still need ${byReply === 1 ? 'it' : 'them'}.`;
   }
   out += '\n\n';
 
