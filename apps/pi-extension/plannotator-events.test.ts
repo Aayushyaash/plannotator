@@ -22,6 +22,8 @@ import { join } from "node:path";
 import {
 	PLANNOTATOR_REQUEST_CHANNEL,
 	PLANNOTATOR_REVIEW_RESULT_CHANNEL,
+	PLANNOTATOR_SESSION_CLOSED_CHANNEL,
+	PLANNOTATOR_SESSION_OPENED_CHANNEL,
 	registerPlannotatorEventListeners,
 	writeReviewStatusesAtomically,
 	type PlannotatorReviewStatusResult,
@@ -64,6 +66,7 @@ function createHarness(dir: string) {
 	const sessionHandlers = new Map<string, Handler[]>();
 	const busHandlers = new Map<string, Handler[]>();
 	const results: unknown[] = [];
+	const sessionEvents: Array<{ channel: string; data: any }> = [];
 	let stale = false;
 	const pi = {
 		on: (event: string, handler: Handler) => sessionHandlers.set(event, [...(sessionHandlers.get(event) ?? []), handler]),
@@ -73,6 +76,7 @@ function createHarness(dir: string) {
 			emit: (channel: string, data: unknown) => {
 				if (stale) throw new Error(STALE_MESSAGE);
 				if (channel === PLANNOTATOR_REVIEW_RESULT_CHANNEL) results.push(data);
+				if (channel === PLANNOTATOR_SESSION_OPENED_CHANNEL || channel === PLANNOTATOR_SESSION_CLOSED_CHANNEL) sessionEvents.push({ channel, data });
 				for (const handler of busHandlers.get(channel) ?? []) void handler(data);
 			},
 		},
@@ -105,6 +109,7 @@ function createHarness(dir: string) {
 
 	return {
 		results,
+		sessionEvents,
 		request,
 		async startSession() {
 			for (const handler of sessionHandlers.get("session_start") ?? []) await handler({ reason: "startup" }, { hasUI: true, cwd: dir });
@@ -220,6 +225,47 @@ describe("plannotator:request plan-review across a session replacement", () => {
 		expect(harness.results).toHaveLength(1);
 		expect(await harness.reviewStatus(open.reviewId)).toMatchObject({ status: "completed", approved: true, feedback: "after reload" });
 		expect(await harness.reviewStatus(decided.reviewId)).toMatchObject({ status: "completed", approved: true });
+	});
+});
+
+// #1589: a review a plannotator:request opened is announced like every other.
+describe("plannotator:request plan-review session events", () => {
+	test("opened with the request's ids, closed once with the outcome", async () => {
+		const dir = sandbox();
+		const harness = createHarness(dir);
+		await harness.startSession();
+		const { reviewId, url } = await openPlanReview(harness, "Session events");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(harness.sessionEvents).toEqual([
+			{
+				channel: PLANNOTATOR_SESSION_OPENED_CHANNEL,
+				data: expect.objectContaining({ action: "plan-review", url, reviewId, requestId: expect.stringMatching(/^r-/) }),
+			},
+		]);
+		expect((await postJson(`${url}/api/deny`, { feedback: "rework" })).status).toBe(200);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const [opened, closed] = harness.sessionEvents.map((event) => event.data);
+		expect(harness.sessionEvents.map((event) => event.channel)).toEqual([PLANNOTATOR_SESSION_OPENED_CHANNEL, PLANNOTATOR_SESSION_CLOSED_CHANNEL]);
+		expect(closed).toEqual({ ...opened, outcome: "submitted", closedAt: expect.any(Number) });
+	});
+
+	test("a review that ends after the runtime was replaced emits nothing onto the dead bus", async () => {
+		const dir = sandbox();
+		const harness = createHarness(dir);
+		await harness.startSession();
+		const { url } = await openPlanReview(harness, "Session events after reload");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		await harness.shutdown();
+		const { logged } = await captureErrors(async () => {
+			const fatal = await trapFatal(async () => {
+				expect((await postJson(`${url}/api/approve`, {})).status).toBe(200);
+				// The server stops 1.5 s after a decision; the close follows it.
+				await new Promise((resolve) => setTimeout(resolve, 1700));
+			});
+			expect(fatal).toEqual([]);
+		});
+		expect(logged.filter((line) => line.includes("could not emit"))).toEqual([]);
+		expect(harness.sessionEvents.map((event) => event.channel)).toEqual([PLANNOTATOR_SESSION_OPENED_CHANNEL]);
 	});
 });
 
