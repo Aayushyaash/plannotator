@@ -1,4 +1,4 @@
-import { monoFontStack } from '@plannotator/ui/utils/cssFontFamily';
+import { monoFontStack, normalizeCssFontSize } from '@plannotator/ui/utils/cssFontFamily';
 
 /**
  * Font override CSS for Pierre's shadow DOM.
@@ -6,14 +6,16 @@ import { monoFontStack } from '@plannotator/ui/utils/cssFontFamily';
  * Single home for the font-family/font-size injection block shared by
  * usePierreTheme (live diff theme) and DiffHunkPreview (synchronous tooltip
  * theme). fontFamily is free text since custom fonts (#851); monoFontStack
- * quotes and escapes it so a name can't break out of the CSS string.
+ * quotes and escapes it so a name can't break out of the CSS string, and
+ * fontSize must be a plain CSS length (else the default size applies).
  */
 export function buildPierreFontCSS(fontFamily?: string, fontSize?: string): string {
   const stack = monoFontStack(fontFamily);
-  if (!stack && !fontSize) return '';
+  const size = normalizeCssFontSize(fontSize);
+  if (!stack && !size) return '';
   return `
       pre, code, [data-line-content], [data-column-number] {
         ${stack ? `font-family: ${stack} !important;` : ''}
-        ${fontSize ? `font-size: ${fontSize} !important; line-height: 1.5 !important;` : ''}
+        ${size ? `font-size: ${size} !important; line-height: 1.5 !important;` : ''}
       }`;
 }

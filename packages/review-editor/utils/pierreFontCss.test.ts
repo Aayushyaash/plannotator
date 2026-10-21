@@ -22,4 +22,12 @@ describe('buildPierreFontCSS', () => {
     expect(value).toMatch(/^"[^"\n]*", monospace !important;$/);
     expect(css).toContain('font-size: 14px !important;');
   });
+
+  test('a font size that is not a plain length is dropped, not injected', () => {
+    expect(buildPierreFontCSS(undefined, '13px; } :host { display: none')).toBe('');
+    const css = buildPierreFontCSS('Iosevka', 'expression(alert(1))');
+    expect(css).toContain('font-family');
+    expect(css).not.toContain('font-size');
+    expect(buildPierreFontCSS(undefined, '0.875rem')).toContain('font-size: 0.875rem !important;');
+  });
 });

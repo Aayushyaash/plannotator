@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   MAX_FONT_FAMILY_LENGTH,
   monoFontStack,
+  normalizeCssFontSize,
   normalizeFontFamilyName,
   quoteFontFamily,
 } from './cssFontFamily';
@@ -87,5 +88,36 @@ describe('isFontInstalled', () => {
 
   test('an empty name is never found', () => {
     expect(isFontInstalled('  ', fakeContext([]))).toBe(false);
+  });
+});
+
+describe('normalizeCssFontSize', () => {
+  test('keeps a plain length in range', () => {
+    expect(normalizeCssFontSize('13px')).toBe('13px');
+    expect(normalizeCssFontSize(' 0.875rem ')).toBe('0.875rem');
+    expect(normalizeCssFontSize('11PT')).toBe('11pt');
+    expect(normalizeCssFontSize('1.2em')).toBe('1.2em');
+  });
+
+  test('anything else falls back to the default size', () => {
+    for (const bad of [
+      '',
+      undefined,
+      '13',
+      'px',
+      '13 px',
+      '-13px',
+      '13vh',
+      'calc(13px)',
+      'var(--x)',
+      '13px; } :host { display: none',
+      '13px !important',
+      '2px',
+      '500px',
+      '10rem',
+      '1e2px',
+    ]) {
+      expect(normalizeCssFontSize(bad)).toBe('');
+    }
   });
 });

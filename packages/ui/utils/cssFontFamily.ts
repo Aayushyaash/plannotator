@@ -39,3 +39,27 @@ export function monoFontStack(name: string | undefined): string {
   const quoted = name ? quoteFontFamily(name) : '';
   return quoted ? `${quoted}, monospace` : '';
 }
+
+/** Accepted range per unit for the code font size (roughly 6px to 72px). */
+const FONT_SIZE_RANGE: Record<'px' | 'pt' | 'rem' | 'em', readonly [number, number]> = {
+  px: [6, 72],
+  pt: [5, 54],
+  rem: [0.375, 4.5],
+  em: [0.375, 4.5],
+};
+
+/**
+ * The code font size as CSS, or '' (the default size) when it is not a plain
+ * number with a px, pt, rem or em unit inside a sane range. The value comes
+ * from a cookie and config.json, which other localhost pages can write, so it
+ * is never put into CSS unchecked.
+ */
+export function normalizeCssFontSize(size: string | undefined): string {
+  if (!size) return '';
+  const match = /^(\d{1,3}(?:\.\d{1,3})?)(px|pt|rem|em)$/i.exec(size.trim());
+  if (!match) return '';
+  const value = Number(match[1]);
+  const unit = match[2].toLowerCase() as keyof typeof FONT_SIZE_RANGE;
+  const [min, max] = FONT_SIZE_RANGE[unit];
+  return value >= min && value <= max ? `${value}${unit}` : '';
+}

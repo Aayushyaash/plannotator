@@ -16,7 +16,7 @@ import {
 } from '../utils/agentToolSetting';
 import { loadDiffFont } from '../utils/diffFonts';
 import { isFontInstalled } from '../utils/fontDetect';
-import { MAX_FONT_FAMILY_LENGTH, monoFontStack, normalizeFontFamilyName } from '../utils/cssFontFamily';
+import { MAX_FONT_FAMILY_LENGTH, monoFontStack, normalizeCssFontSize, normalizeFontFamilyName } from '../utils/cssFontFamily';
 import { TaterSpritePullup } from './TaterSpritePullup';
 import { getIdentity, regenerateIdentity, setCustomIdentity, isIdentityEditable } from '../utils/identity';
 import { GitUser } from '../icons/GitUser';
@@ -778,7 +778,7 @@ const ReviewDisplayTab: React.FC<{ isCompactTouchLayout?: boolean }> = ({ isComp
             <div className="text-xs text-muted-foreground">Font size for diff code lines</div>
           </div>
           <div className="text-xs tabular-nums text-muted-foreground min-w-[4ch] text-right">
-            {diffFontSize || 'Auto'}
+            {normalizeCssFontSize(diffFontSize) || 'Auto'}
           </div>
         </div>
         <div className="flex items-center gap-2">
