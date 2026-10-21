@@ -446,6 +446,50 @@ shell `plannotator` command: its `tool_call` event can only block a call, which
 the model reads as an error, so the skill's "use the tool" line is what steers
 it.
 
+### Pi: session events and the checklist window
+
+**`plannotator:session-opened` / `plannotator:session-closed` (#1589).** One
+pair per Pi review, whatever opened it (`apps/pi-extension/session-events.ts`):
+the `/plannotator-*` commands and the `plannotator` tool (`trackReview` in
+`index.ts`, at the registry's add and its decision or failure), plan review
+(the submit tool, closed by its decision, by `stopPendingPlanReview` or by its
+server stopping), and `plannotator:request` code-review / annotate /
+annotate-last / plan-review (`plannotator-events.ts`, which now starts the
+session and waits on it itself so the URL is known before the decision).
+Opened: `{ id, action, url, openedAt, piSessionId?, reviewId?, requestId? }`,
+`id` the registry's `pn-` id (a fresh `pn-` id for `plannotator:request`
+reviews, which are not in the registry), `action` one of `plan-review`,
+`code-review`, `annotate`, `annotate-last`. Closed: the same plus `outcome`
+(`approved`, `submitted`, or `closed` with `closedBy` `reviewer` | `agent` |
+`stopped` | `error`) and `closedAt` (`sessionEndOf` / `sessionEndOfError`).
+The handle emits closed once. Archive emits neither. **Cache safety:** they go
+on `pi.events` only, never a message, entry, system prompt or tool list.
+**Stale runtimes (#1864):** every emit runs on a microtask inside try/catch;
+it goes through the opener's `pi` when the opener's session was live at the
+moment of the open or close, else (or when that throws) through the instance
+that last claimed a process-wide slot (`claimSessionEventBus` at
+`session_start`, released at `session_shutdown`, on `globalThis` under a
+versioned key), else nowhere, silently. So a review that ends after `/reload`
+reaches the replacement's bus and never throws out of a handler.
+`session_shutdown` now calls `stopPendingPlanReview()` first, so a plan review
+the session ends closes on its own bus. `plannotator:request` reviews use the
+listener's own `sessionLive`, so after a replacement their close goes to the
+live instance's bus or nowhere (never the dead one; `plannotator-events.test.ts`
+pins that nothing is logged). Proofs: `apps/pi-extension/session-events.test.ts`
+(over a fake Pi whose instances share one bus and whose replaced instance
+throws Pi's stale-ctx error: every model request, the active tools with their
+definitions, `before_agent_start`'s results and every message, is
+byte-identical while reviews open, close and outlive `/reload`, and identical
+again with a bus that throws; the pair per entry point and outcome) and the
+session-event cases in `plannotator-events.test.ts`.
+
+**The checklist widget scrolls (#1412).** Pi draws at most 10 lines of a
+widget (`InteractiveMode.MAX_WIDGET_LINES`), so `updateWidget` sends
+`checklistWindow(checklistItems)` (`apps/pi-extension/checklist-window.ts`):
+all items when there are 10 or fewer, else 10 items ending on the first open
+one (the first 10 until it is past them), and the last 10 once everything is
+done. `setWidget` only; the status line keeps the full count.
+
 ### Claude Code mod: non-blocking plan review, annotate, review and last
 
 Where Claude Code runs hooks modules ("Claude Mods": function hooks, CLI only,
