@@ -5377,6 +5377,7 @@ const App: React.FC = () => {
     abort: abortAI,
     resetSession: resetAISession,
     resetThread: resetAIThread,
+    newChat: startNewAIChat,
     sessionId: aiSessionId,
   } = aiChat;
   const canUseAI = aiAvailable && aiContext !== null;
@@ -6876,6 +6877,7 @@ const App: React.FC = () => {
         onSessionAskAction: handleSessionAskAction,
       })}
       askSessionSetupHint={isAgentTerminalReady ? null : askSessionSetupHint(origin, aiProviders)}
+      onNewChat={isAgentTerminalReady ? undefined : startNewAIChat}
     />
   );
 

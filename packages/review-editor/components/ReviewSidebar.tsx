@@ -79,6 +79,8 @@ interface ReviewSidebarProps {
   onAIConfigChange?: (config: { providerId?: string | null; model?: string | null; reasoningEffort?: string | null }) => void;
   hasAISession?: boolean;
   /** "Ask this session": the reviewer's choice on a busy answer. */
+  /** Ask AI "New chat" (#1981); absent: no button. */
+  onAINewChat?: () => void;
   onSessionAskAction?: (questionId: string, action: SessionAskAction) => void;
   /** Optional note on how to get "Ask this session" (askSessionSetupHint). */
   askSessionSetupHint?: string | null;
@@ -282,6 +284,7 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
   onAIConfigChange,
   hasAISession,
   onSessionAskAction,
+  onAINewChat,
   askSessionSetupHint,
   agentJobs,
   agentCapabilities,
@@ -809,7 +812,7 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
               hasAISession={hasAISession}
               onSessionAskAction={onSessionAskAction}
               askSessionSetupHint={askSessionSetupHint}
-             
+              onNewChat={onAINewChat}
             />
           )}
 

@@ -649,6 +649,21 @@ export function useAIChat({
     setError(null);
   }, [postServerAbort, threadTitle]);
 
+  // The panel's "New chat": clears the thread and forgets the Plannotator AI
+  // session, so the next question starts a fresh one (a separate AI then gets
+  // the full context again). Unlike `resetThread` (a document switch), it never
+  // stops anything: while a question is in flight (streaming, creating its
+  // session, or waiting on a busy "Ask this session") it does nothing and
+  // answers false, so a running turn is not aborted and a pending ask is not
+  // dropped. What the agent session already received (`deliveredDraftsRef`) is
+  // kept: with "Ask this session" a new chat reaches the SAME host session,
+  // which still remembers it.
+  const newChat = useCallback((): boolean => {
+    if (abortRef.current) return false;
+    resetThread();
+    return true;
+  }, [resetThread]);
+
   useEffect(() => {
     return () => {
       sessionEpochRef.current += 1;
@@ -672,6 +687,7 @@ export function useAIChat({
     abort,
     resetSession,
     resetThread,
+    newChat,
     sessionId: thread.sessionId,
   };
 }
