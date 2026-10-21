@@ -12,7 +12,7 @@ import { inboxAgentName, inboxAskingMessage, inboxDefaultSkip, type InboxMessage
 import type { QuestionAnswer } from '@plannotator/core/question-block';
 import { InboxStore } from '../shared/inbox/store';
 import { inboxDeliveryState, type InboxListRow, type InboxListSection, type InboxRowDelivery } from '@plannotator/core/inbox-types';
-import { deliveryLine, type DeliveryLineInput, type RecipientConnection } from './deliveryLine';
+import { deliveryLine, waitInputs, type DeliveryLineInput, type RecipientConnection } from './deliveryLine';
 import { hasMovingDelivery, rowDeliveryLine, rowDeliveryName, rowDeliverySpoken, rowTimeIso } from './rowDelivery';
 
 const time = (iso: string) => `at ${iso.slice(11, 16)}`;
@@ -154,9 +154,7 @@ describe('a thread with two sessions: the row and the thread line agree on who a
       sendingNow: !!last.deliver_now_at,
       connection,
       askerEnded: askerEnded ? { name: inboxAgentName(asking!.author) } : null,
-      waitingSince: last.created_at,
-      nowBy: last.deliver_now_by ?? null,
-      nowAt: last.deliver_now_at ?? null,
+      ...waitInputs(connection, last.id, { ...last, into_turn: last.delivery?.into_turn ?? null }),
     });
   }
 
@@ -166,8 +164,14 @@ describe('a thread with two sessions: the row and the thread line agree on who a
       roots.push(dir);
       const store = InboxStore.open(dir);
       const project = store.ensureProject({ name: 'ledger', root: '/work/ledger' });
-      const connections = new Map<string, RecipientConnection | null>([['ses_b', { busy: true, idle_since: null, send_now: true }]]);
-      const live = { connection: (s: string) => connections.get(s) ?? null, askerLive: (s: string) => s !== 'ses_a' };
+      // The server's clocks for the items waiting on ses_b, as the sessions route and the rows read them.
+      const waits: Record<string, { since: string; auto_since: string | null }> = {};
+      const connections = new Map<string, RecipientConnection | null>([['ses_b', { busy: true, idle_since: null, send_now: true, waits }]]);
+      const live = {
+        connection: (s: string) => connections.get(s) ?? null,
+        askerLive: (s: string) => s !== 'ses_a',
+        waitOf: (s: string, id: string) => (s === 'ses_b' && waits[id] ? { since: waits[id]!.since, autoSince: waits[id]!.auto_since } : null),
+      };
       store.setDeliveryPresence(live);
       const body = [':::question', 'Which region?', '', '- [ ] us-east', '- [ ] eu-west', ':::'].join('\n');
       const m1 = store.sendMessage({ project_id: project.id, author: { kind: 'agent', host: 'pi', session: 'ses_a', name: null }, body, wakes: true }).message;
@@ -177,7 +181,8 @@ describe('a thread with two sessions: the row and the thread line agree on who a
         const answer: QuestionAnswer = { v: 1, key: q.key, kind: q.kind, prompt: q.prompt, selected: ['eu-west'] };
         store.savePicks(m1.id, [{ key: q.key, revision: q.revision, answer }]);
       }
-      store.sendReply(m2.id, { words: 'Clean them up.', idempotency_key: 'k1' });
+      const sent = store.sendReply(m2.id, { words: 'Clean them up.', idempotency_key: 'k1' }).reply!;
+      waits[sent.id] = { since: sent.created_at, auto_since: sent.created_at };
       const row = store.listRow(m1.id)!;
       const line = threadLine(store.windowThread(m1.id)! as never, row.sent?.checked_at ?? null, live);
       expect(row.delivery!.state).toBe(line.state);

@@ -7,7 +7,7 @@ import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
 import { parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 import type { InboxListRow, InboxMessageWire, InboxProjectRepo, InboxQuestion, InboxSentRecipient, InboxThread, InboxUpload } from '@plannotator/core/inbox-types';
 import type { IndexedQuestion, QuestionAnswer, QuestionStatus } from '@plannotator/core/question-block';
-import { inboxAskingMessage, inboxDefaultSkip, wholeMinutes, isInboxNote, isInboxTextKind, readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachment, type InboxAttachmentState, type InboxInlineImage, type InboxQuestionState } from '@plannotator/core/inbox-types';
+import { INBOX_AUTO_SEND_ACK_NOTES, inboxAskingMessage, inboxDefaultSkip, wholeMinutes, isInboxNote, isInboxTextKind, readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachment, type InboxAttachmentState, type InboxInlineImage, type InboxQuestionState } from '@plannotator/core/inbox-types';
 import type { LocalLinkResolver } from '@plannotator/ui/components/LocalLinkContext';
 import { NOT_ATTACHED_TITLE, attachmentDeepLink, attachmentDisplayPath, attachmentForLink, openAttachmentTitle, useRefRepo } from '../links';
 import { InboxApiError, inboxApi, type AttachmentsModel } from '../api';
@@ -29,7 +29,7 @@ import { useReplyDraft } from '../replyDraft';
 import { conflictText, DraftHead, DraftFootNote } from './DraftLabel';
 import { canToggleRead } from '../markRead';
 import { NewMessageButton, NewMessageComposer, NewMessagePopover, hostName, useLiveSessions, type NewMessageMode } from './NewMessage';
-import { autoAfterText, deliveryLine, restartNote, type DeliveryLine, type RecipientConnection } from '../deliveryLine';
+import { autoAfterText, deliveryLine, restartNote, TURN_ENDED_TEXT, waitInputs, type DeliveryLine, type RecipientConnection } from '../deliveryLine';
 import { RestartLine } from './RestartNote';
 import { UndeliveredBand, UndeliveredText, useMinuteClock } from './Undelivered';
 import { SendToAnotherSession } from '../compose/SendToAnotherSession';
@@ -725,7 +725,13 @@ export function ackPillLine(
   now: number = Date.now(),
 ): { state: AckPillState; text: string } {
   if (ack.delivered_at) {
-    const auto = ack.deliver_now_by === 'auto' && ack.deliver_now_at && ack.note_at ? ` · ${autoAfterText(wholeMinutes(ack.note_at, ack.deliver_now_at))}` : '';
+    // Marked by the Inbox to go in by itself: say how it went in (into the running turn, or when it ended).
+    const marked = ack.deliver_now_by === 'auto' && ack.deliver_now_at && ack.wait_started_at;
+    const auto = !marked
+      ? ''
+      : ack.delivered_into_turn === false
+        ? ` · ${TURN_ENDED_TEXT}`
+        : ` · ${autoAfterText(wholeMinutes(ack.wait_started_at!, ack.deliver_now_at!))}`;
     return { state: 'delivered', text: `Delivered to ${agent}, ${time(ack.delivered_at)}${auto}` };
   }
   // The window ended after the person replied, or the agent wrote again: it was not sent.
@@ -742,10 +748,9 @@ export function ackPillLine(
       wakes: true,
       sendingNow: !!ack.deliver_now_at,
       connection,
-      // It waits on a busy session: "Undelivered N min", and it goes in by itself after the wait.
-      waitingSince: ack.note_at ?? null,
-      nowBy: ack.deliver_now_by ?? null,
-      nowAt: ack.deliver_now_at ?? null,
+      // It waits on a busy session: "Undelivered N min", and (while a 👍 does) it goes in by itself after the wait.
+      ...waitInputs(connection, ack.note_id, { wait_started_at: ack.wait_started_at, deliver_now_by: ack.deliver_now_by, deliver_now_at: ack.deliver_now_at }),
+      ...(INBOX_AUTO_SEND_ACK_NOTES ? {} : { autoSendAfterMs: null }),
       now,
     });
     return { state: line.state === 'sending' ? 'sending' : 'queued', text: `${you}${line.text}` };
@@ -2276,7 +2281,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   const { connections: tagConnections, load: loadTagConnections } = useTagConnections(thread.thread_id, waitingTags, waitingTags.length > 0);
   const tagLines = lastTags.map((tag) => {
     const name = tagName(tag, ownerHost, replySession);
-    return { tag, name, line: tagDeliveryLine(tag, name, tagConnections[tag.session], whenTime, last.created_at) };
+    return { tag, name, line: tagDeliveryLine(tag, name, tagConnections[tag.session], whenTime, last.id) };
   });
   const delivered: DeliveryLine | null =
     last.author.kind !== 'person'
@@ -2290,9 +2295,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             sendingNow: !!last.deliver_now_at,
             connection: recipientConnection,
             undelivered: undelivered ? { host: hostName(lastTo.host) } : null,
-            waitingSince: last.created_at,
-            nowBy: last.deliver_now_by ?? null,
-            nowAt: last.deliver_now_at ?? null,
+            ...waitInputs(recipientConnection, last.id, { ...last, into_turn: last.delivery?.into_turn ?? null }),
           })
         : deliveryLine({
             name: asker,
@@ -2303,9 +2306,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             sendingNow: !!last.deliver_now_at,
             connection: recipientConnection,
             askerEnded: askerEnded && asking ? { name: asking.name } : null,
-            waitingSince: last.created_at,
-            nowBy: last.deliver_now_by ?? null,
-            nowAt: last.deliver_now_at ?? null,
+            ...waitInputs(recipientConnection, last.id, { ...last, into_turn: last.delivery?.into_turn ?? null }),
           });
   // No Send now because that session runs an older plugin than a restart loads (the "Steps" line,
   // owner approval "restart-warning"): only while the reply waits for a working session.

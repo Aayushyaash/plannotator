@@ -17,6 +17,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { InboxListRow, InboxListSection, InboxMessageWire, InboxProject, InboxRowDelivery, InboxThread } from '@plannotator/core/inbox-types';
+import { INBOX_AUTO_SEND_ACK_NOTES } from '@plannotator/core/inbox-types';
 import type { RecipientConnection } from './deliveryLine';
 
 const hasDom = typeof document !== 'undefined';
@@ -226,11 +227,15 @@ async function renderThread(value: InboxThread, sent: { at: string; checked_at: 
   return host;
 }
 
+/** The server's clock for the reply on that session (the sessions route's `connection.waits`). */
+const waitsFor = (id: string, since: string, autoSince: string | null = since) => ({ [id]: { since, auto_since: autoSince } });
+
 const band = (el: HTMLElement) => el.querySelector<HTMLElement>('[data-undelivered].ib-delivered');
 
 test.skipIf(!hasDom)('it can go in now: "Undelivered 3 min · Claude Code is working · goes in by itself in 2 min" and a filled Send now', async () => {
-  connection = { busy: true, idle_since: null, send_now: true, auto_send_after_ms: 5 * MIN };
-  const el = await renderThread(thread());
+  connection = { busy: true, idle_since: null, send_now: true, auto_send_after_ms: 5 * MIN, waits: waitsFor(REPLY, ago(3.5 * MIN)) };
+  // Sent long ago (for a session that was gone): the minutes are the server's clock, not created_at.
+  const el = await renderThread(thread({ created_at: ago(90 * MIN) }));
   const b = band(el)!;
   expect(b.getAttribute('data-delivery')).toBe('queued');
   expect(b.hasAttribute('data-stuck')).toBe(false);
@@ -245,21 +250,34 @@ test.skipIf(!hasDom)('it can go in now: "Undelivered 3 min · Claude Code is wor
   expect(b.querySelector('[data-stuck-why]')).toBeNull();
 });
 
-test.skipIf(!hasDom)('under a minute left: "goes in by itself in under a minute"; an older Inbox (no wait sent): no countdown, only the wait', async () => {
-  connection = { busy: true, idle_since: null, send_now: true, auto_send_after_ms: 5 * MIN };
-  let el = await renderThread(thread({ created_at: ago(4.5 * MIN) }));
+test.skipIf(!hasDom)('under a minute left: "goes in by itself in under a minute"; no countdown before the auto clock, nor from an older Inbox; no clock yet: no minutes', async () => {
+  connection = { busy: true, idle_since: null, send_now: true, auto_send_after_ms: 5 * MIN, waits: waitsFor(REPLY, ago(4.5 * MIN)) };
+  let el = await renderThread(thread());
   expect(band(el)!.textContent).toContain('Undelivered 4 min · Claude Code is working · goes in by itself in under a minute');
   act(() => root?.unmount());
   host?.remove();
-  connection = { busy: true, idle_since: null, send_now: true };
+  // Waited 12 minutes, able to take it for 1: the countdown runs from the 1, the label from the 12.
+  connection = { busy: true, idle_since: null, send_now: true, auto_send_after_ms: 5 * MIN, waits: waitsFor(REPLY, ago(12.2 * MIN), ago(1.2 * MIN)) };
+  el = await renderThread(thread());
+  expect(band(el)!.textContent).toContain('Undelivered 12 min · Claude Code is working · goes in by itself in 4 min');
+  act(() => root?.unmount());
+  host?.remove();
+  connection = { busy: true, idle_since: null, send_now: true, waits: waitsFor(REPLY, ago(3.5 * MIN)) };
   el = await renderThread(thread());
   expect(band(el)!.textContent).toContain('Undelivered 3 min · Claude Code is working · it gets this when its turn ends');
   expect(band(el)!.querySelector('[data-send-now]')).not.toBeNull();
+  act(() => root?.unmount());
+  host?.remove();
+  // The server has not started a clock (it just saw the session busy): the plain queued line, however old the reply.
+  connection = { busy: true, idle_since: null, send_now: true, auto_send_after_ms: 5 * MIN, waits: {} };
+  el = await renderThread(thread({ created_at: ago(90 * MIN) }));
+  expect(band(el)).toBeNull();
+  expect(el.querySelector<HTMLElement>('[data-delivery]')!.textContent).toContain('Queued · Claude Code is working; it gets this when its turn ends.');
 });
 
 test.skipIf(!hasDom)("it can't go in sooner: grey, no button, no countdown; why, and the fix with Copy when it is an older plugin", async () => {
-  connection = { busy: true, idle_since: null, send_now: false, auto_send_after_ms: 5 * MIN };
-  let el = await renderThread(thread({ created_at: ago(12.3 * MIN) }));
+  connection = { busy: true, idle_since: null, send_now: false, auto_send_after_ms: 5 * MIN, waits: waitsFor(REPLY, ago(12.3 * MIN), null) };
+  let el = await renderThread(thread());
   let b = band(el)!;
   expect(b.hasAttribute('data-stuck')).toBe(true);
   expect(b.querySelector('[data-send-now]')).toBeNull();
@@ -277,8 +295,9 @@ test.skipIf(!hasDom)("it can't go in sooner: grey, no button, no countdown; why,
     engine: '2.1.305',
     outdated: { loaded: '0.28.21', installed: '0.28.25', fix: 'restart' },
     restart_command: 'cd ~/code/billing && claude --resume ses_a',
+    waits: waitsFor(REPLY, ago(12.3 * MIN), null),
   };
-  el = await renderThread(thread({ created_at: ago(12.3 * MIN) }));
+  el = await renderThread(thread());
   b = band(el)!;
   const why = b.querySelector<HTMLElement>('[data-stuck-why]')!;
   expect(why.textContent).toContain("It can't go in sooner: this session runs an older Plannotator plugin. Type /reload-plugins in that Claude Code to fix it.");
@@ -288,24 +307,44 @@ test.skipIf(!hasDom)("it can't go in sooner: grey, no button, no countdown; why,
   expect(b.querySelector('[data-restart-toggle]')!.getAttribute('aria-expanded')).toBe('false');
 });
 
-test.skipIf(!hasDom)('after it went in by itself: "Delivered to Claude Code, <time> · went into its turn by itself after 5 min"; a person\'s Send now says nothing of it', async () => {
-  const sentAt = ago(9 * MIN);
-  const nowAt = new Date(Date.parse(sentAt) + 5 * MIN).toISOString();
+test.skipIf(!hasDom)('after it went in by itself: "Delivered to Claude Code, <time> · went into its turn by itself after 5 min"; when the turn ended first it says so; a person\'s Send now says nothing of it', async () => {
+  const sentAt = ago(30 * MIN);
+  const waitedFrom = ago(9 * MIN);
+  const nowAt = new Date(Date.parse(waitedFrom) + 5 * MIN).toISOString();
   const deliveredAt = new Date(Date.parse(nowAt) + 20_000).toISOString();
-  const delivered = { delivery: { state: 'delivered' as const, host: 'claude-code', session: 'ses_a', at: deliveredAt } };
-  let el = await renderThread(thread({ created_at: sentAt, deliver_now_at: nowAt, deliver_now_by: 'auto', ...delivered }), { at: sentAt, checked_at: deliveredAt });
+  const delivered = (intoTurn?: boolean) => ({
+    delivery: { state: 'delivered' as const, host: 'claude-code', session: 'ses_a', at: deliveredAt, ...(intoTurn === undefined ? {} : { into_turn: intoTurn }) },
+  });
+  const auto = { created_at: sentAt, deliver_now_at: nowAt, deliver_now_by: 'auto' as const, wait_started_at: waitedFrom };
+  let el = await renderThread(thread({ ...auto, ...delivered(true) }), { at: sentAt, checked_at: deliveredAt });
   let line = el.querySelector<HTMLElement>('[data-delivery]')!;
   expect(line.getAttribute('data-delivery')).toBe('delivered');
   expect(line.textContent).toMatch(/^Delivered to Claude Code, .+ · went into its turn by itself after 5 min$/);
   act(() => root?.unmount());
   host?.remove();
-  el = await renderThread(thread({ created_at: sentAt, deliver_now_at: nowAt, deliver_now_by: 'person', ...delivered }), { at: sentAt, checked_at: deliveredAt });
+  // Its own Ask question held the turn: it went in when the turn ended, not by itself mid-turn.
+  el = await renderThread(thread({ ...auto, ...delivered(false) }), { at: sentAt, checked_at: deliveredAt });
+  line = el.querySelector<HTMLElement>('[data-delivery]')!;
+  expect(line.textContent).toMatch(/^Delivered to Claude Code, .+ · went in when its turn ended$/);
+  expect(line.hasAttribute('data-auto')).toBe(false);
+  act(() => root?.unmount());
+  host?.remove();
+  el = await renderThread(thread({ created_at: sentAt, deliver_now_at: nowAt, deliver_now_by: 'person', ...delivered() }), { at: sentAt, checked_at: deliveredAt });
   line = el.querySelector<HTMLElement>('[data-delivery]')!;
   expect(line.textContent).not.toContain('by itself');
 });
 
+test.skipIf(!hasDom)('marked to go in just before its session went away: it waits for the session, never "Sending … now" forever', async () => {
+  connection = null;
+  const el = await renderThread(thread({ deliver_now_at: ago(0.5 * MIN), deliver_now_by: 'auto', wait_started_at: ago(5.5 * MIN) }));
+  const line = el.querySelector<HTMLElement>('[data-delivery]')!;
+  expect(line.getAttribute('data-delivery')).toBe('queued');
+  expect(line.textContent).toContain('Queued for Claude Code; it gets this when its session is back.');
+  expect(line.textContent).not.toContain('Sending');
+});
+
 test.skipIf(!hasDom)('a 👍 waiting on a busy session says how long, and that it goes in by itself; it offers no Send now', async () => {
-  connection = { busy: true, idle_since: null, send_now: true, auto_send_after_ms: 5 * MIN };
+  connection = { busy: true, idle_since: null, send_now: true, auto_send_after_ms: 5 * MIN, waits: waitsFor('msg_note', ago(3.5 * MIN)) };
   const value = thread();
   const asked = value.messages[0]!;
   const acked: InboxThread = {
@@ -315,6 +354,10 @@ test.skipIf(!hasDom)('a 👍 waiting on a busy session says how long, and that i
   const el = await renderThread(acked, null);
   await settle();
   const pill = el.querySelector<HTMLElement>('[data-ack-pill]')!;
-  expect(pill.textContent).toContain('Undelivered 3 min · Claude Code is working · goes in by itself in 2 min');
+  expect(pill.textContent).toContain(
+    INBOX_AUTO_SEND_ACK_NOTES
+      ? 'Undelivered 3 min · Claude Code is working · goes in by itself in 2 min'
+      : 'Undelivered 3 min · Claude Code is working · it gets this when its turn ends',
+  );
   expect([...el.querySelectorAll('button')].some((button) => /send now/i.test(button.textContent ?? ''))).toBe(false);
 });

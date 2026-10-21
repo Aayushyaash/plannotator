@@ -10,10 +10,22 @@
  * goes into the running turn by itself, exactly as if the person pressed Send
  * now (owner approval "inbox-busy-agent-reply", 2026-10-21). Only where Send
  * now is possible (the session's connection says `send_now`). The server
- * marks it (`deliver_now_by: "auto"`); measured from the item's own
- * `created_at`, so it survives an Inbox restart.
+ * marks it (`deliver_now_by: "auto"`). Measured from the first time the
+ * server saw that session busy, with Send now possible, while the item waited
+ * for it (not from `created_at`: a reply left for an ended session, or a
+ * message moved to another session, starts the wait when its session is
+ * busy). The clock lives in the server's memory, so an Inbox restart or the
+ * session going away starts it again: the wait is never shorter.
  */
 export const INBOX_AUTO_SEND_AFTER_MS = 5 * 60_000;
+
+/**
+ * Whether the note that carries a 👍 Looks good goes into a running turn by
+ * itself after the wait, like a reply. The one switch: false leaves a 👍
+ * waiting for the turn to end (it asks nothing of the agent), in the server's
+ * marking and in every line that says what happens next.
+ */
+export const INBOX_AUTO_SEND_ACK_NOTES = true;
 
 /** Who asked for an item to go into the running turn: the person's Send now, or the Inbox after the wait. */
 export type InboxDeliverNowBy = "person" | "auto";
@@ -64,8 +76,23 @@ export interface InboxDeliveryInput {
   sendingNow: boolean;
   /** Undefined: not known (not read yet, an older Inbox); null: it does not poll now. */
   connection: InboxDeliveryConnection | null | undefined;
-  /** When it began to wait (the item's `created_at`). Absent: no wait is shown. */
+  /**
+   * When it began to wait on a busy session (the server's clock; after the
+   * mark, the item's `wait_started_at`). Absent: no wait is shown.
+   */
   waitingSince?: string | null;
+  /**
+   * When the clock toward going in by itself started: the first time the
+   * server saw the session busy with Send now possible while it waited.
+   * Absent: it does not go in by itself (yet).
+   */
+  autoSince?: string | null;
+  /**
+   * Delivered after an automatic mark: whether it went into a running turn
+   * (`delivery.into_turn`). False: it waited for the turn to end (the
+   * session's own Ask question held it). Absent: not known.
+   */
+  intoTurn?: boolean | null;
   /** Who set `deliver_now_at`, kept after a failed attempt cleared it (`deliver_now_by`). */
   nowBy?: InboxDeliverNowBy | null;
   /** When it was asked to go now (`deliver_now_at`). */
@@ -89,17 +116,23 @@ export interface InboxDeliveryDecision {
   wait?: { since: string; steerable: boolean; autoSendAt: string | null };
   /** It went (or is going) into the turn by itself, after this many whole minutes. */
   autoAfterMin?: number;
+  /** Delivered after an automatic mark, but at the end of the turn (not into it). */
+  turnEnded?: boolean;
 }
 
 export function inboxDeliveryState(input: InboxDeliveryInput): InboxDeliveryDecision {
   const no = { sendNow: false };
-  // Went (or is going) in by itself: the line says so once it is delivered.
-  const auto = input.nowBy === "auto" && !!input.nowAt && !!input.waitingSince ? { autoAfterMin: wholeMinutes(input.waitingSince, input.nowAt) } : {};
-  if (input.delivered) return { state: "delivered", reason: "delivered", ...no, ...auto };
+  // Went (or is going) in by itself: the line says so once it is delivered. Only when it went into the
+  // running turn: one the session's own Ask question held waited for the turn to end, and says that.
+  const marked = input.nowBy === "auto" && !!input.nowAt && !!input.waitingSince;
+  const auto = marked && input.intoTurn !== false ? { autoAfterMin: wholeMinutes(input.waitingSince!, input.nowAt!) } : {};
+  if (input.delivered) return { state: "delivered", reason: "delivered", ...no, ...auto, ...(marked && input.intoTurn === false ? { turnEnded: true } : {}) };
   if (input.undelivered) return { state: "undelivered", reason: "undelivered", ...no };
   if (input.askerEnded) return { state: "saved", reason: "ended", ...no };
   if (!input.wakes) return { state: "saved", reason: "reads", ...no };
   const connection = input.connection;
+  // Its session does not poll now: it waits for the session to come back, whatever was pressed before.
+  if (connection === null) return { state: "queued", reason: "away", ...no };
   // Pressed, and the session can take it now. While it cannot (its own Ask this session question holds
   // it), the item waits for the turn to end: it reads as queued.
   if (input.sendingNow && !(connection?.busy === true && !connection.send_now)) return { state: "sending", reason: "sending_now", ...no, ...auto };
@@ -113,22 +146,22 @@ export function inboxDeliveryState(input: InboxDeliveryInput): InboxDeliveryDeci
     };
   }
   if (connection?.busy === false) return { state: "sending", reason: "idle", ...no };
-  if (connection === null) return { state: "queued", reason: "away", ...no };
   return { state: "queued", reason: "next_turn", ...no };
 }
 
 /**
- * When an item waiting on a busy session goes into its turn by itself: its
- * `created_at` plus the server's wait, only while its connection can take it
- * mid-turn and no attempt ran yet (`deliver_now_by` set, by the person or by
- * an earlier automatic one, never twice). Null otherwise.
+ * When an item waiting on a busy session goes into its turn by itself: the
+ * server's clock (`autoSince`, started when it first saw the session busy
+ * with Send now possible) plus the wait, only while its connection can take
+ * it mid-turn and no attempt ran yet (`deliver_now_by` set, by the person or
+ * by an earlier automatic one, never twice). Null otherwise.
  */
-export function inboxAutoSendAt(input: Pick<InboxDeliveryInput, "waitingSince" | "nowBy" | "nowAt" | "sendingNow" | "connection" | "autoSendAfterMs">): string | null {
+export function inboxAutoSendAt(input: Pick<InboxDeliveryInput, "autoSince" | "nowBy" | "nowAt" | "sendingNow" | "connection" | "autoSendAfterMs">): string | null {
   const after = input.autoSendAfterMs;
-  if (after == null || !(after >= 0) || !input.waitingSince) return null;
+  if (after == null || !(after >= 0) || !input.autoSince) return null;
   if (input.nowBy || input.nowAt || input.sendingNow) return null;
   if (input.connection?.busy !== true || !input.connection.send_now) return null;
-  const start = Date.parse(input.waitingSince);
+  const start = Date.parse(input.autoSince);
   return Number.isFinite(start) ? new Date(start + after).toISOString() : null;
 }
 
@@ -218,7 +251,8 @@ export interface InboxRowDelivery {
   asking?: { host: string | null; name: string | null };
   /**
    * `reason: "working"` (approval "inbox-busy-agent-reply"): it waits on a
-   * busy session since then, the row's "Undelivered N min". Absent otherwise
+   * busy session since then (the first time the server saw that session busy
+   * while it waited), the row's "Undelivered N min". Absent otherwise
    * and from an older Inbox. Additive.
    */
   waiting_since?: string;
@@ -228,4 +262,6 @@ export interface InboxRowDelivery {
   auto_send_at?: string | null;
   /** It went (or is going) into the running turn by itself, after this many whole minutes of waiting. */
   auto_after_min?: number;
+  /** Delivered after an automatic mark, but when the turn ended (the session's own Ask question held it). */
+  turn_ended?: boolean;
 }

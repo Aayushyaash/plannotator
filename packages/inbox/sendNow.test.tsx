@@ -131,13 +131,14 @@ async function render(value: InboxThread, sent: { at: string; checked_at: string
 const line = (el: HTMLElement) => el.querySelector('[data-delivery]') as HTMLElement;
 
 test.skipIf(!hasDom)('Claude Code at work: "Undelivered · … is working" (approval "inbox-busy-agent-reply"), and Send now posts the send-now route for the reply', async () => {
-  connection = { busy: true, idle_since: null, send_now: true };
+  // The server's clock for the reply on that busy session (`waits`): the line's minutes.
+  connection = { busy: true, idle_since: null, send_now: true, waits: { [REPLY]: { since: new Date(Date.now() - 4 * 60_000).toISOString(), auto_since: null } } };
   let changed = 0;
   const el = await render(thread(), undefined, async () => {
     changed += 1;
   });
   expect(line(el).getAttribute('data-delivery')).toBe('queued');
-  // How long it waited (the reply was written long before the test runs) and what happens next.
+  // How long it waited on the busy session and what happens next.
   expect(line(el).textContent).toMatch(/^Undelivered \d+ min · Claude Code is working · it gets this when its turn ends/);
   const button = el.querySelector('[data-send-now]') as HTMLButtonElement;
   expect(button.textContent).toBe('Send now');

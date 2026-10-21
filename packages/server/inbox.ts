@@ -1649,7 +1649,15 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     if (body.type !== "delivered" || typeof body.id !== "string") {
       throw new InboxError("validation_error", 'type: "delivered" with the reply id, or "state" with busy.', { field: "type" });
     }
-    const reply = store.recordDelivery(body.id, { host, session });
+    // An item the Inbox marked to go in by itself: whether it went into the running turn, or waited for the
+    // turn to end (the session was seen idle after the mark: its own Ask question held the turn).
+    const marked = store.message(body.id);
+    const markedAt = marked
+      ? marked.tags?.find((tag) => tag.session === session && tag.deliver_now_by === "auto")?.deliver_now_at ??
+        (marked.deliver_now_by === "auto" ? marked.deliver_now_at : null)
+      : null;
+    const intoTurn = markedAt ? live.deliveredIntoTurn(session, markedAt) : undefined;
+    const reply = store.recordDelivery(body.id, { host, session, ...(intoTurn !== undefined ? { intoTurn } : {}) });
     return json({ ok: true, delivery: reply.delivery });
   };
 
@@ -1696,19 +1704,31 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
 
   // A reply that waited 5 minutes on a busy session goes into its running turn by itself, as if the person
   // pressed Send now (owner approval "inbox-busy-agent-reply", 2026-10-21). Only where that session's
-  // connection can take it mid-turn (`send_now`); the store decides what is due from each item's own
-  // `created_at` and marks it once (`deliver_now_by: "auto"`), so an Inbox restart loses nothing. The mark
-  // is a store line, which answers the session's held poll with `now: true`.
+  // connection can take it mid-turn (`send_now`). The wait is the live sessions' clock, started the first
+  // time that session was seen busy and able to take it while the item waited (never the item's
+  // `created_at`); a restart or the session going away starts it again. The store marks it once
+  // (`deliver_now_by: "auto"`); the mark is a store line, which answers the session's held poll with `now: true`.
   const autoSendFor = (session: string, tags: boolean) => {
     try {
-      store.autoSendDue(session, { afterMs: live.autoSendAfterMs, tags });
+      store.autoSendDue(session, { afterMs: live.autoSendAfterMs, tags, clockOf: (id) => live.waitClockOf(session, id) });
     } catch (error) {
       process.stderr.write(`Inbox: a reply did not go in by itself: ${error instanceof Error ? error.message : String(error)}\n`);
     }
   };
   const autoSendSweep = () => {
+    live.trackWaits();
     for (const { session, tags } of live.steerableSessions()) autoSendFor(session, tags);
   };
+  // A person's item written while its session is already busy starts its clock at once, not at the next sweep.
+  let waitsQueued = false;
+  const unsubscribeWaits = store.subscribe((line) => {
+    if (line.kind !== "message" || line.record.author.kind !== "person" || waitsQueued) return;
+    waitsQueued = true;
+    queueMicrotask(() => {
+      waitsQueued = false;
+      live.trackWaits();
+    });
+  });
   const autoSendWatch = setInterval(autoSendSweep, options.autoSendSweepMs ?? INBOX_AUTO_SEND_SWEEP_MS);
   (autoSendWatch as { unref?: () => void }).unref?.();
   // The sidebar's "Reload Claude Code N" is pushed as it changes (a session restarts, goes away, or an update lands).
@@ -1722,7 +1742,12 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   (restartWatch as { unref?: () => void }).unref?.();
 
   // The list rows' delivery (approval "inbox-row-delivery"): the store reads the live sessions for it.
-  store.setDeliveryPresence({ connection: live.deliveryConnectionOf, askerLive: live.askerLive, autoSendAfterMs: live.autoSendAfterMs });
+  store.setDeliveryPresence({
+    connection: live.deliveryConnectionOf,
+    askerLive: live.askerLive,
+    autoSendAfterMs: live.autoSendAfterMs,
+    waitOf: live.waitOf,
+  });
   // A session's turn starting or ending, its connection going away, or an asker grace running out moves a
   // row's delivery without writing a store line. The sessions' delivery signature is compared on a short
   // timer, only while a window listens, and `event: deliveries` tells the windows to read the list again.
@@ -2508,6 +2533,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     clearInterval(restartWatch);
     clearInterval(deliveryWatch);
     clearInterval(autoSendWatch);
+    unsubscribeWaits();
     void mcp.close().catch(() => {});
     server.stop(true);
     // The tailnet mapping and the door listener, the Wi-Fi listener and its

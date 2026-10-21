@@ -9,11 +9,13 @@
  * session's connection is the bridge's real doors driven as the mod drives
  * them (busy, whether it can take a reply mid-turn, what plugin it loaded,
  * `delivered` once the reply is in); the person's Send is the window's own
- * reply box. Minutes pass by stopping the Inbox and moving a reply's own
- * `created_at` back in its store file, then starting it again: which also
- * proves that the wait survives a restart, with the real 5 minutes. The live
- * timer (no restart, no poll needed) runs with the testing knob
- * PLANNOTATOR_INBOX_AUTO_SEND_MS.
+ * reply box. The wait is the server's clock, started when it first saw the
+ * session busy while the reply waited; minutes pass for the window by moving
+ * the page's clock forward (Playwright's `page.clock`), so the badge and the
+ * band read "Undelivered 3 min" without waiting 3 minutes. Going in by itself
+ * runs for real with the testing knob PLANNOTATOR_INBOX_AUTO_SEND_MS (a
+ * shorter wait, honoured only in a build that is not a release), across an
+ * Inbox restart, which starts the clock again.
  *
  * PNGs (1440 light and dark, and a phone) land in
  * PLANNOTATOR_UNDELIVERED_SHOTS, else .local/proof/undelivered/.
@@ -21,7 +23,7 @@
 
 import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { INBOX_BRIDGE_EVENT_PATH, INBOX_BRIDGE_POLL_PATH, INBOX_SEND_NOW_POLL_FIELD, parseInboxBridgeCommands, type InboxReplyCommand } from '../../packages/shared/inbox/connection';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
@@ -117,30 +119,14 @@ function startInbox(extra: Record<string, string> = {}): string {
   return started.stdout.trim();
 }
 
-/** Move a message's `created_at` back by `ms` in its store file, with the Inbox stopped: time passing, as the store reads it. */
-function backdate(messageId: string, ms: number): void {
-  const projects = join(world.dataDir, 'inbox', 'projects');
-  for (const key of readdirSync(projects)) {
-    const file = join(projects, key, 'messages.jsonl');
-    if (!existsSync(file)) continue;
-    const lines = readFileSync(file, 'utf8').split('\n');
-    let changed = false;
-    const next = lines.map((line) => {
-      if (!line.trim()) return line;
-      const parsed = JSON.parse(line) as { id: string; record: { created_at: string } };
-      if (parsed.id !== messageId) return line;
-      changed = true;
-      parsed.record.created_at = new Date(Date.parse(parsed.record.created_at) - ms).toISOString();
-      return JSON.stringify(parsed);
-    });
-    if (changed) writeFileSync(file, next.join('\n'));
-  }
+async function restartWith(extra: Record<string, string> = {}): Promise<void> {
+  await stopScratchInbox(world.dataDir);
+  world.url = startInbox(extra);
 }
 
-async function restartAfter(moves: [string, number][], extra: Record<string, string> = {}): Promise<void> {
-  await stopScratchInbox(world.dataDir);
-  for (const [id, ms] of moves) backdate(id, ms);
-  world.url = startInbox(extra);
+/** Minutes pass for the window: its clock is fixed `ms` ahead of now (the server's clock is untouched). */
+async function windowAhead(page: Page, ms: number): Promise<void> {
+  await page.clock.setFixedTime(new Date(Date.now() + ms));
 }
 
 async function sessionOf(threadId: string): Promise<string> {
@@ -153,6 +139,12 @@ async function lastPersonId(threadId: string): Promise<string> {
   const response = await fetch(`http://127.0.0.1:${registry().port}/api/inbox/threads/${threadId}`);
   const thread = ((await response.json()) as { thread: { messages: { id: string; author: { kind: string } }[] } }).thread;
   return thread.messages.filter((m) => m.author.kind === 'person').at(-1)!.id;
+}
+
+async function waitOf(threadId: string, session: string, id: string): Promise<{ since: string; auto_since: string | null }> {
+  const response = await fetch(`http://127.0.0.1:${registry().port}/api/inbox/threads/${threadId}/sessions?asker=${session}`);
+  const body = (await response.json()) as { asker: { connection: { waits: Record<string, { since: string; auto_since: string | null }> } } };
+  return body.asker.connection.waits[id]!;
 }
 
 async function message(threadId: string, id: string): Promise<Record<string, unknown>> {
@@ -291,17 +283,19 @@ test('waiting on a busy agent: "Undelivered N min" on the row (blue / grey), Sen
   await expect.poll(() => connection.commands.length, { timeout: 15_000 }).toBe(1);
   expect(connection.commands[0]!.now).toBeUndefined();
 
-  // Minutes pass: 3½ for the hero, 12 for the stuck one. The hero is still under 5: it waits.
-  await restartAfter([
-    [hero.reply, 3.5 * MIN],
-    [stuck.reply, 12.2 * MIN],
-  ]);
+  // The server started both clocks when it saw the sessions busy with the replies waiting.
+  const heroClock = await waitOf(hero.thread, await sessionOf(hero.thread), hero.reply);
+  expect(Date.parse(heroClock.since)).toBeGreaterThanOrEqual(Date.parse(String((await message(hero.thread, hero.reply)).created_at)));
+  expect(heroClock.auto_since).not.toBeNull();
+  expect((await waitOf(stuck.thread, await sessionOf(stuck.thread), stuck.reply)).auto_since).toBeNull();
+  // 3½ minutes pass for the window. The hero is still under 5: it waits.
+  await windowAhead(page, 3.5 * MIN);
   await page.goto(`${world.url}`);
   const heroRow = page.locator(`.ib-lbody [data-thread-id="${hero.thread}"]`).first();
   const stuckRow = page.locator(`.ib-lbody [data-thread-id="${stuck.thread}"]`).first();
   await expect(heroRow.locator('[data-undelivered]')).toHaveText('Undelivered 3 min');
   await expect(heroRow.locator('[data-undelivered]')).not.toHaveAttribute('data-stuck', /.*/);
-  await expect(stuckRow.locator('[data-undelivered]')).toHaveText('Undelivered 12 min');
+  await expect(stuckRow.locator('[data-undelivered]')).toHaveText('Undelivered 3 min');
   await expect(stuckRow.locator('[data-undelivered]')).toHaveAttribute('data-stuck', '');
   // The badge is the count's cell: the row reads it in its name.
   await expect(heroRow).toContainText('Undelivered 3 min');
@@ -339,7 +333,8 @@ test('waiting on a busy agent: "Undelivered N min" on the row (blue / grey), Sen
   const narrowRows = () => boxOf(page, [`.ib-group:has([data-thread-id="${hero.thread}"])`], 0);
   await shot(page, 'thread-rows', narrowRows);
 
-  // Can't go in sooner: grey, no button, no countdown; why and the fix, with Copy.
+  // Can't go in sooner: grey, no button, no countdown; why and the fix, with Copy. 12 minutes for the window.
+  await windowAhead(page, 12.2 * MIN);
   await page.goto(`${world.url}#thread=${stuck.thread}`);
   const grey = page.locator('section.ib-pane .ib-delivered[data-undelivered]');
   await expect(grey).toHaveAttribute('data-stuck', '');
@@ -358,6 +353,7 @@ test('on a phone: the row badge, the band and a 44 px Send now', async ({ browse
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true, colorScheme: 'light' });
   try {
     const page = await context.newPage();
+    await windowAhead(page, 3.5 * MIN);
     await page.goto(world.url);
     const row = page.locator(`.ib-mrow[data-thread-id="${hero.thread}"]`);
     await expect(row.locator('[data-undelivered]')).toHaveText('Undelivered 3 min');
@@ -387,20 +383,28 @@ test('on a phone: the row badge, the band and a 44 px Send now', async ({ browse
   }
 });
 
-test('after 5 minutes it goes into the running turn by itself (the Inbox restarted in between): the poll hands it with `now`; then "went into its turn by itself after 5 min"', async () => {
+test('it goes into the running turn by itself after the wait, counted again from the restart: the poll hands it with `now`; then "went into its turn by itself after N min"', async () => {
   const { page } = world;
-  // Two more minutes pass: 5½ in all. The first busy poll after the start puts it in.
-  await restartAfter([[hero.reply, 2 * MIN]]);
-  await expect.poll(() => hero.connection.commands.find((c) => c.id === hero.reply)?.now, { timeout: 20_000 }).toBe(true);
-  expect(await message(hero.thread, hero.reply)).toMatchObject({ deliver_now_by: 'auto' });
+  await page.clock.setFixedTime(new Date());
+  // A one-minute wait (the testing knob). The restart forgets every clock: nothing goes in at once.
+  await restartWith({ PLANNOTATOR_INBOX_AUTO_SEND_MS: String(MIN) });
+  await page.waitForTimeout(3_000);
+  expect((await message(hero.thread, hero.reply)).deliver_now_by ?? null).toBeNull();
+  expect(hero.connection.commands.find((c) => c.id === hero.reply)?.now).toBeUndefined();
+  await expect.poll(() => hero.connection.commands.find((c) => c.id === hero.reply)?.now, { timeout: 90_000, intervals: [1_000] }).toBe(true);
+  const marked = await message(hero.thread, hero.reply);
+  expect(marked).toMatchObject({ deliver_now_by: 'auto' });
+  expect(Date.parse(String(marked.deliver_now_at)) - Date.parse(String(marked.wait_started_at))).toBeGreaterThanOrEqual(MIN);
+  await page.clock.setFixedTime(new Date());
   await page.goto(`${world.url}#thread=${hero.thread}`);
   const pane = page.locator('section.ib-pane');
   await expect(pane.locator('[data-delivery]')).toHaveText('Sending to Claude Code now…');
   // The connection put it into the running turn.
   await hero.connection.deliver(hero.reply);
+  expect((await message(hero.thread, hero.reply)).delivery).toMatchObject({ into_turn: true });
   const line = pane.locator('[data-delivery]');
   await expect(line).toHaveAttribute('data-delivery', 'delivered');
-  await expect(line).toHaveText(/^Delivered to Claude Code, (?:[A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d{2} [AP]M · went into its turn by itself after 5 min$/);
+  await expect(line).toHaveText(/^Delivered to Claude Code, (?:[A-Z][a-z]{2} \d{1,2}, )?\d{1,2}:\d{2} [AP]M · went into its turn by itself after 1 min$/);
   const row = page.locator(`.ib-lbody [data-thread-id="${hero.thread}"]`).first();
   await expect(row.locator('.ib-tick')).toHaveAttribute('data-tick', 'delivered');
   await expect(row.locator('[data-undelivered]')).toHaveCount(0);
@@ -412,7 +416,7 @@ test('after 5 minutes it goes into the running turn by itself (the Inbox restart
 });
 
 test('the live timer: with no window and no press, a waiting reply goes in once the wait has passed (testing knob PLANNOTATOR_INBOX_AUTO_SEND_MS)', async () => {
-  await restartAfter([], { PLANNOTATOR_INBOX_AUTO_SEND_MS: '2000' });
+  await restartWith({ PLANNOTATOR_INBOX_AUTO_SEND_MS: '2000' });
   const fresh = await agent();
   const sent = await fresh.send({ project_path: world.ledger, subject: 'Backfill done', body: 'The backfill is done. Drop the old table now?' }, { wakes: true });
   const connection = new Connection(await sessionOf(sent.thread_id), world.ledger, { busy: true, sendNow: true });

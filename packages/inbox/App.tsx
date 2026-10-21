@@ -1391,12 +1391,6 @@ function Inbox() {
   }, []);
 
   /**
-   * Mark read, or move it back (the pressed button, `E` again, Undo). The
-   * thread leaves the top for Quiet with its waiting questions closed; Undo
-   * reopens them as they were. An agent stopped or held up on it makes the
-   * toast a warning with Reply.
-   */
-  /**
    * Send now from a list row (approval "inbox-busy-agent-reply"): the reply
    * waiting on a busy agent goes into its running turn now, as the thread's
    * Send now does. No toast: the row's tick and badge say it.
@@ -1414,6 +1408,12 @@ function Inbox() {
     say('Sending it now.');
   };
 
+  /**
+   * Mark read, or move it back (the pressed button, `E` again, Undo). The
+   * thread leaves the top for Quiet with its waiting questions closed; Undo
+   * reopens them as they were. An agent stopped or held up on it makes the
+   * toast a warning with Reply.
+   */
   const markRead = async (threadId: string, read: boolean) => {
     const before = rowOf(threadId);
     // With a thread open the list holds still: the row moves to Quiet when the list next settles.

@@ -317,6 +317,12 @@ export interface InboxMessage {
    */
   deliver_now_by?: InboxDeliverNowBy | null;
   /**
+   * When it began to wait on its busy session, written with the Inbox's own
+   * mark (`deliver_now_by: "auto"`), so "went into its turn by itself after
+   * N min" stays true after delivery. Absent otherwise. Additive.
+   */
+  wait_started_at?: string | null;
+  /**
    * A guided review this message carries (submit_guide, PLAN step 5): the
    * snapshot is a content-addressed blob, `inbox/blobs/<sha256>`. Absent on
    * every other message and on records older than step 5.
@@ -452,6 +458,8 @@ export interface InboxTag {
   deliver_now_at?: string | null;
   /** Who asked for `deliver_now_at` (see `InboxMessage.deliver_now_by`). */
   deliver_now_by?: InboxDeliverNowBy | null;
+  /** When it began to wait on that session (see `InboxMessage.wait_started_at`). */
+  wait_started_at?: string | null;
   /** A session that is not woken read the thread with read_thread after the tag (its own read only). */
   read_at?: string | null;
 }
@@ -581,6 +589,9 @@ export interface InboxAck {
   note_at?: string | null;
   deliver_now_at?: string | null;
   deliver_now_by?: InboxDeliverNowBy | null;
+  /** The note's `wait_started_at` and its delivery's `into_turn` (the window's thread only). */
+  wait_started_at?: string | null;
+  delivered_into_turn?: boolean | null;
 }
 
 /**
@@ -608,6 +619,13 @@ export interface InboxDelivery {
   /** The session it was delivered to (the asking message's `author.session`, or the message's `to.session`). */
   session: string;
   at: string;
+  /**
+   * Written for an item the Inbox marked to go in by itself (approval
+   * "inbox-busy-agent-reply"): true when it went into a running turn, false
+   * when its session went idle after the mark (the session's own Ask question
+   * held the turn, so it went in when the turn ended). Absent otherwise.
+   */
+  into_turn?: boolean;
 }
 
 // ─────────────────────────────── Guided reviews (step 5) ───────────────────────────────

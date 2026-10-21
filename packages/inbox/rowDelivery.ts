@@ -28,6 +28,7 @@ export function rowDeliveryLine(d: InboxRowDelivery, time: (iso: string) => stri
     endedName,
     wait: rowWait(d) ?? undefined,
     ...(d.state === 'delivered' && d.auto_after_min !== undefined ? { autoAfterMin: d.auto_after_min } : {}),
+    ...(d.state === 'delivered' && d.turn_ended ? { turnEnded: true } : {}),
   });
   return d.kind === 'ack' ? `👍 Looks good · ${text}` : text;
 }
