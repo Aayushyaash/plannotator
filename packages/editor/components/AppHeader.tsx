@@ -1,3 +1,4 @@
+import type { UpdateCheckSetting } from '@plannotator/ui/hooks/useUpdateCheckSetting';
 import React from 'react';
 import type { Origin } from '@plannotator/shared/agents';
 import type { Agent } from '@plannotator/ui/hooks/useAgents';
@@ -11,9 +12,11 @@ import { Settings } from '@plannotator/ui/components/Settings';
 import { PlanHeaderMenu } from '@plannotator/ui/components/PlanHeaderMenu';
 import type { CallbackConfig } from '@plannotator/ui/utils/callback';
 import type { UIPreferences } from '@plannotator/ui/utils/uiPreferences';
+import type { AgentToolSetting } from '@plannotator/ui/utils/agentToolSetting';
 import { SparklesIcon } from '@plannotator/ui/components/SparklesIcon';
 import type { CompactPlanAction } from '@plannotator/ui/components/PlanHeaderMenu';
 import { HtmlSurfaceControls } from '@plannotator/ui/components/HtmlSurfaceControls';
+import { BundleSwitcher, type BundleSwitcherProps } from './BundleSwitcher';
 
 /** Plannotator's refresh strings for the published control: the document
  * is a file on disk, so the refresh says so. */
@@ -54,6 +57,10 @@ interface AppHeaderProps {
   compactDocumentTitle?: string;
   compactSessionActions?: CompactPlanAction[];
   compactDocumentActions?: CompactPlanAction[];
+  /** A review of several files: the "2 of 3 · mock.html ‹ ›" switcher beside
+   *  the logo. Desktop only; the compact shell names the position in its
+   *  title and offers previous/next in its Options menu. */
+  bundleSwitcher?: BundleSwitcherProps;
   // Mode flags (stable after mount)
   isApiMode: boolean;
   annotateMode: boolean;
@@ -104,6 +111,12 @@ interface AppHeaderProps {
   taterMode: boolean;
   mobileSettingsOpen: boolean;
   gitUser: string | undefined;
+  /** Present when the server advertises the auto-update setting; Settings shows its switch. */
+  autoUpdateSetting?: { env?: boolean };
+  updateCheckSetting?: UpdateCheckSetting;
+  /** The `plannotator` agent tool switch (parseAgentToolSetting of serverConfig); Settings shows its row. */
+  agentToolSetting?: AgentToolSetting;
+  onAgentToolChange?: (enabled: boolean) => Promise<void>;
   /** This session offers the Agent TUI, so Settings shows its Position row. */
   agentTerminalAvailable: boolean;
   /** The browser exposes WebMCP, so Settings shows the "Agent tools" opt-out.
@@ -169,6 +182,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   compactDocumentTitle,
   compactSessionActions,
   compactDocumentActions,
+  bundleSwitcher,
   isApiMode,
   annotateMode,
   archiveMode,
@@ -198,6 +212,10 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   taterMode,
   mobileSettingsOpen,
   gitUser,
+  autoUpdateSetting,
+  updateCheckSetting,
+  agentToolSetting,
+  onAgentToolChange,
   agentTerminalAvailable,
   webmcpAvailable = false,
   agentConnected = false,
@@ -250,7 +268,10 @@ export const AppHeader = React.memo<AppHeaderProps>(({
             <span className="block h-11 w-11" aria-hidden="true" />
           )
         ) : (
-          <AppHeaderLogo />
+          <>
+            <AppHeaderLogo />
+            {bundleSwitcher && <BundleSwitcher {...bundleSwitcher} />}
+          </>
         )}
       </div>
 
@@ -487,6 +508,10 @@ export const AppHeader = React.memo<AppHeaderProps>(({
             externalOpen={mobileSettingsOpen}
             onExternalClose={onCloseSettings}
             gitUser={gitUser}
+            autoUpdateSetting={autoUpdateSetting}
+            updateCheckSetting={updateCheckSetting}
+            agentToolSetting={agentToolSetting}
+            onAgentToolChange={onAgentToolChange}
             agentTerminalAvailable={agentTerminalAvailable}
             webmcpAvailable={webmcpAvailable}
           />

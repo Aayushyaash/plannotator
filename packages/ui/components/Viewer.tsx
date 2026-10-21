@@ -1,22 +1,24 @@
 import { generateId } from '../utils/generateId';
 import React, { useRef, useState, useEffect, useLayoutEffect, useMemo, forwardRef, useImperativeHandle, useCallback, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
-import { ImageLightbox } from './ImageLightbox';
-import { AnnotationType, type Block, type Annotation, type EditorMode, type InputMethod, type ImageAttachment, type ActionsLabelMode } from '../types';
+import { collectDocumentImages, ImageLightbox, type LightboxImage } from './ImageLightbox';
+import { AnnotationType, type Block, type Annotation, type EditorMode, type InputMethod, type ImageAttachment, type ActionsLabelMode, type HostDraft } from '../types';
 import { applyHighlight, codeBlockClassName, onCodeHighlightSwap } from '../utils/codeHighlight';
 import { paintCodeBlockMark } from '../utils/codeBlockMark';
 import { useFenceTheme } from '../hooks/useFenceTheme';
-import { computeListIndices, groupBlocks, type Frontmatter, type FrontmatterValue } from '../utils/parser';
+import { computeListIndices, groupBlocks, selectionSourceLines, type Frontmatter, type FrontmatterValue } from '../utils/parser';
 import { buildHeadingSlugMap } from '../utils/slugify';
 import { copyTextToClipboard } from '../utils/clipboard';
 import { BlockRenderer } from './BlockRenderer';
 import { indexQuestionBlocks, type IndexedQuestion, type ParsedQuestion, type QuestionAnswer } from '@plannotator/core/question-block';
+import type { QuestionBlockProps } from './blocks/QuestionBlock';
 import { resolveQuestionAnswers } from '../utils/questionAnswers';
 import { CodeBlock } from './blocks/CodeBlock';
 import { TableBlock } from './blocks/TableBlock';
 import { TableToolbar } from './blocks/TableToolbar';
 import { TablePopout } from './blocks/TablePopout';
 import { CodePathValidationContext } from './CodePathValidationContext';
+import { LocalLinkContext, type LocalLinkResolver } from './LocalLinkContext';
 import { useValidatedCodePaths } from '../hooks/useValidatedCodePaths';
 import { AnnotationToolbar } from './AnnotationToolbar';
 import { FloatingQuickLabelPicker } from './FloatingQuickLabelPicker';
@@ -132,6 +134,13 @@ export interface ViewerProps {
   onAddGlobalAttachment?: (image: ImageAttachment) => void;
   onRemoveGlobalAttachment?: (path: string) => void;
   repoInfo?: { display: string; branch?: string; host?: string } | null;
+  /**
+   * The repository bare `#123` / `@user` refs link into, WITHOUT the repo
+   * badge `repoInfo` also draws (a host that renders many small documents,
+   * such as the Inbox's messages). Wins over `repoInfo` for links only;
+   * `null` and absent both fall back to `repoInfo`, as before.
+   */
+  refRepo?: { display: string; host?: string } | null;
   stickyActions?: boolean;
   /**
    * Render compact annotation controls and the existing document actions in
@@ -145,7 +154,27 @@ export interface ViewerProps {
   gridEnabled?: boolean;
   onOpenLinkedDoc?: (path: string) => void;
   onOpenCodeFile?: (path: string) => void;
+  /**
+   * Opt-in host capability: decide what a link to a local path does
+   * (`[the mock](mock.html)`, markdown and raw-HTML `<a href>` alike; never
+   * `#anchors`, `//host` or a URL with a scheme). Return `{ kind: 'open' }`
+   * to open it yourself, `{ kind: 'unavailable', title }` to draw it as
+   * inert text, or null for the default. Absent → unchanged.
+   */
+  resolveLocalLink?: LocalLinkResolver;
   imageBaseDir?: string;
+  /**
+   * A click on an image in the document. Given: the host handles it (the
+   * Inbox opens a message's image in its own viewer) and no lightbox opens.
+   * Absent: the lightbox, as always.
+   */
+  onImageClick?: (src: string, alt: string) => void;
+  /**
+   * The lightbox steps through every image the document shows (← →, the
+   * peek; approval "inbox-image-viewer": plan review and annotate's light
+   * version). Absent or false: the single image overlay, as always.
+   */
+  imageLightboxStepping?: boolean;
   /** Directory the active document lives in — used by the code-path validator
    *  so out-of-tree relative references (e.g. `../foo.ts` in a linked doc)
    *  resolve against the doc's own directory rather than only cwd. */
@@ -218,6 +247,65 @@ export interface ViewerProps {
    *  decision"), given the indexed question and its saved answer. Rendered in
    *  read-only cards too; return null for none. */
   renderQuestionFooter?: (question: IndexedQuestion, answer: QuestionAnswer | undefined) => React.ReactNode;
+  /** Whether answering a question records a decision, per question. On a
+   *  `Decision: when answered` question: false draws its "Records a
+   *  decision" tag dimmed with a dotted outline and hides the "Answering this
+   *  records a decision" row; true or undefined keeps today's card. On a
+   *  question with no decision line it is ignored unless
+   *  `questionDecisionScope` is `'any'`; then a boolean adds the tag in that
+   *  state (true also shows the row) and undefined adds nothing. Has no
+   *  effect on a question whose decision is already recorded. */
+  questionDecisionRecording?: (question: IndexedQuestion) => boolean | undefined;
+  /** Which questions can carry the "Records a decision" tag (ui 0.52.1).
+   *  `'when-answered'` (default, the 0.52.0 behaviour): only questions with
+   *  `Decision: when answered`. `'any'`: also a question with no decision
+   *  line, when `questionDecisionRecording` returns a boolean for it. */
+  questionDecisionScope?: 'when-answered' | 'any';
+  /** Whether `:::question` cards read `Decision:` lines (default true). False
+   *  (a host that records no decisions, such as the Plannotator Inbox): a
+   *  `Decision:` line is shown as context and no question carries a decision
+   *  tag or row from it. The prompt, key and numbering are unchanged. */
+  questionDecisionLines?: boolean;
+  /** Makes a question's "Records a decision" tag a toggle button
+   *  (`aria-pressed`); a click calls this with the question's key and the
+   *  next state, which the host stores and returns from
+   *  `questionDecisionRecording`. Ignored when `readOnly`. */
+  onToggleQuestionDecisionRecording?: (key: string, next: boolean) => void;
+  /** Opens the host's decision card (ui 0.52.1): the tag splits into a
+   *  diamond switch (the toggle above) and the words "Records a decision" as
+   *  a button that calls this with the question's key and the words' element
+   *  (anchor your popover to it). Offered on and off. Ignored when
+   *  `readOnly`. */
+  onOpenQuestionDecision?: (key: string, anchor: HTMLElement) => void;
+  /** Per question, true draws its decision tag as a plain tag: no switch and
+   *  no opener, as under `readOnly`, while the other questions keep theirs
+   *  (a host whose message holds one sent and one open question). Absent:
+   *  every question follows `readOnly`. */
+  questionDecisionLocked?: (question: IndexedQuestion) => boolean;
+  /** Per question, true draws that card read-only, as under `readOnly` (no
+   *  picks, no Other, no note, no Skip, no Accept recommended, and its
+   *  decision tag a plain tag), while the other questions stay answerable (a
+   *  host whose message holds one sent and one open question). Absent: every
+   *  question follows `readOnly`. */
+  questionReadOnly?: (question: IndexedQuestion) => boolean;
+  /** `'none'` hides each question card's own status tag (Open / Answered /
+   *  Settled / Skipped) so the host can draw its own; the decision tags stay.
+   *  Default `'card'`. */
+  questionStatusTag?: 'card' | 'none';
+  /** The host's own words for a question's status tag (ui seam, see
+   *  `QuestionBlock` `statusLabel`): the Plannotator Inbox says "Not sent" for
+   *  a saved, unsent pick. Absent: the card's own tags. */
+  questionStatusLabel?: QuestionBlockProps['statusLabel'];
+  /** A host's own card in place of a question's (ui seam for a question the
+   *  host no longer lets anyone answer, such as the Plannotator Inbox's
+   *  replaced questions). Called per question; a returned node is drawn
+   *  instead of the answer card, inside a wrapper carrying the block's
+   *  `data-block-id`; `undefined` keeps the answer card. Absent: every
+   *  question draws its answer card (today's behaviour). */
+  renderQuestionCard?: (question: IndexedQuestion, answer: QuestionAnswer | undefined) => React.ReactNode | undefined;
+  /** Host content right under a question card's prompt, per question (e.g.
+   *  "Replaces <an earlier question>"); null for none. Absent: nothing there. */
+  renderQuestionBelowPrompt?: (question: IndexedQuestion) => React.ReactNode;
   onAskAI?: CommentAskAIHandler;
   /** Whether comment popovers offer image attachments. Hosts without an
    *  uploadTransport pass false so the attach affordance never dead-ends.
@@ -228,6 +316,28 @@ export interface ViewerProps {
    *  comment, attachments, checkbox toggles). Existing annotations still
    *  render and remain selectable. Default false — today's behavior. */
   readOnly?: boolean;
+  /**
+   * Opt-in host capability: the document is read, not annotated. Every
+   * annotation affordance is off exactly as under `readOnly` (selection and
+   * code-block toolbars, comment composers, pinpoint, the annotation header,
+   * global comment and attachments, Vim), the document actions (Global
+   * comment, Copy) are not drawn, but question cards and checkboxes keep their
+   * handlers. For a host that shows a message with answerable `:::question`
+   * blocks and no comments on its text. Absent → unchanged.
+   */
+  answerOnly?: boolean;
+  /**
+   * Opt-in host capability, with `answerOnly`: the reader may comment on the
+   * text. A text selection opens the selection toolbar, comment-only
+   * (Comment and the one-click 👍; no Delete, no label picker), and its
+   * comment composer; `annotations` are drawn as highlights. Question cards
+   * are left out of selection (their text is not commented on), and nothing
+   * else of authoring comes back (no pinpoint, code-block toolbar, Global
+   * comment or Copy, no Vim). For a host that shows a message whose words
+   * can be commented on (the Plannotator Inbox's agent messages). Ignored
+   * without `answerOnly` and under `readOnly`. Absent → unchanged.
+   */
+  textComments?: boolean;
   /** Opt-in Vim-style keyboard selection. Default false for compatibility. */
   vimModeEnabled?: boolean;
   /** Replace the compact Vim badge with the live video-style key HUD. */
@@ -239,12 +349,36 @@ export interface ViewerProps {
   /** Fires once per highlight-restore pass with what it tried and what it could
    *  not anchor, so a host can mark the leftovers in its annotation panel. */
   onRestoreReport?: (report: AnnotationRestoreReport) => void;
+  /**
+   * Opt-in host capability: the composer handed to the host (see
+   * `HostDraft`). A selection settling, a pinpoint tap or Comment mode reports
+   * a draft here instead of opening the toolbar or a composer (a pinpoint tap
+   * reports `intent: 'compose'`), and null when it closes. The document
+   * actions (Global comment, Copy) and the code-block and table hover
+   * toolbars are not drawn, and a pinpoint tap on a code block does nothing.
+   * The host saves the comment and draws it through `annotations` /
+   * `applySharedAnnotations`. Ignored when authoring is off. Absent →
+   * unchanged.
+   */
+  onHostDraft?: (draft: HostDraft | null) => void;
 }
 
 export interface ViewerHandle {
   removeHighlight: (id: string) => void;
   clearAllHighlights: () => void;
   applySharedAnnotations: (annotations: Annotation[]) => void;
+  /** `HtmlViewer` only: move a pinned draft to the element around it
+   *  (`'parent'`) or back in (`'child'`), for a host that composes
+   *  (`onHostDraft`). The markdown `Viewer` does not implement it. */
+  stepPin?: (direction: 'parent' | 'child') => void;
+  /** `HtmlViewer` only: scroll the pinned draft into the middle of the
+   *  frame, for a host whose panel covers part of it. */
+  revealPin?: () => void;
+  /** Markdown `Viewer` only, for a host that composes (`onHostDraft`) on a
+   *  touch screen: make the page's text selection a draft now (the host's own
+   *  Comment action), reported through `onHostDraft` as `'selection'`.
+   *  Returns false when nothing in the document is selected. */
+  takeSelection?: () => boolean;
 }
 
 interface CodeBlockToolbarTarget {
@@ -559,6 +693,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   onAddGlobalAttachment,
   onRemoveGlobalAttachment,
   repoInfo,
+  refRepo,
   stickyActions = true,
   annotationHeader,
   gridEnabled = false,
@@ -572,8 +707,11 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   maxWidth,
   onOpenLinkedDoc,
   onOpenCodeFile,
+  resolveLocalLink,
   linkedDocInfo,
   imageBaseDir,
+  onImageClick: hostImageClick,
+  imageLightboxStepping = false,
   codePathBaseDir,
   disableCodePathValidation,
   onRestoreReport,
@@ -590,18 +728,52 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   onSaveQuestionAnswer,
   saveQuestionAnswerLabel,
   renderQuestionFooter,
+  questionDecisionRecording,
+  questionDecisionScope,
+  questionDecisionLines = true,
+  onToggleQuestionDecisionRecording,
+  onOpenQuestionDecision,
+  questionDecisionLocked,
+  questionReadOnly,
+  questionStatusTag,
+  questionStatusLabel,
+  renderQuestionCard,
+  renderQuestionBelowPrompt,
   onAskAI,
   allowImages = true,
   readOnly = false,
+  answerOnly = false,
+  textComments = false,
   vimModeEnabled = false,
   vimHudEnabled = false,
   vimHudKeyPanelEnabled = true,
   onVimHudKeyPanelChange,
+  onHostDraft,
 }, ref) => {
-  const viewerAnnotationHeader = readOnly ? undefined : annotationHeader;
+  // Annotation authoring is off when read-only, and when the host only wants
+  // answers (`answerOnly`); question cards and checkboxes follow `readOnly`.
+  const authoringOff = readOnly || answerOnly;
+  // `textComments`: an answer-only document whose words still take comments
+  // (the selection toolbar, comment-only, and its composer); everything else
+  // of authoring stays off. Without it this is exactly `!authoringOff`.
+  const textCommentsOnly = answerOnly && textComments && !readOnly;
+  const selectionCommentsOn = !authoringOff || textCommentsOnly;
+  const hostComposes = onHostDraft !== undefined && !authoringOff;
+  const viewerAnnotationHeader = authoringOff ? undefined : annotationHeader;
   const hasViewerAnnotationHeader = viewerAnnotationHeader !== undefined;
+  // Where `#123` / `@user` link: `refRepo` when the host gave one, else `repoInfo`.
+  const linkRepo = refRepo ?? repoInfo;
   const [copied, setCopied] = useState(false);
-  const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
+  const [lightbox, setLightboxState] = useState<{ src: string; alt: string; images?: LightboxImage[] } | null>(null);
+  // A host that handles image clicks (the Inbox) gets them; otherwise the lightbox opens, stepping through
+  // the document's images when the host asked for it.
+  const setLightbox = (image: { src: string; alt: string }) => {
+    if (hostImageClick) {
+      hostImageClick(image.src, image.alt);
+      return;
+    }
+    setLightboxState(imageLightboxStepping ? { ...image, images: collectDocumentImages(containerRef.current) } : image);
+  };
   const [locationHash, setLocationHash] = useState(() => window.location.hash);
   const globalCommentButtonRef = useRef<HTMLButtonElement>(null);
   // Read through a ref: only the imperative removeHighlight path below needs
@@ -656,9 +828,9 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   // annotations that carry `questionAnswer` (matched by question key, so an
   // answer follows its question across re-parses).
   const questionIndex = useMemo(() => {
-    const list = indexQuestionBlocks(blocks);
+    const list = indexQuestionBlocks(blocks, { decisionLines: questionDecisionLines });
     return { byBlock: new Map(list.map((q) => [q.blockId, q])), total: list.length };
-  }, [blocks]);
+  }, [blocks, questionDecisionLines]);
   // A host that keeps answers itself (`questionAnswers`) replaces the
   // annotation-derived map; each entry is validated like any other reader.
   const answersByKey = useMemo(
@@ -688,8 +860,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     codeBlock: { block: Block; element: HTMLElement };
   } | null>(null);
   const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const readOnlyRef = useRef(readOnly);
-  readOnlyRef.current = readOnly;
+  const readOnlyRef = useRef(authoringOff);
+  readOnlyRef.current = authoringOff;
   const stickySentinelRef = useRef<HTMLDivElement>(null);
   const lastAutoScrolledHashRef = useRef<string | null>(null);
   const [isStuck, setIsStuck] = useState(false);
@@ -721,6 +893,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     removeHighlight: hookRemoveHighlight,
     clearAllHighlights,
     applyAnnotations,
+    takeSelection,
   } = useAnnotationHighlighter({
     containerRef,
     annotations,
@@ -728,7 +901,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     onSelectAnnotation,
     selectedAnnotationId,
     mode,
-    enabled: !readOnly,
+    enabled: selectionCommentsOn,
     // Markdown documents drift between the moment a draft/share is written and
     // the moment it is restored (a plan revision, a re-rendered block, a
     // renderer change that adds or drops elements — #1509 hoisted an alert's
@@ -740,6 +913,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     verifyRestoredContent: true,
     onRestoreMismatch: handleRestoreMismatch,
     onRestoreReport,
+    onHostDraft: hostComposes ? onHostDraft : undefined,
   });
 
   // Refs for code block annotation path
@@ -911,7 +1085,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     });
   }, [applyCodeBlockAnnotation, blocks]);
 
-  const vimModeActive = vimModeEnabled && !readOnly;
+  const vimModeActive = vimModeEnabled && !authoringOff;
   const keyboardCodeBlockToolbarOpen = codeBlockToolbar?.activation === 'keyboard';
   const vimBlocked = !!toolbarState
     || !!hookCommentPopover
@@ -940,12 +1114,16 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     onHandledCommand: handleVimCommand,
   });
 
+  // With the composer handed to the host, a pinpoint tap opens it at once.
+  const hostPinpointRange = useCallback((range: Range) => highlightRange(range, 'comment'), [highlightRange]);
+  const noHostCodeBlockClick = useCallback(() => {}, []);
   const { hoverTarget, clearHover: clearPinpointHover } = usePinpoint({
     containerRef,
     inputMethod,
-    enabled: !readOnly && !toolbarState && !hookCommentPopover && !viewerCommentPopover && !hookQuickLabelPicker && !codeBlockQuickLabelPicker && !(isPlanDiffActive ?? false) && !vim.helpOpen,
-    onSelectRange: highlightRange,
-    onCodeBlockClick: handlePinpointCodeBlockClick,
+    // A host composer's draft stays open while the host composes; the next tap replaces it.
+    enabled: !authoringOff && (hostComposes || (!toolbarState && !hookCommentPopover)) && !viewerCommentPopover && !hookQuickLabelPicker && !codeBlockQuickLabelPicker && !(isPlanDiffActive ?? false) && !vim.helpOpen,
+    onSelectRange: hostComposes ? hostPinpointRange : highlightRange,
+    onCodeBlockClick: hostComposes ? noHostCodeBlockClick : handlePinpointCodeBlockClick,
   });
   clearPinpointHoverRef.current = clearPinpointHover;
   const vimOwnsHudTarget = vimHudEnabled
@@ -964,7 +1142,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     : (inputMethod === 'pinpoint' ? hoverTarget : null) ?? legacyVimTarget;
 
   useEffect(() => {
-    if (!readOnly) return;
+    if (!authoringOff) return;
     if (hoverTimeoutRef.current) {
       clearTimeout(hoverTimeoutRef.current);
       hoverTimeoutRef.current = null;
@@ -973,7 +1151,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     setIsCodeBlockToolbarExiting(false);
     setViewerCommentPopover(null);
     setCodeBlockQuickLabelPicker(null);
-  }, [readOnly]);
+  }, [authoringOff]);
 
   useEffect(() => {
     if (!vimOwnsDocumentNavigation) return;
@@ -1119,7 +1297,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     },
     clearAllHighlights,
     applySharedAnnotations: applyAnnotations,
-  }), [hookRemoveHighlight, clearAllHighlights, applyAnnotations, blocks]);
+    takeSelection,
+  }), [hookRemoveHighlight, clearAllHighlights, applyAnnotations, blocks, takeSelection]);
 
   // --- Viewer-specific: code block annotation ---
 
@@ -1232,7 +1411,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         </button>
       )}
 
-      {!readOnly && onAddGlobalAttachment && onRemoveGlobalAttachment && (
+      {!authoringOff && onAddGlobalAttachment && onRemoveGlobalAttachment && (
         <AttachmentsButton
           images={globalAttachments}
           onAdd={onAddGlobalAttachment}
@@ -1242,7 +1421,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         />
       )}
 
-      {!readOnly && (
+      {!authoringOff && (
         <button
           ref={globalCommentButtonRef}
           onClick={() => {
@@ -1314,6 +1493,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
 
   return (
     <CodePathValidationContext.Provider value={codePathValidation}>
+    <LocalLinkContext.Provider value={resolveLocalLink ?? null}>
     <DiagramAnchorClaimsContext.Provider value={diagramClaims}>
     <div className="relative z-50 w-full" style={maxWidth === null ? undefined : { maxWidth: maxWidth ?? 832 }}>
       {taterMode && <TaterSpriteSitting />}
@@ -1385,7 +1565,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
           <>
             {badgeClearance > 0 && <div data-print-hide style={{ height: badgeClearance }} aria-hidden="true" />}
             {stickyActions && <div ref={stickySentinelRef} className="h-0 w-0 float-right" aria-hidden="true" />}
-            {stickyActions ? (
+            {answerOnly || hostComposes ? null : stickyActions ? (
               <StickyActionsLane className={`flex items-start gap-1 md:gap-2 rounded-lg p-1 md:p-2 transition-colors duration-150 ${isStuck ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''} ${gridEnabled ? '-mr-3 md:-mr-5 lg:-mr-7 xl:-mr-9' : '-mr-1 md:-mr-2'} mt-6 md:-mt-5 lg:-mt-7 xl:-mt-9`}>
                 {documentActions}
               </StickyActionsLane>
@@ -1415,8 +1595,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                       onOpenCodeFile={onOpenCodeFile}
                       onToggleCheckbox={readOnly ? undefined : onToggleCheckbox}
                       checkboxOverrides={checkboxOverrides}
-                      githubRepo={repoInfo?.display}
-                      repoHost={repoInfo?.host}
+                      githubRepo={linkRepo?.display}
+                      repoHost={linkRepo?.host}
                       headingAnchorId={headingSlugMap.get(block.id)}
                       onNavigateAnchor={scrollToAnchor}
                     />
@@ -1431,9 +1611,11 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 annotations={annotations}
                 selectedAnnotationId={selectedAnnotationId}
                 onSelectAnnotation={onSelectAnnotation}
-                onAddAnnotation={readOnly ? undefined : onAddAnnotation}
-                readOnly={readOnly}
+                onAddAnnotation={authoringOff ? undefined : onAddAnnotation}
+                readOnly={authoringOff}
                 onRestoreReport={onRestoreReport}
+                onAskAI={authoringOff ? undefined : onAskAI}
+                askAISourcePath={linkedDocInfo?.filepath ?? sourceInfo}
               />
             </Suspense>
           ) : group.block.type === 'code' && isGraphvizLanguage(group.block.language) ? (
@@ -1443,9 +1625,11 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 annotations={annotations}
                 selectedAnnotationId={selectedAnnotationId}
                 onSelectAnnotation={onSelectAnnotation}
-                onAddAnnotation={readOnly ? undefined : onAddAnnotation}
-                readOnly={readOnly}
+                onAddAnnotation={authoringOff ? undefined : onAddAnnotation}
+                readOnly={authoringOff}
                 onRestoreReport={onRestoreReport}
+                onAskAI={authoringOff ? undefined : onAskAI}
+                askAISourcePath={linkedDocInfo?.filepath ?? sourceInfo}
               />
             </Suspense>
           ) : group.block.type === 'table' ? (
@@ -1456,8 +1640,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               onImageClick={(src, alt) => setLightbox({ src, alt })}
               onOpenLinkedDoc={onOpenLinkedDoc}
               onOpenCodeFile={onOpenCodeFile}
-              githubRepo={repoInfo?.display}
-              repoHost={repoInfo?.host}
+              githubRepo={linkRepo?.display}
+              repoHost={linkRepo?.host}
               onNavigateAnchor={scrollToAnchor}
               onHover={(element) => {
                 if (tableHoverTimeoutRef.current) {
@@ -1465,7 +1649,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                   tableHoverTimeoutRef.current = null;
                 }
                 setIsTableToolbarExiting(false);
-                if (!toolbarState) {
+                if (!toolbarState && !hostComposes) {
                   setHoveredTable({ block: group.block, element });
                 }
               }}
@@ -1483,7 +1667,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             <CodeBlock
               key={group.block.id}
               block={group.block}
-              onHover={readOnly || inputMethod === 'pinpoint' ? undefined : (element) => {
+              onHover={authoringOff || hostComposes || inputMethod === 'pinpoint' ? undefined : (element) => {
                 // Clear any pending leave timeout
                 if (hoverTimeoutRef.current) {
                   clearTimeout(hoverTimeoutRef.current);
@@ -1504,7 +1688,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                   });
                 }
               }}
-              onLeave={readOnly || inputMethod === 'pinpoint' ? undefined : () => {
+              onLeave={authoringOff || hostComposes || inputMethod === 'pinpoint' ? undefined : () => {
                 if (keyboardCodeBlockToolbarOpen) return;
                 // Delay then start exit animation
                 hoverTimeoutRef.current = setTimeout(() => {
@@ -1517,7 +1701,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 }, 100);
               }}
               isHovered={
-                !readOnly
+                !authoringOff
                 && inputMethod !== 'pinpoint'
                 && !vimOwnsDocumentNavigation
                 && codeBlockToolbar?.block.id === group.block.id
@@ -1526,7 +1710,17 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
           ) : (
             (() => {
               const question = questionIndex.byBlock.get(group.block.id);
-              return (
+              const hostCard = question && renderQuestionCard
+                ? renderQuestionCard(question, answersByKey.get(question.question.key))
+                : undefined;
+              if (hostCard !== undefined) {
+                return (
+                  <div key={group.block.id} data-block-id={group.block.id} data-block-type="directive" className={textCommentsOnly ? 'annotation-exclude' : undefined}>
+                    {hostCard}
+                  </div>
+                );
+              }
+              const rendered = (
                 <BlockRenderer
                   imageBaseDir={imageBaseDir}
                   onImageClick={(src, alt) => setLightbox({ src, alt })}
@@ -1537,28 +1731,47 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                   onNavigateAnchor={scrollToAnchor}
                   onToggleCheckbox={readOnly ? undefined : onToggleCheckbox}
                   checkboxOverrides={checkboxOverrides}
-                  githubRepo={repoInfo?.display}
-                  repoHost={repoInfo?.host}
+                  githubRepo={linkRepo?.display}
+                  repoHost={linkRepo?.host}
                   headingAnchorId={headingSlugMap.get(group.block.id)}
                   question={question}
                   questionTotal={questionIndex.total}
                   questionAnswer={question ? answersByKey.get(question.question.key) : undefined}
-                  onAnswerQuestion={readOnly ? undefined : onAnswerQuestion}
-                  onSaveQuestionAnswer={readOnly ? undefined : onSaveQuestionAnswer}
+                  onAnswerQuestion={readOnly || (question && questionReadOnly?.(question)) ? undefined : onAnswerQuestion}
+                  onSaveQuestionAnswer={readOnly || (question && questionReadOnly?.(question)) ? undefined : onSaveQuestionAnswer}
                   saveQuestionAnswerLabel={saveQuestionAnswerLabel}
                   renderQuestionFooter={renderQuestionFooter}
+                  questionDecisionRecording={question ? questionDecisionRecording?.(question) : undefined}
+                  questionDecisionScope={questionDecisionScope}
+                  onToggleQuestionDecisionRecording={readOnly || (question && (questionDecisionLocked?.(question) || questionReadOnly?.(question))) ? undefined : onToggleQuestionDecisionRecording}
+                  onOpenQuestionDecision={readOnly || (question && (questionDecisionLocked?.(question) || questionReadOnly?.(question))) ? undefined : onOpenQuestionDecision}
+                  questionStatusTag={questionStatusTag}
+                  questionStatusLabel={questionStatusLabel}
+                  renderQuestionBelowPrompt={renderQuestionBelowPrompt}
                 />
               );
+              // `textComments`: a question card's words are not commented on
+              // (its own controls already are excluded); a box-less wrapper
+              // keeps its layout.
+              if (question && textCommentsOnly) {
+                return (
+                  <div key={group.block.id} className="annotation-exclude" style={{ display: 'contents' }}>
+                    {rendered}
+                  </div>
+                );
+              }
+              return rendered;
             })()
           )
         )}
 
         {/* Text selection toolbar */}
-        {!readOnly && toolbarState && (
+        {selectionCommentsOn && !hostComposes && toolbarState && (
           <ToolbarErrorBoundary>
             <AnnotationToolbar
               element={toolbarState.element}
               positionMode="center-above"
+              commentOnly={textCommentsOnly || undefined}
               onAnnotate={handleAnnotate}
               onClose={handleToolbarClose}
               onRequestComment={handleRequestComment}
@@ -1608,7 +1821,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         )}
 
         {/* Code block hover toolbar */}
-        {!readOnly
+        {!authoringOff
           && codeBlockToolbar
           && !toolbarState
           && !(vimOwnsDocumentNavigation && codeBlockToolbar.activation === 'pointer')
@@ -1658,8 +1871,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             onImageClick={(src, alt) => setLightbox({ src, alt })}
             onOpenLinkedDoc={onOpenLinkedDoc}
             onOpenCodeFile={onOpenCodeFile}
-            githubRepo={repoInfo?.display}
-            repoHost={repoInfo?.host}
+            githubRepo={linkRepo?.display}
+            repoHost={linkRepo?.host}
             onNavigateAnchor={scrollToAnchor}
           />
         )}
@@ -1693,7 +1906,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         )}
 
         {/* Comment popover — hook handles text selection, Viewer handles global + code block */}
-        {!readOnly && hookCommentPopover && (
+        {selectionCommentsOn && !hostComposes && hookCommentPopover && (
             <CommentPopover
               anchorEl={hookCommentPopover.anchorEl}
               contextText={hookCommentPopover.contextText}
@@ -1711,10 +1924,11 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 label: 'Selected text',
                 text: hookCommentPopover.selectedText ?? hookCommentPopover.contextText,
                 sourcePath: linkedDocInfo?.filepath ?? sourceInfo,
+                ...selectionSourceLines(blocks, hookCommentPopover.blockIds ?? []),
               }}
             />
           )}
-        {!readOnly && viewerCommentPopover && (
+        {!authoringOff && viewerCommentPopover && (
           <CommentPopover
             anchorEl={viewerCommentPopover.anchorEl}
             contextText={viewerCommentPopover.contextText}
@@ -1736,12 +1950,15 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               label: viewerCommentPopover.isGlobal ? 'Document' : 'Code block',
               text: viewerCommentPopover.selectedText,
               sourcePath: linkedDocInfo?.filepath ?? sourceInfo,
+              ...(!viewerCommentPopover.isGlobal && viewerCommentPopover.codeBlock
+                ? selectionSourceLines(blocks, [viewerCommentPopover.codeBlock.block.id])
+                : null),
             }}
           />
         )}
 
         {/* Quick Label floating picker — hook handles text selection, Viewer handles code blocks */}
-        {!readOnly && hookQuickLabelPicker && (
+        {selectionCommentsOn && !hostComposes && hookQuickLabelPicker && (
           <FloatingQuickLabelPicker
             anchorEl={hookQuickLabelPicker.anchorEl}
             cursorHint={hookQuickLabelPicker.cursorHint}
@@ -1749,7 +1966,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             onDismiss={hookQuickLabelPickerDismiss}
           />
         )}
-        {!readOnly && codeBlockQuickLabelPicker && (
+        {!authoringOff && codeBlockQuickLabelPicker && (
           <FloatingQuickLabelPicker
             anchorEl={codeBlockQuickLabelPicker.anchorEl}
             onSelect={(label: QuickLabel) => {
@@ -1773,11 +1990,12 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
 
       {/* Image lightbox */}
       {lightbox && createPortal(
-        <ImageLightbox src={lightbox.src} alt={lightbox.alt} onClose={() => setLightbox(null)} />,
+        <ImageLightbox src={lightbox.src} alt={lightbox.alt} images={lightbox.images} onClose={() => setLightboxState(null)} />,
         document.body
       )}
     </div>
     </DiagramAnchorClaimsContext.Provider>
+    </LocalLinkContext.Provider>
     </CodePathValidationContext.Provider>
   );
 });

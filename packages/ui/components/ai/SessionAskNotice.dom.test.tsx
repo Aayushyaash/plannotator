@@ -42,6 +42,32 @@ function buttonsIn(container: Element, selector: string): HTMLButtonElement[] {
 }
 
 describe.if(hasDom)('Ask this session notices in the document chat panel', () => {
+  const listenOnlyProviders = [{ id: 'session-bridge', name: 'session-bridge', sessionBridge: { host: 't3', status: 'ready', modes: { turn: true, transient: false }, interruptible: false } }];
+
+  test('a session advertised as not interruptible offers waiting and stops listening without claiming to stop its turn', () => {
+    const onSessionAskAction = mock((_questionId: string, _action: string) => {});
+    const onStop = mock(() => {});
+    const el = render({ messages: [entry({ error: 'busy', errorCode: 'agent_busy' })], onSessionAskAction,
+      aiProviders: listenOnlyProviders, onAskGeneral: mock(() => {}), isStreaming: true, onStop });
+    const choices = buttonsIn(el, '[data-session-ask-actions="busy"]');
+    expect(choices.map(button => button.textContent)).toEqual(['Ask when it finishes']);
+    act(() => choices[0].click());
+    expect(onSessionAskAction.mock.calls).toEqual([['q1', 'wait']]);
+    const stop = el.querySelector<HTMLButtonElement>('button[aria-label="Stop listening"]')!;
+    expect(stop.title).toContain('keeps running');
+    act(() => stop.click());
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  test('the capability decides, not the host name: without interruptible:false the interrupt choice and Stop generating stay', () => {
+    // What regresses: an older server (no field) or any other host losing "Interrupt and ask now".
+    const { interruptible: _dropped, ...advert } = listenOnlyProviders[0].sessionBridge;
+    const el = render({ messages: [entry({ error: 'busy', errorCode: 'agent_busy' })], onSessionAskAction: mock(() => {}),
+      aiProviders: [{ ...listenOnlyProviders[0], sessionBridge: advert }], onAskGeneral: mock(() => {}), isStreaming: true, onStop: mock(() => {}) });
+    expect(buttonsIn(el, '[data-session-ask-actions="busy"]').map(button => button.textContent)).toEqual(['Ask when it finishes', 'Interrupt and ask now']);
+    expect(el.querySelector('button[aria-label="Stop generating"]')).not.toBeNull();
+  });
+
   test('busy: the two choices report wait and interrupt for that question', () => {
     const onSessionAskAction = mock((_questionId: string, _action: string) => {});
     const el = render({
@@ -56,30 +82,34 @@ describe.if(hasDom)('Ask this session notices in the document chat panel', () =>
     expect(onSessionAskAction.mock.calls).toEqual([['q1', 'wait'], ['q1', 'interrupt']]);
   });
 
-  test('gone: offers the separate-AI fallback only when there is one', () => {
+  // While a session is attached Ask AI has no other provider, so a gone or
+  // blocked session must not offer a switch: only a note, and no buttons.
+  test('gone and blocked: a note that the session cannot be reached, no fallback button', () => {
     const onSessionAskAction = mock((_questionId: string, _action: string) => {});
-    const withFallback = render({
-      messages: [entry({ error: 'gone', errorCode: 'session_gone' })],
-      onSessionAskAction,
-      sessionAskFallbackLabel: 'Pi',
-    });
-    const [fallback] = buttonsIn(withFallback, '[data-session-ask-actions="fallback"]');
-    act(() => fallback.click());
-    expect(onSessionAskAction.mock.calls).toEqual([['q1', 'fallback']]);
-    act(() => root?.unmount());
-    host?.remove();
-
-    const without = render({
-      messages: [entry({ error: 'gone', errorCode: 'session_gone' })],
-      onSessionAskAction,
-      sessionAskFallbackLabel: null,
-    });
-    expect(without.querySelector('[data-session-ask-actions]')).toBeNull();
+    for (const [errorCode, kind] of [['session_gone', 'gone'], ['session_blocked', 'blocked']] as const) {
+      const el = render({ messages: [entry({ error: 'unreachable', errorCode })], onSessionAskAction });
+      expect(el.querySelector(`[data-session-ask-unreachable="${kind}"]`)).not.toBeNull();
+      expect(el.querySelector('[data-session-ask-actions]')).toBeNull();
+      expect(el.querySelectorAll('[data-ai-message] button').length).toBe(0);
+      act(() => root?.unmount());
+      host?.remove();
+      root = null;
+      host = null;
+    }
+    expect(onSessionAskAction).not.toHaveBeenCalled();
   });
 
   test('a host that passes no handler renders no actions, even for a bridge error code', () => {
     const el = render({ messages: [entry({ error: 'busy', errorCode: 'agent_busy' })] });
     expect(el.querySelector('[data-session-ask-actions]')).toBeNull();
+  });
+
+  // The failure this guards: a taken-over answer rendered as an error, which
+  // replaces the partial answer the reviewer already read.
+  test('taken over: the partial answer stays, with the note under it', () => {
+    const el = render({ messages: [entry({ text: 'Because of X', notice: 'NOTE-SENTINEL' })] });
+    expect(el.textContent).toContain('Because of X');
+    expect(el.querySelector('[data-session-ask-note="taken-over"]')?.textContent).toBe('NOTE-SENTINEL');
   });
 
   test('a waiting question shows the waiting status instead of "Thinking"', () => {

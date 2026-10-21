@@ -237,6 +237,60 @@ describe.if(hasDom)('cross-file annotation mutations', () => {
     expect(api!.linkedDoc.getDocAnnotations().get(ROOT_PATH)?.annotations).toEqual([]);
   });
 
+  // getDocAnnotations() deliberately carries the OPEN document too (panel,
+  // counts); an export that read it beside the host's live state printed the
+  // open document twice. getFeedbackDocuments() is the export's split: each
+  // document once, the root apart from the others.
+  test('the feedback split holds the root once and every other document once', async () => {
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    await act(async () => {
+      root = createRoot(host!);
+      root.render(<Harness />);
+    });
+    // Root active: its annotations are the host's live state, so no root entry.
+    let split = api!.linkedDoc.getFeedbackDocuments();
+    expect(split.root).toBeNull();
+    expect([...split.documents.keys()]).toEqual([]);
+
+    await act(async () => { api!.linkedDoc.openLoaded({ filepath: OTHER_PATH, markdown: '# b' }); });
+    await act(async () => { api!.setAnnotations([row('b1'), row('b2')]); });
+
+    split = api!.linkedDoc.getFeedbackDocuments();
+    expect(split.root?.annotations.map((a) => a.id)).toEqual(['a1']);
+    expect([...split.documents.keys()]).toEqual([OTHER_PATH]);
+    expect(split.documents.get(OTHER_PATH)?.annotations.map((a) => a.id)).toEqual(['b1', 'b2']);
+
+    // Back on the root: the visited document is stored, the root is live again.
+    await act(async () => { api!.linkedDoc.back(); });
+    split = api!.linkedDoc.getFeedbackDocuments();
+    expect(split.root).toBeNull();
+    expect([...split.documents.keys()]).toEqual([OTHER_PATH]);
+  });
+
+  // Opening the root's own path FROM the root (an HTML "Home" link, or
+  // index.html#intro from index.html) is not a backlink: no linked doc is
+  // open yet, so it becomes a separate copy with its own comments. Those
+  // must reach the export, matching the count the decision control shows.
+  test('comments on a self-opened copy of the root are exported, not dropped', async () => {
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    await act(async () => {
+      root = createRoot(host!);
+      root.render(<Harness />);
+    });
+    await act(async () => { api!.linkedDoc.openLoaded({ filepath: ROOT_PATH, markdown: '# a' }); });
+    await act(async () => { api!.setAnnotations([row('s1')]); });
+    await act(async () => { api!.linkedDoc.openLoaded({ filepath: OTHER_PATH, markdown: '# b' }); });
+    await act(async () => { api!.linkedDoc.back(); });
+
+    expect(api!.linkedDoc.docAnnotationCount).toBe(1);
+    const split = api!.linkedDoc.getFeedbackDocuments();
+    const exported = [...split.documents.values()].flatMap((d) => d.annotations.map((a) => a.id));
+    expect(exported).toEqual(['s1']);
+    expect(split.documents.get(ROOT_PATH)?.annotations.map((a) => a.id)).toEqual(['s1']);
+  });
+
   test('the active document is never written through the stored-document path', async () => {
     await mountWithTwoAnnotatedDocuments();
     // App routes open-document cards to its own handlers; the store refuses the

@@ -4,20 +4,18 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { removeStubbedHtml, stubHookDistHtml } from "../../../tests/helpers/hook-dist-stub";
 
 const entry = resolve(import.meta.dir, "index.ts");
-const distDir = resolve(import.meta.dir, "../dist");
 const roots: string[] = [];
 let stubs: string[] = [];
 
 beforeAll(() => {
   // API-only CLI tests need the import-time HTML assets, even without a UI build.
-  stubs = ["index.html", "review.html"].map(name => join(distDir, name)).filter(path => !existsSync(path));
-  mkdirSync(distDir, { recursive: true });
-  for (const path of stubs) writeFileSync(path, "<!doctype html><title>test</title>");
+  stubs = stubHookDistHtml();
 });
 afterAll(() => {
-  for (const path of stubs) rmSync(path, { force: true });
+  removeStubbedHtml(stubs);
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
 
@@ -79,8 +77,11 @@ async function launch(cwd: string, args: string[], dataDir: string, bridge = fal
   const stdout = new Response(proc.stdout).text();
   const stderr = new Response(proc.stderr).text();
   for (let i = 0; i < 200; i++) {
-    if (existsSync(ready)) {
-      const { url } = JSON.parse(readFileSync(ready, "utf8"));
+    // The CLI appends one JSON line; the file exists before the line is
+    // written, so only a newline-terminated read is the whole record.
+    const line = existsSync(ready) ? readFileSync(ready, "utf8") : "";
+    if (line.endsWith("\n")) {
+      const { url } = JSON.parse(line);
       return {
         async api(path: string, body?: unknown) {
           const response = await fetch(`${url}${path}`, body === undefined ? undefined : {
@@ -200,7 +201,9 @@ test("direct CLI honors PLANNOTATOR_CWD only for an explicit directory", async (
       session.stop();
     }
   }
-}, 15_000);
+  // Two cold CLI boots plus the CLI's fixed 1.5 s exit grace each, like the
+  // other two-session tests here; launch() alone allows each boot ~10 s.
+}, 30_000);
 
 test("a selected linked worktree and a multi-repo parent use existing discovery", async () => {
   const { root, caller, target, dataDir } = fixture();

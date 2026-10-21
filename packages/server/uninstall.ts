@@ -28,6 +28,14 @@ import {
   resolve,
 } from "node:path";
 import { getPlannotatorDataDir } from "@plannotator/shared/data-dir";
+import { parseT3HookCommand, T3_SETTINGS_BACKUP_SUFFIX } from "@plannotator/shared/t3-hook-command";
+import { runningT3Workers, stopT3Workers } from "@plannotator/shared/t3-workers";
+import { inboxStatus, readInboxRegistry, stopInbox } from "@plannotator/shared/inbox/registry";
+import { INBOX_TAILNET_HTTPS_PORT, takeDownInboxTailnet } from "./inbox-devices";
+import { takeDownInboxTailscale } from "./inbox-tailscale";
+import { forgetInboxAgents, planInboxAgentRemoval, type AgentEnvironment } from "./inbox-agents";
+import { planInboxNoteRemoval } from "./inbox-agent-notes";
+import { INBOX_AGENT_LABELS, type InboxAgentId } from "@plannotator/core/inbox-types";
 import {
   applyEdits,
   createScanner,
@@ -100,6 +108,8 @@ const PURGE_OWNED_TOP_LEVEL = [
   "plans",
   "history",
   "feedback",
+  "inbox",
+  "t3-code",
   "drafts",
   "review-progress",
   "active",
@@ -122,6 +132,7 @@ const PURGE_OWNED_TOP_LEVEL = [
   "update-result.json",
   "update.lock",
   "update.log",
+  "update-notes",
   "install-flags.json",
 ] as const;
 
@@ -286,7 +297,7 @@ type MutableUninstallResult = {
 type HookCleanupSpec = {
   readonly event: string;
   readonly matcher?: string;
-  readonly suffix: "" | "improve-context";
+  readonly suffix: "" | "improve-context" | "t3-hook";
 };
 
 type HookCleanupPolicy = {
@@ -379,10 +390,70 @@ export async function runPlannotatorUninstall(
     };
   }
 
+  // A running Inbox writes into inbox/ until it exits: purge stops it first,
+  // over its own token-guarded stop route (registry pid as the fallback).
+  let inboxBlocksPurge = false;
+  if (request.purge && !dataDirSafetyIssue) {
+    if (request.dryRun) {
+      const status = await inboxStatus(state.dataDir);
+      if (status.state === "running") {
+        state.planned.push(`Stop the running Plannotator Inbox (pid ${status.entry.pid})`);
+      }
+    } else {
+      const stopped = await stopInbox(state.dataDir);
+      if (stopped.state === "stopped") {
+        state.removed.push(`Stopped the running Plannotator Inbox (pid ${stopped.pid})`);
+      } else if (stopped.state === "still_running") {
+        inboxBlocksPurge = true;
+        state.errors.push(
+          `The Plannotator Inbox (pid ${stopped.pid}) is still running; quit it and run uninstall --purge again.`,
+        );
+      }
+    }
+    // "Reach from my tailnet": a mapping a crashed Inbox left behind (a clean stop already took its own down).
+    if (!inboxBlocksPurge && readInboxRegistry(state.dataDir)?.tailnet) {
+      if (request.dryRun) {
+        state.planned.push(`Take down the Plannotator Inbox's tailnet address (tailscale serve --https=${INBOX_TAILNET_HTTPS_PORT})`);
+      } else {
+        const tailnet = takeDownInboxTailnet(state.dataDir);
+        if (tailnet === "removed") state.removed.push(`Took down the Plannotator Inbox's tailnet address (tailscale serve --https=${INBOX_TAILNET_HTTPS_PORT})`);
+        if (tailnet === "failed") state.warnings.push(`Could not check or remove the Inbox's tailnet address; run: tailscale serve --https=${INBOX_TAILNET_HTTPS_PORT} off`);
+      }
+    }
+    // "Over your tailnet": the window's mapping a crashed Inbox left behind (a clean stop, including the stop above, takes its own down).
+    const kept = inboxBlocksPurge ? undefined : readInboxRegistry(state.dataDir)?.tailscale;
+    if (kept?.https_port && kept.proxy_port) {
+      if (request.dryRun) {
+        state.planned.push(`Take down the Plannotator Inbox's tailnet address (tailscale serve --https=${kept.https_port})`);
+      } else {
+        const result = takeDownInboxTailscale(state.dataDir);
+        if (result === "removed") state.removed.push(`Took down the Plannotator Inbox's tailnet address (tailscale serve --https=${kept.https_port})`);
+        if (result === "failed") state.warnings.push(`Could not check or remove the Inbox's tailnet address; run: tailscale serve --https=${kept.https_port} off`);
+      }
+    }
+  }
+
+  // The opt-in T3 Code connection's workers run from the binary being removed
+  // and write into t3-code/: stop them (reviews stay open). Nothing to do for
+  // anyone who never connected T3.
+  if (request.dryRun) {
+    for (const worker of await runningT3Workers(state.dataDir)) {
+      state.planned.push(`Stop the T3 Code companion for thread ${worker.thread} (pid ${worker.pid})`);
+    }
+  } else {
+    for (const worker of await stopT3Workers(state.dataDir)) {
+      if (worker.state === "stopped") state.removed.push(`Stopped the T3 Code companion for thread ${worker.entry.thread} (pid ${worker.entry.pid})`);
+      if (worker.state === "still_running") state.warnings.push(`The T3 Code companion for thread ${worker.entry.thread} (pid ${worker.entry.pid}) did not stop; quit it before deleting ${join(state.dataDir, "t3-code")}.`);
+    }
+  }
+
   const paths = resolveOwnedPaths(environment);
 
   await removeHostPlugins(request, environment, paths, state);
   removeHostConfigEntries(request, environment, paths, state);
+  // Plain uninstall too: with the binary gone, an agent's plannotator-inbox
+  // entry would fail to start at every launch.
+  await removeInboxAgentConnections(request, environment, state);
   removeInstalledFiles(request, environment, paths, state);
   if (dataDirSafetyIssue) {
     state.warnings.push(
@@ -404,7 +475,7 @@ export async function runPlannotatorUninstall(
       // Keep this block synchronous: no host command or other awaited work may
       // reopen a path-swap window after the destructive-boundary revalidation.
       removeInstallerData(request, state);
-      if (request.purge) purgeLocalData(request, state);
+      if (request.purge && !inboxBlocksPurge) purgeLocalData(request, state);
     }
   }
 
@@ -457,6 +528,63 @@ export function formatUninstallResult(result: UninstallResult): string {
   }
 
   return lines.join("\n");
+}
+
+/** The agents' boundary (inbox-agents.ts) over uninstall's own. */
+function agentEnvironmentOf(environment: UninstallEnvironment): AgentEnvironment {
+  return {
+    platform: environment.platform,
+    homeDir: environment.homeDir,
+    env: environment.env,
+    which: (command) => environment.which(command),
+    run: async (argv) => {
+      const result = await environment.runCommand(argv[0]!, argv.slice(1));
+      return { exitCode: result.exitCode, timedOut: result.timedOut, stdout: result.stdout ?? "", stderr: "" };
+    },
+  };
+}
+
+/**
+ * The `plannotator-inbox` MCP entries `plannotator inbox` added to the
+ * agents on this computer (inbox-agents.ts): only the recorded ones that still
+ * run Plannotator. An entry the person changed to run something else is theirs
+ * and is named; so is one that runs this binary but has no record (agents.json
+ * lost), which the person may have added by hand. A failure is a warning,
+ * never a reason to keep the CLI.
+ */
+async function removeInboxAgentConnections(
+  request: UninstallRequest,
+  environment: UninstallEnvironment,
+  state: MutableUninstallResult,
+): Promise<void> {
+  const agents = agentEnvironmentOf(environment);
+  // With no record (agents.json lost), an entry that runs exactly this binary is named, never removed.
+  const plan = planInboxAgentRemoval(state.dataDir, agents, [environment.execPath, "inbox", "mcp"]);
+  // The notes (inbox-agent-notes.ts): only the marked section, as the person left it.
+  const notes = planInboxNoteRemoval(state.dataDir, agents, INBOX_AGENT_LABELS);
+  for (const skipped of [...plan.skipped, ...notes.skipped]) state.warnings.push(`Skipped: ${skipped}.`);
+  if (request.dryRun) {
+    for (const item of plan.items) state.planned.push(item.describe);
+    for (const note of notes.items) state.planned.push(note.describe);
+    return;
+  }
+  for (const note of notes.items) {
+    const result = note.apply();
+    if (result.ok) state.removed.push(note.describe);
+    else state.warnings.push(`Could not remove the note in ${note.path}: ${result.reason}.`);
+  }
+  const removed: InboxAgentId[] = [];
+  for (const item of plan.items) {
+    const problem = await item.apply();
+    if (problem) {
+      state.warnings.push(`Could not remove ${item.describe}: ${problem}.`);
+      continue;
+    }
+    state.removed.push(item.describe);
+    removed.push(item.agent);
+  }
+  // A plain uninstall keeps the data: forget these records so a reinstall connects them again.
+  if (!request.purge) forgetInboxAgents(state.dataDir, removed);
 }
 
 function formatUninstallRetryCommand(request: UninstallRequest): string {
@@ -637,6 +765,7 @@ function removeHostConfigEntries(
     [
       { event: "PermissionRequest", matcher: "ExitPlanMode", suffix: "" },
       { event: "PreToolUse", matcher: "EnterPlanMode", suffix: "improve-context" },
+      { event: "PreToolUse", matcher: "Bash", suffix: "t3-hook" },
     ],
     paths.binaryPaths,
     environment.platform,
@@ -645,10 +774,13 @@ function removeHostConfigEntries(
       removeFileWhenEmpty: false,
     },
     "managed Claude Code hooks",
-    `Make ${join(paths.claudeDir, "settings.json")} a readable, writable strict JSON object. Remove only Plannotator command hooks from hooks.PermissionRequest entries whose matcher is "ExitPlanMode" and hooks.PreToolUse entries whose matcher is "EnterPlanMode", then save the file.`,
+    `Make ${join(paths.claudeDir, "settings.json")} a readable, writable strict JSON object. Remove only Plannotator command hooks from hooks.PermissionRequest entries whose matcher is "ExitPlanMode", hooks.PreToolUse entries whose matcher is "EnterPlanMode", and Plannotator t3-hook commands in Bash entries, then save the file.`,
     request,
     state,
   );
+  // The backup `t3-hook install` (install.sh --with-t3) made before its first
+  // change to settings.json. The name is Plannotator's own; nothing else writes it.
+  removePath(join(paths.claudeDir, `settings.json${T3_SETTINGS_BACKUP_SUFFIX}`), request, state);
 
   cleanupHooksJson(
     join(paths.codexDir, "hooks.json"),
@@ -846,6 +978,20 @@ function removeInstalledFiles(
     ),
   ]) {
     removePath(cachePath, request, state);
+  }
+
+  // OpenCode 2 caches npm plugins at <cache>/opencode/npm/<name>@<spec>/
+  // (packages/util/src/npm.ts), i.e. npm/@plannotator/opencode@latest.
+  for (const cacheRoot of uniquePaths([
+    paths.xdgCacheDir,
+    join(environment.homeDir, ".cache"),
+  ])) {
+    cleanupDirectoryEntriesWithPrefix(
+      join(cacheRoot, "opencode", "npm", "@plannotator"),
+      "opencode",
+      request,
+      state,
+    );
   }
 
   cleanupDirectoryEntriesWithPrefix(
@@ -1912,7 +2058,7 @@ function removePath(
 function isManagedHook(
   value: unknown,
   binaryPaths: readonly string[],
-  suffix: "" | "improve-context",
+  suffix: "" | "improve-context" | "t3-hook",
   platform: NodeJS.Platform,
   allowRelocatedBinary = false,
 ): boolean {
@@ -1922,6 +2068,10 @@ function isManagedHook(
   }
 
   const command = hook.command.trim();
+  if (suffix === "t3-hook") {
+    const parsed = parseT3HookCommand(command);
+    return parsed !== undefined && (parsed.executable === "plannotator" || binaryPaths.some((path) => sameCommand(parsed.executable, path, platform)));
+  }
   const expectedBare = suffix ? `plannotator ${suffix}` : "plannotator";
   if (command === expectedBare) return true;
 

@@ -4,6 +4,7 @@ import { DiffViewer } from '../../components/DiffViewer';
 import { useReviewState } from '../ReviewStateContext';
 import { getReviewDiffPanelFilePath, type ReviewDiffPanelParams } from '../reviewPanelTypes';
 import { annotationMatchesPrScope } from '../../utils/annotationScope';
+import { fileKind } from '@plannotator/core/file-kind';
 
 /**
  * Thin adapter between dockview's panel API and the existing DiffViewer.
@@ -42,6 +43,11 @@ export const ReviewDiffPanel: React.FC<IDockviewPanelProps> = (props) => {
           )
         : [],
     [state.aiMessages, file]
+  );
+
+  const reviewFilePaths = useMemo(
+    () => new Set(state.files.map((candidate) => candidate.path)),
+    [state.files]
   );
 
   const searchMatchesForFile = useMemo(
@@ -101,6 +107,7 @@ export const ReviewDiffPanel: React.FC<IDockviewPanelProps> = (props) => {
         onDeleteAnnotation={state.onDeleteAnnotation}
         isViewed={state.viewedFiles.has(file.path)}
         isGenerated={state.generatedFiles.has(file.path)}
+        isTest={fileKind(file.path, state.generatedFiles) === 'test'}
         onToggleViewed={() => state.onToggleViewed(file.path)}
         showViewedControls={state.showViewedControls}
         isStaged={state.stagedFiles.has(file.path)}
@@ -131,6 +138,14 @@ export const ReviewDiffPanel: React.FC<IDockviewPanelProps> = (props) => {
         onCodeNavRequest={state.onCodeNavRequest}
         onTokenHoverEnter={state.onTokenHoverEnter}
         onTokenHoverLeave={state.onTokenHoverLeave}
+        reviewFilePaths={reviewFilePaths}
+        onOpenReviewFile={state.openDiffFile}
+        markdownPreviewSupported={!!state.markdownPreview}
+        markdownView={state.markdownPreview ? state.markdownPreview.viewOf(file.path) : 'source'}
+        markdownViewDisabledReason={state.markdownPreview?.lockReason(file.path) ?? null}
+        onMarkdownViewChange={state.markdownPreview
+          ? (view, how) => (how === 'chosen' ? state.markdownPreview!.choose : state.markdownPreview!.show)(file.path, view)
+          : undefined}
       />
     </div>
   );

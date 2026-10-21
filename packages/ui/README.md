@@ -19,6 +19,7 @@ configurePlannotatorUI({
   storageBackend,              // where settings persist
   identityProvider,           // who the current user is
   imageSrcResolver,           // how image paths resolve to URLs
+  uploadTransport,             // where pasted/attached images upload to
   docPreviewFetcher,
   fileTreeBackend,
   draftTransport,
@@ -26,12 +27,16 @@ configurePlannotatorUI({
   aiTransport,
   skillCatalogTransport,       // skill-reference catalog for comment composers
   skillContentTransport,       // human-only skill contents for feedback injection
+  skillReferenceExport,        // false: no per-comment "Skills referenced" list (a host composing one block per message)
+  skillInstructionsDestination, // what the human-only line says instructions go with (default "your feedback")
   serverSync,
   webmcp,                      // browser-agent (WebMCP) provider policy: { enabled, namePrefix }
   mathRendererLoader,          // how KaTeX loads when no renderer is registered before first math render
   identityGenerator,           // sync generator behind the default "tater" name (no identityProvider)
   alertIconRenderer,           // (name) => ReactNode | null for a GitHub alert title line's <!-- icon: name --> (default: null, the type's icon)
   fenceTheme,                  // (colorTheme, mode) => Shiki theme name | undefined for code fences (default: SHIKI_THEME_MAP, else pierre-dark/light)
+  componentTooltips,           // true: ui's own hover text (components/HostTitle) draws as ui's Tooltip, not a native title (ui 0.53.0; default false)
+  loadSettingsFromBackend,     // true: re-hydrate settings from your (synchronous) storageBackend after install, applied last
 });
 ```
 
@@ -292,6 +297,16 @@ in 0.42.0 (proven by diffing the mounted `outerHTML` against the base commit).
   in a plain-text body, so the first person you list owns every occurrence of
   it; and a restored draft has no chips (and reports no ids) until the author
   picks again. No source → no overlay element at all.
+- **Agents in the `@` picker** (ui 0.53.1; the Plannotator
+  Inbox's agent tags): `MentionSource.kinds?: ('user' | 'agent')[]` (absent →
+  users only, as before) lets a host offer agents; `MentionSource.matchDetail?:
+  boolean` (absent → true) keeps a query from matching the `detail` line;
+  `MentionPerson.group?: string` draws consecutive people of one group under a
+  heading, each run a `role="group"` labelled by it (absent on every person →
+  the flat list); `MentionSource.renderNotice?: (tagged) => ReactNode` draws a
+  host line under the composer field from the people the draft still tags
+  (`CommentPopover`). All optional; a host passing none renders exactly as
+  before.
 - **`Viewer` / `HtmlViewer` `mentionSource`** (0.43.1): the same prop on the two
   viewers, forwarded to every comment composer each of them mounts, so a host
   wires mentions once per surface instead of per composer. The ids the author
@@ -348,6 +363,22 @@ Neither prop reaches `CodeAnnotation` cards (the review-editor shape), which
 take no `renderCardFooter` either. See HANDOFF.md § "Annotation card header
 slot and mentions on the edit box (0.45.0)".
 
+- **`compareAnnotations?: (a, b) => number`** (ui 0.53.0) — the order of the
+  comment timeline and of each All-files group, for comments with an order of
+  their own (the Inbox sorts a video's comments by the moment they are at).
+  Ties keep creation order; replies still thread under their parent. Omit it
+  and the panel sorts by creation exactly as before.
+- **`title?`, `titleNote?`, `cardParts?: (annotation) => { quote?, images? }`**
+  (ui 0.53.0) — the header's title (default "Annotations") and a quiet note
+  at its right, and per card whether the built-in quote and image row are
+  drawn (the Inbox's video comments draw the moment and the frame in
+  `renderCardHeader` instead). Omit them and the panel is as before.
+- **Export: `exportLocation`** (ui 0.53.0) — a string a host sets on the
+  COPY of an annotation it hands the exporters (`exportAnnotations`,
+  `exportLinkedDocAnnotations`): one line printed under the entry's heading
+  (the Inbox's `At 1:42 (102.4 s of 7:41)`). Never stored; an annotation
+  without it exports byte-identically.
+
 ### WebMCP provider (`@plannotator/ui/webmcp`; 0.32.0)
 
 The engine that lets a browser-integrated agent (Chrome/Edge WebMCP, `document.modelContext`) call in-page tools on a document surface. Feature-detected once; a browser without the API sees no registration, no DOM, no network, no timers. Seam: `configurePlannotatorUI({ webmcp: { enabled, namePrefix } })`, default enabled with the `plannotator.` prefix; pass `enabled: false` to keep a host page tool-free, or your own prefix to namespace the tools beside your own. There is deliberately no confirmation seam: the catalog is read-and-comment only (no approve / submit / close tools), and the agent may only edit or remove comments stamped `source: "browser-agent"`.
@@ -383,6 +414,52 @@ See HANDOFF.md § "Questions in documents (0.48.0, core 0.25.8)".
 - `findQuestionBlocks(markdown)` (core) locates each question block by key, line range and exact text, without the UI parser; it shares the block splitter's rules through the new `@plannotator/core/markdown-structure` subpath, so it agrees with what renders.
 
 See HANDOFF.md § "Question host seams (ui 0.49.0, core 0.25.9)".
+
+**Decision recording toggle and status tag (ui 0.52.0).** Also optional on `Viewer`, also unused by Plannotator:
+
+- `questionDecisionRecording(question) => boolean | undefined`: false draws a `Decision: when answered` question's "Records a decision" tag faded (muted-foreground at 55%; the focus ring stays at full strength) with a dotted outline and hides its "Answering this records a decision" row. A recorded decision is never affected.
+- `onToggleQuestionDecisionRecording(key, next)`: makes that tag an `aria-pressed` toggle button; store `next` and return it from `questionDecisionRecording`. Not offered under `readOnly` or in a card without an answer handler.
+- `questionStatusTag: 'none'`: hides the card's own Open / Answered / Settled / Skipped tag so you can draw your own; the decision tags stay.
+- `renderQuestionCard(question, savedAnswer)` (ui 0.53.0): your own card in place of a question's answer card (return `undefined` to keep it), e.g. for a question the asker withdrew; `renderQuestionBelowPrompt(question)`: content under a card's prompt.
+
+See HANDOFF.md § "Question decision toggle and status tag (ui 0.52.0; …)".
+
+**Decision toggle on any question, and a decision-card opener (ui 0.52.1).** Also optional on `Viewer`, also unused by Plannotator:
+
+- `questionDecisionScope?: 'when-answered' | 'any'` (default `'when-answered'`, the 0.52.0 behaviour). With `'any'`, `questionDecisionRecording(question)` also applies to a question with no decision line: a boolean adds the "Records a decision" tag in that state (true also shows the "Answering this records a decision" row); `undefined` leaves it tag-less. Return `false` for "off by default".
+- `onOpenQuestionDecision(key, anchor)`: splits the tag into a diamond switch (`aria-pressed`, "Record as a decision", driven by `onToggleQuestionDecisionRecording`) and the words as a button (`aria-haspopup="dialog"`) that calls this with its own element to anchor your decision card. Offered on and off; not offered under `readOnly`. Without it the whole tag is the toggle, as in 0.52.0.
+
+See HANDOFF.md § "Decision toggle on any question, and an opener for the host's decision card (ui 0.52.1, …)".
+
+**Questions without decision lines (ui 0.53.0, core 0.25.13).** `Viewer` `questionDecisionLines?: boolean` (default `true`, today's behaviour). `false` parses every `:::question` card with core's new `{ decisionLines: false }` option (`parseQuestionBlock(kind, body, options?)`, `indexQuestionBlocks(blocks, options?)`): a `Decision:` line is shown as context, and no card gets a decision tag or row from it. The prompt, key, numbering and choices are the default parse's (the line still ends a choice right above it). For a host that records no decisions; the Plannotator Inbox passes it since Decisions were removed there (2026-10). Every decision seam above is unchanged.
+
+**Answers without comments (ui 0.53.0).** `Viewer` `answerOnly`: annotation authoring and the document actions (Global comment, Copy) are off as under `readOnly`, while question cards and checkboxes keep their handlers, for a host that shows a message to answer, not a document to annotate. See HANDOFF.md § "Viewer `answerOnly` (ui 0.53.0)".
+
+**Comments on an answer-only document (ui 0.53.1).** `Viewer` `textComments`, with `answerOnly`: the text-selection toolbar (comment-only) and its composer come back, question cards stay out of selection, nothing else of authoring does. See HANDOFF.md § "Viewer `textComments` (ui 0.53.1)".
+
+**Local links decided by the host (ui 0.53.0).** `Viewer` `resolveLocalLink`: the host decides what a link to a local path does (open it itself, or draw it as inert text), markdown and raw HTML alike. See HANDOFF.md § "Viewer `resolveLocalLink` (ui 0.53.0)".
+
+### Diff file tree (`components/DiffFileTree`; ui 0.50.0)
+
+A read-only file tree for a list of changed files, to sit beside a host's own per-file diff list. It is Plannotator's code-review tree, not a lookalike: the builder (`utils/diffFileTree`), the folder open/closed hook (`hooks/useDiffFileTreeExpansion`) and the row atoms moved here from `packages/review-editor`, and the review now renders from them.
+
+```tsx
+import { DiffFileTree } from "@plannotator/ui/components/DiffFileTree";
+
+<DiffFileTree
+  files={files}            // { path, oldPath?, status, additions, deletions }[]
+  selectedPath={selected}  // string | null (controlled)
+  onSelect={setSelected}   // (path) => void
+/>
+```
+
+- `status`: `'added' | 'modified' | 'deleted' | 'renamed' | 'binary'` (letters A, M, D, R, B; R's tooltip names `oldPath`).
+- Optional: `defaultExpanded` (`'all'` default, `'none'`, or folder paths; re-applied when the set of files changes, not when an equal array is passed again), `label` (accessible name, default "Changed files"), `className`.
+- Same shape rules as the review: folders first, single-child folder chains merged (`packages/app/src`), a lone root folder holding only files unwrapped, folder +/- summed.
+- `role="tree"` with `treeitem` rows (`aria-level`, `aria-expanded`, `aria-selected`) and one tab stop. While focus is in the tree: ArrowDown/`j`, ArrowUp/`k`, Home, End select files in tree order (the review's keys, opening folders as needed); ArrowRight/ArrowLeft open/close a focused folder, ArrowLeft from a file focuses its folder. Unlike the review, nothing listens on `window`.
+- Styling is the `file-tree-item` rules in `styles.css` plus ThemeProvider tokens; no fetches, no seams.
+
+For a custom row, use the atoms (`DiffFileTreeFolderRow`, `DiffFileTreeFileRowContent`, `ChangeTypeLetter`, `DiffCounts`, `diffFileTreeIndent`) with `buildDiffFileTree` and `useDiffFileTreeExpansion`, as the review does. See HANDOFF.md § "Diff file tree".
 
 ## Consuming it (e.g. from Workspaces)
 

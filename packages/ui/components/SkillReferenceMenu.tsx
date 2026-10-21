@@ -15,6 +15,16 @@ interface SkillReferenceMenuProps {
   /** Explicitly activated row, or null — the menu opens with nothing active. */
   activeIndex: number | null;
   onSelect: (index: number) => void;
+  /**
+   * The box the menu must stay inside, in viewport coordinates, read at each
+   * measure. Default: the viewport. A host whose composer sits in a dialog
+   * with a footer passes the dialog's area above the footer.
+   */
+  boundary?: () => { top: number; bottom: number } | null;
+  /** Which side of the anchor the menu tries first. Default: above. */
+  prefer?: 'above' | 'below';
+  /** Upper bound on the list's height, in px. Default: 256. */
+  maxListHeight?: number;
 }
 
 /** Vertical gap between the composer wrapper and the menu (mb-1.5 / mt-1.5 = 6px). */
@@ -40,24 +50,29 @@ interface MenuPlacement {
  * When neither side fits the whole list, the side with more room wins and the
  * list is clamped to it, so the menu never extends past a viewport edge.
  */
-function computeMenuPlacement(
+export function computeMenuPlacement(
   anchorRect: Pick<DOMRect, 'top' | 'bottom'>,
   naturalListHeight: number,
   chromeHeight: number,
   viewportHeight: number,
+  options: { boundaryTop?: number; prefer?: 'above' | 'below'; maxListHeight?: number } = {},
 ): MenuPlacement {
-  const spaceAbove = anchorRect.top - MENU_GAP - MENU_VIEWPORT_MARGIN - chromeHeight;
+  const boundaryTop = options.boundaryTop ?? 0;
+  const cap = options.maxListHeight ?? MAX_LIST_HEIGHT;
+  const spaceAbove = anchorRect.top - boundaryTop - MENU_GAP - MENU_VIEWPORT_MARGIN - chromeHeight;
   const spaceBelow = viewportHeight - anchorRect.bottom - MENU_GAP - MENU_VIEWPORT_MARGIN - chromeHeight;
-  const needed = Math.min(naturalListHeight, MAX_LIST_HEIGHT);
+  const needed = Math.min(naturalListHeight, cap);
+  const [first, second] = options.prefer === 'below' ? (['below', 'above'] as const) : (['above', 'below'] as const);
+  const space = (side: MenuPlacement['direction']) => (side === 'above' ? spaceAbove : spaceBelow);
   const direction: MenuPlacement['direction'] =
-    needed <= spaceAbove ? 'above'
-    : needed <= spaceBelow ? 'below'
-    : spaceAbove >= spaceBelow ? 'above'
-    : 'below';
-  const available = direction === 'above' ? spaceAbove : spaceBelow;
+    needed <= space(first) ? first
+    : needed <= space(second) ? second
+    : space(first) >= space(second) ? first
+    : second;
+  const available = space(direction);
   return {
     direction,
-    maxListHeight: Math.max(0, Math.min(MAX_LIST_HEIGHT, Math.round(available))),
+    maxListHeight: Math.max(0, Math.min(cap, Math.round(available))),
   };
 }
 
@@ -85,13 +100,19 @@ export const SkillReferenceMenu: React.FC<SkillReferenceMenuProps> = ({
   items,
   activeIndex,
   onSelect,
+  boundary,
+  prefer,
+  maxListHeight,
 }) => {
   const menuRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [placement, setPlacement] = useState<MenuPlacement>({
-    direction: 'above',
-    maxListHeight: MAX_LIST_HEIGHT,
+    direction: prefer ?? 'above',
+    maxListHeight: maxListHeight ?? MAX_LIST_HEIGHT,
   });
+  // The optional seams, read through a ref so `measure` stays stable for its listeners.
+  const optionsRef = useRef({ boundary, prefer, maxListHeight });
+  optionsRef.current = { boundary, prefer, maxListHeight };
 
   const measure = useCallback(() => {
     const menuEl = menuRef.current;
@@ -106,7 +127,13 @@ export const SkillReferenceMenu: React.FC<SkillReferenceMenuProps> = ({
     // jitter loop this component once shipped.
     const chrome = Math.max(0, menuEl.offsetHeight - listEl.offsetHeight);
     // scrollHeight reports full content height even while clamped.
-    const next = computeMenuPlacement(rect, listEl.scrollHeight, chrome, window.innerHeight);
+    const { boundary: readBoundary, prefer: side, maxListHeight: cap } = optionsRef.current;
+    const box = readBoundary?.() ?? null;
+    const next = computeMenuPlacement(rect, listEl.scrollHeight, chrome, box ? box.bottom : window.innerHeight, {
+      boundaryTop: box ? box.top : 0,
+      prefer: side,
+      maxListHeight: cap,
+    });
     setPlacement((prev) =>
       prev.direction === next.direction && prev.maxListHeight === next.maxListHeight
         ? prev
@@ -182,11 +209,12 @@ export const SkillReferenceMenu: React.FC<SkillReferenceMenuProps> = ({
             }`}
           >
             <SkillIcon />
-            <span className="shrink-0 font-semibold text-foreground">{item.name}</span>
-            <span className="min-w-0 flex-1 truncate text-muted-foreground">
+            {/* data-skill-item-part: a host's styling hook (the Inbox lays a row out in two lines on a phone). */}
+            <span data-skill-item-part="name" className="shrink-0 font-semibold text-foreground">{item.name}</span>
+            <span data-skill-item-part="description" className="min-w-0 flex-1 truncate text-muted-foreground">
               {item.description ?? ''}
             </span>
-            <span className="shrink-0 pl-3 text-xs text-muted-foreground/80">
+            <span data-skill-item-part="root" className="shrink-0 pl-3 text-xs text-muted-foreground/80">
               {ROOT_LABELS[item.root]}
             </span>
           </button>
@@ -215,6 +243,26 @@ const SkillIcon: React.FC = () => (
 
 interface HumanOnlySkillNoticeProps {
   skills: SkillCatalogEntry[];
+  /**
+   * What the instructions go with. Default: the host's (`setSkillInstructionsDestination`),
+   * else "your feedback". The Inbox says "your reply" or "your message".
+   */
+  destination?: string;
+}
+
+// Module-level seam (see packages/ui/CLAUDE.md): what every composer's
+// human-only line says the instructions go with, unless the composer says.
+// Plannotator's comments go with "your feedback"; the Inbox's comments on
+// attached files ride a reply.
+const DEFAULT_DESTINATION = 'your feedback';
+let defaultDestination = DEFAULT_DESTINATION;
+
+export function setSkillInstructionsDestination(destination: string): void {
+  defaultDestination = destination || DEFAULT_DESTINATION;
+}
+
+export function resetSkillInstructionsDestination(): void {
+  defaultDestination = DEFAULT_DESTINATION;
 }
 
 /**
@@ -227,8 +275,9 @@ interface HumanOnlySkillNoticeProps {
  * toggles), and assistive tech alike. It pairs with the dotted-underline
  * marker the composer overlay paints on human-only tokens.
  */
-export const HumanOnlySkillNotice: React.FC<HumanOnlySkillNoticeProps> = ({ skills }) => {
+export const HumanOnlySkillNotice: React.FC<HumanOnlySkillNoticeProps> = ({ skills, destination }) => {
   if (skills.length === 0) return null;
+  destination ??= defaultDestination;
   const names = skills.map((s) => s.name).join(', ');
   return (
     <details data-skill-human-only-notice="true" className="group mt-1 px-1">
@@ -240,12 +289,12 @@ export const HumanOnlySkillNotice: React.FC<HumanOnlySkillNoticeProps> = ({ skil
         {skills.length === 1 ? (
           <>
             <span className="font-mono">{names}</span> cannot be invoked by a model, so
-            its instructions will be included with your feedback.
+            its instructions will be included with {destination}.
           </>
         ) : (
           <>
             <span className="font-mono">{names}</span> cannot be invoked by a model, so
-            their instructions will be included with your feedback.
+            their instructions will be included with {destination}.
           </>
         )}
       </p>

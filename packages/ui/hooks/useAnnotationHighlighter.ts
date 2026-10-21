@@ -7,10 +7,11 @@
 
 import { useEffect, useRef, useState, useCallback, type RefObject } from 'react';
 import Highlighter from '@plannotator/web-highlighter';
-import type { Annotation, EditorMode, ImageAttachment } from '../types';
+import type { Annotation, EditorMode, HostDraft, ImageAttachment } from '../types';
 import { AnnotationType } from '../types';
 import type { QuickLabel } from '../utils/quickLabels';
 import { getIdentity } from '../utils/identity';
+import { annotationOwnsHighlight } from '../utils/annotationOwnsHighlight';
 import { transformPlainText } from '../utils/inlineTransforms';
 
 // --- Exported state types ---
@@ -28,6 +29,9 @@ export interface CommentPopoverState {
   initialText?: string;
   source?: any;
   draftKey: string;
+  /** `data-block-id`s of the blocks the pending selection covers, in
+   *  document order (a host maps them to source lines for Ask AI). */
+  blockIds?: string[];
 }
 
 export interface QuickLabelPickerState {
@@ -60,6 +64,27 @@ function commentDraftTargetKey(source: any, selectedText: string): string {
     ? `${end.parentTagName}:${end.parentIndex}:${end.textOffset}`
     : 'unknown';
   return `selection:${startKey}:${endKey}:${selectedText}`;
+}
+
+/** The blocks a pending selection covers: a math source names its own block;
+ *  a text selection is read off the highlighter's pending marks, each mapped
+ *  to its nearest `[data-block-id]` (the block its annotation would carry). */
+function selectionBlockIds(highlighter: any, source: any): string[] {
+  if (isMathAnnotationSource(source)) return [source.blockId];
+  if (!highlighter || !source?.id) return [];
+  let doms: unknown[] = [];
+  try {
+    doms = highlighter.getDoms(source.id) ?? [];
+  } catch {
+    return [];
+  }
+  const ids: string[] = [];
+  for (const dom of doms) {
+    if (!(dom instanceof HTMLElement)) continue;
+    const id = dom.closest<HTMLElement>('[data-block-id]')?.dataset.blockId;
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
 }
 
 type MathAnnotationTarget = {
@@ -281,6 +306,37 @@ const paintedTextOf = (doms: readonly HTMLElement[]): string => {
     }
   }
   return painted;
+};
+
+/** The block element a painted highlight sits in, found the way an
+ *  annotation's `blockId` is found when it is created (walk up from the
+ *  parent of the first highlighted node to the nearest `data-block-id`), so an
+ *  unchanged document resolves every restore to the block it was made in. */
+const blockElementOf = (dom: Node | null | undefined): HTMLElement | null => {
+  let parent = dom?.parentElement ?? null;
+  while (parent && !parent.dataset.blockId) parent = parent.parentElement;
+  return parent;
+};
+
+/** Where `quote` starts in `text`, matching whitespace-insensitively (the
+ *  same comparison the restore verification uses: a quote that crossed a
+ *  block boundary or a soft wrap carries different whitespace than the
+ *  block's text). 0 when it is not there, as at creation. */
+const quoteOffsetIn = (text: string, quote: string): number => {
+  const exact = text.indexOf(quote);
+  if (exact !== -1) return exact;
+  const needle = compactText(quote);
+  if (!needle) return 0;
+  // Compact the text while remembering each kept character's original index.
+  const positions: number[] = [];
+  let compact = '';
+  for (let i = 0; i < text.length; i++) {
+    if (/\s/.test(text[i])) continue;
+    compact += text[i];
+    positions.push(i);
+  }
+  const at = compact.indexOf(needle);
+  return at === -1 ? 0 : positions[at];
 };
 
 /**
@@ -654,6 +710,13 @@ export interface UseAnnotationHighlighterOptions {
   /** Fires once per `applyAnnotations` pass with what that pass tried and what
    *  it could not anchor, so a host can mark the leftovers in its panel. */
   onRestoreReport?: (report: AnnotationRestoreReport) => void;
+  /**
+   * The composer handed to the host (see `HostDraft`). Set: whenever a
+   * selection's toolbar or composer would open, the host gets the draft
+   * instead (and null when it closes); the host draws no toolbar or composer
+   * from this hook's state. Absent: unchanged.
+   */
+  onHostDraft?: (draft: HostDraft | null) => void;
 }
 
 /** The outcome of one `applyAnnotations` pass. */
@@ -661,9 +724,34 @@ export interface AnnotationRestoreReport {
   /** Ids the pass considered — including ones already painted, which are
    *  anchored by definition. A host clears their unanchored marks. */
   attempted: string[];
-  /** Of those, the ones left with no highlight because the stored positions
-   *  resolved onto the wrong text AND the quote was nowhere in the document. */
+  /** Of those, the ones left with no highlight: neither the stored positions
+   *  (absent, unresolvable, or resolved onto the wrong text) nor a search for
+   *  the quote found it in the document. */
   unanchored: string[];
+  /** Annotations whose stored `blockId` no longer names where their text is,
+   *  because the document changed since they were made (a draft restored
+   *  after an edit, a plan revision). Each entry says where the text is NOW:
+   *  `blockId` is the block the highlight landed in, or `''` when the text is
+   *  gone (every unanchored id is listed here too). Annotations whose stored
+   *  block still holds their text are never listed, so an unchanged document
+   *  reports nothing here. A host that exports line numbers from `blockId`
+   *  should write these back. Optional so older reporters (the diagram
+   *  overlay) need not produce it. */
+  moved?: RestoredAnchor[];
+}
+
+/** Where a restored annotation's text sits now (see `moved`). */
+export interface RestoredAnchor {
+  id: string;
+  /** The block the highlight landed in; `''` when the text is gone. */
+  blockId: string;
+  /** Offset of the quote in that block's text (same rule as creation);
+   *  absent when the text is gone. */
+  startOffset?: number;
+  /** The stored `startMeta`/`endMeta` did not lead to the text (unresolvable,
+   *  or onto other text) and should be dropped so later restores search by
+   *  text instead. False when the stored positions themselves were verified. */
+  positionsStale: boolean;
 }
 
 /** Annotation UI state and mutation commands owned by one rendered document. */
@@ -696,6 +784,8 @@ export interface UseAnnotationHighlighterReturn {
   removeHighlight: (id: string) => void;
   clearAllHighlights: () => void;
   applyAnnotations: (annotations: Annotation[]) => void;
+  /** For a host that composes on a touch screen: the page selection as a draft now (see `ViewerHandle.takeSelection`). */
+  takeSelection?: () => boolean;
 }
 
 /**
@@ -715,6 +805,7 @@ export function useAnnotationHighlighter({
   verifyRestoredContent = false,
   onRestoreMismatch,
   onRestoreReport,
+  onHostDraft,
 }: UseAnnotationHighlighterOptions): UseAnnotationHighlighterReturn {
   const highlighterRef = useRef<Highlighter | null>(null);
   const modeRef = useRef<EditorMode>(mode);
@@ -762,6 +853,14 @@ export function useAnnotationHighlighter({
     applyMathAnnotationClass(source.element, 'pending-math', AnnotationType.COMMENT, source.displayMode);
     pendingMathElementRef.current = source.element;
   }, []);
+
+  // A host that composes (onHostDraft) on a touch screen takes the selection
+  // itself, from its own Comment action (`takeSelection`): painting it as it
+  // settles would replace the system selection, and its edit menu with it.
+  const hostComposesRef = useRef(false);
+  hostComposesRef.current = onHostDraft !== undefined;
+  const takeTouchSelectionRef = useRef<() => boolean>(() => false);
+  const takeSelection = useCallback(() => takeTouchSelectionRef.current(), []);
 
   // Track mouse position for quick label picker
   useEffect(() => {
@@ -915,7 +1014,8 @@ export function useAnnotationHighlighter({
     return null;
   }, []);
 
-  const createAnnotationFromSource = (
+  /** The annotation a selection's source makes, or null for a blank quote. No side effects. */
+  const buildAnnotationFromSource = (
     highlighter: Highlighter,
     source: any,
     type: AnnotationType,
@@ -924,11 +1024,11 @@ export function useAnnotationHighlighter({
     isQuickLabel?: boolean,
     quickLabelTip?: string,
     mentions?: readonly string[],
-  ) => {
+  ): Annotation | null => {
     // #881: the last line before an annotation exists. A quote of pure
     // whitespace cannot be re-anchored on the next load, so it would come back
     // as an invisible row that is still counted and still exported.
-    if (isBlankQuote(source?.text)) return;
+    if (isBlankQuote(source?.text)) return null;
 
     const doms = highlighter.getDoms(source.id);
     let blockId = '';
@@ -976,6 +1076,22 @@ export function useAnnotationHighlighter({
       ...(isQuickLabel ? { isQuickLabel: true } : {}),
       ...(quickLabelTip ? { quickLabelTip } : {}),
     };
+    return newAnnotation;
+  };
+
+  const createAnnotationFromSource = (
+    highlighter: Highlighter,
+    source: any,
+    type: AnnotationType,
+    text?: string,
+    images?: ImageAttachment[],
+    isQuickLabel?: boolean,
+    quickLabelTip?: string,
+    mentions?: readonly string[],
+  ) => {
+    const newAnnotation = buildAnnotationFromSource(highlighter, source, type, text, images, isQuickLabel, quickLabelTip, mentions);
+    if (!newAnnotation) return;
+    const mathTargets = pendingMathTargetsRef.current;
 
     if (type === AnnotationType.DELETION) {
       highlighter.addClass('deletion', source.id);
@@ -1097,9 +1213,36 @@ export function useAnnotationHighlighter({
 
     const attempted: string[] = [];
     const unanchored: string[] = [];
+    const moved: RestoredAnchor[] = [];
+
+    // Record where a restored annotation's text sits when its stored blockId
+    // no longer names that place. Block ids are positional (`block-N`), so
+    // after the document changed the stored id can name a different block,
+    // and a line label read from it would point at the wrong line. Nothing is
+    // recorded while the stored block still holds the quote — an unchanged
+    // document, or a quote that also appears in the stored block — so the
+    // stored id (and the export built from it) stays exactly as it was.
+    const noteAnchor = (ann: Annotation, firstDom: Node | null | undefined, positionsStale: boolean) => {
+      if (!ann.blockId) return;
+      const blockEl = blockElementOf(firstDom);
+      const blockId = blockEl?.dataset.blockId;
+      if (!blockEl || !blockId || blockId === ann.blockId) return;
+      const stored = containerRef.current?.querySelector(
+        `[data-block-id="${escapeAttrValue(ann.blockId)}"]`,
+      );
+      const quote = compactText(ann.originalText);
+      if (stored && quote && compactText(stored.textContent ?? '').includes(quote)) return;
+      moved.push({ id: ann.id, blockId, startOffset: quoteOffsetIn(blockEl.textContent ?? '', ann.originalText), positionsStale });
+    };
 
     anns.forEach(ann => {
       if (ann.type === AnnotationType.GLOBAL_COMMENT) return;
+      // Diff-view comments (`diff-block-N`, drawn by the diff view) and
+      // checkbox toggles (raw-markdown quotes keyed by their block) are never
+      // text highlights. Callers filter them out; skipping them here as well
+      // keeps a stray one from being reported unanchored or moved, which would
+      // rewrite its blockId.
+      if (!annotationOwnsHighlight(ann)) return;
       // A comment on a rendered diagram part has no text anchor: the
       // diagram overlay restores it against its render and reports its own
       // verdict, so it is neither attempted nor unanchored here (the same
@@ -1128,7 +1271,8 @@ export function useAnnotationHighlighter({
       if (existingManual) return;
 
       const mathTargets = findMathElementsForAnnotation(ann);
-      if (mathTargets.length > 0) {
+      const paintedMath = mathTargets.length > 0;
+      if (paintedMath) {
         applyMathTargets(mathTargets, ann.id, ann.type);
         if (!ann.startMeta && !ann.endMeta && !ann.mathTargets?.length) {
           return;
@@ -1160,6 +1304,7 @@ export function useAnnotationHighlighter({
               } else if (ann.type === AnnotationType.COMMENT) {
                 highlighter.addClass('comment', ann.id);
               }
+              if (!paintedMath) noteAnchor(ann, restoredDoms[0] as Node, false);
               return;
             }
           }
@@ -1169,8 +1314,14 @@ export function useAnnotationHighlighter({
       const range = findTextInDOM(ann.originalText);
       if (!range) {
         if (rejectedRestoreText !== null) {
-          unanchored.push(ann.id);
           onRestoreMismatchRef.current?.(ann, rejectedRestoreText);
+        }
+        // Nothing painted it: not the stored positions (absent, unresolvable,
+        // or onto other text) and not the search. A formula the math path
+        // painted above is anchored, whatever its quote search says.
+        if (!paintedMath) {
+          unanchored.push(ann.id);
+          moved.push({ id: ann.id, blockId: '', positionsStale: true });
         }
         console.warn(`Could not find text for annotation ${ann.id}: "${ann.originalText.slice(0, 50)}..."`);
         return;
@@ -1229,6 +1380,8 @@ export function useAnnotationHighlighter({
           return;
         }
 
+        if (!paintedMath) noteAnchor(ann, textNodes[0].node, true);
+
         textNodes.reverse().forEach(({ node, start, end }) => {
           try {
             const nodeRange = document.createRange();
@@ -1259,7 +1412,9 @@ export function useAnnotationHighlighter({
       }
     });
 
-    if (attempted.length > 0) onRestoreReportRef.current?.({ attempted, unanchored });
+    if (attempted.length > 0) {
+      onRestoreReportRef.current?.({ attempted, unanchored, ...(moved.length > 0 ? { moved } : {}) });
+    }
   }, [findMathElementsForAnnotation, findTextInDOM, verifyRestoredContent]);
 
   const removeHighlight = useCallback((id: string) => {
@@ -1394,6 +1549,7 @@ export function useAnnotationHighlighter({
               selectedText: source.text,
               source,
               draftKey: commentDraftTargetKey(source, source.text),
+              blockIds: selectionBlockIds(highlighter, source),
             });
           } else if (effectiveMode === 'quickLabel') {
             pendingSourceRef.current = source;
@@ -1464,7 +1620,11 @@ export function useAnnotationHighlighter({
     container.addEventListener('mouseup', handlePointerEndCapture, true);
     container.addEventListener('touchend', handlePointerEndCapture, true);
 
-    highlighter.run();
+    // On a touch screen a host that composes takes the selection when the
+    // person chooses its Comment (takeSelection); the library painting it at
+    // touchend would end the system selection and its edit menu first.
+    const isTouchPrimary = window.matchMedia('(pointer: coarse)').matches;
+    if (!(isTouchPrimary && hostComposesRef.current)) highlighter.run();
 
     const handleMathMouseDown = (event: MouseEvent) => {
       mouseDownMathRef.current = closestMathElement(event.target as Node, containerRef.current);
@@ -1525,6 +1685,7 @@ export function useAnnotationHighlighter({
           selectedText: source.text,
           source,
           draftKey: commentDraftTargetKey(source, source.text),
+          blockIds: [source.blockId],
         });
         return;
       }
@@ -1553,28 +1714,33 @@ export function useAnnotationHighlighter({
     containerRef.current.addEventListener('mouseup', handleMathMouseUp, true);
 
     // Mobile bridge
-    const isTouchPrimary = window.matchMedia('(pointer: coarse)').matches;
     let selectionTimer: ReturnType<typeof setTimeout>;
+    // The page's selection, painted as a pending highlight; false when there is none to take.
+    const takeTouchSelection = (): boolean => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
+      if (!containerRef.current?.contains(sel.anchorNode)) return false;
+      const range = sel.getRangeAt(0).cloneRange();
+      // Same fail-closed rule as the pointer-end guard (#881): touch
+      // selections settle on block boundaries just as often.
+      if (isBlankQuote(sel.toString()) || !isSerializableRange(range)) return false;
+      snapRangeStartPastExcluded(range);
+      pendingRangeRunsRef.current = rangeTextPieces(range);
+      try {
+        highlighter.fromRange(range);
+        return true;
+      } catch (error) {
+        pendingRangeRunsRef.current = null;
+        warnHighlighterFailure('painting a touch selection', error);
+        return false;
+      }
+    };
+    takeTouchSelectionRef.current = takeTouchSelection;
     const handleSelectionChange = isTouchPrimary
       ? () => {
           clearTimeout(selectionTimer);
-          selectionTimer = setTimeout(() => {
-            const sel = window.getSelection();
-            if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
-            if (!containerRef.current?.contains(sel.anchorNode)) return;
-            const range = sel.getRangeAt(0).cloneRange();
-            // Same fail-closed rule as the pointer-end guard (#881): touch
-            // selections settle on block boundaries just as often.
-            if (isBlankQuote(sel.toString()) || !isSerializableRange(range)) return;
-            snapRangeStartPastExcluded(range);
-            pendingRangeRunsRef.current = rangeTextPieces(range);
-            try {
-              highlighter.fromRange(range);
-            } catch (error) {
-              pendingRangeRunsRef.current = null;
-              warnHighlighterFailure('painting a touch selection', error);
-            }
-          }, 400);
+          if (hostComposesRef.current) return;
+          selectionTimer = setTimeout(takeTouchSelection, 400);
         }
       : null;
 
@@ -1671,6 +1837,7 @@ export function useAnnotationHighlighter({
         selectedText: source.text,
         source,
         draftKey: commentDraftTargetKey(source, source.text),
+        blockIds: [source.blockId],
       });
       return;
     }
@@ -1815,6 +1982,7 @@ export function useAnnotationHighlighter({
       initialText: initialChar,
       source: toolbarState.source,
       draftKey: commentDraftTargetKey(toolbarState.source, toolbarState.selectionText),
+      blockIds: selectionBlockIds(highlighterRef.current, toolbarState.source),
     });
     setToolbarState(null);
   };
@@ -1901,6 +2069,66 @@ export function useAnnotationHighlighter({
     window.getSelection()?.removeAllRanges();
   }, [clearPendingSelection, quickLabelPicker]);
 
+  // --- The composer handed to the host (onHostDraft) ---
+  // The toolbar and composer states still drive everything here; the host is
+  // told about them instead of seeing them drawn. A math source has no id of
+  // its own until it is committed, so its draft id is minted once per source.
+  const onHostDraftRef = useRef(onHostDraft);
+  onHostDraftRef.current = onHostDraft;
+  const hostDraftIdsRef = useRef(new WeakMap<object, string>());
+  const hostDraftOn = onHostDraft !== undefined;
+  useEffect(() => {
+    const report = onHostDraftRef.current;
+    if (!report) return;
+    const open = commentPopover ?? toolbarState;
+    const source = open?.source;
+    const highlighter = highlighterRef.current;
+    if (!source || !highlighter) {
+      report(null);
+      return;
+    }
+    let annotation: Annotation | null;
+    if (isMathAnnotationSource(source)) {
+      let id = hostDraftIdsRef.current.get(source);
+      if (!id) {
+        id = annotationId();
+        hostDraftIdsRef.current.set(source, id);
+      }
+      annotation = {
+        id,
+        blockId: source.blockId,
+        startOffset: 0,
+        endOffset: source.text.length,
+        type: AnnotationType.COMMENT,
+        text: '',
+        originalText: source.text,
+        createdA: Date.now(),
+        author: getIdentity(),
+      };
+    } else {
+      annotation = buildAnnotationFromSource(highlighter, source, AnnotationType.COMMENT, '');
+    }
+    if (!annotation) {
+      report(null);
+      return;
+    }
+    report({
+      annotation,
+      intent: commentPopover ? 'compose' : 'selection',
+      cancel: () => {
+        // A newer selection owns the pending state now: leave it alone.
+        if (pendingSourceRef.current !== source) return;
+        if (!isMathAnnotationSource(source)) highlighterRef.current?.remove(source.id);
+        clearPendingSelection();
+        setToolbarState(null);
+        setCommentPopover(null);
+        window.getSelection()?.removeAllRanges();
+      },
+    });
+    // buildAnnotationFromSource reads refs only; the states are the inputs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commentPopover, toolbarState, hostDraftOn, clearPendingSelection]);
+
   return {
     highlighterRef,
     toolbarState,
@@ -1919,5 +2147,6 @@ export function useAnnotationHighlighter({
     removeHighlight,
     clearAllHighlights,
     applyAnnotations: applyAnnotationsInternal,
+    takeSelection,
   };
 }

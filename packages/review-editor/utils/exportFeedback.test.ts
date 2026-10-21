@@ -334,6 +334,16 @@ describe("exportReviewFeedback", () => {
     expect(highlighted).toBeGreaterThan(note);
   });
 
+  it("fences quoted code with more backticks than any run in it, so a ``` line in the code cannot end the quote", () => {
+    const result = exportReviewFeedback([
+      ann({ text: "Fix the example", selectedText: "Example:\n```\nnpm i\n```", originalCode: "a ```` b", suggestedCode: "no ticks" }),
+    ]);
+    expect(result).toContain("**Highlighted text:**\n````\nExample:\n```\nnpm i\n```\n````\n");
+    expect(result).toContain("**Replaces:**\n`````\na ```` b\n`````\n");
+    // Code without a backtick run keeps the three-backtick fence, byte for byte.
+    expect(result).toContain("**Suggested code:**\n```\nno ticks\n```\n");
+  });
+
   it("omits the Highlighted text block when there is no selectedText", () => {
     const result = exportReviewFeedback([ann()]);
     expect(result).not.toContain("**Highlighted text:**");
@@ -618,5 +628,36 @@ describe("buildProseFeedback — artifact annotations", () => {
     expect(output).toContain("Hero image — Pin at 25%, 40%");
     expect(output).toContain("Regarding an artifact in the PR description.");
     expect(output).toContain("Crop this more tightly.");
+  });
+});
+
+describe("comments made in a Markdown preview", () => {
+  it("export under their file with the quoted text and where it was in the rendered diff", () => {
+    const output = exportReviewFeedback([
+      ann({
+        id: "md-1",
+        scope: "file",
+        filePath: "docs/guide.md",
+        lineStart: 1,
+        lineEnd: 1,
+        text: "Link the installer page.",
+        markdownPreview: { originalText: "new installer\nfrom the website", view: "diff", diffContext: "removed" },
+      }),
+    ]);
+    expect(output).toContain("## docs/guide.md");
+    expect(output).toContain("> new installer\n> from the website");
+    expect(output).toContain("in removed text");
+    expect(output).toContain("Link the installer page.");
+    // Not presented as an ordinary file comment or a line comment.
+    expect(output).not.toContain("File Comment");
+    expect(output).not.toContain("Line 1");
+  });
+
+  it("say nothing about the section when it was unchanged or made in the whole file", () => {
+    const output = exportReviewFeedback([
+      ann({ id: "md-2", scope: "file", filePath: "docs/guide.md", text: "Fine.", markdownPreview: { originalText: "stays", view: "whole" } }),
+    ]);
+    expect(output).toContain("> stays");
+    expect(output).not.toContain("_(in ");
   });
 });

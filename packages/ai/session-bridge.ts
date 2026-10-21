@@ -40,11 +40,18 @@ import type {
  */
 export type SessionBridgeStatus = "ready" | "busy" | "blocked" | "gone";
 
-export type SessionBridgeHost = "pi" | "opencode" | "claude-code";
+export type SessionBridgeHost = "pi" | "opencode" | "claude-code" | "t3";
 
 export type SessionBridgeAskMode = "turn" | "transient";
 
-export type SessionBridgeErrorCode = "busy" | "blocked" | "gone" | "aborted" | "failed";
+/**
+ * `taken_over`: someone else's prompt (the person typing into the session, a
+ * peer, another plugin) entered the turn that was answering our question, so
+ * the rest of that turn answers them. The host stops streaming at once, keeps
+ * what it already sent, and settles with this code; the client shows the
+ * partial answer with a note, not an error.
+ */
+export type SessionBridgeErrorCode = "busy" | "blocked" | "gone" | "aborted" | "failed" | "taken_over";
 
 export interface SessionBridgeSink {
 	delta(text: string): void;
@@ -69,6 +76,13 @@ export interface SessionBridge {
 	 * Send one question. The host reports through `sink` exactly once with
 	 * `done` or `error`. Aborting `signal` cancels OUR question only: drop it if
 	 * it was not delivered yet, stop the turn only if the running turn is ours.
+	 *
+	 * Take-over rule (every host): once a prompt we did not send enters the
+	 * turn that is answering the question, that turn is no longer ours. The
+	 * host stops streaming, settles with `error("taken_over")`, and from then
+	 * on neither an abort of this question nor `interrupt()` stops that turn.
+	 * When the answer had already finished (the turn's last model response
+	 * called no tools) before the other message entered, it settles `done`.
 	 */
 	ask(req: SessionBridgeAskRequest, sink: SessionBridgeSink, signal: AbortSignal): void;
 	/**
@@ -77,6 +91,12 @@ export interface SessionBridge {
 	 * refuses an interrupt request.
 	 */
 	interrupt?(): void | Promise<void>;
+	/**
+	 * `false` when the host never stops the session's work (T3 Code): the
+	 * client then offers neither "Interrupt and ask now" nor a Stop that
+	 * claims to stop the turn. Absent means it can, as before.
+	 */
+	readonly interruptible?: boolean;
 	/**
 	 * The server is about to deliver the reviewer's decision (or shut down):
 	 * drop any question that has not reached the session yet, and leave a turn
@@ -98,12 +118,30 @@ export const SESSION_BRIDGE_ERROR = {
 	gone: "session_gone",
 	inFlight: "ask_in_flight",
 	failed: "session_ask_failed",
+	takenOver: "session_taken_over",
 } as const;
+
+/**
+ * The note shown under a partial answer whose turn another message took over.
+ * Neutral: most hosts cannot tell the person typing from another extension's
+ * steer or a peer session's message.
+ */
+export const SESSION_ASK_TAKEN_OVER_TEXT =
+	"Another message entered this session while it was answering, so the rest of the reply went to that message.";
+
+/** The same note when the host knows the person typed it (Claude Code: the prompt box, Remote Control). */
+export const SESSION_ASK_TAKEN_OVER_BY_PERSON_TEXT =
+	"You typed into this session while it was answering, so the rest of the reply went to your prompt.";
+
+/** Why "Interrupt and ask now" refuses a turn another message took over. */
+export const SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT =
+	"The session is now answering another message, so Plannotator will not stop it. Ask when it finishes instead.";
 
 const HOST_LABELS: Record<SessionBridgeHost, string> = {
 	pi: "Pi",
 	opencode: "OpenCode",
 	"claude-code": "Claude Code",
+	t3: "T3 Code",
 };
 
 export function sessionBridgeLabel(
@@ -138,10 +176,12 @@ function describeSurface(context: AIContext): string | null {
 		case "plan-review":
 			return "Surface: plan review";
 		case "annotate": {
-			const { filePath, sourceInfo } = context.annotate;
+			const { filePath, sourceInfo, bundlePosition } = context.annotate;
 			if (filePath === "last-message") return "Surface: annotating your last message";
 			const where = sourceInfo && /^https?:\/\//i.test(sourceInfo) ? sourceInfo : filePath;
-			return where ? `Surface: annotating ${where}` : "Surface: annotating a document";
+			// A review of several files names the open file's place in it.
+			const position = bundlePosition ? `, file ${bundlePosition.index} of ${bundlePosition.total}` : "";
+			return where ? `Surface: annotating ${where}${position}` : "Surface: annotating a document";
 		}
 		default:
 			return null;
@@ -149,13 +189,58 @@ function describeSurface(context: AIContext): string | null {
 }
 
 /**
- * The message the session receives. There is no system prompt: the host's own
- * prompt is in effect, so the header carries the framing.
+ * Opens the reviewer's unsubmitted annotations (#1748). The session that
+ * receives an Ask is the agent the review is for, with its tools, so drafts
+ * are framed as read-only context and never in the submitted-feedback format:
+ * the reviewer sends them, as feedback, when ready.
  */
-export function formatSessionAskText(context: AIContext, prompt: string, mode: SessionBridgeAskMode = "turn"): string {
+export const SESSION_ASK_DRAFTS_LABEL =
+	"[Draft annotations the reviewer has not submitted yet. They are context for the question only. Do not act on them; the reviewer will send them when ready. This list replaces any draft list sent earlier.]";
+
+/** Closes the draft list, so the question after it reads as the question. */
+export const SESSION_ASK_DRAFTS_END = "[End of draft annotations]";
+
+/** Sent once when every draft the session saw earlier was removed. */
+export const SESSION_ASK_DRAFTS_CLEARED =
+	"[The reviewer has no draft annotations now. Disregard any draft list sent earlier.]";
+
+/** Upper bound on the draft list in one question; a longer one is cut. */
+export const MAX_SESSION_ASK_DRAFTS_CHARS = 16_000;
+
+/** Text inside a draft list that reads like the end marker. */
+const DRAFTS_END_LOOKALIKE = /\[\s*end\s+of\s+(?:the\s+)?draft\s+annotations?\b[^\]\n]*\]/gi;
+
+function formatDraftBlock(draftAnnotations: string | undefined): string | null {
+	if (draftAnnotations === undefined) return null;
+	// The list's own text cannot close the frame early, in any spelling a
+	// reader would take for the end marker (case, spacing, a suffix).
+	let list = draftAnnotations.replace(DRAFTS_END_LOOKALIKE, "(quoted: end of draft annotations)").trim();
+	if (!list) return SESSION_ASK_DRAFTS_CLEARED;
+	if (list.length > MAX_SESSION_ASK_DRAFTS_CHARS) {
+		list = `${list.slice(0, MAX_SESSION_ASK_DRAFTS_CHARS)}\n… (the rest of the draft list was cut)`;
+	}
+	return [SESSION_ASK_DRAFTS_LABEL, list, SESSION_ASK_DRAFTS_END].join("\n");
+}
+
+/**
+ * The message the session receives. There is no system prompt: the host's own
+ * prompt is in effect, so the header carries the framing. `draftAnnotations`
+ * (the reviewer's unsubmitted annotations, when they changed since the session
+ * last saw them) rides in its read-only frame between the surface and the
+ * question, so the question stays the last thing the session reads.
+ */
+export function formatSessionAskText(
+	context: AIContext,
+	prompt: string,
+	mode: SessionBridgeAskMode = "turn",
+	draftAnnotations?: string,
+): string {
 	const surface = describeSurface(context);
 	const note = mode === "transient" ? SESSION_ASK_TRANSIENT_NOTE : null;
-	return [SESSION_ASK_HEADER, note, surface, "", prompt.trim()].filter((line) => line !== null).join("\n");
+	const drafts = formatDraftBlock(draftAnnotations);
+	return [SESSION_ASK_HEADER, note, surface, "", drafts, drafts === null ? null : "", prompt.trim()]
+		.filter((line) => line !== null)
+		.join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +256,8 @@ export interface SessionBridgeInfo {
 	host: SessionBridgeHost;
 	status: SessionBridgeStatus;
 	modes: { turn: boolean; transient: boolean };
+	/** Present (`false`) only when the host said it never interrupts; absent = interruptible. */
+	interruptible?: false;
 }
 
 export class SessionBridgeProvider implements AIProvider {
@@ -203,7 +290,12 @@ export class SessionBridgeProvider implements AIProvider {
 		} catch {
 			status = "gone";
 		}
-		return { host: this.bridge.host, status, modes: { ...this.bridge.modes } };
+		return {
+			host: this.bridge.host,
+			status,
+			modes: { ...this.bridge.modes },
+			...(this.bridge.interruptible === false ? { interruptible: false as const } : {}),
+		};
 	}
 
 	/** @internal one question at a time across every session of this provider. */
@@ -450,7 +542,9 @@ export class SessionBridgeSession extends BaseSession {
 								? errorMessage(SESSION_BRIDGE_ERROR.blocked, message || BLOCKED_TEXT)
 								: code === "busy"
 									? errorMessage(SESSION_BRIDGE_ERROR.agentBusy, message || BUSY_TEXT)
-									: errorMessage(SESSION_BRIDGE_ERROR.failed, message || "The session could not answer.");
+									: code === "taken_over"
+										? errorMessage(SESSION_BRIDGE_ERROR.takenOver, message || SESSION_ASK_TAKEN_OVER_TEXT)
+										: errorMessage(SESSION_BRIDGE_ERROR.failed, message || "The session could not answer.");
 					settle(mapped);
 				},
 			};
@@ -473,7 +567,7 @@ export class SessionBridgeSession extends BaseSession {
 			);
 
 			try {
-				bridge.ask({ askId: `${this.id}:${gen}`, text: formatSessionAskText(this.context, prompt, mode), mode }, sink, hostAbort.signal);
+				bridge.ask({ askId: `${this.id}:${gen}`, text: formatSessionAskText(this.context, prompt, mode, options?.draftAnnotations), mode }, sink, hostAbort.signal);
 			} catch (err) {
 				sink.error("failed", err instanceof Error ? err.message : String(err));
 			}

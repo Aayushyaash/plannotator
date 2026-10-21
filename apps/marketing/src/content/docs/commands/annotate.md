@@ -66,6 +66,18 @@ When you pass a folder, Plannotator opens a file browser showing all markdown an
 
 Build output directories like `_site/`, `public/`, `.docusaurus/`, and `node_modules/` are automatically excluded from the file browser.
 
+## Several files in one review
+
+Pass several file paths to review them together:
+
+```bash
+plannotator annotate spec.md ui/mock.html notes.md
+```
+
+They open as one review, in the order you gave them. The first file opens right away. A switcher in the header ("2 of 3 · mock.html") and the Files tab list them in that order, and each file renders as it would alone (markdown, raw HTML, diagram files). There is one decision for all of them: Send Feedback sends one message with a section per file, in the same order, and with `--gate` one Approve covers every file. Each file's comments are also saved under that file, so they come back when you open it again on its own or in another review. Edit Mode works on each file it would work on alone (`.md`, `.mdx` and `.txt`): your edits save back to that file. Documents the files link to open read-only.
+
+Every argument must be an existing file named by its path. If anything else is mixed in (a word, a URL, a folder, or a bare name Plannotator would have to search the project for), the command keeps its usual behavior: one file among plain words opens that file, and several targets are an error that names them. Agents with the `plannotator` tool pass the files as a list in `target`.
+
 ## URLs
 
 Fetching a URL converts the page to markdown before opening it in the annotation editor. Loopback `http` URLs are the exception: they open your running app live instead, covered in [Local apps](#local-apps) below.
@@ -136,7 +148,7 @@ Live app annotation runs on the standalone CLI, the Claude Code slash command, a
 
 Live app and HTML sessions share one interaction model:
 
-- The session opens with the pen **armed**, so a click pins the element under the cursor and a drag selects text to comment on.
+- The session opens with the pen **armed**, so a click pins the element under the cursor and a drag selects text to comment on. A click on a link follows it, as in any page; hold `Cmd` (`Ctrl` on Windows and Linux) and click to pin the link for a comment instead. On a phone, tap a link to follow it, or press and hold it to comment on it. Live apps (`plannotator annotate http://localhost:…`) work the same way: a click navigates the app, `Cmd`/`Ctrl`-click comments on the link.
 - `Esc` steps back one rung at a time: it closes an open draft, then clears the hover outline, then drops you into **Interact** mode, where clicks, forms, links, and navigation reach the page normally.
 - The pen button in the header (or `Cmd/Ctrl+Shift+A`) toggles annotation back on, and off again. Existing comment markers stay visible in both modes, and clicking one still opens it.
 - Selecting text to comment works in **both** modes, so you can leave a note without arming the pen.
@@ -215,7 +227,7 @@ This is the recommended flag for hook integrations. If both `--hook` and `--json
 | Flags | UX | Approve | Close | Send Annotations |
 |---|---|---|---|---|
 | *(none)* | 2-button | n/a | empty | feedback (plaintext) |
-| `--gate` | 3-button | `The user approved.` | empty | feedback (plaintext) |
+| `--gate` | 3-button | `The user approved.`, or the approved-with-notes message when approved with a note | empty | feedback (plaintext) |
 | `--json` | 2-button | n/a | `{"decision":"dismissed"}` | `{"decision":"annotated","feedback":"..."}` |
 | `--gate --json` | 3-button | `{"decision":"approved"}`, or `{"decision":"approved","feedback":"..."}` when approved with notes | `{"decision":"dismissed"}` | `{"decision":"annotated","feedback":"..."}` |
 | `--hook` | 3-button | empty | empty | `{"decision":"block","reason":"..."}` |

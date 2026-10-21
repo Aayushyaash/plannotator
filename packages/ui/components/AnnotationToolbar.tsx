@@ -2,12 +2,13 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
 import { AnnotationType } from "../types";
 import { createPortal } from "react-dom";
 import { useDismissOnOutsideAndEscape } from "../hooks/useDismissOnOutsideAndEscape";
-import { type QuickLabel, getQuickLabels, THUMBS_UP_LABEL } from "../utils/quickLabels";
+import { type QuickLabel, getQuickLabels, quickLabelIndexForDigit, THUMBS_UP_LABEL } from "../utils/quickLabels";
 import { copyTextToClipboard } from "../utils/clipboard";
 import { acquireTypeToCommentCapture } from "../shortcuts/plan-review/annotationMode.shortcuts";
 import { FloatingQuickLabelPicker } from "./FloatingQuickLabelPicker";
 import { FloatingSelectionActionsPicker } from "./SelectionActionsDropdown";
 import { buildSelectionActionContext, type SelectionAction } from "../utils/selectionActions";
+import { HostTitle } from './HostTitle';
 
 type PositionMode = 'center-above' | 'top-right';
 
@@ -174,7 +175,7 @@ export const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
         e.preventDefault();
         if (!commentOnly && quickLabelsEnabled) {
           const digit = parseInt(e.code.slice(5), 10);
-          const index = digit === 0 ? 9 : digit - 1;
+          const index = quickLabelIndexForDigit(digit);
           if (index < quickLabels.length) {
             onQuickLabel?.(quickLabels[index]);
           }
@@ -399,18 +400,20 @@ const ToolbarButton = React.forwardRef<HTMLButtonElement, {
   /** Extra DOM attributes (e.g. data-selection-actions). Absent adds nothing. */
   dataAttributes?: Record<string, string>;
 }>(({ onClick, icon, label, className, dataAttributes }, ref) => (
-  <button
-    ref={ref}
-    // Icon-only controls: the markers are inert outside the compact touch
-    // scope, where theme.css grows them to var(--pn-touch-target). Desktop
-    // geometry is unchanged.
-    data-pn-touch-target="true"
-    data-pn-touch-target-icon="true"
-    onClick={onClick}
-    title={label}
-    className={`p-1.5 rounded-md transition-colors ${className}`}
-    {...dataAttributes}
-  >
-    {icon}
-  </button>
+  // The label is the button's only name: as a component tooltip (HostTitle) it also becomes its aria-label.
+  <HostTitle title={label} name>
+    <button
+      ref={ref}
+      // Icon-only controls: the markers are inert outside the compact touch
+      // scope, where theme.css grows them to var(--pn-touch-target). Desktop
+      // geometry is unchanged.
+      data-pn-touch-target="true"
+      data-pn-touch-target-icon="true"
+      onClick={onClick}
+      className={`p-1.5 rounded-md transition-colors ${className}`}
+      {...dataAttributes}
+    >
+      {icon}
+    </button>
+  </HostTitle>
 ));

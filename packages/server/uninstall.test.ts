@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, parse } from "node:path";
+import { t3HookCommand } from "@plannotator/shared/t3-hook-command";
 import {
   formatPurgeWarning,
   runPlannotatorUninstall,
@@ -249,7 +250,87 @@ function snapshotTree(root: string): string[] {
   return snapshot;
 }
 
+/**
+ * A stand-in for a T3 Code per-thread worker: registers itself the way the
+ * real one does (`t3-code/<endpoint>/threads/<thread>/daemon.json`), answers
+ * `/health` and exits on `/stop`.
+ */
+async function startFakeT3Worker(dataDir: string) {
+  const directory = join(dataDir, "t3-code", "e".repeat(64), "threads", "t".repeat(64));
+  mkdirSync(directory, { recursive: true });
+  const script = `
+    const token = "x".repeat(40);
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
+      if (req.headers.get("authorization") !== "Bearer " + token) return new Response("no", { status: 403 });
+      const path = new URL(req.url).pathname;
+      if (path === "/health") return Response.json({ running: true, endpoint: "http://127.0.0.1:3773/mcp", thread: "thread-a", pid: process.pid });
+      if (path === "/stop") { setTimeout(() => process.exit(0), 20); return Response.json({ stopped: true }); }
+      return new Response("no", { status: 404 });
+    } });
+    await Bun.write(${JSON.stringify(join(directory, "daemon.json"))}, JSON.stringify({ endpoint: "http://127.0.0.1:3773/mcp", thread: "thread-a", pid: process.pid, port: server.port, token }));
+  `;
+  const child = Bun.spawn([process.execPath, "-e", script], { stdout: "ignore", stderr: "ignore" });
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(join(directory, "daemon.json")) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  return child;
+}
+
+describe("the optional T3 Code connection", () => {
+  test("uninstall stops its running workers, and purge removes t3-code/", async () => {
+    const fixture = createFixture();
+    const child = await startFakeT3Worker(fixture.dataDir);
+    try {
+      const planned = await runPlannotatorUninstall({ purge: true, dryRun: true }, fixture.environment);
+      expect(planned.planned.some((line) => line.includes(`Stop the T3 Code companion for thread thread-a (pid ${child.pid})`))).toBe(true);
+      expect(child.exitCode).toBeNull();
+      const result = await runPlannotatorUninstall({ purge: true, dryRun: false }, fixture.environment);
+      expect(result.removed.some((line) => line.includes(`Stopped the T3 Code companion for thread thread-a (pid ${child.pid})`))).toBe(true);
+      expect(await child.exited).toBe(0);
+      expect(existsSync(join(fixture.dataDir, "t3-code"))).toBe(false);
+    } finally {
+      child.kill(); // inbox-guard: own child
+    }
+  });
+
+  test("without a T3 connection, uninstall reports nothing about it", async () => {
+    const fixture = createFixture();
+    const result = await runPlannotatorUninstall({ purge: false, dryRun: false }, fixture.environment);
+    expect([...result.removed, ...result.planned, ...result.warnings, ...result.errors].some((line) => line.includes("T3"))).toBe(false);
+  });
+});
+
 describe("default uninstall", () => {
+  test("removes the optional T3 hook only for the installed binary, preserving other Bash hooks", async () => {
+    const fixture = createFixture();
+    const binary = join(fixture.homeDir, ".local", "bin", "plannotator");
+    writeText(binary);
+    const settings = join(fixture.homeDir, ".claude", "settings.json");
+    const customHooks = [
+      { type: "command", command: "my-custom-hook" },
+      { type: "command", command: t3HookCommand("/custom/plannotator", fixture.dataDir) },
+    ];
+    writeJson(settings, {
+      theme: "dark",
+      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [
+        { type: "command", command: t3HookCommand(binary, fixture.dataDir), timeout: 10 },
+        ...customHooks,
+      ] }] },
+    });
+    // The backup `t3-hook install` keeps of settings before its first change.
+    const backup = `${settings}.plannotator-t3.bak`;
+    writeText(backup);
+    const planned = await runPlannotatorUninstall({ purge: false, dryRun: true }, fixture.environment);
+    expect(planned.planned).toContain(backup);
+    expect(existsSync(backup)).toBe(true);
+    const result = await runPlannotatorUninstall({ purge: false, dryRun: false }, fixture.environment);
+    expect(result.ok).toBe(true);
+    expect(readJson(settings)).toEqual({
+      theme: "dark", hooks: { PreToolUse: [{ matcher: "Bash", hooks: customHooks }] },
+    });
+    expect(existsSync(backup)).toBe(false);
+    expect(result.removed).toContain(backup);
+  });
+
   test("removes recognized installer components and preserves local data", async () => {
     const fixture = createFixture();
     const { homeDir, dataDir } = fixture;
@@ -386,7 +467,30 @@ describe("default uninstall", () => {
       "opencode",
       "0.25.1@@@1",
     );
+    // OpenCode 2 caches npm plugins at <cache>/opencode/npm/<name>@<spec>/<generation>/.
+    const openCode2PluginCache = join(
+      homeDir,
+      ".cache",
+      "opencode",
+      "npm",
+      "@plannotator",
+      "opencode@latest",
+      "1790000000000",
+      "package.json",
+    );
+    const openCode2UnrelatedCache = join(
+      homeDir,
+      ".cache",
+      "opencode",
+      "npm",
+      "@plannotator",
+      "pi-extension@latest",
+      "1790000000000",
+      "package.json",
+    );
     writeText(openCodePackageCache);
+    writeText(openCode2PluginCache);
+    writeText(openCode2UnrelatedCache);
     writeText(unrelatedScopedCache);
     writeText(unrelatedBunCache);
     writeText(bunOpenCodeVersionCache);
@@ -517,6 +621,8 @@ describe("default uninstall", () => {
     expect(vibeHooksAfter).not.toContain("exit_plan_mode");
     expect(existsSync(customStaleLayoutEntry)).toBe(true);
     expect(existsSync(openCodePackageCache)).toBe(false);
+    expect(existsSync(join(homeDir, ".cache", "opencode", "npm", "@plannotator", "opencode@latest"))).toBe(false);
+    expect(existsSync(openCode2UnrelatedCache)).toBe(true);
     expect(existsSync(unrelatedScopedCache)).toBe(true);
     expect(existsSync(unrelatedBunCache)).toBe(true);
     expect(existsSync(bunOpenCodeVersionCache)).toBe(false);
@@ -2037,5 +2143,70 @@ describe("host and platform integrations", () => {
       PLANNOTATOR_UNINSTALL_ORIGINAL_PATH:
         `C:\\Before;${dirname(currentExe)};C:\\After;;`,
     });
+  });
+});
+
+describe("the Inbox's agent connections (inbox-agents.ts)", () => {
+  const cursorFile = (fixture: Fixture) => join(fixture.homeDir, ".cursor", "mcp.json");
+  const ours = { command: "/old/bin/plannotator", args: ["inbox", "mcp"] };
+
+  function seed(fixture: Fixture): void {
+    writeJson(cursorFile(fixture), { mcpServers: { mine: { command: "x" }, "plannotator-inbox": ours } });
+    writeJson(join(fixture.dataDir, "inbox", "agents.json"), {
+      v: 1,
+      agents: { cursor: { state: "added", reach: "mcp", path: cursorFile(fixture), command: ["/old/bin/plannotator", "inbox", "mcp"], at: "2026-10-12T00:00:00.000Z" } },
+    });
+  }
+
+  test("--dry-run lists the entry and changes nothing", async () => {
+    const fixture = createFixture();
+    seed(fixture);
+    const result = await runPlannotatorUninstall({ purge: false, dryRun: true }, fixture.environment);
+    expect(result.planned).toContain(`MCP server plannotator-inbox from Cursor (${join("~", ".cursor", "mcp.json")}, that entry only)`);
+    expect((readJson(cursorFile(fixture)).mcpServers as Record<string, unknown>)["plannotator-inbox"]).toEqual(ours);
+  });
+
+  test("a plain uninstall removes the entry, keeps the person's others, and forgets the record", async () => {
+    const fixture = createFixture();
+    seed(fixture);
+    const result = await runPlannotatorUninstall({ purge: false, dryRun: false }, fixture.environment);
+    expect(result.removed).toContain(`MCP server plannotator-inbox from Cursor (${join("~", ".cursor", "mcp.json")}, that entry only)`);
+    expect(readJson(cursorFile(fixture)).mcpServers).toEqual({ mine: { command: "x" } });
+    expect((readJson(join(fixture.dataDir, "inbox", "agents.json")).agents as Record<string, unknown>).cursor).toBeUndefined();
+  });
+
+  test("the notes: only the marked section, from a file the record no longer names too", async () => {
+    const fixture = createFixture();
+    const note = [
+      "<!-- plannotator-inbox:start v1 · added by Plannotator. Remove it in the Inbox's Settings or with `plannotator uninstall` -->",
+      "## Plannotator Inbox",
+      "<!-- plannotator-inbox:end -->",
+    ].join("\n");
+    writeText(join(fixture.homeDir, ".codex", "AGENTS.md"), `Mine.\n\n${note}\n`);
+    const dry = await runPlannotatorUninstall({ purge: false, dryRun: true }, fixture.environment);
+    expect(dry.planned).toContain(`Note for Codex (${join("~", ".codex", "AGENTS.md")}, marked section only; you edited it)`);
+    const result = await runPlannotatorUninstall({ purge: false, dryRun: false }, fixture.environment);
+    expect(result.removed).toContain(`Note for Codex (${join("~", ".codex", "AGENTS.md")}, marked section only; you edited it)`);
+    expect(readFileSync(join(fixture.homeDir, ".codex", "AGENTS.md"), "utf8")).toBe("Mine.\n");
+  });
+
+  test("with no record (agents.json lost), an entry that runs this binary is named and left, never removed", async () => {
+    const fixture = createFixture();
+    const entry = { command: fixture.environment.execPath, args: ["inbox", "mcp"] };
+    writeJson(cursorFile(fixture), { mcpServers: { "plannotator-inbox": entry } });
+    const result = await runPlannotatorUninstall({ purge: false, dryRun: false }, fixture.environment);
+    expect(result.warnings).toContain(
+      `Skipped: Cursor's "plannotator-inbox" in ${join("~", ".cursor", "mcp.json")} runs this Plannotator, but no record says Plannotator added it, so it may be yours (to remove it, delete that entry by hand).`,
+    );
+    expect(readJson(cursorFile(fixture)).mcpServers).toEqual({ "plannotator-inbox": entry });
+  });
+
+  test("an entry that runs something else now is named and left", async () => {
+    const fixture = createFixture();
+    seed(fixture);
+    writeJson(cursorFile(fixture), { mcpServers: { "plannotator-inbox": { command: "theirs" } } });
+    const result = await runPlannotatorUninstall({ purge: false, dryRun: false }, fixture.environment);
+    expect(result.warnings).toContain(`Skipped: Cursor's "plannotator-inbox" now runs something else (changed by hand), so it is yours.`);
+    expect(readJson(cursorFile(fixture)).mcpServers).toEqual({ "plannotator-inbox": { command: "theirs" } });
   });
 });

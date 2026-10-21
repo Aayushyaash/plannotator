@@ -12,6 +12,7 @@ steps to ensure your changes work correctly.
 5. [Decision Control Manual Checklist](#decision-control-manual-checklist)
 6. [WebMCP Manual Checklist](#webmcp-manual-checklist)
 7. [Terminal-Tools Announcement Manual Checklist](#terminal-tools-announcement-manual-checklist)
+   - [Ask This Session Announcement Manual Checklist](#ask-this-session-announcement-manual-checklist)
 8. [HTML Sibling-Link Manual Checklist](#html-sibling-link-manual-checklist)
 9. [Cross-File Annotations Manual Checklist](#cross-file-annotations-manual-checklist)
 
@@ -510,6 +511,29 @@ not hand the turn to an earlier dialog.
    the dark footage. At ~400px wide the video spans the panel, the headline, switch and actions
    wrap without horizontal overflow, and "Got it" stays reachable.
 
+## Ask This Session Announcement Manual Checklist
+
+Not CI. The gate is one cookie, `plannotator-announce-ask-session-seen`. Seed
+`plannotator-announce-tui-herdr-seen=1` (and the other first-run keys) so the chain reaches it.
+
+1. **Who sees it.** Open a review from Claude Code (`/plannotator-review`), Pi or OpenCode 2 and
+   don't touch anything: the announcement opens within a few seconds, its headline names that
+   agent, and Ask AI shows "Ask this session". `PLANNOTATOR_ORIGIN=codex`,
+   `PLANNOTATOR_AI=disabled`, `PLANNOTATOR_CLAUDE_MOD=0` or `PLANNOTATOR_REMOTE=1`: no
+   announcement, and the cookie is still unset afterwards.
+2. **It never interrupts.** Clear the cookie, open a session and click into the page (or start
+   typing a comment) before it appears: it does not open on this load, and the cookie is unset.
+   Reload without touching anything: it opens.
+3. **One announcement per load.** Clear both announcement cookies: the terminal-tools one shows;
+   dismiss it, and this one does NOT follow on the same load. Reload: now this one shows.
+4. **Exits and keyboard.** Got it, `Escape` and a click on the backdrop all close it and write the
+   cookie. `Tab` wraps inside it; `Mod+Enter` approves nothing and posts nothing.
+5. **Suppressed, not consumed.** Archive, `#share` links and the compact touch shell never show it
+   and leave the cookie unset.
+6. **Video.** Muted, looping autoplay from `https://plannotator.ai/assets/ask-this-session-demo.*`;
+   with "Reduce motion" the poster waits behind a play button; offline the frame keeps its place
+   and says the video could not load. On a short window (e.g. 1280x640) the whole panel fits.
+
 ## HTML Sibling-Link Manual Checklist
 
 Not CI. Build a small local site in a scratch folder: `index.html` linking to a sibling
@@ -546,11 +570,13 @@ play. Run `plannotator annotate <site>/index.html`.
 7. **The chrome survives navigation.** Show the tools (the eye), then follow two HTML links.
    The tools stay shown and the sidebar keeps whatever state you left it in — neither is reset
    to the session defaults mid-session.
-8. **Armed mode still annotates links.** Re-arm with the pen (or `Mod+Shift+A`) and click a
-   link: the comment composer opens on the `<a>` element and no navigation happens.
-9. **Live app sessions are untouched.** Run `plannotator annotate http://localhost:<dev port>`
+8. **Armed: a click follows, Cmd/Ctrl-click pins.** Re-arm with the pen (or `Mod+Shift+A`) and
+   click a link: it follows. Cmd-click (Ctrl-click off macOS) the same link: the comment composer
+   opens on the `<a>` element and no navigation happens. On a phone: a tap follows, a
+   press-and-hold (half a second) opens the composer, and lifting the finger follows nothing.
+9. **Live app sessions follow the same rule.** Run `plannotator annotate http://localhost:<dev port>`
    against any app and click its own in-app links, armed and in Interact: they navigate the app
-   through the proxy exactly as before.
+   through the proxy. Armed, Cmd/Ctrl-click (press-and-hold on a phone) pins the link instead.
 
 Known limitation to expect in step 2: a document in a subfolder loads assets that sit below it,
 but `../style.css` and `../img.png` do not resolve (`/api/html-assets` mints one token per HTML

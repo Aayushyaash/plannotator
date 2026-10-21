@@ -1,8 +1,15 @@
+import { piUpdateAdvert } from "./update-advert.ts";
+import { crossOriginRefusalBody, isSameOriginOrNoOrigin } from "../generated/request-origin.ts";
 import { randomUUID } from "node:crypto";
 import { likelyAppHtmlEncoding, prewarmAppHtml } from "../generated/app-html.ts";
 import { createServer } from "node:http";
 
-import { contentHash, deleteDraft } from "../generated/draft.ts";
+import { contentHash, deleteDraft, loadDraft } from "../generated/draft.ts";
+import { countUnsentDraftComments, hostSessionClosedEvent, type HostCloseOutcome } from "../generated/host-control.ts";
+import { checkServerSession, createServerSessionNonce, serverSessionMismatchBody } from "../generated/server-session.ts";
+import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control.ts";
+import { createRequestHostGuard } from "./request-host-guard.ts";
+import { isSameOriginRequest, refuseCrossOriginWrite } from "./request-origin-guard.ts";
 import {
 	type ArchivedPlan,
 	generateSlug,
@@ -42,7 +49,8 @@ import {
 } from "./integrations.ts";
 import { buildAdvertisedUrl, isRemoteSession, listenOnPort } from "./network.ts";
 
-import { loadConfig, saveConfig, detectGitUser, getServerConfig, resolveAIEnabled, resolveFeedbackHistory, resolveSharingEnabled } from "../generated/config.ts";
+import { agentToolSaveFailed, loadConfig, saveConfig, detectGitUser, getServerConfig, resolveAIEnabled, resolveFeedbackHistory, resolveSharingEnabled } from "../generated/config.ts";
+import { currentPiHost } from "../pi-host.ts";
 import { appendFeedbackRecord, type FeedbackDecision } from "../generated/feedback-archive.ts";
 import { isFaviconStyle, type FaviconStyle } from "../generated/favicon.ts";
 import { readImprovementHook, getImprovementHookExpectedPath } from "../generated/improvement-hooks.ts";
@@ -103,9 +111,22 @@ export interface PlanServerResult {
 	updatePlan: (plan: string) => PlanRevisionResult | null;
 	waitForDone?: () => Promise<void>;
 	stop: () => void;
+	/** Host-only status (no close: a plan review ends with the reviewer's decision). */
+	hostControl: HostControl;
+	/**
+	 * In-process only (over HTTP a plan review stays unclosable): the Pi
+	 * session that opened this review is going away (/reload, a session
+	 * switch, leaving plan mode), so nothing could deliver a decision. Tells
+	 * open tabs over the external-annotation stream (`session-closed` with
+	 * `by: "session"`: the tab says the agent session ended and keeps its saved draft)
+	 * and refuses any later decision. The caller stops the server afterwards.
+	 */
+	closeKeepingDraft: () => HostCloseOutcome;
 }
 
 export async function startPlanReviewServer(options: {
+	/** Turns on `/api/host/status` for a caller in another process (never in remote mode or archive mode). */
+	hostControlToken?: string;
 	plan: string;
 	htmlContent: string;
 	origin?: string;
@@ -222,23 +243,47 @@ export async function startPlanReviewServer(options: {
 	// (note integrations): updatePlan then refuses, so the plan a decision
 	// names cannot be swapped while that decision is still being recorded.
 	let decisionClaimed = false;
+	// Stale-tab guard (packages/core/server-session.ts): advertised on
+	// /api/plan, echoed by every decision; a different nonce (a tab left open
+	// on a port a new server now owns) is refused with 409 session_mismatch.
+	// A body without it (an older client) is accepted.
+	const serverSession = createServerSessionNonce();
 	const decisionPromise = new Promise<PlanReviewDecision>((r) => {
 		resolveDecision = r;
 	});
+	// Set by closeKeepingDraft: the session that opened the review is gone.
+	let closedByHost = false;
 	const publishDecision = (result: PlanReviewDecision): boolean => {
 		if (decisionSettled) return false;
 		decisionSettled = true;
 		resolveDecision(result);
 		for (const listener of decisionListeners) {
-			Promise.resolve(listener(result)).catch((error) => {
-				console.error("[Plan Review] Decision listener failed:", error);
-			});
+			// Each listener runs on a microtask, so a SYNCHRONOUS throw becomes a
+			// rejection the catch below logs. This runs inside an HTTP handler: a
+			// listener that throws there (a replaced Pi runtime's stale-ctx emit,
+			// #1864) must never escape into it, where it kills the Pi process.
+			Promise.resolve()
+				.then(() => listener(result))
+				.catch((error) => {
+					console.error("[Plan Review] Decision listener failed:", error);
+				});
 		}
 		return true;
 	};
 
 	// Draft key for annotation persistence
 	const draftKey = options.mode !== "archive" ? contentHash(options.plan) : "";
+
+	// Host-only status: mirrors packages/server/index.ts.
+	const hostControlToken = options.mode === "archive" ? undefined : resolveHostControlToken(options.hostControlToken);
+	const hostControl: HostControl = {
+		status: () => ({
+			kind: "plan",
+			documents: [],
+			unsentAnnotations: draftKey ? countUnsentDraftComments(loadDraft(draftKey)) : 0,
+			decided: decisionSettled || decisionClaimed,
+		}),
+	};
 
 	// Editor annotations (in-memory, VS Code integration — skip in archive mode)
 	const editorAnnotations = options.mode !== "archive" ? createEditorAnnotationHandler() : null;
@@ -257,6 +302,9 @@ export async function startPlanReviewServer(options: {
 	 */
 	const isStaleRevision = (body: Record<string, unknown>): boolean =>
 		typeof body.planRevision === "number" && body.planRevision !== planRevision;
+	const refuseClosed = (res: Parameters<typeof json>[0]): void => {
+		json(res, { error: "This review was closed: the session that opened it ended.", code: "already_decided" }, 409);
+	};
 	const refuseStaleRevision = (res: Parameters<typeof json>[0]): void => {
 		json(res, {
 			error: "The plan was revised while you were reviewing it. Review the new version, then decide again.",
@@ -268,8 +316,15 @@ export async function startPlanReviewServer(options: {
 	// Lazy cache for in-session archive tab
 	let cachedArchivePlans: ArchivedPlan[] | null = null;
 
+	const requestHostGuard = createRequestHostGuard();
 	const server = createServer(async (req, res) => {
+		// Host allowlist first, before any route (request-host-guard.ts).
+		if (requestHostGuard.refuse(req, res)) return;
+		// Then no write from another site, before any route (request-origin-guard.ts).
+		if (refuseCrossOriginWrite(req, res)) return;
 		const url = requestUrl(req);
+
+		if (handleHostControl(req, res, url, { token: hostControlToken, getServerPort: () => boundPort, control: hostControl })) return;
 
 		if (url.pathname === "/api/done" && req.method === "POST") {
 			resolveDone?.();
@@ -327,7 +382,7 @@ export async function startPlanReviewServer(options: {
 					archivePlans,
 					sharingEnabled,
 					shareBaseUrl,
-					serverConfig: getServerConfig(gitUser),
+					serverConfig: getServerConfig(gitUser, currentPiHost()),
 				});
 			} else {
 				json(res, {
@@ -335,6 +390,7 @@ export async function startPlanReviewServer(options: {
 					// Advertises that this review receives revised plans while open;
 					// the tab then polls /api/plan/revision.
 					...(options.planRevisions ? { planRevision } : {}),
+					serverSession,
 					origin: options.origin ?? "pi",
 					permissionMode: options.permissionMode,
 					previousPlan,
@@ -344,7 +400,8 @@ export async function startPlanReviewServer(options: {
 					pasteApiUrl,
 					repoInfo,
 					projectRoot: process.cwd(),
-					serverConfig: getServerConfig(gitUser),
+					serverConfig: getServerConfig(gitUser, currentPiHost()),
+					...piUpdateAdvert(options.origin),
 				});
 			}
 		} else if (url.pathname === "/api/hooks/status" && req.method === "GET") {
@@ -363,18 +420,26 @@ export async function startPlanReviewServer(options: {
 				composedLength: composed?.length ?? null,
 			});
 		} else if (url.pathname === "/api/config" && req.method === "POST") {
+			if (!isSameOriginOrNoOrigin(req.headers.origin ?? null, req.headers.host ?? "", req.headers["sec-fetch-site"])) {
+				json(res, { error: "Cross-origin config writes are not allowed" }, 403);
+				return;
+			}
 			try {
-				const body = (await parseBody(req)) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; conventionalComments?: boolean; conventionalLabels?: unknown[] | null; pfmReminder?: boolean };
+				const body = (await parseBody(req)) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; updateCheck?: unknown; agentTool?: unknown; conventionalComments?: boolean; conventionalLabels?: unknown[] | null; pfmReminder?: boolean };
 				const toSave: Record<string, unknown> = {};
 				if (body.displayName !== undefined) toSave.displayName = body.displayName;
 				if (body.diffOptions !== undefined) toSave.diffOptions = body.diffOptions;
 				if (body.theme !== undefined) toSave.theme = body.theme;
 				if (isFaviconStyle(body.favicon)) toSave.favicon = body.favicon;
 				if (typeof body.autoUpdate === "boolean") toSave.autoUpdate = body.autoUpdate;
+				if (typeof body.updateCheck === "boolean") toSave.updateCheck = body.updateCheck;
+				// The agent tool switch: boolean only; it applies to the next session.
+				if (typeof body.agentTool === "boolean") toSave.agentTool = body.agentTool;
 				if (body.conventionalComments !== undefined) toSave.conventionalComments = body.conventionalComments;
 				if (body.conventionalLabels !== undefined) toSave.conventionalLabels = body.conventionalLabels;
 				if (body.pfmReminder !== undefined) toSave.pfmReminder = body.pfmReminder;
 				if (Object.keys(toSave).length > 0) saveConfig(toSave as Parameters<typeof saveConfig>[0]);
+				if (agentToolSaveFailed(toSave)) return json(res, { error: "Could not save the setting to config.json." }, 500);
 				json(res, { ok: true });
 			} catch {
 				json(res, { error: "Invalid request" }, 400);
@@ -414,8 +479,17 @@ export async function startPlanReviewServer(options: {
 			url.pathname === "/api/plan/vscode-diff" &&
 			req.method === "POST"
 		) {
+			// Opens an editor on this machine: another site's page and a stale tab are refused.
+			if (!isSameOriginRequest(req)) {
+				json(res, crossOriginRefusalBody(), 403);
+				return;
+			}
 			try {
 				const body = await parseBody(req);
+				if (checkServerSession(body, serverSession) === "mismatch") {
+					json(res, serverSessionMismatchBody(), 409);
+					return;
+				}
 				const baseVersion = body.baseVersion as number;
 				if (!baseVersion) {
 					json(res, { error: "Missing baseVersion" }, 400);
@@ -449,10 +523,24 @@ export async function startPlanReviewServer(options: {
 		} else if (url.pathname === "/favicon.png") {
 			handleFavicon(res);
 		} else if (url.pathname === "/api/save-notes" && req.method === "POST") {
-			await handleSaveNotesRequest(req, res);
+			await handleSaveNotesRequest(req, res, { serverSession });
 		} else if (url.pathname === "/api/approve" && req.method === "POST") {
+			let body: Record<string, unknown> = {};
+			try {
+				body = await parseBody(req);
+			} catch {
+				body = {};
+			}
+			if (checkServerSession(body, serverSession) === "mismatch") {
+				json(res, serverSessionMismatchBody(), 409);
+				return;
+			}
 			if (decisionSettled) {
 				json(res, { ok: true, duplicate: true });
+				return;
+			}
+			if (closedByHost) {
+				refuseClosed(res);
 				return;
 			}
 			let feedback: string | undefined;
@@ -461,12 +549,6 @@ export async function startPlanReviewServer(options: {
 			let planSaveEnabled = true;
 			let planSaveCustomPath: string | undefined;
 			let draftGeneration: number | undefined;
-			let body: Record<string, unknown> = {};
-			try {
-				body = await parseBody(req);
-			} catch {
-				body = {};
-			}
 			if (isStaleRevision(body)) {
 				refuseStaleRevision(res);
 				return;
@@ -548,8 +630,22 @@ export async function startPlanReviewServer(options: {
 			});
 			json(res, { ok: true, savedPath });
 		} else if (url.pathname === "/api/deny" && req.method === "POST") {
+			let body: Record<string, unknown> = {};
+			try {
+				body = await parseBody(req);
+			} catch {
+				body = {};
+			}
+			if (checkServerSession(body, serverSession) === "mismatch") {
+				json(res, serverSessionMismatchBody(), 409);
+				return;
+			}
 			if (decisionSettled) {
 				json(res, { ok: true, duplicate: true });
+				return;
+			}
+			if (closedByHost) {
+				refuseClosed(res);
 				return;
 			}
 			let feedback = "Plan rejected by user";
@@ -557,12 +653,6 @@ export async function startPlanReviewServer(options: {
 			let planSaveCustomPath: string | undefined;
 			let draftGeneration: number | undefined;
 			let answersOnly = false;
-			let body: Record<string, unknown> = {};
-			try {
-				body = await parseBody(req);
-			} catch {
-				body = {};
-			}
 			if (isStaleRevision(body)) {
 				refuseStaleRevision(res);
 				return;
@@ -602,6 +692,7 @@ export async function startPlanReviewServer(options: {
 		}
 	});
 
+	requestHostGuard.attach(server);
 	const { port, portSource } = await listenOnPort(server);
 	boundPort = port;
 	// Remote sessions serve the app page compressed (#1617); start gzip (what
@@ -617,6 +708,17 @@ export async function startPlanReviewServer(options: {
 		portSource,
 		url: buildAdvertisedUrl(port),
 		waitForDecision: () => decisionPromise,
+		hostControl,
+		closeKeepingDraft: () => {
+			if (decisionSettled || decisionClaimed) return { closed: false, reason: "decided" };
+			if (options.mode === "archive") return { closed: false, reason: "not-closable" };
+			closedByHost = true;
+			// updatePlan refuses from here on, as after a decision.
+			decisionClaimed = true;
+			const unsentAnnotations = draftKey ? countUnsentDraftComments(loadDraft(draftKey)) : 0;
+			externalAnnotations?.broadcast(hostSessionClosedEvent(unsentAnnotations, "session"));
+			return { closed: true, unsentAnnotations };
+		},
 		onDecision: (listener) => {
 			decisionListeners.add(listener);
 			return () => {

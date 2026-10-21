@@ -1,11 +1,11 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AIChatEntry, PendingPermission } from '../../hooks/useAIChat';
-import type { AIProviderOption } from '../../utils/aiProvider';
+import { hasNonInterruptibleSession, type AIProviderOption } from '../../utils/aiProvider';
 import { formatRelativeTime, renderChatMarkdown } from '../../utils/aiChatFormat';
 import { OverlayScrollArea } from '../OverlayScrollArea';
 import { SparklesIcon } from '../SparklesIcon';
 import { AIProviderBar } from './AIProviderBar';
-import { SessionAskActions, SessionAskStatus, sessionAskErrorTone, type SessionAskAction } from './SessionAskNotice';
+import { SessionAskActions, SessionAskNote, SessionAskStatus, sessionAskErrorTone, type SessionAskAction } from './SessionAskNotice';
 import { submitHint } from '../../utils/platform';
 
 interface DocumentAIChatPanelProps {
@@ -20,10 +20,10 @@ interface DocumentAIChatPanelProps {
   aiProviders?: AIProviderOption[];
   aiConfig?: { providerId: string | null; model: string | null; reasoningEffort?: string | null };
   onAIConfigChange?: (config: { providerId?: string | null; model?: string | null; reasoningEffort?: string | null }) => void;
-  /** "Ask this session": the reviewer's choice on a busy/gone/blocked answer. */
+  /** "Ask this session": the reviewer's choice on a busy answer. */
   onSessionAskAction?: (questionId: string, action: SessionAskAction) => void;
-  /** Label of the provider "Ask a separate AI instead" would use; null hides it. */
-  sessionAskFallbackLabel?: string | null;
+  /** Optional note under the provider bar on how to get "Ask this session" (askSessionSetupHint). */
+  askSessionSetupHint?: string | null;
 }
 
 function truncate(text: string, max = 180): string {
@@ -70,8 +70,10 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
   aiConfig,
   onAIConfigChange,
   onSessionAskAction,
-  sessionAskFallbackLabel,
+  askSessionSetupHint,
 }) => {
+  // A session that is never interrupted (T3 Code): Stop only stops listening.
+  const listenOnly = hasNonInterruptibleSession(aiProviders);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [generalInput, setGeneralInput] = useState('');
   const latestMessage = messages[messages.length - 1];
@@ -119,8 +121,8 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
             <DocumentQAPair
               key={entry.question.id}
               entry={entry}
+              canInterrupt={!listenOnly}
               onSessionAskAction={onSessionAskAction}
-              sessionAskFallbackLabel={sessionAskFallbackLabel}
             />
           ))}
         </div>
@@ -148,6 +150,7 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
         onProviderChange={(providerId) => onAIConfigChange?.({ providerId })}
         onModelChange={(model) => onAIConfigChange?.({ model })}
         onReasoningEffortChange={(reasoningEffort) => onAIConfigChange?.({ reasoningEffort })}
+        setupHint={askSessionSetupHint}
       />
 
       {onAskGeneral && (
@@ -158,6 +161,7 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
           disabled={isStreaming}
           isStreaming={isStreaming}
           onStop={onStop}
+          observationOnly={listenOnly}
         />
       )}
     </div>
@@ -167,8 +171,8 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
 const DocumentQAPair = memo<{
   entry: AIChatEntry;
   onSessionAskAction?: (questionId: string, action: SessionAskAction) => void;
-  sessionAskFallbackLabel?: string | null;
-}>(({ entry, onSessionAskAction, sessionAskFallbackLabel }) => {
+  canInterrupt?: boolean;
+}>(({ entry, onSessionAskAction, canInterrupt }) => {
   const { question, response } = entry;
   const renderedResponse = useMemo(
     () => response.text ? renderChatMarkdown(response.text) : null,
@@ -210,7 +214,7 @@ const DocumentQAPair = memo<{
             <p className={`text-xs ${sessionAskErrorTone(response)}`}>{response.error}</p>
             <SessionAskActions
               response={response}
-              fallbackLabel={sessionAskFallbackLabel}
+              canInterrupt={canInterrupt}
               onAction={onSessionAskAction ? (action) => onSessionAskAction(question.id, action) : undefined}
             />
           </>
@@ -226,6 +230,7 @@ const DocumentQAPair = memo<{
             <span className="ai-streaming-cursor" /> Thinking...
           </span>
         ) : null}
+        {!response.error && <SessionAskNote response={response} />}
       </div>
     </div>
   );
@@ -279,7 +284,8 @@ const GeneralInput: React.FC<{
   disabled?: boolean;
   isStreaming?: boolean;
   onStop?: () => void;
-}> = ({ value, onChange, onSubmit, disabled, isStreaming, onStop }) => {
+  observationOnly?: boolean;
+}> = ({ value, onChange, onSubmit, disabled, isStreaming, onStop, observationOnly = false }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -313,9 +319,10 @@ const GeneralInput: React.FC<{
           <button
             onClick={onStop}
             className="p-1.5 mb-px rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors flex-shrink-0"
-            title="Stop generating"
-            aria-label="Stop generating"
+            title={observationOnly ? 'Stop listening; the question keeps running in the session' : 'Stop generating'}
+            aria-label={observationOnly ? 'Stop listening' : 'Stop generating'}
           >
+            {observationOnly && <span className="text-[10px] mr-1">Stop listening</span>}
             <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
               <rect x="6" y="6" width="12" height="12" rx="2" />
             </svg>

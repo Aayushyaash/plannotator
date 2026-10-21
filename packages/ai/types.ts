@@ -107,6 +107,14 @@ export interface AIQueryOptions {
    * reviewer choose.
    */
   busyPolicy?: "wait" | "interrupt";
+  /**
+   * "Ask this session" only: the reviewer's unsubmitted (draft) annotations,
+   * as the plain list `formatDraftAnnotationsForAsk` builds. The bridge wraps
+   * it in a read-only frame (`formatSessionAskText`), never as feedback. An
+   * empty string means the drafts sent earlier were all removed; absent means
+   * nothing changed since the session last saw them.
+   */
+  draftAnnotations?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +256,8 @@ export interface AIProvider {
     host: string;
     status: "ready" | "busy" | "blocked" | "gone";
     modes: { turn: boolean; transient: boolean };
+    /** `false` only when the host never interrupts the session's work. */
+    interruptible?: false;
   };
 
   /**

@@ -22,6 +22,8 @@ export interface EmbeddedPlanReviewInput {
   logReady: (url: string, isRemote: boolean, port: number) => void;
   /** "Ask this session": in-process bridge to the session (quick answers while the plan waits). */
   sessionBridge?: SessionBridge;
+  /** The host can register the `plannotator` tool: serverConfig advertises its switch. */
+  opencodeToolCapable?: boolean;
 }
 
 export interface EmbeddedPlanReviewResult {
@@ -87,8 +89,12 @@ export async function runEmbeddedPlanReview(
     htmlContent: input.htmlContent,
     opencodeClient: input.client,
     sessionBridge: input.sessionBridge,
+    ...(input.opencodeToolCapable ? { opencodeToolCapable: true } : {}),
     onReady: async (url, isRemote, port) => {
-      await handleServerReady(url, isRemote, port);
+      // announce: false. This runs in OpenCode's own process, sharing stderr
+      // with its TUI renderer, and input.logReady already shows the URL (a
+      // toast on OpenCode 1, a transcript notice on OpenCode 2).
+      await handleServerReady(url, isRemote, port, { announce: false });
       input.logReady(url, isRemote, port);
     },
   });

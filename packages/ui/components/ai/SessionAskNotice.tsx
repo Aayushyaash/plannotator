@@ -3,7 +3,7 @@ import type { AIResponse } from '../../types';
 import { SESSION_ASK_ERROR_CODES } from '../../utils/aiProvider';
 
 /** What the reviewer chose on an "Ask this session" answer that could not run. */
-export type SessionAskAction = 'wait' | 'interrupt' | 'fallback';
+export type SessionAskAction = 'wait' | 'interrupt';
 
 /**
  * In-progress line for a question waiting on a busy session. Renders nothing
@@ -33,20 +33,21 @@ const buttonClass =
   'px-2 py-1 rounded-md text-[10px] font-medium transition-colors';
 
 /**
- * Follow-up actions under an "Ask this session" error:
+ * Follow-up under an "Ask this session" error:
  * - the session is busy: ask when it finishes, or interrupt it and ask now;
- * - the session is gone or blocked: ask a separate AI instead.
- * Renders nothing for other errors or when the host passes no handler.
+ * - the session is gone or blocked: a plain note. Ask AI has no other provider
+ *   while a session is attached, so there is nothing to switch to.
+ * Busy actions render only when the host passes a handler.
  */
 export const SessionAskActions: React.FC<{
   response: AIResponse;
   onAction?: (action: SessionAskAction) => void;
-  /** Label of the provider the fallback would use; null hides the fallback. */
-  fallbackLabel?: string | null;
-}> = ({ response, onAction, fallbackLabel }) => {
-  if (!onAction || !response.errorCode) return null;
+  canInterrupt?: boolean;
+}> = ({ response, onAction, canInterrupt = true }) => {
+  if (!response.errorCode) return null;
 
   if (response.errorCode === SESSION_ASK_ERROR_CODES.agentBusy) {
+    if (!onAction) return null;
     return (
       <div className="flex flex-wrap gap-1.5 mt-2" data-session-ask-actions="busy">
         <button
@@ -56,34 +57,46 @@ export const SessionAskActions: React.FC<{
         >
           Ask when it finishes
         </button>
-        <button
+        {canInterrupt && <button
           type="button"
           onClick={() => onAction('interrupt')}
           className={`${buttonClass} bg-muted text-foreground hover:bg-muted/80`}
           title="Stops the session's current work, then asks your question"
         >
           Interrupt and ask now
-        </button>
+        </button>}
       </div>
     );
   }
 
-  if (
-    (response.errorCode === SESSION_ASK_ERROR_CODES.gone || response.errorCode === SESSION_ASK_ERROR_CODES.blocked) &&
-    fallbackLabel
-  ) {
+  if (response.errorCode === SESSION_ASK_ERROR_CODES.gone || response.errorCode === SESSION_ASK_ERROR_CODES.blocked) {
+    const gone = response.errorCode === SESSION_ASK_ERROR_CODES.gone;
     return (
-      <div className="flex flex-wrap gap-1.5 mt-2" data-session-ask-actions="fallback">
-        <button
-          type="button"
-          onClick={() => onAction('fallback')}
-          className={`${buttonClass} bg-muted text-foreground hover:bg-muted/80`}
-        >
-          Ask a separate AI instead ({fallbackLabel})
-        </button>
-      </div>
+      <p
+        className="mt-1.5 text-[11px] text-muted-foreground"
+        data-session-ask-unreachable={gone ? 'gone' : 'blocked'}
+      >
+        {gone
+          ? 'Ask AI answers only from the session that opened Plannotator, and that session is gone, so Ask AI can\'t reach it.'
+          : 'Ask AI answers only from the session that opened Plannotator, and that session is waiting on this decision, so Ask AI can\'t reach it until you decide.'}
+      </p>
     );
   }
 
   return null;
+};
+
+/**
+ * A muted note under an "Ask this session" answer that stopped early because
+ * the person typed into the session while it answered (the rest of that turn
+ * went to their prompt). The partial answer above it stands. Renders nothing
+ * for any other response.
+ */
+export const SessionAskNote: React.FC<{ response: Pick<AIResponse, 'notice'> }> = ({ response }) => {
+  if (!response.notice) return null;
+  return (
+    <p className="mt-1.5 text-[11px] text-muted-foreground" data-session-ask-note="taken-over">
+      {response.notice}
+    </p>
+  );
 };

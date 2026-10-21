@@ -76,10 +76,21 @@ export interface QueryRequest {
   sessionId: string;
   /** The user's prompt/question. */
   prompt: string;
-  /** Optional context update (e.g., new annotations since session was created). */
+  /**
+   * Optional context update (e.g., new annotations since session was created).
+   * Separate-AI providers only: an "Ask this session" question ignores it,
+   * because the session that receives it is the agent the feedback is for and
+   * would read it as instructions (#1748). Drafts go there as `draftAnnotations`.
+   */
   contextUpdate?: string;
   /** "Ask this session" only: what to do when the host session is busy. */
   busyPolicy?: "wait" | "interrupt";
+  /**
+   * "Ask this session" only: the reviewer's unsubmitted annotations as a plain
+   * list, framed by the bridge as read-only context (see `AIQueryOptions`).
+   * Ignored by every other provider.
+   */
+  draftAnnotations?: string;
 }
 
 export interface AbortRequest {
@@ -94,6 +105,15 @@ export interface AbortRequest {
 export interface AIEndpointDeps {
   /** Provider registry (one per server or shared). */
   registry: ProviderRegistry;
+  /**
+   * Providers registered ONLY so their model catalogs can be served to the
+   * agent-job launchers (Review Agents, Code Tour, Guided Review), used when a
+   * session bridge makes the bridge the sole Ask AI provider. They never take
+   * an Ask AI session and are never listed under `providers`: a
+   * `?activate=<id>` probe naming one runs its discovery and reports it under
+   * `catalogProviders`, which only the launchers' catalog loader reads.
+   */
+  catalogRegistry?: ProviderRegistry;
   /** Session manager instance (one per server). */
   sessionManager: SessionManager;
   /** Resolve the current working directory for new AI sessions. */
@@ -236,6 +256,7 @@ function clampPositiveNumber(value: unknown, max: number): number | undefined {
 export function createAIEndpoints(deps: AIEndpointDeps) {
   const {
     registry,
+    catalogRegistry,
     sessionManager,
     getCwd,
     beforeCapabilities,
@@ -263,27 +284,27 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
       // on load, and activating there would reintroduce the eager launch this
       // deferral exists to prevent.
       const activateId = new URL(req.url).searchParams.get("activate");
-      if (activateId && registry.get(activateId)) {
+      const catalogOnly = activateId && !registry.get(activateId) ? catalogRegistry?.get(activateId) : undefined;
+      if (activateId && (registry.get(activateId) || catalogOnly)) {
         await beforeProviderSession?.(activateId, "activate");
       }
       const defaultEntry = registry.getDefault();
-      const providerDetails = registry.list().map(id => {
-        const p = registry.get(id)!;
-        return {
-          id,
-          name: p.name,
-          capabilities: p.capabilities,
-          models: p.models ?? [],
-          ...(p.modelsSource ? { modelsSource: p.modelsSource } : {}),
-          ...(p.toolVersion ? { toolVersion: p.toolVersion } : {}),
-          ...(p.label ? { label: p.label } : {}),
-          ...(p.sessionBridge ? { sessionBridge: p.sessionBridge } : {}),
-        };
+      const describe = (id: string, p: AIProvider) => ({
+        id,
+        name: p.name,
+        capabilities: p.capabilities,
+        models: p.models ?? [],
+        ...(p.modelsSource ? { modelsSource: p.modelsSource } : {}),
+        ...(p.toolVersion ? { toolVersion: p.toolVersion } : {}),
+        ...(p.label ? { label: p.label } : {}),
+        ...(p.sessionBridge ? { sessionBridge: p.sessionBridge } : {}),
       });
+      const providerDetails = registry.list().map(id => describe(id, registry.get(id)!));
       return Response.json({
         available: !!defaultEntry,
         providers: providerDetails,
         defaultProvider: defaultEntry?.id ?? null,
+        ...(activateId && catalogOnly ? { catalogProviders: [describe(activateId, catalogOnly)] } : {}),
       });
     },
 
@@ -382,6 +403,7 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
       const { sessionId, prompt, contextUpdate } = body;
       const busyPolicy =
         body.busyPolicy === "wait" || body.busyPolicy === "interrupt" ? body.busyPolicy : undefined;
+      const draftAnnotations = typeof body.draftAnnotations === "string" ? body.draftAnnotations : undefined;
 
       if (!sessionId || !prompt) {
         return Response.json(
@@ -404,10 +426,20 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
 
       sessionManager.touch(sessionId);
 
-      // If context update provided, prepend it to the prompt
-      const effectivePrompt = contextUpdate
+      const isSessionBridge = entry.session instanceof SessionBridgeSession;
+
+      // A separate AI gets the context update in front of the prompt. "Ask
+      // this session" never does: that session is the agent the review is
+      // for, and the update is the feedback export of drafts the reviewer has
+      // not submitted, which it would carry out (#1748). Drafts reach it only
+      // as `draftAnnotations`, inside the bridge's read-only frame.
+      const effectivePrompt = contextUpdate && !isSessionBridge
         ? `[Context update: the user has made changes since this conversation started]\n${contextUpdate}\n\n${prompt}`
         : prompt;
+      const queryOptions = {
+        ...(busyPolicy && { busyPolicy }),
+        ...(isSessionBridge && draftAnnotations !== undefined && { draftAnnotations }),
+      };
 
       // Set label from first query if not already set
       if (!entry.label) {
@@ -419,8 +451,8 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
       const stream = new ReadableStream({
         async start(controller) {
           try {
-            const messages = busyPolicy
-              ? entry.session.query(effectivePrompt, { busyPolicy })
+            const messages = Object.keys(queryOptions).length > 0
+              ? entry.session.query(effectivePrompt, queryOptions)
               : entry.session.query(effectivePrompt);
             for await (const message of messages) {
               const data = JSON.stringify(message);

@@ -4,6 +4,7 @@ import { resolveReplyParents } from '@plannotator/core/annotation-threads';
 import { diagramAnchorLocationLine, parseDiagramAnchor } from '@plannotator/core/diagram-anchor';
 import {
   formatQuestionAnswerLines,
+  formatQuestionAnswerText,
   formatQuestionAnswersSection,
   indexQuestionBlocks,
   parseQuestionAnswer,
@@ -381,10 +382,13 @@ export const parseMarkdownToBlocks = (markdown: string, options?: ParseMarkdownO
     const prevLineWasBlank = lastLineWasBlank;
     lastLineWasBlank = false;
 
-    // Headings
-    if (trimmed.startsWith('#')) {
+    // Headings: one to six `#` followed by a space or the end of the line
+    // (CommonMark ATX). `#123 fixed`, `#hashtag` and `#!/bin/sh` are text,
+    // so an issue ref that starts a line keeps its link.
+    const headingMatch = trimmed.match(/^(#{1,6})(?:\s|$)/);
+    if (headingMatch) {
       flush();
-      const level = trimmed.match(/^#+/)?.[0].length || 1;
+      const level = headingMatch[1].length;
       blocks.push({
         id: `block-${currentId++}`,
         type: 'heading',
@@ -448,62 +452,63 @@ export const parseMarkdownToBlocks = (markdown: string, options?: ParseMarkdownO
       continue;
     }
 
-    // Blockquotes — consecutive `>` lines merge into one block so wrapped
-    // paragraph quotes render as a single continuous quote box. A blank line
-    // breaks the blockquote so the next `>` starts a fresh one.
+    // Blockquotes: a run of consecutive `>` lines (blank `>` lines included)
+    // is ONE quote block, the way GitHub renders it: one quote, one bar. A
+    // truly blank line ends the run, so the next `>` starts a fresh quote; a
+    // line without `>` is not a lazy continuation (it starts a paragraph).
     //
-    // Exception: if the stripped content starts with a block-level marker
-    // (list item, heading, code fence, nested blockquote) we do NOT merge.
-    // Our flat block model can't render a list-inside-a-quote as an actual
-    // nested list, so merging would flatten the markers into run-on inline
-    // text. Leaving them as separate blockquote blocks preserves each line's
-    // visual identity (a stacked-box layout) — imperfect but legible. A
-    // proper recursive blockquote parser is tracked as a follow-up.
+    // `content` is the quote's own markdown: each line with its `>` marker and
+    // one following space or tab removed (deeper indentation is kept, so a
+    // fenced code block or a nested list inside the quote keeps its shape) and
+    // trailing whitespace trimmed, one content line per source line. Blank
+    // lines at the quote's edges are dropped (`startLine` moves past leading
+    // ones), so the block's line span is the quote's text. The renderer
+    // (`BlockquoteBlock`) parses `content` again with this function and draws
+    // the inner blocks (paragraphs, code fences, lists, nested quotes) inside
+    // the one quote, while the quote stays a single annotatable block with a
+    // single `data-block-id`.
+    //
+    // GitHub alerts (`> [!KIND]` as the run's first line) are unchanged: the
+    // marker line tags the block, and the body is every later line fully
+    // `>`-stripped and trimmed, empty leading lines skipped, exactly as the
+    // line-by-line merge produced it. AlertBlock renders it.
     if (trimmed.startsWith('>')) {
       flush();
-      const stripped = trimmed.replace(/^>\s*/, '');
-      // List markers require trailing whitespace to avoid matching inline
-      // text like "-hyphen" or "1.5 seconds"; headings, code fences, and
-      // nested blockquote markers don't require it (``` can be followed
-      // directly by a language tag, # can start a dense heading).
-      const blockMarkerRe = /^(?:(?:\*|-|\d+\.)\s|#|```|>)/;
-      const hasBlockMarker = blockMarkerRe.test(stripped);
-      const prevBlock = blocks.length > 0 ? blocks[blocks.length - 1] : null;
-      // Don't merge into a previous blockquote whose content itself starts
-      // with a block marker — otherwise a `> some text` line following a
-      // `> 1. item` line would get glued onto the list-item block.
-      const prevIsMarkerQuote =
-        prevBlock?.type === 'blockquote' && blockMarkerRe.test(prevBlock.content);
-      // Alerts own their body: once a blockquote is tagged as an alert,
-      // subsequent `>` lines always merge into it (until a blank line).
-      // Without this, `> [!NOTE]\n> - item` splits the list item off into
-      // a separate plain quote, losing the callout.
-      const prevIsAlert = prevBlock?.type === 'blockquote' && !!prevBlock.alertKind;
-      const shouldMergeIntoAlert = prevIsAlert && !prevLineWasBlank;
-      const shouldMergeNormal =
-        !hasBlockMarker &&
-        !prevIsMarkerQuote &&
-        !prevLineWasBlank &&
-        prevBlock?.type === 'blockquote';
-      if (shouldMergeIntoAlert || shouldMergeNormal) {
-        prevBlock!.content = prevBlock!.content
-          ? prevBlock!.content + '\n' + stripped
-          : stripped;
-      } else {
-        // GitHub alert marker: a blockquote whose first line is [!KIND].
-        // We strip the marker from content and tag the block; rendering decides the style.
-        const alertMatch = stripped.match(/^\[!(NOTE|TIP|WARNING|CAUTION|IMPORTANT)\]\s*$/i);
+      let runEnd = i;
+      while (runEnd + 1 < lines.length && lines[runEnd + 1].trim().startsWith('>')) runEnd++;
+      const run = lines.slice(i, runEnd + 1);
+      const quoteStartLine = currentLineNum;
+      i = runEnd;
+      const alertMatch = trimmed
+        .replace(/^>\s*/, '')
+        .match(/^\[!(NOTE|TIP|WARNING|CAUTION|IMPORTANT)\]\s*$/i);
+      if (alertMatch) {
+        const body = run.slice(1).reduce((acc, raw) => {
+          const stripped = raw.trim().replace(/^>\s*/, '');
+          return acc ? acc + '\n' + stripped : stripped;
+        }, '');
         blocks.push({
           id: `block-${currentId++}`,
           type: 'blockquote',
-          content: alertMatch ? '' : stripped,
-          alertKind: alertMatch
-            ? (alertMatch[1].toLowerCase() as 'note' | 'tip' | 'warning' | 'caution' | 'important')
-            : undefined,
+          content: body,
+          alertKind: alertMatch[1].toLowerCase() as 'note' | 'tip' | 'warning' | 'caution' | 'important',
           order: currentId,
-          startLine: currentLineNum
+          startLine: quoteStartLine,
         });
+        continue;
       }
+      const inner = run.map((raw) => raw.replace(/^\s*>[ \t]?/, '').trimEnd());
+      let first = 0;
+      while (first < inner.length - 1 && inner[first] === '') first++;
+      let last = inner.length - 1;
+      while (last > first && inner[last] === '') last--;
+      blocks.push({
+        id: `block-${currentId++}`,
+        type: 'blockquote',
+        content: inner.slice(first, last + 1).join('\n'),
+        order: currentId,
+        startLine: quoteStartLine + first,
+      });
       continue;
     }
     
@@ -774,13 +779,41 @@ const isElementPlaceholderQuote = (text: unknown): boolean =>
  *  element instead (`Feedback on the <nav> element — "Primary"`); every other
  *  annotation keeps the quote line exactly as before. */
 const commentHeadingLine = (ann: any): string => {
+  const element = elementSubject(ann);
+  return element ? `Feedback on ${element}` : `Feedback on: "${ann.originalText}"`;
+};
+
+/** `the <nav> element — "Primary"` for a text-less pinpoint whose quote is
+ *  the bridge's placeholder; null for every other annotation. */
+const elementSubject = (ann: any): string | null => {
   const context = ann?.elementContext;
-  if (context && typeof context.tag === 'string' && isElementPlaceholderQuote(ann.originalText)) {
-    const tag = safeInline(context.tag, 32);
-    const name = context.name ? safeInline(context.name, 120) : '';
-    return `Feedback on the <${tag}> element${name ? ` — "${name}"` : ''}`;
+  if (!context || typeof context.tag !== 'string' || !isElementPlaceholderQuote(ann.originalText)) return null;
+  const tag = safeInline(context.tag, 32);
+  const name = context.name ? safeInline(context.name, 120) : '';
+  const file = elementSourceFileName(context);
+  return `the <${tag}> element${name ? ` — "${name}"` : ''}${file && file !== name ? ` (${file})` : ''}`;
+};
+
+/** The file a media element shows, so two nameless images read differently in a heading:
+ *  `team.jpg` for `https://cdn.test/img/team.jpg?…`, `data:image/png` for an
+ *  inline image. Empty when the context carries no source.
+ *
+ *  `sourceName` is the bridge's own resolution (the one the composer quote
+ *  uses: src, a lazy data-src, srcset, <picture>/<source>, poster), so the
+ *  heading and the quote can never name different files. Contexts captured
+ *  before that field existed fall back to the scrubbed `src` attribute. */
+const elementSourceFileName = (context: any): string => {
+  if (typeof context?.sourceName === 'string' && context.sourceName.trim()) {
+    return safeInline(context.sourceName, 60);
   }
-  return `Feedback on: "${ann.originalText}"`;
+  const attrs = Array.isArray(context?.attrs) ? context.attrs : [];
+  const pair = attrs.find((p: unknown) => Array.isArray(p) && p[0] === 'src' && typeof p[1] === 'string');
+  if (!pair) return '';
+  const value: string = pair[1].trim();
+  if (/^data:/i.test(value)) return safeInline(`data:${value.slice(5).split(/[;,]/)[0] || 'unknown'}`, 60);
+  const path = value.replace(/\?…$/, '').replace(/\/+$/, '');
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  return safeInline(name || path, 60);
 };
 
 export interface ElementContextExportOptions {
@@ -882,6 +915,66 @@ const additionalTargetsExportBlock = (ann: any): string => {
   return block;
 };
 
+/** A URL with its query and fragment replaced by `?…`, the way the bridge
+ *  scrubs captured `href`/`src` values (tokens live in both). */
+const scrubUrlQuery = (url: string): string => {
+  const mark = url.search(/[?#]/);
+  return mark < 0 ? url : `${url.slice(0, mark)}?…`;
+};
+
+/** Ask AI sends no query strings: the live-app route line drops its query
+ *  (the persisted context keeps it, since that is the page that was reviewed). */
+const withoutRouteQuery = (context: unknown): unknown => {
+  const page = (context as any)?.page;
+  if (!page || typeof page.url !== 'string') return context;
+  return { ...(context as object), page: { ...page, url: scrubUrlQuery(page.url) } };
+};
+
+/** The anchor's `href`/`src` selector rung carries the raw attribute value,
+ *  query included (it must, to stay a working selector); Ask AI gets the
+ *  value with the query scrubbed instead. */
+const withoutSelectorQuery = (anchor: AskAIElementTarget['anchor']): AskAIElementTarget['anchor'] => {
+  if (!anchor || typeof anchor.selector !== 'string') return anchor;
+  const selector = anchor.selector.replace(
+    /(\[(?:href|src)=")((?:[^"\\]|\\.)*)(")/g,
+    (_m, open: string, value: string, close: string) => `${open}${scrubUrlQuery(value)}${close}`,
+  );
+  return { ...anchor, selector };
+};
+
+/** One pinpointed element as the Ask AI composer holds it (a draft target). */
+export interface AskAIElementTarget {
+  text?: string;
+  anchor?: { selector?: string } | null;
+  context?: unknown;
+}
+
+/**
+ * The element identity behind an Ask AI question asked from a raw-HTML or
+ * live-app pinpoint: the same identity lines the feedback export prints
+ * (`elementContextExportBlock`), without the fenced outline (the costly part
+ * of a model turn). One entry per pinpointed element, numbered when the
+ * question covers several. Empty when no target carries element context, so
+ * a plain text selection asks exactly what it asked before.
+ */
+export const elementIdentityForAskAI = (targets: readonly AskAIElementTarget[] | null | undefined): string => {
+  if (!Array.isArray(targets)) return '';
+  const blocks = targets
+    .map((target) => ({
+      text: typeof target?.text === 'string' ? safeInline(target.text, 200) : '',
+      lines: elementContextExportBlock(
+        { elementContext: withoutRouteQuery(target?.context), htmlAnchor: withoutSelectorQuery(target?.anchor) },
+        { includeOutline: false, includeRoute: true },
+      ).trim(),
+    }))
+    .filter((block) => block.lines);
+  if (blocks.length === 0) return '';
+  if (blocks.length === 1) return blocks[0].lines;
+  return blocks
+    .map((block, i) => `Element ${i + 1}${block.text ? `: "${block.text}"` : ''}\n${block.lines}`)
+    .join('\n\n');
+};
+
 /**
  * One annotation rendered as a standalone feedback entry (no number, no
  * document heading), for hosts that surface a single annotation to an agent.
@@ -935,7 +1028,17 @@ export const exportAnnotationEntry = (ann: any, opts: ElementContextExportOption
  *  a malformed anchor (an older or foreign writer) is skipped, never thrown. */
 const diagramLocationExportLine = (ann: any): string => {
   const anchor = ann?.diagramAnchor === undefined ? null : parseDiagramAnchor(ann.diagramAnchor);
-  return anchor === null ? '' : `${safeInline(diagramAnchorLocationLine(anchor), 600)}\n`;
+  if (anchor !== null) return `${safeInline(diagramAnchorLocationLine(anchor), 600)}\n`;
+  return hostLocationExportLine(ann);
+};
+
+/** A host's own location line for an entry (the Inbox's "At 1:42 (102.4 s of
+ *  7:41)" on a video comment): `exportLocation`, a string the HOST sets on the
+ *  copy it hands the exporter, never stored and never set by Plannotator, so
+ *  every other annotation's output is byte-identical. One line, capped. */
+const hostLocationExportLine = (ann: any): string => {
+  const line = ann?.exportLocation;
+  return typeof line === 'string' && line.trim() !== '' ? `${safeInline(line, 300)}\n` : '';
 };
 
 const lineLabelForAnnotation = (blocks: Block[], ann: any): string | null => {
@@ -946,6 +1049,29 @@ const lineLabelForAnnotation = (blocks: Block[], ann: any): string | null => {
   const end = blockEndLine(block);
   if (end <= block.startLine) return `line ${block.startLine}`;
   return `lines ${block.startLine}–${end}`;
+};
+
+/** The source lines a text selection covers, for an Ask AI question
+ *  (`AIQuestion.scope.lineStart` / `lineEnd`). `blockIds` are the blocks the
+ *  selection touches; the range runs from the first block's start line to
+ *  the last block's end line, so a selection inside one block names exactly
+ *  the span its annotation would export (`(line 41)` / `(lines 41–44)`).
+ *  Blocks without a line (diff blocks, unknown ids) are skipped; `null` when
+ *  none is left. */
+export const selectionSourceLines = (
+  blocks: readonly Block[],
+  blockIds: readonly string[],
+): { lineStart: number; lineEnd: number } | null => {
+  let lineStart = Infinity;
+  let lineEnd = -Infinity;
+  for (const id of blockIds) {
+    if (id.startsWith('diff-block-')) continue;
+    const block = blocks.find(b => b.id === id);
+    if (!block || typeof block.startLine !== 'number' || block.startLine < 1) continue;
+    lineStart = Math.min(lineStart, block.startLine);
+    lineEnd = Math.max(lineEnd, blockEndLine(block), block.startLine);
+  }
+  return Number.isFinite(lineStart) ? { lineStart, lineEnd } : null;
 };
 
 /** Separate valid question answers from ordinary feedback. A row whose
@@ -974,57 +1100,81 @@ const questionItemsFromAnswers = (answers: QuestionAnswer[]): QuestionExportItem
     settled: false,
   }));
 
-export const exportAnnotations = (
-  blocks: Block[],
-  allAnnotations: any[],
-  globalAttachments: ImageAttachment[] = [],
-  title: string = 'Plan Feedback',
-  subject: string = 'plan',
-  opts: ExportAnnotationsOptions = {},
-): string => {
-  // Answers to `:::question` blocks are printed first, in their own section,
-  // and never counted as numbered feedback.
-  const { answers, annotations } = splitQuestionAnswers(allAnnotations);
-  const answersSection = answers.length > 0
-    ? formatQuestionAnswersSection(questionExportItems(indexQuestionBlocks(blocks)), answers, { headingLevel: 2 })
-    : '';
-  if (annotations.length === 0 && globalAttachments.length === 0 && !answersSection) {
-    return 'No changes detected.';
-  }
+/** The diff-block index of a comment made in the plan/version diff view
+ *  (`blockId` `diff-block-N`), or null for every other annotation. */
+const diffBlockIndex = (ann: any): number | null => {
+  const match = typeof ann?.blockId === 'string' ? /^diff-block-(\d+)$/.exec(ann.blockId) : null;
+  return match ? Number(match[1]) : null;
+};
 
-  // Sort annotations by block and offset
-  const sortedAnns = [...annotations].sort((a, b) => {
-    const blockA = blocks.findIndex(blk => blk.id === a.blockId);
-    const blockB = blocks.findIndex(blk => blk.id === b.blockId);
-    if (blockA !== blockB) return blockA - blockB;
+/**
+ * Sort annotations in DOCUMENT order: by the block's position in `blocks`,
+ * then by offset. Without blocks (a linked document whose text is unknown)
+ * block ids compare numerically, so block-10 never precedes block-2.
+ *
+ * Comments made in the version diff view (`diff-block-N`) cannot be placed in
+ * the document: N indexes the diff against whichever base was selected, and
+ * nothing in the annotation maps it back to a block. They go together AFTER
+ * every other comment, in diff order (which is itself document order, since
+ * the diff walks the document). A list with no diff comments sorts exactly as
+ * before.
+ */
+const sortAnnotationsInDocumentOrder = (annotations: any[], blocks: Block[] | undefined): any[] => {
+  const order = new Map<string, number>();
+  blocks?.forEach((blk, index) => order.set(blk.id, index));
+  return [...annotations].sort((a, b) => {
+    const diffA = diffBlockIndex(a);
+    const diffB = diffBlockIndex(b);
+    if (diffA !== null || diffB !== null) {
+      if (diffA === null) return -1;
+      if (diffB === null) return 1;
+      if (diffA !== diffB) return diffA - diffB;
+      return a.startOffset - b.startOffset;
+    }
+    if (a.blockId !== b.blockId) {
+      // Two ids missing from `blocks` share position -1; fall through to the
+      // offset so the main document keeps its pre-#1696 order.
+      const byBlock = blocks
+        ? (order.get(a.blockId) ?? -1) - (order.get(b.blockId) ?? -1)
+        : String(a.blockId ?? '').localeCompare(String(b.blockId ?? ''), undefined, { numeric: true });
+      if (byBlock) return byBlock;
+    }
     return a.startOffset - b.startOffset;
   });
+};
 
-  // One injection per export: a human-only skill referenced by several
-  // comments has its instructions injected once (see skillReferenceExportBlock).
-  const injectedSkills = new Set<string>();
-
-  let output = `# ${title}\n\n`;
-
-  if (opts.sourceConverted) {
-    output += `> Note: Line numbers below refer to the converted markdown, not the original HTML/URL source.\n\n`;
+/** `Label Summary` heading (at `level`) tallying quick labels, or '' when none. */
+const labelSummaryBlock = (sortedAnns: any[], level: number): string => {
+  const labeledAnns = sortedAnns.filter((a: any) => a.isQuickLabel && a.text);
+  if (labeledAnns.length === 0) return '';
+  const grouped = new Map<string, number>();
+  labeledAnns.forEach((a: any) => {
+    grouped.set(a.text, (grouped.get(a.text) || 0) + 1);
+  });
+  let output = `${'#'.repeat(level)} Label Summary\n\n`;
+  for (const [text, count] of grouped) {
+    output += `- **${text}**: ${count}\n`;
   }
+  output += '\n';
+  return output;
+};
 
-  output += answersSection;
-
-  // Add global reference images section if any
-  if (globalAttachments.length > 0) {
-    output += `## Reference Images\n`;
-    output += `Please review these reference images (use the Read tool to view):\n`;
-    globalAttachments.forEach((img, idx) => {
-      output += `${idx + 1}. [${img.name}] \`${img.path}\`\n`;
-    });
-    output += `\n`;
-  }
-
-  if (annotations.length > 0) {
-    output += `I've reviewed this ${subject} and have ${annotations.length} piece${annotations.length > 1 ? 's' : ''} of feedback:\n\n`;
-  }
+/**
+ * The numbered feedback entries of ONE document, shared by the root export
+ * (`exportAnnotations`, entries at `##`) and every linked/folder document
+ * (`exportLinkedDocAnnotations`, entries at `###` under the file heading), so
+ * a document's comments read the same whichever section carries them: line
+ * labels, `[In diff content]`, quick labels with their tip, element context,
+ * skill references, images, and threaded replies.
+ */
+const renderAnnotationEntries = (
+  sortedAnns: any[],
+  blocks: Block[] | undefined,
+  opts: { subject: string; level: number; injectedSkills: Set<string> },
+): string => {
+  const { subject, injectedSkills } = opts;
+  const hashes = (n: number) => '#'.repeat(n);
+  let output = '';
 
   // Live app sessions stamp annotations with the page they were made on.
   // When any exported annotation carries a pageUrl, entries are grouped under
@@ -1036,7 +1186,7 @@ export const exportAnnotations = (
   // number of its position in the ungrouped order, matching the on-page
   // marker numbering, so grouped sections may show non-contiguous numbers.
   // With no pageUrl anywhere the output is byte-identical to the ungrouped
-  // export (`## N.` entries, no page headers).
+  // export (entries at `level`, no page headers).
   const hasPageGroups = sortedAnns.some(
     (a: any) => typeof a.pageUrl === 'string' && a.pageUrl.length > 0,
   );
@@ -1117,16 +1267,16 @@ export const exportAnnotations = (
   let lastEmittedPage: string | null = null;
   emitOrder.forEach((ann) => {
     if (hasPageGroups && ann.pageUrl && ann.pageUrl !== lastEmittedPage) {
-      output += `## Page: ${ann.pageUrl}\n\n`;
+      output += `${hashes(opts.level)} Page: ${ann.pageUrl}\n\n`;
       lastEmittedPage = ann.pageUrl;
     }
-    output += `${hasPageGroups ? '###' : '##'} ${annotationNumbers.get(ann)}. `;
+    output += `${hashes(hasPageGroups ? opts.level + 1 : opts.level)} ${annotationNumbers.get(ann)}. `;
 
     // Add diff context label if annotation was created in diff view
     if (ann.diffContext) {
       output += `[In diff content] `;
     } else {
-      const lineLabel = lineLabelForAnnotation(blocks, ann);
+      const lineLabel = blocks ? lineLabelForAnnotation(blocks, ann) : null;
       if (lineLabel) output += `(${lineLabel}) `;
     }
 
@@ -1188,22 +1338,61 @@ export const exportAnnotations = (
     output += '\n';
   });
 
+  return output;
+};
+
+export const exportAnnotations = (
+  blocks: Block[],
+  allAnnotations: any[],
+  globalAttachments: ImageAttachment[] = [],
+  title: string = 'Plan Feedback',
+  subject: string = 'plan',
+  opts: ExportAnnotationsOptions = {},
+): string => {
+  // Answers to `:::question` blocks are printed first, in their own section,
+  // and never counted as numbered feedback.
+  const { answers, annotations } = splitQuestionAnswers(allAnnotations);
+  const answersSection = answers.length > 0
+    ? formatQuestionAnswersSection(questionExportItems(indexQuestionBlocks(blocks)), answers, { headingLevel: 2 })
+    : '';
+  if (annotations.length === 0 && globalAttachments.length === 0 && !answersSection) {
+    return 'No changes detected.';
+  }
+
+  const sortedAnns = sortAnnotationsInDocumentOrder(annotations, blocks);
+
+  // One injection per export: a human-only skill referenced by several
+  // comments has its instructions injected once (see skillReferenceExportBlock).
+  const injectedSkills = new Set<string>();
+
+  let output = `# ${title}\n\n`;
+
+  if (opts.sourceConverted) {
+    output += `> Note: Line numbers below refer to the converted markdown, not the original HTML/URL source.\n\n`;
+  }
+
+  output += answersSection;
+
+  // Add global reference images section if any
+  if (globalAttachments.length > 0) {
+    output += `## Reference Images\n`;
+    output += `Please review these reference images (use the Read tool to view):\n`;
+    globalAttachments.forEach((img, idx) => {
+      output += `${idx + 1}. [${img.name}] \`${img.path}\`\n`;
+    });
+    output += `\n`;
+  }
+
+  if (annotations.length > 0) {
+    output += `I've reviewed this ${subject} and have ${annotations.length} piece${annotations.length > 1 ? 's' : ''} of feedback:\n\n`;
+  }
+
+  output += renderAnnotationEntries(sortedAnns, blocks, { subject, level: 2, injectedSkills });
+
   output += `---\n`;
 
-  // Quick Label Summary
-  const labeledAnns = sortedAnns.filter((a: any) => a.isQuickLabel && a.text);
-  if (labeledAnns.length > 0) {
-    const grouped = new Map<string, number>();
-    labeledAnns.forEach((a: any) => {
-      grouped.set(a.text, (grouped.get(a.text) || 0) + 1);
-    });
-
-    output += `\n## Label Summary\n\n`;
-    for (const [text, count] of grouped) {
-      output += `- **${text}**: ${count}\n`;
-    }
-    output += '\n';
-  }
+  const summary = labelSummaryBlock(sortedAnns, 2);
+  if (summary) output += `\n${summary}`;
 
   return output;
 };
@@ -1216,10 +1405,33 @@ export interface LinkedDocAnnotationEntry {
   isConverted?: boolean;
 }
 
+/** Section heading for exportLinkedDocAnnotations. The default describes
+ *  documents a plan links to; a folder session's documents are not that. */
+export interface LinkedDocExportHeading {
+  title: string;
+  intro: string;
+}
+
+export const LINKED_DOC_EXPORT_HEADING: LinkedDocExportHeading = {
+  title: 'Linked Document Feedback',
+  intro: 'The following feedback is on documents referenced in the plan.',
+};
+
+export const FOLDER_DOC_EXPORT_HEADING: LinkedDocExportHeading = {
+  title: 'Folder Document Feedback',
+  intro: 'The following feedback is on files in the reviewed folder, grouped by file.',
+};
+
+export const BUNDLE_DOC_EXPORT_HEADING: LinkedDocExportHeading = {
+  title: 'File Feedback',
+  intro: 'The following feedback is on the files under review, one section per file, in the order they were given for review.',
+};
+
 export const exportLinkedDocAnnotations = (
-  docAnnotations: Map<string, LinkedDocAnnotationEntry>
+  docAnnotations: Map<string, LinkedDocAnnotationEntry>,
+  heading: LinkedDocExportHeading = LINKED_DOC_EXPORT_HEADING,
 ): string => {
-  let output = `\n# Linked Document Feedback\n\nThe following feedback is on documents referenced in the plan.\n\n`;
+  let output = `\n# ${heading.title}\n\n${heading.intro}\n\n`;
 
   // One injection per export, across all linked documents.
   const injectedSkills = new Set<string>();
@@ -1247,57 +1459,14 @@ export const exportLinkedDocAnnotations = (
       output += `\n`;
     }
 
-    // Sort annotations by block and offset
-    const sortedAnns = [...annotations].sort((a, b) => {
-      if (a.blockId !== b.blockId) return a.blockId.localeCompare(b.blockId);
-      return a.startOffset - b.startOffset;
-    });
+    const sortedAnns = sortAnnotationsInDocumentOrder(annotations, docBlocks);
 
     if (annotations.length > 0 || answers.length === 0) {
       output += `I've reviewed this document and have ${annotations.length} piece${annotations.length !== 1 ? 's' : ''} of feedback:\n\n`;
     }
 
-    sortedAnns.forEach((ann, index) => {
-      output += `### ${index + 1}. `;
-
-      const lineLabel = docBlocks ? lineLabelForAnnotation(docBlocks, ann) : null;
-      if (lineLabel) output += `(${lineLabel}) `;
-
-      switch (ann.type) {
-        case 'DELETION':
-          output += `Remove this\n`;
-          output += `\`\`\`\n${ann.originalText}\n\`\`\`\n`;
-          output += `> I don't want this in the document.\n`;
-          break;
-
-        case 'COMMENT':
-          output += `${commentHeadingLine(ann)}\n`;
-          output += diagramLocationExportLine(ann);
-          output += `> ${ann.text}\n`;
-          break;
-
-        case 'GLOBAL_COMMENT':
-          output += `General feedback about the document\n`;
-          output += `> ${ann.text}\n`;
-          break;
-      }
-
-      output += elementContextExportBlock(ann, { includeRoute: false });
-      // Multi-target raw-HTML comments list every additional covered element.
-      output += additionalTargetsExportBlock(ann);
-
-      // External (tool-sourced) comments list skills but never inject.
-      output += skillReferenceExportBlock(ann.text, injectedSkills, { external: !!ann.source });
-
-      if (ann.images && ann.images.length > 0) {
-        output += `**Attached images:**\n`;
-        ann.images.forEach((img: ImageAttachment) => {
-          output += `- [${img.name}] \`${img.path}\`\n`;
-        });
-      }
-
-      output += '\n';
-    });
+    output += renderAnnotationEntries(sortedAnns, docBlocks, { subject: 'document', level: 3, injectedSkills });
+    output += labelSummaryBlock(sortedAnns, 3);
   }
 
   output += `---\n`;
@@ -1365,6 +1534,119 @@ export const exportCodeFileAnnotations = (annotations: CodeAnnotation[]): string
 
   output += `---\n`;
   return output;
+};
+
+/** What `formatDraftAnnotationsForAsk` lists: the same collections the
+ *  feedback export reads, before the reviewer submits them. */
+export interface DraftAnnotationsForAsk {
+  /** The session's own document (plan, file, message). */
+  annotations: readonly Annotation[];
+  blocks?: Block[];
+  globalAttachments?: readonly ImageAttachment[];
+  /** Every other document holding drafts, by path. */
+  documents?: ReadonlyMap<string, LinkedDocAnnotationEntry>;
+  codeAnnotations?: readonly CodeAnnotation[];
+  editorAnnotations?: readonly EditorAnnotation[];
+}
+
+const MAX_ASK_DRAFT_ENTRIES = 60;
+const ASK_DRAFT_QUOTE_CHARS = 160;
+const ASK_DRAFT_TEXT_CHARS = 1000;
+
+/**
+ * The reviewer's UNSUBMITTED annotations as a plain list, for an "Ask this
+ * session" question (#1748). It is deliberately not the feedback export: no
+ * title, no "I've reviewed this … and have N pieces of feedback", no numbered
+ * "Feedback on" headings, no injected skill instructions. The session that
+ * reads it is the agent the review is for, so a draft must read as something
+ * the reviewer is still writing, not as a request. The server wraps the list
+ * in a read-only frame (`SESSION_ASK_DRAFTS_LABEL`); this function only lists.
+ *
+ * One line per draft (`Draft 2 (line 14): comment on "…" — …`), numbered in
+ * document order so a question can say "draft 2"; every page-, file- or
+ * reviewer-supplied string is collapsed to one line and capped. Empty string
+ * when there are no drafts.
+ */
+export const formatDraftAnnotationsForAsk = (input: DraftAnnotationsForAsk): string => {
+  type Row = { ann: any; where: string | null };
+  const rows: Row[] = [];
+  const placeOf = (blocks: Block[] | undefined, ann: any): string | null => {
+    if (ann.diffContext) return 'in the version diff';
+    return blocks ? lineLabelForAnnotation(blocks, ann) : null;
+  };
+  for (const ann of sortAnnotationsInDocumentOrder([...input.annotations], input.blocks)) {
+    rows.push({ ann, where: placeOf(input.blocks, ann) });
+  }
+  for (const [path, doc] of input.documents ?? []) {
+    for (const ann of sortAnnotationsInDocumentOrder([...doc.annotations], doc.blocks)) {
+      const line = placeOf(doc.blocks, ann);
+      rows.push({ ann, where: line ? `${safeInline(path, 300)}, ${line}` : safeInline(path, 300) });
+    }
+  }
+
+  const numbers = new Map<string, number>();
+  rows.forEach((row, index) => {
+    if (typeof row.ann?.id === 'string') numbers.set(row.ann.id, index + 1);
+  });
+  const replyParents = resolveReplyParents(rows.map((row) => row.ann));
+  const quote = (value: unknown) => `"${safeInline(value, ASK_DRAFT_QUOTE_CHARS)}"`;
+  const text = (value: unknown) => safeInline(value, ASK_DRAFT_TEXT_CHARS);
+  const imageList = (list: readonly ImageAttachment[]): string =>
+    list.map((img) => `[${safeInline(img?.name, 80)}] ${safeInline(img?.path, 300)}`).join(', ');
+  const images = (list: unknown): string =>
+    Array.isArray(list) && list.length > 0 ? ` (attached: ${imageList(list)})` : '';
+
+  const lines: string[] = [];
+  rows.forEach(({ ann, where }, index) => {
+    const parent = replyParents.get(ann.id);
+    const parentNumber = parent ? numbers.get(parent) : undefined;
+    const head = `Draft ${index + 1}${where ? ` (${where})` : ''}:`;
+    const from = ann.source ? ` (from ${safeInline(ann.source, 60)})` : '';
+    const answer = ann.questionAnswer == null ? null : parseQuestionAnswer(ann.questionAnswer);
+    let body: string;
+    if (answer) {
+      body = `answer to the question ${quote(answer.prompt)} — ${text(formatQuestionAnswerText(answer))}`;
+    } else if (parentNumber !== undefined) {
+      body = `reply to draft ${parentNumber} — ${text(ann.text)}`;
+    } else if (ann.type === 'DELETION') {
+      body = `suggests removing ${quote(ann.originalText)}`;
+    } else if (ann.type === 'GLOBAL_COMMENT') {
+      body = `general note — ${text(ann.text)}`;
+    } else {
+      const subject = elementSubject(ann) ?? quote(ann.originalText);
+      const anchor = ann.diagramAnchor === undefined ? null : parseDiagramAnchor(ann.diagramAnchor);
+      const target = anchor ? `${subject} [${safeInline(diagramAnchorLocationLine(anchor), 300)}]` : subject;
+      body = ann.isQuickLabel
+        ? `label ${quote(ann.text)} on ${target}`
+        : `comment on ${target} — ${text(ann.text)}`;
+    }
+    lines.push(`${head} ${body}${from}${images(ann.images)}`);
+  });
+
+  let next = rows.length;
+  for (const ann of input.codeAnnotations ?? []) {
+    next += 1;
+    const range = ann.lineStart === ann.lineEnd ? `line ${ann.lineStart}` : `lines ${ann.lineStart}–${ann.lineEnd}`;
+    const on = ann.originalCode ? ` on ${quote(ann.originalCode)}` : '';
+    lines.push(`Draft ${next} (${safeInline(ann.filePath, 300)}, ${range}): comment${on} — ${text(ann.text)}${ann.source ? ` (from ${safeInline(ann.source, 60)})` : ''}${images(ann.images)}`);
+  }
+  for (const ann of input.editorAnnotations ?? []) {
+    next += 1;
+    const range = ann.lineStart === ann.lineEnd ? `line ${ann.lineStart}` : `lines ${ann.lineStart}–${ann.lineEnd}`;
+    lines.push(`Draft ${next} (${safeInline(ann.filePath, 300)}, ${range}): comment on ${quote(ann.selectedText)} — ${text(ann.comment)}`);
+  }
+
+  const shown = lines.slice(0, MAX_ASK_DRAFT_ENTRIES);
+  if (lines.length > shown.length) shown.push(`… and ${lines.length - shown.length} more draft annotations`);
+
+  const attachments = input.globalAttachments ?? [];
+  if (attachments.length > 0) shown.push(`Reference images: ${imageList(attachments)}`);
+  for (const [path, doc] of input.documents ?? []) {
+    if (doc.globalAttachments.length > 0) {
+      shown.push(`Reference images (${safeInline(path, 300)}): ${imageList(doc.globalAttachments)}`);
+    }
+  }
+  return shown.join('\n');
 };
 
 export interface MessageAnnotationEntry {

@@ -1,4 +1,6 @@
 import { GUIDE_CLI_USAGE } from "@plannotator/server/guide-cli";
+import { T3_CLI_USAGE } from "@plannotator/t3-code/usage";
+import { INBOX_CARD_COLUMNS } from "@plannotator/core/inbox-types";
 
 const HELP_FLAGS = new Set(["--help", "-h"]);
 
@@ -158,15 +160,118 @@ export function formatTopLevelHelp(): string {
     "  plannotator guide share --id <savedGuideId> | --guide <guide.json> --patch <diff.patch> | --snapshot <snapshot.json> [--public] [--ttl <7d>] [--json]",
     "  plannotator guide unshare <id> --token <deleteToken>",
     "  plannotator sessions",
+    "  plannotator inbox [--background | --no-open] [--tailscale]",
+    "  plannotator inbox mcp",
+    "  plannotator update [--check]",
     "  plannotator uninstall [--purge] [--yes] [--dry-run]",
     "  plannotator improve-context",
     "",
     "Run 'plannotator <command> --help' for command-specific usage.",
+    "Agents: run 'plannotator inbox --help' for the full guide to the Plannotator Inbox",
+    "(what it is, when to use it, its MCP tools, threads, questions, connecting agents).",
     "",
     "Note:",
     "  running 'plannotator' without arguments is for hook integration and expects JSON on stdin",
+    "  --browser <name> picks the browser for one run; --browser none opens no browser (the URL is always printed)",
   ].join("\n");
 }
+
+/**
+ * Subcommands that work but are not released yet. They keep their
+ * `<sub> --help` text and stay known to the dispatcher (so they never read as
+ * "Unknown command"), but they are left out of everything that advertises the
+ * CLI: the top-level help, the "Did you mean" suggestions, and the plannotator
+ * knowledge skill (plannotator-skill-reference.test.ts requires a hidden
+ * subcommand to be ABSENT from the skill and every other one to be present).
+ * To launch one, delete it from this set, add its usage lines to
+ * formatTopLevelHelp() and document it in apps/skills/core/plannotator/SKILL.md.
+ *
+ * `inbox` (the Plannotator Inbox) was the last one to launch. Today: the
+ * opt-in T3 Code connection (`t3`, and `t3-hook`, its Claude hook), and
+ * `card`, the Board's card call from a shell (approval "inbox-board", step 1),
+ * hidden until the Board page ships.
+ */
+export const HIDDEN_SUBCOMMANDS: ReadonlySet<string> = new Set<string>(["t3", "t3-hook", "card"]);
+
+/**
+ * `plannotator card …` (card-command.ts): the Board's card call from a shell,
+ * a thin client over the Inbox's `card` MCP tool. Unreleased (HIDDEN_SUBCOMMANDS).
+ */
+export const CARD_COMMAND_USAGE = [
+  "Usage:",
+  "  plannotator card create <title> [--column <column>] [--say <text>] [--you <text>] [--thread <id>] [--pr <ref>] [--key <key>]",
+  "  plannotator card create --thread <id> [...]      (the thread's subject is the title)",
+  "  plannotator card move <crd_id> <column> [--say <text>] [--you <text>] [--thread <id>] [--pr <ref>] [--reason <text>]",
+  "  plannotator card say <crd_id> [<text>] [--you <text>] [--title <text>]",
+  "  plannotator card link <crd_id> [--thread <id>] [--pr <ref>] [--say <text>]",
+  "  plannotator card ship <crd_id> [--say <text>] [--pr <ref>] [--thread <id>]",
+  "  plannotator card drop <crd_id> <reason> [--say <text>]",
+  "  plannotator card list [--anyone | --mine] [--all]",
+  "",
+  "Every command takes [--project <folder>] (default: this folder) and [--json].",
+  `Columns: ${INBOX_CARD_COLUMNS.join(", ")} (icebox is the person's only).`,
+  "",
+  "Keeps a card on the person's Board in the Plannotator Inbox for work that outlasts a reply.",
+  "Run 'plannotator inbox --help' for the full guide (its card tool section).",
+].join("\n");
+
+/**
+ * `plannotator inbox`'s commands and flags. `plannotator inbox --help` prints
+ * the full agent guide (inbox-help.ts), which carries this block as its
+ * "Commands and flags" section; it is also the `inbox` entry of
+ * SUBCOMMAND_HELP, so the skill freshness test reads the same flags.
+ * The parser is `runInboxCommand` in inbox-command.ts.
+ */
+export const INBOX_COMMAND_USAGE = [
+  "Usage:",
+  "  plannotator inbox [--background | --no-open] [--tailscale]",
+  "  plannotator inbox mcp",
+  "  plannotator inbox --notes <ids>",
+  "",
+  "  plannotator inbox               Start the Inbox and open it in the browser,",
+  "                                  or open the one already running",
+  "  plannotator inbox --background  Start it detached without opening a browser,",
+  "                                  print its URL and exit",
+  "  plannotator inbox --no-open     Run it here without opening a browser",
+  "  plannotator inbox --tailscale   Also publish it over the person's tailnet for this",
+  "                                  run (tailscale serve, HTTPS, never funnel), for the",
+  "                                  Tailscale login that owns this machine only. With",
+  "                                  an Inbox already running, asks it to publish.",
+  "  plannotator inbox mcp           The stdio MCP server for agents. Starts a stopped",
+  "                                  Inbox in the background (no browser tab).",
+  "  plannotator inbox --notes <ids> Add the Inbox note to these agents' instructions",
+  "                                  files (claude-code, codex, gemini, pi, opencode,",
+  "                                  comma-separated). Only with the person's yes;",
+  "                                  starts nothing.",
+  "",
+  "Over the tailnet at every start: the Inbox's Settings, PLANNOTATOR_INBOX_TAILSCALE=1,",
+  "or { \"inboxTailscale\": true } in config.json. Agents and MCP stay on this computer;",
+  "another Tailscale login is let in only when config.json inboxTailscaleAllow names it.",
+  "",
+  "A person's plannotator inbox (not --background) also connects the agents found on",
+  "this computer that are not connected yet: a plannotator-inbox MCP server in each",
+  "terminal agent and the Claude app, the inbox tool for Pi and OpenCode with",
+  "Plannotator's extension or plugin. It never adds back one removed or turned off,",
+  "never replaces another plannotator-inbox, and says what it added on stderr.",
+  "PLANNOTATOR_INBOX_CONNECT=0 skips it. plannotator uninstall removes what it added.",
+].join("\n");
+
+/** `plannotator update`'s usage; the command is update-command.ts. */
+export const UPDATE_COMMAND_USAGE = [
+  "Usage:",
+  "  plannotator update [--check]",
+  "",
+  "Install the newest Plannotator release now, the way the install script does,",
+  "with the choices from your last install (install-flags.json). Open reviews keep",
+  "running on the old version; new ones start on the new one.",
+  "",
+  "Options:",
+  "  --check       Only ask GitHub whether a newer release exists; install nothing",
+  "",
+  "Asks GitHub even when automatic update checks are off (PLANNOTATOR_UPDATE_CHECK=0",
+  "or { \"updateCheck\": false }), because you asked. Exit codes: 0 up to date or",
+  "updated, 1 the update failed or could not run, 2 usage, 130 interrupted.",
+].join("\n");
 
 // Per-subcommand usage text. Keyed by the canonical subcommand token; aliases
 // (e.g. `last` → `annotate-last`) are resolved in formatSubcommandHelp().
@@ -234,6 +339,8 @@ export const SUBCOMMAND_HELP: Record<string, string> = {
     "  plannotator annotate <file.md | file.txt | file.html | https://... | folder/> [--markdown] [--no-jina] [--tailscale] [--gate] [--json] [--hook] [--require-approval] [--result-file <path>]",
     "",
     "Open a markdown/text/HTML file, a URL, or a folder of documents in the annotation UI.",
+    "Several existing file paths (plannotator annotate spec.md mock.html notes.md) open",
+    "as one review, in that order, with one decision for all of them.",
     "",
     "Options:",
     "  --markdown    Convert HTML input to markdown instead of rendering it raw",
@@ -303,14 +410,18 @@ export const SUBCOMMAND_HELP: Record<string, string> = {
   ].join("\n"),
   sessions: [
     "Usage:",
-    "  plannotator sessions [--open [N]] [--clean]",
+    "  plannotator sessions [--open [N]] [--clean] [--json]",
     "",
     "List active Plannotator server sessions.",
     "",
     "Options:",
     "  --open [N]    Reopen session #N (default 1) in the browser",
     "  --clean       Remove stale session entries",
+    "  --json        Print the sessions as a JSON array on stdout (index, mode, reviewId, target, url, ...)",
   ].join("\n"),
+  // `inbox --help` prints the full agent guide instead (index.ts, inbox-help.ts).
+  inbox: INBOX_COMMAND_USAGE,
+  update: UPDATE_COMMAND_USAGE,
   uninstall: [
     "Usage:",
     "  plannotator uninstall [--purge] [--yes | -y] [--dry-run]",
@@ -325,6 +436,17 @@ export const SUBCOMMAND_HELP: Record<string, string> = {
     "",
     "Purge data is local-only: it is not stored on a Plannotator server and",
     "cannot be recovered after purge. Unrecognized custom files are preserved.",
+  ].join("\n"),
+  // Unreleased (HIDDEN_SUBCOMMANDS): the opt-in T3 Code connection, and the Board's cards.
+  t3: T3_CLI_USAGE,
+  card: CARD_COMMAND_USAGE,
+  "t3-hook": [
+    "Usage:",
+    "  plannotator t3-hook install --settings <settings.json> --executable <plannotator>",
+    "  plannotator t3-hook remove --settings <settings.json>",
+    "",
+    "Internal: the Claude Bash hook of the opt-in T3 Code connection and its",
+    "settings helper (install.sh --with-t3 / --without-t3). Agents never run it.",
   ].join("\n"),
 };
 
@@ -364,6 +486,8 @@ export function formatInteractiveNoArgClarification(): string {
     "  plannotator last",
     "  plannotator archive",
     "  plannotator sessions",
+    "  plannotator inbox",
+    "  plannotator update",
     "  plannotator uninstall",
     "",
     "Run 'plannotator --help' for top-level usage.",

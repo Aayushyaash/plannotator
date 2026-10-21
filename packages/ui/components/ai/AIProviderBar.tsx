@@ -1,7 +1,8 @@
 import React from 'react';
 import { getProviderMeta } from '../ProviderIcons';
-import { type AIProviderOption } from '../../utils/aiProvider';
+import { findSessionBridge, type AIProviderOption } from '../../utils/aiProvider';
 import { ModelSourceHint, modelSourceToolForProvider } from '../ModelSourceHint';
+import { AskSessionSetupHint } from './AskSessionSetupHint';
 
 interface AIProviderBarProps {
   providers: AIProviderOption[];
@@ -11,6 +12,11 @@ interface AIProviderBarProps {
   onProviderChange: (providerId: string) => void;
   onModelChange: (model: string) => void;
   onReasoningEffortChange?: (effort: string | null) => void;
+  /**
+   * Optional muted line under the bar saying how to get "Ask this session"
+   * (see askSessionSetupHint). Absent: the bar renders exactly as before.
+   */
+  setupHint?: string | null;
 }
 
 export const AIProviderBar: React.FC<AIProviderBarProps> = ({
@@ -21,11 +27,32 @@ export const AIProviderBar: React.FC<AIProviderBarProps> = ({
   onProviderChange,
   onModelChange,
   onReasoningEffortChange,
+  setupHint,
 }) => {
   if (providers.length === 0) {
     return (
+      <>
       <div className="border-t border-border/50 px-2 py-1.5 text-[11px] text-muted-foreground/50">
         No AI providers available
+      </div>
+      <AskSessionSetupHint text={setupHint} />
+      </>
+    );
+  }
+
+  // "Ask this session": the session that opened Plannotator is the only thing
+  // Ask AI talks to, so there is no provider or model to choose. Show its label.
+  const sessionBridge = findSessionBridge(providers);
+  if (sessionBridge) {
+    const bridgeMeta = getProviderMeta(sessionBridge.name, sessionBridge.label);
+    const BridgeIcon = bridgeMeta.icon;
+    return (
+      <div
+        className="border-t border-border/50 px-2 py-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground"
+        data-ai-provider-session-bridge
+      >
+        <BridgeIcon className="w-3.5 h-3.5 flex-shrink-0" />
+        <span className="min-w-0 truncate text-foreground">{bridgeMeta.label}</span>
       </div>
     );
   }
@@ -98,6 +125,7 @@ export const AIProviderBar: React.FC<AIProviderBarProps> = ({
       info={currentProvider}
       className="-mt-1 px-2 pb-1.5 text-[10px] text-muted-foreground/50"
     />
+    <AskSessionSetupHint text={setupHint} />
     </>
   );
 };

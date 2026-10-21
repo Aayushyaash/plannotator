@@ -39,6 +39,9 @@ VERIFY_ATTESTATION_FLAG=-1
 # Precedence: --with-call-flow > PLANNOTATOR_INSTALL_CALLDIFF > config.json
 # installCallFlow > default (off).
 WITH_CALL_FLOW_FLAG=-1
+# T3 support is installed only by an explicit flag, never by the plugin,
+# environment auto-detection, config.json or the guided-install wizard.
+T3_HOOK_FLAG=-1
 # Guided-install answers. Precedence: CLI flags > wizard (terminal, first run
 # or --reconfigure) > saved prefs from a previous run > defaults (no extras,
 # nothing model-invocable). Empty string = not set by a flag.
@@ -70,6 +73,12 @@ SKIP_OPENCODE_FLAG=0
 # cannot reach github.com for the tag being installed — the release smoke test
 # installs a synthetic v9.9.9 whose tag has no GitHub counterpart.
 SKIP_SKILLS_FLAG=0
+# Claude Code plugin update opt-out. Not an agent home: when the claude CLI is
+# on PATH and plannotator@plannotator is already installed, the installer runs
+# `claude plugin marketplace update plannotator` and `claude plugin update
+# plannotator@plannotator --scope user` (Claude Code does not auto-update GitHub
+# marketplaces). --skip-claude-plugin turns that off. Same three layers.
+SKIP_CLAUDE_PLUGIN_FLAG=0
 
 usage() {
     cat <<'USAGE'
@@ -77,7 +86,8 @@ Usage: install.sh [--version <tag>] [--verify-attestation | --skip-attestation]
                   [--extras | --no-extras] [--model-invocable <list>|none]
                   [--minimal | --no-minimal] [--skip-codex] [--skip-gemini]
                   [--skip-kiro] [--skip-vibe] [--skip-opencode] [--skip-skills]
-                  [--non-interactive] [--reconfigure] [--help]
+                  [--with-t3 | --without-t3]
+                  [--skip-claude-plugin] [--non-interactive] [--reconfigure] [--help]
        install.sh <tag>
 
 Options:
@@ -97,6 +107,13 @@ Options:
                          { "installCallFlow": true } in config.json.
   --extras               Install the extra skills (compound, setup-goal,
                          visual-explainer) via `npx skills add` without asking.
+  --with-t3              Install the optional T3 Code Claude Bash hook into
+                         ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json.
+                         Off by default. Authorize T3 separately with
+                         plannotator t3 login --url <T3 MCP URL>.
+  --without-t3           Remove only the T3 Code hook from that Claude profile.
+                         Preserves other hooks, settings and T3 credentials.
+                         Both T3 flags are skipped by --minimal.
   --no-extras            Skip the extras without asking.
   --model-invocable <l>  Comma-separated skill names to make model-invocable
                          (e.g. plannotator-review,plannotator-compound), or
@@ -145,6 +162,15 @@ Options:
                          github.com cannot serve the tag being installed. Env
                          var: PLANNOTATOR_SKIP_SKILLS_INSTALL; config key:
                          skipInstall.skills.
+  --skip-claude-plugin   Do not update an installed Claude Code plugin. By
+                         default, when the claude CLI is on PATH and the
+                         plannotator@plannotator plugin is installed, the
+                         installer runs `claude plugin marketplace update
+                         plannotator` and `claude plugin update
+                         plannotator@plannotator --scope user`. It never
+                         installs the plugin, and skips a --version pin. Env
+                         var: PLANNOTATOR_SKIP_CLAUDE_PLUGIN_UPDATE;
+                         config key: skipInstall.claudePlugin.
   --non-interactive      Never prompt, even in a terminal. Uses flags, then
                          saved answers from a previous run, then the defaults
                          (no extras, nothing model-invocable).
@@ -299,6 +325,16 @@ while [ $# -gt 0 ]; do
             MINIMAL_FLAG=0
             shift
             ;;
+        --with-t3|--without-t3)
+            _t3_value=1
+            [ "$1" = "--without-t3" ] && _t3_value=0
+            if [ "$T3_HOOK_FLAG" -ne -1 ] && [ "$T3_HOOK_FLAG" -ne "$_t3_value" ]; then
+                echo "--with-t3 and --without-t3 are mutually exclusive" >&2
+                exit 1
+            fi
+            T3_HOOK_FLAG="$_t3_value"
+            shift
+            ;;
         --skip-codex)
             SKIP_CODEX_FLAG=1
             shift
@@ -321,6 +357,10 @@ while [ $# -gt 0 ]; do
             ;;
         --skip-skills)
             SKIP_SKILLS_FLAG=1
+            shift
+            ;;
+        --skip-claude-plugin)
+            SKIP_CLAUDE_PLUGIN_FLAG=1
             shift
             ;;
         -h|--help)
@@ -539,6 +579,9 @@ skip_opencode_source=""
 # the same key region, so it rides along in the loop below.
 skip_skills=0
 skip_skills_source=""
+# skipInstall.claudePlugin opts out of updating an installed Claude Code plugin.
+skip_claude_plugin=0
+skip_claude_plugin_source=""
 _skip_install_block=""
 if [ -f "$_config_dir/config.json" ]; then
     _skip_install_block=$(awk '
@@ -566,7 +609,7 @@ if [ -f "$_config_dir/config.json" ]; then
         }' "$_config_dir/config.json" 2>/dev/null) || _skip_install_block=""
 fi
 if [ -n "$_skip_install_block" ]; then
-    for _agent in codex gemini kiro vibe opencode skills; do
+    for _agent in codex gemini kiro vibe opencode skills claudePlugin; do
         if printf '%s' "$_skip_install_block" | grep -q "\"$_agent\"[[:space:]]*:[[:space:]]*false"; then
             continue # explicit false is a veto, never a skip
         fi
@@ -595,6 +638,10 @@ if [ -n "$_skip_install_block" ]; then
                 skills)
                     skip_skills=1
                     skip_skills_source="config skipInstall.skills"
+                    ;;
+                claudePlugin)
+                    skip_claude_plugin=1
+                    skip_claude_plugin_source="config skipInstall.claudePlugin"
                     ;;
             esac
         fi
@@ -662,6 +709,16 @@ case "${PLANNOTATOR_SKIP_SKILLS_INSTALL:-}" in
         skip_skills_source=""
         ;;
 esac
+case "${PLANNOTATOR_SKIP_CLAUDE_PLUGIN_UPDATE:-}" in
+    1|true|yes|TRUE|YES|True|Yes)
+        skip_claude_plugin=1
+        skip_claude_plugin_source="PLANNOTATOR_SKIP_CLAUDE_PLUGIN_UPDATE"
+        ;;
+    0|false|no|FALSE|NO|False|No)
+        skip_claude_plugin=0
+        skip_claude_plugin_source=""
+        ;;
+esac
 if [ "$SKIP_CODEX_FLAG" -eq 1 ]; then
     skip_codex=1
     skip_codex_source="--skip-codex"
@@ -685,6 +742,10 @@ fi
 if [ "$SKIP_SKILLS_FLAG" -eq 1 ]; then
     skip_skills=1
     skip_skills_source="--skip-skills"
+fi
+if [ "$SKIP_CLAUDE_PLUGIN_FLAG" -eq 1 ]; then
+    skip_claude_plugin=1
+    skip_claude_plugin_source="--skip-claude-plugin"
 fi
 
 # Pre-flight: if verification is requested, reject tags older than the first
@@ -976,12 +1037,15 @@ write_install_flags() {
     [ "$VERIFY_ATTESTATION_FLAG" = "1" ] && _if_add verify-attestation
     [ "$VERIFY_ATTESTATION_FLAG" = "0" ] && _if_add skip-attestation
     [ "$WITH_CALL_FLOW_FLAG" = "1" ] && _if_add with-call-flow
+    [ "$T3_HOOK_FLAG" = "1" ] && _if_add with-t3
+    [ "$T3_HOOK_FLAG" = "0" ] && _if_add without-t3
     [ "$SKIP_CODEX_FLAG" = "1" ] && _if_add skip-codex
     [ "$SKIP_GEMINI_FLAG" = "1" ] && _if_add skip-gemini
     [ "$SKIP_KIRO_FLAG" = "1" ] && _if_add skip-kiro
     [ "$SKIP_VIBE_FLAG" = "1" ] && _if_add skip-vibe
     [ "$SKIP_OPENCODE_FLAG" = "1" ] && _if_add skip-opencode
     [ "$SKIP_SKILLS_FLAG" = "1" ] && _if_add skip-skills
+    [ "$SKIP_CLAUDE_PLUGIN_FLAG" = "1" ] && _if_add skip-claude-plugin
     _if_path="$_config_dir/install-flags.json"
     {
         mkdir -p "$_config_dir" &&
@@ -1003,6 +1067,24 @@ if [ "$minimal" -eq 1 ]; then
     echo "Minimal install complete — only the plannotator binary was installed."
     echo "No skills, hooks, agent integrations, or config files were written."
     exit 0
+fi
+
+# Optional T3 Code hook (only with --with-t3 / --without-t3). A step that
+# fails never fails the install, like the Claude Code plugin update: the
+# reason is printed with the command to retry, and the install goes on.
+if [ "$T3_HOOK_FLAG" -ne -1 ]; then
+    _t3_settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+    if [ "$T3_HOOK_FLAG" -eq 1 ]; then
+        if PLANNOTATOR_DATA_DIR="$_config_dir" "$INSTALL_DIR/plannotator" t3-hook install --settings "$_t3_settings" --executable "$INSTALL_DIR/plannotator"; then
+            echo "T3 authorization is separate: plannotator t3 login --url <T3 MCP URL>"
+        else
+            echo "T3 Code hook: could not install it (see above); the rest of the install continues. Retry with: plannotator t3-hook install --settings \"$_t3_settings\" --executable \"$INSTALL_DIR/plannotator\"" >&2
+        fi
+    else
+        if ! PLANNOTATOR_DATA_DIR="$_config_dir" "$INSTALL_DIR/plannotator" t3-hook remove --settings "$_t3_settings"; then
+            echo "T3 Code hook: could not remove it (see above); the rest of the install continues. Retry with: plannotator t3-hook remove --settings \"$_t3_settings\"" >&2
+        fi
+    fi
 fi
 
 sem_asset_for_platform() {
@@ -1363,48 +1445,284 @@ NODE
     fi
 fi
 
-# Validate plugin hooks.json if plugin is already installed
-PLUGIN_HOOKS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/marketplaces/plannotator/apps/hook/hooks/hooks.json"
-if [ -f "$PLUGIN_HOOKS" ]; then
-    cat > "$PLUGIN_HOOKS" << 'HOOKS_EOF'
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "EnterPlanMode",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "plannotator improve-context",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PermissionRequest": [
-      {
-        "matcher": "ExitPlanMode",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "plannotator",
-            "timeout": 345600
-          }
-        ]
-      }
-    ]
-  }
+# Claude Code plugin: repair the marketplace clone, never rewrite it.
+#
+# ${CLAUDE_CONFIG_DIR:-~/.claude}/plugins/marketplaces/plannotator is Claude
+# Code's own git clone of this repository; installing or updating the plugin
+# copies apps/hook from it into the plugin cache. Installers used to overwrite
+# its apps/hook/hooks/hooks.json with a hard-coded copy (added in #230 to fix
+# a stale 1800s timeout, extended in #267 to pin the Windows exe path). That
+# copy drifted from the repo file twice: #689 found it dropping the
+# EnterPlanMode hook, and it later dropped "modules" (the Claude Code mod).
+# The clone's own file is the source of truth, so nothing writes it now.
+#
+# An earlier installer's rewrite can still be sitting in the clone as a local
+# edit, and a plugin installed or updated from it loses the mod. Restore the
+# file from the clone's HEAD, but only when it differs from HEAD AND its
+# content (whitespace removed) is exactly one of the shapes those installers
+# wrote, so a user's own edit is never discarded. Needs git; without it this
+# is a no-op. install.ps1 / install.cmd carry the same pattern as a .NET
+# regex (keep the three in step).
+PLUGIN_MARKETPLACE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/marketplaces/plannotator"
+PLUGIN_HOOKS="$PLUGIN_MARKETPLACE_DIR/apps/hook/hooks/hooks.json"
+LEGACY_PLUGIN_HOOKS_RE='^\{"hooks":\{("PreToolUse":\[\{"matcher":"EnterPlanMode","hooks":\[\{"type":"command","command":"(\\")?[^"\\]*plannotator(\.exe)?(\\")?improve-context","timeout":5\}\]\}\],)?"PermissionRequest":\[\{"matcher":"ExitPlanMode","hooks":\[\{"type":"command","command":"(\\")?[^"\\]*plannotator(\.exe)?(\\")?","timeout":345600\}\]\}\]\}\}$'
+
+repair_legacy_plugin_hooks() {
+    _clone="$1"
+    _rel="apps/hook/hooks/hooks.json"
+    [ -f "$_clone/$_rel" ] || return 0
+    command -v git >/dev/null 2>&1 || return 0
+    # Only a git clone that tracks the file...
+    git -C "$_clone" cat-file -e "HEAD:$_rel" 2>/dev/null || return 0
+    # ...and only while it differs from HEAD (exit 1; 0 is clean, >1 an error).
+    _diff_rc=0
+    git -C "$_clone" diff --quiet HEAD -- "$_rel" 2>/dev/null || _diff_rc=$?
+    [ "$_diff_rc" -eq 1 ] || return 0
+    _compact=$(tr -d ' \t\r\n' < "$_clone/$_rel" 2>/dev/null) || return 0
+    printf '%s' "$_compact" | grep -Eq "$LEGACY_PLUGIN_HOOKS_RE" || return 0
+    if git -C "$_clone" checkout -q -- "$_rel" 2>/dev/null; then
+        echo "Restored ${_clone}/${_rel} from its git checkout (an earlier installer had rewritten it)."
+    fi
 }
-HOOKS_EOF
-    echo "Updated plugin hooks at ${PLUGIN_HOOKS}"
-fi
+repair_legacy_plugin_hooks "$PLUGIN_MARKETPLACE_DIR" || true
+
+# Claude Code plugin: update it when it is already installed.
+#
+# The plugin comes from a GitHub marketplace, which Claude Code does not
+# auto-update by default, so a binary update used to leave an old plugin behind
+# (without the mod's Inbox connection and every mod fix since). When the claude
+# CLI is on PATH and plannotator@plannotator is in Claude Code's plugin registry
+# (${CLAUDE_CONFIG_DIR:-~/.claude}/plugins/installed_plugins.json, at user
+# scope), run the two commands this script used to only print. This runs after
+# the repair above, so a repaired clone is what gets copied. It never installs
+# the plugin, never touches another marketplace or plugin, never prompts (stdin
+# is /dev/null), and never fails the install: each command is time-bounded and
+# a failure prints the manual commands. Opt out with --skip-claude-plugin,
+# PLANNOTATOR_SKIP_CLAUDE_PLUGIN_UPDATE=1 or skipInstall.claudePlugin; --minimal
+# exits before this. install.ps1 / install.cmd carry the same steps.
+CLAUDE_PLUGIN_ID="plannotator@plannotator"
+CLAUDE_PLUGIN_REGISTRY="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json"
+# none | manual (installed, no claude CLI) | skipped | updated | current | failed
+# | no-marketplace (the plannotator marketplace is gone; re-add it)
+claude_plugin_state="none"
+claude_plugin_version=""
+
+# The registry value for plannotator@plannotator (a JSON array of per-scope
+# install records; an object in the older v1 file), or nothing.
+claude_plugin_registry_entry() {
+    [ -f "$CLAUDE_PLUGIN_REGISTRY" ] || return 0
+    awk -v key="\"$CLAUDE_PLUGIN_ID\"" '
+        { buf = buf $0 "\n" }
+        END {
+            pos = 1
+            while (1) {
+                i = index(substr(buf, pos), key)
+                if (i == 0) exit
+                i = pos + i - 1
+                rest = substr(buf, i + length(key))
+                if (match(rest, /^[ \t\r\n]*:[ \t\r\n]*[[{]/) != 0) {
+                    rest = substr(rest, RLENGTH)
+                    depth = 0; instr = 0; esc = 0
+                    n = length(rest)
+                    for (j = 1; j <= n; j++) {
+                        c = substr(rest, j, 1)
+                        if (instr) {
+                            if (esc) esc = 0
+                            else if (c == "\\") esc = 1
+                            else if (c == "\"") instr = 0
+                            continue
+                        }
+                        if (c == "\"") instr = 1
+                        else if (c == "[" || c == "{") depth++
+                        else if (c == "]" || c == "}") {
+                            depth--
+                            if (depth == 0) { print substr(rest, 1, j); exit }
+                        }
+                    }
+                    exit
+                }
+                pos = i + length(key)
+            }
+        }' "$CLAUDE_PLUGIN_REGISTRY" 2>/dev/null || true
+}
+
+# The user-scope install record (flat JSON object text), or nothing. A record
+# without a "scope" field (the v1 registry) counts as the user install. A
+# project- or local-scope-only install is left alone, because `claude plugin
+# update` works on the user scope by default.
+claude_plugin_user_record() {
+    _cp_entry=$(claude_plugin_registry_entry | tr -d '\r\n')
+    [ -n "$(printf '%s' "$_cp_entry" | tr -d ' \t[]{}')" ] || return 0
+    if printf '%s' "$_cp_entry" | grep -q '"scope"[[:space:]]*:'; then
+        printf '%s' "$_cp_entry" | tr '}' '\n' |
+            grep '"scope"[[:space:]]*:[[:space:]]*"user"' | head -n 1
+    else
+        printf '%s\n' "$_cp_entry"
+    fi
+}
+
+# One string field of an install record.
+claude_plugin_field() {
+    printf '%s' "$1" | grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -n 1 |
+        sed 's/.*"\([^"]*\)"$/\1/'
+}
+
+# Run a command with a time limit in plain shell (macOS has no timeout(1)).
+# $1 is the limit in seconds, $2 a path the watchdog creates on a timeout (in
+# a private mktemp directory), the rest the command. Returns the command's
+# status, or 124 when it ran out of time and was stopped.
+run_with_time_limit() {
+    _rtl_secs="$1"
+    _rtl_flag="$2"
+    shift 2
+    rm -f "$_rtl_flag" 2>/dev/null || true
+    "$@" </dev/null &
+    _rtl_pid=$!
+    # The watchdog sleeps in the background and waits for it, so stopping the
+    # watchdog (TERM, below) runs its trap at once: the trap stops the sleep
+    # and exits before anything is flagged or killed.
+    (
+        _rtl_sleep=""
+        trap '[ -n "$_rtl_sleep" ] && kill "$_rtl_sleep" 2>/dev/null; exit 0' TERM
+        sleep "$_rtl_secs" &
+        _rtl_sleep=$!
+        wait "$_rtl_sleep"
+        : > "$_rtl_flag"
+        kill -TERM "$_rtl_pid" 2>/dev/null
+        sleep 5 &
+        _rtl_sleep=$!
+        wait "$_rtl_sleep"
+        kill -KILL "$_rtl_pid" 2>/dev/null
+    ) >/dev/null 2>&1 </dev/null &
+    _rtl_dog=$!
+    _rtl_rc=0
+    wait "$_rtl_pid" || _rtl_rc=$?
+    kill -TERM "$_rtl_dog" 2>/dev/null || true
+    wait "$_rtl_dog" 2>/dev/null || true
+    if [ -f "$_rtl_flag" ]; then
+        return 124
+    fi
+    return "$_rtl_rc"
+}
+
+# --scope user always: `claude plugin update` auto-detects the scope on current
+# Claude Code, and from inside a project with a project-scope install it would
+# update that record and leave the user install old.
+print_claude_plugin_manual_update() {
+    echo "  claude plugin marketplace update plannotator"
+    echo "  claude plugin update ${CLAUDE_PLUGIN_ID} --scope user"
+}
+
+print_claude_plugin_marketplace_readd() {
+    echo "  claude plugin marketplace add backnotprop/plannotator"
+    echo "  claude plugin update ${CLAUDE_PLUGIN_ID} --scope user"
+}
+
+update_claude_plugin_if_installed() {
+    _cp_record=$(claude_plugin_user_record)
+    [ -n "$_cp_record" ] || return 0
+    if ! command -v claude >/dev/null 2>&1; then
+        claude_plugin_state="manual"
+        return 0
+    fi
+    if [ "$skip_claude_plugin" -eq 1 ]; then
+        claude_plugin_state="skipped"
+        echo "Claude Code plugin: not updated (${skip_claude_plugin_source})."
+        return 0
+    fi
+    # A pinned install (--version naming a tag) keeps the plugin it has: the
+    # plugin update always installs the newest plugin, which would not match
+    # an older binary. Background auto-update passes the newest release it
+    # just resolved as --version and exports the same tag as
+    # PLANNOTATOR_UPDATE_VERSION, so that run is not pinned. No network call.
+    if [ "$VERSION_EXPLICIT" -eq 1 ] && [ "${PLANNOTATOR_UPDATE_VERSION:-}" != "$latest_tag" ]; then
+        claude_plugin_state="skipped"
+        echo "Claude Code plugin: not updated: pinned to ${latest_tag}; updating would install the newest plugin."
+        return 0
+    fi
+    # Seconds per command. Internal knob for the tests; the default covers a
+    # slow git fetch of the marketplace clone.
+    _cp_secs="${PLANNOTATOR_CLAUDE_PLUGIN_TIMEOUT:-120}"
+    case "$_cp_secs" in ''|*[!0-9]*|0) _cp_secs=120 ;; esac
+    # One private directory for claude's output and the timeout marker.
+    _cp_tmp=$(mktemp -d "${TMPDIR:-/tmp}/plannotator-claude-plugin.XXXXXX" 2>/dev/null) || _cp_tmp=""
+    if [ -z "$_cp_tmp" ] || [ ! -d "$_cp_tmp" ]; then
+        claude_plugin_state="failed"
+        echo "Claude Code plugin: could not update it (no temporary directory). Run these, then restart Claude Code:"
+        print_claude_plugin_manual_update
+        return 0
+    fi
+    _cp_log="$_cp_tmp/claude.log"
+    _cp_before="$(claude_plugin_field "$_cp_record" version)|$(claude_plugin_field "$_cp_record" gitCommitSha)|$(claude_plugin_field "$_cp_record" installPath)"
+    # CLAUDECODE is cleared for these commands: an auto-update started from a
+    # Claude Code session inherits it, and it marks a nested Claude Code.
+    echo "Updating the Claude Code plugin..."
+    _cp_failed=""
+    _cp_missing=0
+    for _cp_step in marketplace plugin; do
+        _cp_rc=0
+        if [ "$_cp_step" = "marketplace" ]; then
+            run_with_time_limit "$_cp_secs" "$_cp_tmp/timed-out" env -u CLAUDECODE claude plugin marketplace update plannotator >"$_cp_log" 2>&1 || _cp_rc=$?
+        else
+            run_with_time_limit "$_cp_secs" "$_cp_tmp/timed-out" env -u CLAUDECODE claude plugin update "$CLAUDE_PLUGIN_ID" --scope user >"$_cp_log" 2>&1 || _cp_rc=$?
+        fi
+        if [ "$_cp_rc" -eq 124 ]; then
+            _cp_failed="timed out after ${_cp_secs}s"
+        elif [ "$_cp_rc" -ne 0 ]; then
+            # The plannotator marketplace itself is gone (removed by hand):
+            # updating cannot work, re-adding it does.
+            if grep -i 'marketplace' "$_cp_log" 2>/dev/null | grep -Eqi 'not found|not exist|no such|unknown'; then
+                _cp_missing=1
+            fi
+            _cp_last=$(tr -cd '[:print:]\n' < "$_cp_log" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c 1-200)
+            _cp_failed="claude exited ${_cp_rc}${_cp_last:+: ${_cp_last}}"
+        fi
+        [ -z "$_cp_failed" ] || break
+    done
+    rm -rf "$_cp_tmp" 2>/dev/null || true
+    if [ "$_cp_missing" -eq 1 ]; then
+        claude_plugin_state="no-marketplace"
+        echo "Claude Code plugin: could not update it (the plannotator marketplace is not registered). Re-add it, then restart Claude Code:"
+        print_claude_plugin_marketplace_readd
+        return 0
+    fi
+    if [ -n "$_cp_failed" ]; then
+        claude_plugin_state="failed"
+        echo "Claude Code plugin: could not update it (${_cp_failed}). Run these, then restart Claude Code:"
+        print_claude_plugin_manual_update
+        return 0
+    fi
+    _cp_record=$(claude_plugin_user_record)
+    claude_plugin_version=$(claude_plugin_field "$_cp_record" version)
+    _cp_after="${claude_plugin_version}|$(claude_plugin_field "$_cp_record" gitCommitSha)|$(claude_plugin_field "$_cp_record" installPath)"
+    if [ "$_cp_after" = "||" ] || [ "$_cp_before" != "$_cp_after" ]; then
+        claude_plugin_state="updated"
+        echo "Claude Code plugin: updated${claude_plugin_version:+ to ${claude_plugin_version}} (restart Claude Code to load it)."
+    else
+        claude_plugin_state="current"
+        echo "Claude Code plugin: already up to date${claude_plugin_version:+ (${claude_plugin_version})}."
+    fi
+}
+update_claude_plugin_if_installed || true
 
 # Clear any cached OpenCode plugin to force fresh download on next run.
-# An OpenCode opt-out (#1178) leaves OpenCode's own cache directory alone;
-# the Bun package cache is a shared cache, not OpenCode's home, and is
-# always cleared.
+# Both OpenCode generations root their cache at ${XDG_CACHE_HOME:-~/.cache}/opencode:
+#   OpenCode 1: node_modules/@plannotator and packages/@plannotator
+#   OpenCode 2: npm/<name>@<spec>/<generation>/ (packages/util/src/npm.ts),
+#               so our plugin is npm/@plannotator/opencode@<spec>
+#               (opencode@latest for the documented config entry).
+# Only our own package's entries are removed. An OpenCode opt-out (#1178)
+# leaves OpenCode's own cache directory alone; the Bun package cache is a
+# shared cache, not OpenCode's home, and is always cleared.
 if [ "$skip_opencode" -eq 0 ]; then
-    rm -rf "$HOME/.cache/opencode/node_modules/@plannotator" "$HOME/.cache/opencode/packages/@plannotator" 2>/dev/null || true
+    OPENCODE_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/opencode"
+    rm -rf "$OPENCODE_CACHE_DIR/node_modules/@plannotator" "$OPENCODE_CACHE_DIR/packages/@plannotator" 2>/dev/null || true
+    for _oc_entry in "$OPENCODE_CACHE_DIR"/npm/@plannotator/opencode@*; do
+        [ -e "$_oc_entry" ] || [ -L "$_oc_entry" ] || continue
+        rm -rf "$_oc_entry" 2>/dev/null || true
+    done
+    # The scope directory goes only when nothing else is left in it.
+    rmdir "$OPENCODE_CACHE_DIR/npm/@plannotator" 2>/dev/null || true
 fi
 rm -rf "$HOME/.bun/install/cache/@plannotator" 2>/dev/null || true
 
@@ -2217,6 +2535,22 @@ if [ "$pi_detected" -eq 1 ]; then
     echo ""
     echo "  pi install npm:@plannotator/pi-extension"
 fi
+# Oh My Pi (OMP) loads the Pi extension as an OMP plugin (#1814). This run
+# installs nothing into OMP: the section says how, because "Ask this session"
+# in OMP comes only from the extension, never from the CLI run in OMP's shell.
+if command -v omp >/dev/null 2>&1; then
+    echo ""
+    echo "=========================================="
+    echo "  OH MY PI (OMP) USERS"
+    echo "=========================================="
+    echo ""
+    echo "Install or update the Plannotator extension in OMP:"
+    echo ""
+    echo "  omp plugin install @plannotator/pi-extension"
+    echo ""
+    echo "Then restart OMP and open reviews with /plannotator-review, /plannotator-annotate and"
+    echo "/plannotator-last. Reviews opened that way can use Ask this session."
+fi
 if [ -d "$HOME/.gemini" ]; then
     echo ""
     echo "=========================================="
@@ -2321,12 +2655,30 @@ else
 fi
 echo "=========================================="
 echo ""
-echo "Install the Claude Code plugin:"
-echo "  /plugin marketplace add backnotprop/plannotator"
-echo "  /plugin install plannotator@plannotator"
-echo ""
-echo "Upgrading from an older version? Also run /plugin marketplace update"
-echo "so the plugin drops its old plannotator:* command entries."
+case "$claude_plugin_state" in
+    updated)
+        echo "The Claude Code plugin was updated${claude_plugin_version:+ to ${claude_plugin_version}}. Restart Claude Code to load it."
+        ;;
+    current)
+        echo "The Claude Code plugin is up to date${claude_plugin_version:+ (${claude_plugin_version})}."
+        ;;
+    no-marketplace)
+        echo "Re-add the Claude Code plugin's marketplace: run these in a terminal, then restart Claude Code:"
+        print_claude_plugin_marketplace_readd
+        ;;
+    skipped|failed|manual)
+        echo "Update the Claude Code plugin: run these in a terminal, then restart Claude Code:"
+        print_claude_plugin_manual_update
+        ;;
+    *)
+        echo "Install the Claude Code plugin:"
+        echo "  /plugin marketplace add backnotprop/plannotator"
+        echo "  /plugin install plannotator@plannotator"
+        echo ""
+        echo "Updating the plugin? Run these in a terminal, then restart Claude Code:"
+        print_claude_plugin_manual_update
+        ;;
+esac
 echo ""
 if [ "$skip_skills" -eq 1 ]; then
     echo "Skills were skipped (${skip_skills_source}), so the /plannotator-review,"
@@ -2345,7 +2697,18 @@ fi
 # Warn if plannotator is configured in both settings.json hooks AND the plugin (causes double execution)
 # Only warn when the plugin is installed — manual-only users won't have overlap
 CLAUDE_SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+duplicate_plan_hook=0
 if [ -f "$PLUGIN_HOOKS" ] && [ -f "$CLAUDE_SETTINGS" ] && grep -q '"command".*plannotator' "$CLAUDE_SETTINGS" 2>/dev/null; then
+    # The opt-in T3 Bash hook has no counterpart in the default plugin.
+    # Inspect event/matcher pairs so compact JSON with a real plan-hook
+    # overlap still warns even when it also contains the T3 hook.
+    if grep -q 't3-hook' "$CLAUDE_SETTINGS"; then
+        if "$INSTALL_DIR/plannotator" t3-hook plan-hook-present "$CLAUDE_SETTINGS"; then duplicate_plan_hook=1; fi
+    else
+        duplicate_plan_hook=1
+    fi
+fi
+if [ "$duplicate_plan_hook" -eq 1 ]; then
     echo ""
     echo "⚠️ ⚠️ ⚠️  WARNING: DUPLICATE HOOK DETECTED  ⚠️ ⚠️ ⚠️"
     echo ""

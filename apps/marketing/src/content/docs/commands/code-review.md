@@ -290,6 +290,10 @@ Select any text in the diff to annotate it, just like in plan review. Your annot
 
 When an AI provider is available, the diff viewer includes inline AI chat. Select lines in the diff and choose "Ask AI" to ask questions about the code. Responses stream into a sidebar panel grouped by file.
 
+### Ask this session
+
+When the review was opened from Claude Code (with the [Plannotator mod](/docs/guides/claude-code/#the-plannotator-mod)), Pi, or OpenCode 2, Ask AI is answered by that agent session. It is the only option: there is no provider picker. Your question shows in the agent's chat. If the agent is busy, choose **Ask when it finishes** or **Interrupt and ask now**. In remote mode, with `--tailscale`, from OpenCode 1, or with the Claude Code mod off, you pick a provider as described below. Review agents, Code Tour and Guided Review still run their own Claude or Codex models. See [Ask this session](/docs/guides/ai-features/#ask-this-session).
+
 ### Supported providers
 
 Plannotator supports multiple AI providers. Providers are auto-detected based on which CLI tools are installed on your system:
@@ -317,7 +321,7 @@ Open it with the **Guide** button in the review header (or `Mod+Shift+G`), pick 
 
 **Download portable guide** (top-right of a guide) saves the guide as one small HTML file you can send to anyone: it contains the guide, the exact diff it was generated against, and where the change came from (repo, branch, PR link, generating agent). The file renders identically to the in-app guide — same chapters, same diff viewer, syntax highlighting, light/dark — by loading the viewer from `guides.show`, so its size is roughly the size of the diff, never the app. It opens straight from disk. Without internet the file still shows the guide text and file list.
 
-The same export is available from the command line — `plannotator guide list` shows saved guides, `plannotator guide export --id <id>` writes the HTML — and `plannotator guide export --guide guide.json --patch guide.patch` wraps a guide an agent wrote itself (the standalone `plannotator-guide` skill; see [portable guide format](/docs/reference/portable-guides/)). Guides generated before this feature have no retained diff and are not exportable.
+The same export is available from the command line — `plannotator guide list` shows saved guides, `plannotator guide export --id <id>` writes the HTML — and `plannotator guide export --guide guide.json --patch guide.patch` wraps a guide an agent wrote itself (the standalone `guided-review` skill, `npx skills add plannotator/guides`; see [portable guide format](/docs/reference/portable-guides/)). The skill was called `plannotator-guide` before; to switch, run `npx skills remove plannotator-guide` (add `-g` if you installed it globally), then `npx skills add plannotator/guides`. The same command also offers `guided-plan`, which turns a plan for a change into one cited, readable page. Guides generated before this feature have no retained diff and are not exportable.
 
 **Create share link** (in the same Share menu, or `plannotator guide share`) uploads the guide and its diff once to guides.show and gives you a link instead of a file; the upload is encrypted by default with the key carried only in the link, and the one-time delete token (or **Remove link**) takes it down. See [share links](/docs/reference/portable-guides/#share-links).
 

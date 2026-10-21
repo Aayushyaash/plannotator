@@ -3,7 +3,6 @@ import { CodeAnnotation, type CodeAnnotationScope, type EditorAnnotation, type A
 import { Button } from '@plannotator/ui/components/ui/button';
 import { DecisionNoteField } from '@plannotator/ui/components/DecisionControl';
 import { useDismissablePopover } from '@plannotator/ui/hooks/useDismissablePopover';
-import { submitHint } from '@plannotator/ui/utils/platform';
 import { CommentMeta } from './CommentMeta';
 import { EditorAnnotationCard } from '@plannotator/ui/components/EditorAnnotationCard';
 import { CommentActions } from './CommentActions';
@@ -79,9 +78,10 @@ interface ReviewSidebarProps {
   aiConfig?: { providerId: string | null; model: string | null; reasoningEffort?: string | null };
   onAIConfigChange?: (config: { providerId?: string | null; model?: string | null; reasoningEffort?: string | null }) => void;
   hasAISession?: boolean;
-  /** "Ask this session": the reviewer's choice on a busy/gone/blocked answer. */
+  /** "Ask this session": the reviewer's choice on a busy answer. */
   onSessionAskAction?: (questionId: string, action: SessionAskAction) => void;
-  sessionAskFallbackLabel?: string | null;
+  /** Optional note on how to get "Ask this session" (askSessionSetupHint). */
+  askSessionSetupHint?: string | null;
   // Agent props
   agentJobs?: AgentJobInfo[];
   agentCapabilities?: AgentCapabilities | null;
@@ -209,8 +209,7 @@ const GeneralCommentComposer: React.FC<{
             onCancel={() => onOpenChange(false)}
             placeholder="Add a general comment..."
           />
-          <div className="mt-2 flex items-center justify-between gap-2">
-            <span className="text-[10px] leading-snug text-muted-foreground">{submitHint}</span>
+          <div className="mt-2 flex items-center justify-end gap-2">
             <Button size="xs" data-general-comment-add onClick={submit} title="Add the comment to this review">
               Add comment
             </Button>
@@ -283,7 +282,7 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
   onAIConfigChange,
   hasAISession,
   onSessionAskAction,
-  sessionAskFallbackLabel,
+  askSessionSetupHint,
   agentJobs,
   agentCapabilities,
   onAgentLaunch,
@@ -404,6 +403,15 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
             ) : isFileScope ? (
               <span className="inline-flex items-center gap-1.5">
                 <FileNameChip path={annotation.filePath} />
+                {annotation.markdownPreview && (
+                  <span
+                    data-annotation-markdown-preview=""
+                    className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary"
+                    title="Made in the rendered Markdown (Changes or Read)"
+                  >
+                    rendered
+                  </span>
+                )}
                 {annotation.callFlowTargets?.length ? (
                   <span className="text-[9px] text-primary/80">
                     flow · {annotation.callFlowTargets.length} {annotation.callFlowTargets.length === 1 ? 'step' : 'steps'}
@@ -442,6 +450,11 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
           author={annotation.author}
           createdAt={annotation.createdAt}
         />
+        {annotation.markdownPreview && (
+          <div className="mt-1 mb-1 border-l-2 border-border/40 pl-1.5 text-[11px] italic text-muted-foreground/80 line-clamp-2">
+            {annotation.markdownPreview.originalText}
+          </div>
+        )}
         {editingOutdated?.id === annotation.id ? (
           <div className="mt-1" onClick={(e) => e.stopPropagation()}>
             <textarea
@@ -795,7 +808,8 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
               onAIConfigChange={onAIConfigChange}
               hasAISession={hasAISession}
               onSessionAskAction={onSessionAskAction}
-              sessionAskFallbackLabel={sessionAskFallbackLabel}
+              askSessionSetupHint={askSessionSetupHint}
+             
             />
           )}
 

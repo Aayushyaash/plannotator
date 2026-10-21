@@ -12,10 +12,13 @@
  *                        "opencode", "codex", "copilot-cli", "gemini-cli", "pi", "oh-my-pi".
  */
 
+import { crossOriginRefusalBody, isSameOriginOrNoOrigin } from "@plannotator/shared/request-origin";
 import { appHtmlResponse, likelyAppHtmlEncoding, prewarmAppHtml } from "@plannotator/shared/app-html";
 import type { Origin } from "@plannotator/shared/agents";
 import { resolve } from "path";
 import { isRemoteSession, getServerHostname, startBunServerOnAvailablePort, buildAdvertisedUrl } from "./remote";
+import { createRequestHostGuard } from "./request-host-guard";
+import { isSameOriginRequest, refuseCrossOriginWrite } from "./request-origin-guard";
 import { openEditorDiff } from "./ide";
 import {
   saveToObsidian,
@@ -43,31 +46,34 @@ import {
 } from "./storage";
 import { getRepoInfo } from "./repo";
 import { detectProjectName } from "./project";
-import { loadConfig, saveConfig, detectGitUser, getServerConfig, resolveAIEnabled, resolveFeedbackHistory } from "./config";
-import { getAutoUpdateAdvert } from "./auto-update";
+import { agentToolSaveFailed, loadConfig, saveConfig, detectGitUser, getServerConfig, resolveAIEnabled, resolveFeedbackHistory } from "./config";
+import { getAutoUpdateAdvert, getUpdateAdvert, handleUpdateRoute } from "./auto-update";
 import { appendFeedbackRecord, type FeedbackDecision } from "@plannotator/shared/feedback-archive";
 import { isFaviconStyle, type FaviconStyle } from "@plannotator/shared/favicon";
 import { readImprovementHook, getImprovementHookExpectedPath } from "@plannotator/shared/improvement-hooks";
 import { composeImproveContext } from "@plannotator/shared/pfm-reminder";
 import { handleImage, handleUpload, handleAgents, handleServerReady, handleDraftSave, handleDraftLoad, handleDraftDelete, handleApiNotFound, handleFavicon, handleReferenceSkills, handleReferenceSkillContent, handleSaveNotes, readDraftGenerationFromBody, type OpencodeClient } from "./shared-handlers";
-import { contentHash, deleteDraft } from "./draft";
+import { contentHash, deleteDraft, loadDraft } from "./draft";
 import { handleDoc, handleDocExists, handleObsidianVaults, handleObsidianFiles, handleObsidianDoc, handleFileBrowserFiles } from "./reference-handlers";
 import { closeAllFileBrowserWatchers, handleFileBrowserFilesStream } from "./reference-watch";
 import { warmFileListCache } from "@plannotator/shared/resolve-file";
 import { createEditorAnnotationHandler } from "./editor-annotations";
 import { createExternalAnnotationHandler } from "./external-annotations";
 import { isWSL } from "./browser";
-import { createAIRuntime } from "./ai-runtime";
+import { agentToolHostForServer, createAIRuntime } from "./ai-runtime";
+import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control";
+import { countUnsentDraftComments } from "@plannotator/shared/host-control";
 import { isAIEndpointPath, isLongLivedAIEndpointPath, type AIEndpoints, type SessionBridge } from "@plannotator/ai";
 import { isArchiveDocumentMutation } from "@plannotator/shared/archive-mode";
 import { readPlanFile } from "@plannotator/shared/doc-resolve";
+import { checkServerSession, createServerSessionNonce, serverSessionMismatchBody } from "@plannotator/shared/server-session";
 
 // Re-export utilities
 export { isRemoteSession, getServerPort } from "./remote";
 export { openBrowser } from "./browser";
 export * from "./integrations";
 export * from "./storage";
-export { handleServerReady } from "./shared-handlers";
+export { handleServerReady, setServerReadyTarget, SESSION_READY_LINE_PREFIX } from "./shared-handlers";
 export { type VaultNode, buildFileTree } from "@plannotator/shared/reference-common";
 
 // --- Types ---
@@ -75,10 +81,23 @@ export { type VaultNode, buildFileTree } from "@plannotator/shared/reference-com
 export interface ServerOptions {
   /** "Ask this session": the host bridge to the agent session (see packages/ai/session-bridge.ts). A host whose plan flow blocks the session must report `blocked`. */
   sessionBridge?: SessionBridge;
+  /**
+   * The token `/api/host/status` accepts (packages/shared/host-control.ts).
+   * Default: the pull-bridge token the host launched the CLI with; off in
+   * remote mode. A plan review has no host close: it ends with a decision.
+   */
+  hostControlToken?: string;
   /** The plan markdown content */
   plan: string;
   /** Origin identifier (e.g., "claude-code", "opencode") */
   origin: Origin;
+  /**
+   * The OpenCode host can register the `plannotator` agent tool, so the
+   * serverConfig advert names it. Set by the OpenCode 2 plugin's in-process
+   * plan review; a CLI it launches carries OPENCODE_TOOL_CAPABLE_ENV instead
+   * (packages/server/ai-runtime.ts).
+   */
+  opencodeToolCapable?: boolean;
   /** HTML content to serve for the UI */
   htmlContent: string;
   /** Current permission mode to preserve (Claude Code only) */
@@ -148,6 +167,8 @@ export interface ServerResult {
   updatePlan: (plan: string) => PlanRevisionResult | null;
   /** Stop the server and close active browser connections. */
   stop: () => Promise<void>;
+  /** Host-only status (no close: a plan review ends with the reviewer's decision). */
+  hostControl: HostControl;
 }
 
 // --- Server Implementation ---
@@ -177,6 +198,22 @@ export async function startPlannotatorServer(
   // (note integrations): updatePlan then refuses, so the plan a decision
   // names cannot be swapped while that decision is still being recorded.
   let decisionClaimed = false;
+  // Stale-tab guard (packages/core/server-session.ts): advertised on
+  // /api/plan, echoed by every decision; a different nonce is a tab left open
+  // on a port a NEW server now owns, refused with 409 session_mismatch. A
+  // body without it (an older client) is accepted.
+  const serverSession = createServerSessionNonce();
+
+  // Host-only status (packages/shared/host-control.ts). Never in archive mode.
+  const hostControlToken = mode === "archive" ? undefined : resolveHostControlToken(options.hostControlToken);
+  const hostControl: HostControl = {
+    status: () => ({
+      kind: "plan",
+      documents: [],
+      unsentAnnotations: draftKey ? countUnsentDraftComments(loadDraft(draftKey)) : 0,
+      decided: decisionSettled || decisionClaimed,
+    }),
+  };
 
   const isRemote = isRemoteSession();
   const wslFlag = await isWSL();
@@ -323,6 +360,7 @@ export async function startPlannotatorServer(
       planRevision,
     }, { status: 409 });
 
+  const requestHostGuard = createRequestHostGuard();
   const server = await startBunServerOnAvailablePort((port) =>
     Bun.serve({
         hostname: getServerHostname(),
@@ -332,7 +370,21 @@ export async function startPlannotatorServer(
         idleTimeout: 0,
 
         async fetch(req, server) {
+          // Host allowlist first, before any route (request-host-guard.ts).
+          const hostRefusal = requestHostGuard.check(req);
+          if (hostRefusal) return hostRefusal;
+          // Then no write from another site, before any route (request-origin-guard.ts).
+          const originRefusal = refuseCrossOriginWrite(req);
+          if (originRefusal) return originRefusal;
+
           const url = new URL(req.url);
+
+          const hostControlResponse = handleHostControl(req, url, {
+            token: hostControlToken,
+            getServerPort: () => boundPort,
+            control: hostControl,
+          });
+          if (hostControlResponse) return hostControlResponse;
 
           // API: Get a specific plan version from history
           if (url.pathname === "/api/plan/version") {
@@ -403,11 +455,12 @@ export async function startPlannotatorServer(
                 sharingEnabled,
                 shareBaseUrl,
                 isWSL: wslFlag,
-                serverConfig: getServerConfig(gitUser),
+                serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge, options.opencodeToolCapable)),
                 ...getAutoUpdateAdvert(),
+                ...getUpdateAdvert(origin, { exposed: isRemote }),
               });
             }
-            return Response.json({ plan, origin, permissionMode, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, ...(options.planRevisions ? { planRevision } : {}), projectRoot: process.cwd(), planDir: planFile?.dir, isWSL: wslFlag, serverConfig: getServerConfig(gitUser), ...getAutoUpdateAdvert() });
+            return Response.json({ plan, origin, permissionMode, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, serverSession, ...(options.planRevisions ? { planRevision } : {}), projectRoot: process.cwd(), planDir: planFile?.dir, isWSL: wslFlag, serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge, options.opencodeToolCapable)), ...getAutoUpdateAdvert(), ...getUpdateAdvert(origin, { exposed: isRemote }) });
           }
 
           // API: The live plan revision (open reviews that receive revised plans)
@@ -446,20 +499,34 @@ export async function startPlannotatorServer(
             });
           }
 
+          // API: Update now (the update toast and the Options menu): the install script, once.
+
+          const updateRoute = handleUpdateRoute(req, url, { port: boundPort, exposed: isRemote, serverSession });
+
+          if (updateRoute) return updateRoute;
+
+
           // API: Update user config (write-back to ~/.plannotator/config.json)
           if (url.pathname === "/api/config" && req.method === "POST") {
+            if (!isSameOriginOrNoOrigin(req.headers.get("origin"), url.host, req.headers.get("sec-fetch-site"))) {
+              return Response.json({ error: "Cross-origin config writes are not allowed" }, { status: 403 });
+            }
             try {
-              const body = (await req.json()) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; conventionalComments?: boolean; conventionalLabels?: unknown[] | null; pfmReminder?: boolean };
+              const body = (await req.json()) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; updateCheck?: unknown; agentTool?: unknown; conventionalComments?: boolean; conventionalLabels?: unknown[] | null; pfmReminder?: boolean };
               const toSave: Record<string, unknown> = {};
               if (body.displayName !== undefined) toSave.displayName = body.displayName;
               if (body.diffOptions !== undefined) toSave.diffOptions = body.diffOptions;
               if (body.theme !== undefined) toSave.theme = body.theme;
               if (isFaviconStyle(body.favicon)) toSave.favicon = body.favicon;
               if (typeof body.autoUpdate === "boolean") toSave.autoUpdate = body.autoUpdate;
+              if (typeof body.updateCheck === "boolean") toSave.updateCheck = body.updateCheck;
+              // The agent tool switch: boolean only; it applies to the next session.
+              if (typeof body.agentTool === "boolean") toSave.agentTool = body.agentTool;
               if (body.conventionalComments !== undefined) toSave.conventionalComments = body.conventionalComments;
               if (body.conventionalLabels !== undefined) toSave.conventionalLabels = body.conventionalLabels;
               if (body.pfmReminder !== undefined) toSave.pfmReminder = body.pfmReminder;
               if (Object.keys(toSave).length > 0) saveConfig(toSave as Parameters<typeof saveConfig>[0]);
+              if (agentToolSaveFailed(toSave)) return Response.json({ error: "Could not save the setting to config.json." }, { status: 500 });
               return Response.json({ ok: true });
             } catch {
               return Response.json({ error: "Invalid request" }, { status: 400 });
@@ -478,8 +545,15 @@ export async function startPlannotatorServer(
 
           // API: Open plan diff in VS Code
           if (url.pathname === "/api/plan/vscode-diff" && req.method === "POST") {
+            // Opens an editor on this machine: another site's page and a stale tab are refused.
+            if (!isSameOriginRequest(req)) {
+              return Response.json(crossOriginRefusalBody(), { status: 403 });
+            }
             try {
               const body = (await req.json()) as { baseVersion: number };
+              if (checkServerSession(body, serverSession) === "mismatch") {
+                return Response.json(serverSessionMismatchBody(), { status: 409 });
+              }
 
               if (!body.baseVersion) {
                 return Response.json({ error: "Missing baseVersion" }, { status: 400 });
@@ -582,7 +656,7 @@ export async function startPlannotatorServer(
 
           // API: Save to notes (decoupled from approve/deny)
           if (url.pathname === "/api/save-notes" && req.method === "POST") {
-            return handleSaveNotes(req);
+            return handleSaveNotes(req, { serverSession });
           }
 
           // API: Approve plan
@@ -595,6 +669,7 @@ export async function startPlannotatorServer(
             let planSaveCustomPath: string | undefined;
             let draftGeneration: number | undefined;
             const rawApproveBody = (await req.json().catch(() => ({}))) as Record<string, unknown> | null;
+            if (checkServerSession(rawApproveBody, serverSession) === "mismatch") return Response.json(serverSessionMismatchBody(), { status: 409 });
             if (isStaleRevision(rawApproveBody)) return staleRevisionResponse();
             decisionClaimed = true;
             try {
@@ -690,6 +765,7 @@ export async function startPlannotatorServer(
             let draftGeneration: number | undefined;
             let answersOnly = false;
             const rawDenyBody = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+            if (checkServerSession(rawDenyBody, serverSession) === "mismatch") return Response.json(serverSessionMismatchBody(), { status: 409 });
             if (isStaleRevision(rawDenyBody)) return staleRevisionResponse();
             decisionClaimed = true;
             try {
@@ -806,5 +882,6 @@ export async function startPlannotatorServer(
       return { revision: planRevision, version: historyResult.version, unchanged: false };
     },
     stop,
+    hostControl,
   };
 }

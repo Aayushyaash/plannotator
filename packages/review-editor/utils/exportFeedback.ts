@@ -1,8 +1,20 @@
-import type { CodeAnnotation, ConventionalLabel, ConventionalDecoration, CommentAnnotation, Annotation, ArtifactAnnotationMeta } from '@plannotator/ui/types';
+import type { CodeAnnotation, ConventionalLabel, ConventionalDecoration, CommentAnnotation, Annotation, ArtifactAnnotationMeta, MarkdownPreviewAnchor } from '@plannotator/ui/types';
 import type { PRMetadata } from '@plannotator/shared/pr-types';
 import { getMRLabel, getMRNumberLabel, getDisplayRepo } from '@plannotator/shared/pr-types';
 import { exportAnnotations, parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 import { artifactAnchorLabel } from './artifactAnnotations';
+import { codeFenceFor } from '@plannotator/core/markdown-structure';
+
+/**
+ * Quoted code in a fence longer than any backtick run in it (CommonMark), so
+ * a ``` line in the code can never close the quote early. Unchanged (three
+ * backticks) for code without such a run. The Inbox's guideCommentEntry
+ * writes the same (packages/inbox/guideFeedback.test.ts keeps them equal).
+ */
+function fenced(code: string): string {
+  const fence = codeFenceFor(code);
+  return `${fence}\n${code}\n${fence}\n`;
+}
 
 /**
  * Format a conventional comment prefix per the Conventional Comments spec:
@@ -173,6 +185,26 @@ export function formatCallFlowAnnotationTargets(annotation: CodeAnnotation): str
   return `\n\n**Selected call-flow steps:**\n${rows.join('\n')}`;
 }
 
+const MARKDOWN_PREVIEW_CONTEXT_LABEL: Record<NonNullable<MarkdownPreviewAnchor['diffContext']>, string> = {
+  added: 'in added text',
+  removed: 'in removed text',
+  modified: 'in changed text',
+  unchanged: 'in unchanged text',
+};
+
+/**
+ * The quoted text of a comment made in a Markdown file's rendered preview,
+ * as a Markdown quote, plus where in the rendered diff it was when that says
+ * something (removed text no longer exists in the file).
+ */
+export function markdownPreviewQuote(anchor: MarkdownPreviewAnchor): string {
+  const quote = anchor.originalText.trim().split('\n').map((line) => `> ${line}`).join('\n');
+  const where = anchor.diffContext && anchor.diffContext !== 'unchanged'
+    ? `\n_(${MARKDOWN_PREVIEW_CONTEXT_LABEL[anchor.diffContext]})_`
+    : '';
+  return `${quote}${where}\n`;
+}
+
 function formatFileAnnotations(fileAnnotations: CodeAnnotation[], headingLevel = '###', currentDiff?: FeedbackDiffContext): string {
   let output = '';
 
@@ -188,6 +220,17 @@ function formatFileAnnotations(fileAnnotations: CodeAnnotation[], headingLevel =
   for (const ann of sorted) {
     const scope = ann.scope ?? 'line';
     const prefix = formatConventionalPrefix(ann.conventionalLabel, ann.decorations);
+
+    if (scope === 'file' && ann.markdownPreview) {
+      output += `${headingLevel} Comment on the rendered Markdown\n`;
+      output += commitMismatchNote(ann, commitShaFromMode(currentDiff?.mode));
+      output += gitButlerMismatchNote(ann, currentDiff);
+      output += `${markdownPreviewQuote(ann.markdownPreview)}\n`;
+      if (ann.text) output += `${prefix}${ann.text}\n`;
+      else if (prefix) output += `${prefix.trimEnd()}\n`;
+      output += '\n';
+      continue;
+    }
 
     if (scope === 'file') {
       output += `${headingLevel} File Comment\n`;
@@ -245,7 +288,7 @@ function formatSelectedTextBlock(ann: CodeAnnotation): string {
   if (ann.selectedTextFromEdits) {
     output += `_The highlighted text below includes the reviewer's in-progress edits; the line range above anchors to the current file lines that region replaces (approximate)._\n`;
   }
-  output += `\n**Highlighted text:**\n\`\`\`\n${ann.selectedText}\n\`\`\`\n`;
+  output += `\n**Highlighted text:**\n${fenced(ann.selectedText)}`;
   return output;
 }
 
@@ -263,10 +306,10 @@ function formatSelectedTextBlock(ann: CodeAnnotation): string {
 function formatSuggestionBlocks(ann: CodeAnnotation): string {
   let output = '';
   if ((ann.suggestedCode || ann.text) && ann.originalCode) {
-    output += `\n**Replaces:**\n\`\`\`\n${ann.originalCode}\n\`\`\`\n`;
+    output += `\n**Replaces:**\n${fenced(ann.originalCode)}`;
   }
   if (ann.suggestedCode) {
-    output += `\n**Suggested code:**\n\`\`\`\n${ann.suggestedCode}\n\`\`\`\n`;
+    output += `\n**Suggested code:**\n${fenced(ann.suggestedCode)}`;
   }
   return output;
 }

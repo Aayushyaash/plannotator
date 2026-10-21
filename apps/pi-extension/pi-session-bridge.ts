@@ -23,6 +23,20 @@
  *   a continuation after an overflow compaction. An error end therefore waits
  *   for `agent_settled` (Pi >= 0.80.4), or for the session to go idle on older
  *   Pi, before it is reported; a retry that starts answering clears it.
+ * - Take-over: a message we did not send that enters the run answering our
+ *   question makes the rest of that run someone else's. Pi emits such a
+ *   message's `message_start` from the agent loop right after a `turn_start`,
+ *   before the next assistant message: a `user` message (the person steering
+ *   or following up, or `sendUserMessage`) or a triggering custom message
+ *   (steered). A NON-triggering custom message sent while the run streams
+ *   (display-only, e.g. `plannotator-handoff`) is appended at `turn_end`
+ *   instead, outside that window, and takes nothing over. On a take-over the
+ *   question settles at once: `done` when the turn before it ended the answer
+ *   (stop, no tool call; e.g. Plannotator's own decision follow-up arriving
+ *   after the answer finished), `taken_over` otherwise (the deltas already
+ *   sent stand). From then on until the run settles (`agent_settled`, or idle
+ *   on older Pi, so an error retry stays covered), neither a Stop nor
+ *   "Interrupt and ask now" aborts that run: it answers someone else.
  *
  * Only type imports here: this module is loaded eagerly by index.ts.
  */
@@ -36,6 +50,14 @@ import {
 } from "./current-pi-session.ts";
 
 export const PLANNOTATOR_ASK_CUSTOM_TYPE = "plannotator-ask";
+
+/**
+ * The Inbox's session-start reminder (inbox.ts): a hidden custom message
+ * `before_agent_start` adds to the first run of a session, which may be the
+ * run answering our question. It is no one's prompt, so it never takes the
+ * question over.
+ */
+export const PI_INBOX_REMINDER_CUSTOM_TYPE = "plannotator-inbox-reminder";
 
 /** How long a sent question may take to show up in the session before it is reported as failed. */
 const START_WATCHDOG_MS = 15_000;
@@ -100,6 +122,22 @@ export function createPiSessionBridgeHub(
 ): PiSessionBridgeHub {
 	const startWatchdogMs = options.startWatchdogMs ?? START_WATCHDOG_MS;
 	let active: ActiveAsk | null = null;
+	/** Between a `turn_start` and that turn's assistant message: where the loop delivers queued messages. */
+	let turnPrelude = false;
+	/** The run that answered our question was taken over: never aborted from Plannotator until it settles. */
+	let takenOverRun = false;
+	/** Older Pi (no `agent_settled`): polls idleness after the taken-over run ends. */
+	let takenOverPoll: ReturnType<typeof setInterval> | null = null;
+	let takenOverIsIdle: (() => boolean) | null = null;
+	/** The last turn of the run ended the answer: a stop with no tool call. */
+	let lastTurnFinal = false;
+
+	const clearTakenOver = () => {
+		takenOverRun = false;
+		takenOverIsIdle = null;
+		if (takenOverPoll) clearInterval(takenOverPoll);
+		takenOverPoll = null;
+	};
 
 	const finish = (ask: ActiveAsk) => {
 		clearWatchdog(ask);
@@ -114,18 +152,48 @@ export function createPiSessionBridgeHub(
 		ask.sink.error("failed", message);
 	};
 
+	pi.on("turn_start", () => {
+		turnPrelude = true;
+	});
+
+	pi.on("turn_end", (event) => {
+		turnPrelude = false;
+		const message = event?.message as { stopReason?: string; content?: unknown } | undefined;
+		const calledTools =
+			(Array.isArray(event?.toolResults) && event.toolResults.length > 0) ||
+			(Array.isArray(message?.content) && message.content.some((part: { type?: string } | null) => part?.type === "toolCall"));
+		lastTurnFinal = message?.stopReason === "stop" && !calledTools;
+	});
+
 	pi.on("message_start", (event) => {
-		const ask = active;
-		if (!ask) return;
 		const message = event?.message as { role?: string; customType?: string; details?: { askId?: unknown } } | undefined;
-		if (!message) return;
-		if (message.role === "custom" && message.customType === PLANNOTATOR_ASK_CUSTOM_TYPE) {
-			if (message.details?.askId === ask.askId) {
-				ask.started = true;
-				clearWatchdog(ask);
-			}
+		const inPrelude = turnPrelude;
+		const answerFinished = lastTurnFinal;
+		if (message?.role === "assistant") {
+			turnPrelude = false;
+			lastTurnFinal = false;
+		}
+		const ask = active;
+		if (!ask || !message) return;
+		const ours = message.role === "custom" && message.customType === PLANNOTATOR_ASK_CUSTOM_TYPE && message.details?.askId === ask.askId;
+		if (ours) {
+			ask.started = true;
+			clearWatchdog(ask);
 			return;
 		}
+		if (message.role === "custom" && message.customType === PI_INBOX_REMINDER_CUSTOM_TYPE) return;
+		if (ask.started && (message.role === "user" || (message.role === "custom" && inPrelude))) {
+			// Someone else's prompt entered the run answering our question: the
+			// rest of it answers them. Settle now and leave the run alone.
+			clearTakenOver();
+			takenOverRun = true;
+			takenOverIsIdle = ask.isIdle;
+			finish(ask);
+			if (answerFinished && ask.answer) ask.sink.done(ask.answer);
+			else ask.sink.error("taken_over");
+			return;
+		}
+		if (message.role === "custom" && message.customType === PLANNOTATOR_ASK_CUSTOM_TYPE) return;
 		if (ask.started && message.role === "assistant") {
 			// Pi retried (or continued after compaction): the run is still answering.
 			ask.pendingError = null;
@@ -155,6 +223,23 @@ export function createPiSessionBridgeHub(
 	});
 
 	pi.on("agent_end", (event) => {
+		turnPrelude = false;
+		lastTurnFinal = false;
+		if (takenOverRun && !takenOverPoll) {
+			// Pi may retry this run (agent.continue): the taken-over flag holds
+			// until it settles. Without `agent_settled` (older Pi), until idle.
+			const isIdle = takenOverIsIdle;
+			takenOverPoll = setInterval(() => {
+				let idle = true;
+				try {
+					idle = isIdle ? isIdle() : true;
+				} catch {
+					idle = true;
+				}
+				if (idle) clearTakenOver();
+			}, SETTLE_POLL_MS);
+			(takenOverPoll as { unref?: () => void }).unref?.();
+		}
 		const ask = active;
 		if (!ask?.started) return;
 		if (ask.cancelled) {
@@ -187,6 +272,7 @@ export function createPiSessionBridgeHub(
 	});
 
 	pi.on("agent_settled", () => {
+		clearTakenOver();
 		const ask = active;
 		if (ask) reportPendingError(ask);
 	});
@@ -294,6 +380,10 @@ export function createPiSessionBridgeHub(
 					}
 				},
 				interrupt() {
+					if (takenOverRun) {
+						// Same text as SESSION_ASK_TAKEN_OVER_INTERRUPT_TEXT (type-only imports here).
+						throw new Error("The session is now answering another message, so Plannotator will not stop it. Ask when it finishes instead.");
+					}
 					ctx.abort();
 				},
 			};

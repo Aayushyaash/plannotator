@@ -115,7 +115,7 @@ export function useMentionAutocomplete(options: {
   }, [mentionsKey, onMentionsChange]);
 
   const items = useMemo(
-    () => (source && trigger ? mentionMatches(source.people, trigger, taggedIds) : []),
+    () => (source && trigger ? mentionMatches(source.people, trigger, taggedIds, source.kinds, source.matchDetail ?? true) : []),
     [source, trigger, taggedIds],
   );
 
