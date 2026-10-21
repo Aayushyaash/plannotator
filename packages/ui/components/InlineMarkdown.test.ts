@@ -220,3 +220,29 @@ describe('issue and mention refs (#1596)', () => {
     expect(html).toContain('@alice</span>');
   });
 });
+
+describe('digit-only #refs vs hex swatches (#1932)', () => {
+  const render = (text: string, githubRepo?: string) =>
+    renderToStaticMarkup(createElement(InlineMarkdown, { text, githubRepo }));
+  const isSwatch = (html: string) => html.includes('background-color');
+
+  test('with a repo, 6- and 8-digit refs link as issues', () => {
+    for (const num of ['186379', '12345678']) {
+      const html = render(`Fixes #${num}.`, 'home-assistant/core');
+      expect(html).toContain(`href="https://github.com/home-assistant/core/issues/${num}"`);
+      expect(isSwatch(html)).toBe(false);
+    }
+  });
+
+  test('with a repo, hex with a letter, a leading zero, or no word boundary stays a swatch', () => {
+    for (const text of ['#a1b2c3', '#000000', '#003366ff', 'x#123456']) {
+      const html = render(text, 'home-assistant/core');
+      expect(isSwatch(html)).toBe(true);
+      expect(html).not.toContain('/issues/');
+    }
+  });
+
+  test('without a repo, a digit-only 6-digit value stays a swatch', () => {
+    expect(isSwatch(render('#186379'))).toBe(true);
+  });
+});

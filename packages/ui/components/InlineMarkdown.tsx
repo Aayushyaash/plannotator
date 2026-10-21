@@ -846,9 +846,17 @@ export const InlineMarkdown: React.FC<{
     }
 
     // Hex color swatch — 3/4-digit forms need an a-f letter to avoid matching issue refs like #123.
+    // 6/8-digit forms with no letter (#186379) are ambiguous: when the host
+    // knows a repo (`githubRepo`) and the ref branch below would take it (word
+    // boundary, no leading zero, since issue numbers never start with 0), it is
+    // an issue ref (#1932). Without a repo, or for #000000 / #003366, it stays a
+    // swatch, so plan review's colours are unchanged.
     match = remaining.match(
       /^(#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{4}|(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{3}))(?![0-9a-fA-F\w])/,
     );
+    if (match && githubRepo && /^#[1-9]\d*$/.test(match[1]) && !/\w/.test(previousChar)) {
+      match = null;
+    }
     if (match) {
       const hex = match[1];
       parts.push(
@@ -872,8 +880,8 @@ export const InlineMarkdown: React.FC<{
     }
 
     // Issue / PR reference: #123 — only at word boundary, digits only.
-    // Hex-swatch branch above already consumed #fff / #123abc etc., so a bare
-    // #\d+ here is safe to treat as an issue ref.
+    // Hex-swatch branch above already consumed #fff / #123abc etc. (and, with no
+    // repo known, digit-only #123456 / #12345678), so a bare #\d+ here is an issue ref.
     if (!/\w/.test(previousChar)) {
       match = remaining.match(/^#(\d+)(?!\w)/);
       if (match) {
