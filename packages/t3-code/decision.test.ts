@@ -20,6 +20,8 @@ describe("T3 decision messages match the Claude Code mod's", () => {
     ["one comment is singular", { v: 1, surface: "review", decision: "annotated", message: "Fix it.", noop: false, annotationCount: 1 }, "review"],
     ["description-only review feedback", { v: 1, surface: "review", decision: "annotated", message: "PR description note", noop: false, annotationCount: 0 }, "review"],
     ["review LGTM is only logged", { v: 1, surface: "review", decision: "approved", message: "", noop: true }, "review"],
+    ["gated review LGTM is sent", { v: 1, surface: "review", decision: "approved", message: "# Code Review\n\nCode review completed — no changes requested.", noop: true }, "review", { gate: true }],
+    ["gated review posted to the PR platform", { v: 1, surface: "review", decision: "annotated", message: "Pull request approved on GitHub: https://github.com/o/r/pull/1", noop: true, platform: true }, "review", { gate: true }],
     ["review approved with notes", { v: 1, surface: "review", decision: "approved", message: "Nit: rename.", noop: false, annotationCount: 2 }, "review"],
     ["annotate feedback", { v: 1, surface: "annotate", decision: "annotated", message: "Shorten.", noop: false, annotationCount: 2, target }, "annotate"],
     ["annotate Done with nothing to send", { v: 1, surface: "annotate", decision: "annotated", message: "", noop: true }, "annotate"],
@@ -38,6 +40,12 @@ describe("T3 decision messages match the Claude Code mod's", () => {
       }
     });
   }
+
+  test("a gated review's bare approval is sent, headed Approved (#1907)", () => {
+    const { t3, mod } = both({ v: 1, surface: "review", decision: "approved", message: "", noop: true }, "review", { gate: true });
+    expect(mod).toEqual({ action: "submit", text: "Plannotator: notes.md (pn-abc123) — Approved.\nTarget: /repo/notes.md" });
+    expect(t3).toEqual({ action: "send", text: mod.action === "submit" ? mod.text : "" });
+  });
 
   test("Close sends nothing, the agent's close included", () => {
     for (const closedBy of [undefined, "agent" as const]) {
