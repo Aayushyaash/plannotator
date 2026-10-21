@@ -74,6 +74,7 @@ const server = {
   plan: V1,
   decisions: [] as Array<{ endpoint: string; body: Record<string, unknown> }>,
   revisionPolls: 0,
+  notes: false,
 };
 
 function planPayload() {
@@ -84,6 +85,7 @@ function planPayload() {
     previousPlan: server.plan === V2 ? V1 : null,
     versionInfo: { version: server.plan === V2 ? 2 : 1, totalVersions: server.plan === V2 ? 2 : 1, project: "demo" },
     sharingEnabled: false,
+    ...(server.notes ? { approvalNotesSupported: true } : {}),
     serverConfig: {},
   };
 }
@@ -140,7 +142,7 @@ async function waitFor(check: () => boolean, timeoutMs: number): Promise<void> {
 
 function approveButton(): HTMLButtonElement | undefined {
   return Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
-    // The header button renders a compact "OK" label beside "Approve".
+    // The decision control's primary reads "Approve" with nothing to send.
     (button) => button.textContent?.trim().endsWith("Approve") ?? false,
   );
 }
@@ -171,6 +173,7 @@ afterEach(async () => {
   server.plan = V1;
   server.decisions = [];
   server.revisionPolls = 0;
+  server.notes = false;
   memory.clear();
   resetStorageBackend();
   if (hasDom) document.body.replaceChildren();
@@ -247,4 +250,75 @@ describe.if(hasDom)("plan revisions pushed into an open review", () => {
     expect("planRevision" in server.decisions[0]!.body).toBe(false);
     expect(server.revisionPolls).toBe(0);
   });
+});
+
+const decisionCaret = () => document.querySelector<HTMLButtonElement>("[data-decision-caret]");
+const decisionPrimary = () => document.querySelector<HTMLButtonElement>("[data-decision-primary]");
+const decisionNote = () => document.querySelector<HTMLTextAreaElement>("[data-decision-note-input]");
+
+async function openDecisionComposer(labelPart: string, text: string): Promise<void> {
+  await act(async () => decisionCaret()!.click());
+  await settle();
+  const item = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+    .find((el) => el.textContent?.includes(labelPart));
+  if (!item) throw new Error(`menu item "${labelPart}" not found`);
+  await act(async () => item.click());
+  await settle();
+  const input = decisionNote()!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, text);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+describe.if(hasDom)("plan revisions and the decision control (#1057)", () => {
+  // What regresses: the reviewer is writing "Request changes…" about v1 and
+  // the revision swaps the plan under the note, so the note answers a plan
+  // they never read.
+  test("a revision waits while the decision note is being written", async () => {
+    await mountPlan();
+    await openDecisionComposer("Request changes", "Half-written sentinel delta");
+
+    server.revision = 1;
+    server.plan = V2;
+    const pollsBefore = server.revisionPolls;
+    await waitFor(() => server.revisionPolls > pollsBefore, 4000);
+    await waitFor(() => false, 600).catch(() => undefined);
+    expect(document.body.textContent).toContain("sentinel alpha");
+    expect(document.body.textContent).not.toContain("sentinel bravo");
+    expect(decisionNote()?.value).toBe("Half-written sentinel delta");
+
+    // Putting the note away (Escape: back to the menu, then close) lets it load.
+    await act(async () => {
+      decisionNote()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    await settle();
+    await act(async () => decisionCaret()!.click());
+    await waitFor(() => document.body.textContent!.includes("sentinel bravo"), 4000);
+  }, 15000);
+
+  // What regresses: "Approve with a note…" is refused because the agent
+  // revised the plan; the armed approve survives, the button now reads Send
+  // Feedback (the note is a comment), and a click posts /api/approve anyway.
+  test("an approve refused as plan_revised leaves nothing armed: the primary then sends feedback", async () => {
+    server.notes = true;
+    await mountPlan();
+    server.revision = 1; // the agent revised; the tab has not polled yet
+    server.plan = V2;
+    await openDecisionComposer("Approve with a note", "ship it sentinel echo");
+    await act(async () => {
+      decisionNote()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true, cancelable: true }));
+    });
+    await waitFor(() => server.decisions.length >= 1, 4000);
+    expect(server.decisions[0]).toMatchObject({ endpoint: "/api/approve", body: { planRevision: 0 } });
+    await waitFor(() => document.body.textContent!.includes("sentinel bravo"), 4000);
+    await waitUntil(() => decisionPrimary()?.textContent?.includes("Send Feedback") ?? false);
+
+    await act(async () => decisionPrimary()!.click());
+    await waitFor(() => server.decisions.length >= 2, 4000);
+    expect(server.decisions[1]!.endpoint).toBe("/api/deny");
+    expect(server.decisions[1]!.body.planRevision).toBe(1);
+    expect(String(server.decisions[1]!.body.feedback)).toContain("ship it sentinel echo");
+    expect(server.decisions).toHaveLength(2);
+  }, 15000);
 });

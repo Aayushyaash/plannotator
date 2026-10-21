@@ -32,7 +32,7 @@ export interface T3DecisionContext {
   sessionId: string;
   /** The launch's own target (from the ready line); the record's wins. */
   target?: PlannotatorTarget;
-  /** A gated annotate session: Claude was told to wait for the sign-off, so a bare approval is sent. */
+  /** A gated session (annotate or review): Claude was told to wait for the sign-off, so a bare approval is sent. */
   gate?: boolean;
   /** The review's own folder: where an oversized message is written. */
   directory: string;
@@ -62,11 +62,12 @@ function outcomeOf(record: T3HostResult, surface: string): string {
 /**
  * What a settled review sends to its T3 conversation, worded as the Claude
  * Code mod words it (`deliveryFor`): Close, Done with nothing to send and a
- * review LGTM send nothing (a gated annotate approval excepted); feedback is
+ * review LGTM send nothing (a gated approval excepted); feedback is
  * headed `Plannotator: <subject> (pn-…) — <outcome>.` with its Target line;
  * a message over the inline limit is written to the review's feedback.md and
  * Claude is told to Read it. One difference from the mod: a review posted
- * straight to the PR platform is sent (`Review posted` and its status line,
+ * straight to the PR platform is always sent (the mod sends it only for a
+ * gated review) (`Review posted` and its status line,
  * as on Pi and OpenCode), since T3 has no log or suggestion line to show it in.
  */
 export function t3Decision(record: T3HostResult, context: T3DecisionContext): T3Decision {

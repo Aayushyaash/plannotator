@@ -44,7 +44,7 @@ interface Review {
   id: string;
   kind: "annotate" | "review" | "last";
   subject: string;
-  /** A gated annotate session: its bare approval is sent, since Claude was told to wait for it. */
+  /** A gated session (annotate or review): its bare approval is sent, since Claude was told to wait for it. */
   gate?: boolean;
   target?: string | string[];
   createdAt: number;

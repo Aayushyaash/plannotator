@@ -1093,7 +1093,7 @@ export type AgentToolHost = "claude-code" | "pi" | "oh-my-pi" | "opencode";
  * name until used) and for Oh My Pi (owner's call 2026-10-12: OMP lists an
  * extension tool as one line in its system prompt, about 50 tokens, and loads
  * the schema only when the model reads it); off on Pi and OpenCode 2 (a full
- * tool definition, about 780 tokens, in every request). The mod's mirror
+ * tool definition, about 800 tokens, in every request). The mod's mirror
  * (`apps/hook/hooks/mod/enabled.ts`) is kept equal to the claude-code entry by
  * `enabled.test.ts`.
  */

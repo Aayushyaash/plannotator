@@ -111,6 +111,9 @@ jobs:
           packages/ui/components/ai/AIProviderBar.dom.test.tsx
           packages/ui/components/ai/SessionAskNotice.dom.test.tsx
           packages/ui/hooks/useAIChat.sessionAsk.test.tsx
+          packages/ui/hooks/useAIChat.newChat.test.tsx
+          packages/ui/components/ai/NewChatButton.dom.test.tsx
+          packages/review-editor/hooks/useAIChat.newChat.test.tsx
           packages/ui/hooks/useAgentSettings.dom.test.tsx
           packages/ui/utils/codeHighlight.test.ts
           packages/ui/utils/htmlChrome.test.ts
@@ -173,6 +176,7 @@ jobs:
           packages/inbox/wordsOnlyTwoAsks.test.tsx
           packages/inbox/replyDrafts.test.tsx
           packages/inbox/skipNote.test.tsx
+          packages/inbox/picksWhileComposing.test.tsx
           packages/inbox/projectMenu.test.tsx
           packages/inbox/rowMenu.test.tsx
           packages/inbox/fileBack.test.tsx
@@ -302,6 +306,7 @@ jobs:
           packages/editor/App.sidebarTabsAgentTerminal.test.tsx
           packages/editor/App.htmlLinkDraft.test.tsx
           packages/editor/App.decisionControl.test.tsx
+          packages/editor/App.planDecisionControl.test.tsx
           packages/editor/App.planRevision.test.tsx
           packages/editor/App.liveVersion.test.tsx
           packages/editor/askSessionDrafts.test.tsx

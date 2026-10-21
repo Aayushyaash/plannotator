@@ -49,6 +49,15 @@ export interface ParsedReviewArgs {
    */
   gitRemoteCheck?: boolean;
   /**
+   * `true` when the invocation carried `--gate` (#1907): the caller waits for
+   * the reviewer's sign-off, so a bare Approve must reach it. The review page
+   * always has Approve and the CLI always prints the approval, so the flag
+   * changes nothing here; it marks the intent for a host that otherwise only
+   * logs a bare Approve (the Claude Code mod takes the command over as the
+   * `plannotator` tool's gated review).
+   */
+  gate?: boolean;
+  /**
    * Argument-shape problems the host must surface before starting a session.
    * Always present; empty means the invocation parsed cleanly. Hosts differ in
    * how they surface these (CLI exits 1, Pi/OpenCode notify), which is why the
@@ -67,6 +76,7 @@ export function parseReviewArgs(input: string | string[]): ParsedReviewArgs {
   let base: string | undefined;
   let diffType: DiffType | undefined;
   let gitRemoteCheck: boolean | undefined;
+  let gate = false;
   const errors: string[] = [];
   const positional: string[] = [];
 
@@ -104,6 +114,9 @@ export function parseReviewArgs(input: string | string[]): ParsedReviewArgs {
       }
       case "--no-git-remote-check":
         gitRemoteCheck = false;
+        break;
+      case "--gate":
+        gate = true;
         break;
       case "--local":
         useLocal = true;
@@ -196,6 +209,7 @@ export function parseReviewArgs(input: string | string[]): ParsedReviewArgs {
     base,
     diffType,
     ...(gitRemoteCheck === undefined ? {} : { gitRemoteCheck }),
+    ...(gate ? { gate } : {}),
     errors,
   };
 }
