@@ -936,7 +936,7 @@ test.describe('a desktop window', () => {
     expect(await page.evaluate(() => window.location.hash)).toBe(`#thread=${world.threads.holding}`);
   });
 
-  test('a pick with a question left unanswered: the foot keeps Send and Keep open whole at 1280 and 1440 (it ran past the pane in 0.28.16)', async ({ page }) => {
+  test('a pick with a question left unanswered: the foot keeps Send and the skip chip whole at 1280 and 1440, by default and after Skip it (it ran past the pane in 0.28.16)', async ({ page }) => {
     for (const width of [1280, 1440]) {
       await page.setViewportSize({ width, height: 900 });
       await page.goto(`${world.url}#thread=${world.threads.stopped}`);
@@ -946,33 +946,43 @@ test.describe('a desktop window', () => {
       await expect(page.locator('.ib-listcol.ib-narrow')).toBeVisible();
       await pane.getByText('Retry with the same idempotency key').click();
       const foot = pane.locator('.ib-pfoot');
+      const chip = foot.locator('[data-skip-chip]');
       const send = foot.getByRole('button', { name: 'Send', exact: true });
-      const keep = foot.getByRole('button', { name: 'Keep open' });
+      // The default (approval "inbox-explicit-skip"): the other question stays open; Skip it is offered.
       await expect(send).toBeVisible();
-      await expect(keep).toBeVisible();
-      const [paneBox, footBox, sendBox, keepBox, chipBox, notSent] = await Promise.all([
-        pane.boundingBox(),
-        foot.boundingBox(),
-        send.boundingBox(),
-        keep.boundingBox(),
-        foot.locator('.ib-skipchip').boundingBox(),
-        foot.locator('[data-draft-foot]').boundingBox(),
-      ]);
-      const right = Math.min(paneBox!.x + paneBox!.width, width);
-      for (const [name, box] of [['Send', sendBox], ['Keep open', keepBox], ['the skip chip', chipBox]] as const) {
-        expect(box!.x, `${name} at ${width}px`).toBeGreaterThanOrEqual(footBox!.x);
-        expect(box!.x + box!.width, `${name} at ${width}px`).toBeLessThanOrEqual(right);
-        expect(box!.y + box!.height, `${name} at ${width}px`).toBeLessThanOrEqual(footBox!.y + footBox!.height);
-      }
-      // "Draft · 1 pick" stays one line ("Not sent" was once squeezed to two).
-      expect(notSent!.height, `at ${width}px`).toBeLessThan(24);
-      // A tap on Keep open lands on it.
-      await keep.click();
-      await expect(foot.getByRole('button', { name: /^Skip/ })).toBeVisible();
+      await expect(chip).toHaveAttribute('data-skip-chip', 'keep');
+      await expect(chip).toContainText('1 question stays open');
+      const fits = async (toggle: ReturnType<typeof foot.getByRole>, label: string) => {
+        await expect(toggle).toBeVisible();
+        const [paneBox, footBox, sendBox, toggleBox, chipBox, notSent] = await Promise.all([
+          pane.boundingBox(),
+          foot.boundingBox(),
+          send.boundingBox(),
+          toggle.boundingBox(),
+          foot.locator('.ib-skipchip').boundingBox(),
+          foot.locator('[data-draft-foot]').boundingBox(),
+        ]);
+        const right = Math.min(paneBox!.x + paneBox!.width, width);
+        for (const [name, box] of [['Send', sendBox], [label, toggleBox], ['the skip chip', chipBox]] as const) {
+          expect(box!.x, `${name} at ${width}px`).toBeGreaterThanOrEqual(footBox!.x);
+          expect(box!.x + box!.width, `${name} at ${width}px`).toBeLessThanOrEqual(right);
+          expect(box!.y + box!.height, `${name} at ${width}px`).toBeLessThanOrEqual(footBox!.y + footBox!.height);
+        }
+        // "Draft · 1 pick" stays one line ("Not sent" was once squeezed to two).
+        expect(notSent!.height, `at ${width}px`).toBeLessThan(24);
+      };
+      const skipIt = foot.getByRole('button', { name: 'Skip it' });
+      await fits(skipIt, 'Skip it');
+      // A tap on Skip it lands on it; the chip then says what the Send skips, and offers Keep open.
+      await skipIt.click();
+      await expect(chip).toHaveAttribute('data-skip-chip', 'skip');
+      await expect(chip).toContainText('1 question will be skipped');
+      const keep = foot.getByRole('button', { name: 'Keep open' });
+      await fits(keep, 'Keep open');
       await page.screenshot({ path: join(proofDir, `desktop-${width}-foot.png`) });
-      // Back to skipping, for the next width.
-      await foot.getByRole('button', { name: /^Skip/ }).click();
-      await expect(keep).toBeVisible();
+      // Back to the default, for the next width.
+      await keep.click();
+      await expect(skipIt).toBeVisible();
     }
   });
 
