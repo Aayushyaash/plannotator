@@ -66,7 +66,8 @@ function outcomeOf(record: T3HostResult, surface: string): string {
  * headed `Plannotator: <subject> (pn-…) — <outcome>.` with its Target line;
  * a message over the inline limit is written to the review's feedback.md and
  * Claude is told to Read it. One difference from the mod: a review posted
- * straight to the PR platform is sent (`Review posted` and its status line,
+ * straight to the PR platform is always sent (the mod sends it only for a
+ * gated review) (`Review posted` and its status line,
  * as on Pi and OpenCode), since T3 has no log or suggestion line to show it in.
  */
 export function t3Decision(record: T3HostResult, context: T3DecisionContext): T3Decision {

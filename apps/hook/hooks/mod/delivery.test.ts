@@ -46,6 +46,17 @@ describe('deliveryFor', () => {
     expect(delivery.action === 'log' && delivery.suggest).toBe('address the review comments on PR #412')
   })
 
+  // #1907: a gated review waits for the outcome, and the platform post is it.
+  test('a gated review posted to the PR platform is a turn with its status line; ungated it logs', () => {
+    const status = 'Pull request approved on GitHub: https://x/pull/412'
+    const posted = record({ surface: 'review', decision: 'annotated', noop: true, platform: true, message: status })
+    expect(deliveryFor(posted, { ...CONTEXT, subject: 'PR #412', sessionId: 'pn-abc123', deliverApproval: true })).toEqual({
+      action: 'submit',
+      text: `Plannotator: PR #412 (pn-abc123) — Review posted.\n\n${status}`,
+    })
+    expect(deliveryFor(posted, { ...CONTEXT, subject: 'PR #412', sessionId: 'pn-abc123' }).action).toBe('log')
+  })
+
   // Every status line the review editor posts after a platform submission
   // (`statusMessage` in packages/review-editor/App.tsx), built the same way.
   test('every editor status line still logs as the platform post', () => {

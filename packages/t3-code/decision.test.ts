@@ -21,6 +21,7 @@ describe("T3 decision messages match the Claude Code mod's", () => {
     ["description-only review feedback", { v: 1, surface: "review", decision: "annotated", message: "PR description note", noop: false, annotationCount: 0 }, "review"],
     ["review LGTM is only logged", { v: 1, surface: "review", decision: "approved", message: "", noop: true }, "review"],
     ["gated review LGTM is sent", { v: 1, surface: "review", decision: "approved", message: "# Code Review\n\nCode review completed — no changes requested.", noop: true }, "review", { gate: true }],
+    ["gated review posted to the PR platform", { v: 1, surface: "review", decision: "annotated", message: "Pull request approved on GitHub: https://github.com/o/r/pull/1", noop: true, platform: true }, "review", { gate: true }],
     ["review approved with notes", { v: 1, surface: "review", decision: "approved", message: "Nit: rename.", noop: false, annotationCount: 2 }, "review"],
     ["annotate feedback", { v: 1, surface: "annotate", decision: "annotated", message: "Shorten.", noop: false, annotationCount: 2, target }, "annotate"],
     ["annotate Done with nothing to send", { v: 1, surface: "annotate", decision: "annotated", message: "", noop: true }, "annotate"],

@@ -11,7 +11,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { removeStubbedHtml, stubHookDistHtml } from "../../../tests/helpers/hook-dist-stub";
-import { NO_BROWSER } from "../../../tests/helpers/no-browser";
 import { deliveryFor } from "../hooks/mod/delivery";
 
 const entry = resolve(import.meta.dir, "index.ts");
@@ -64,7 +63,6 @@ function start(flags: string[]) {
       PLANNOTATOR_PORT: "0",
       PLANNOTATOR_REMOTE: "0",
       PLANNOTATOR_SKIP_BROWSER_OPEN: "1",
-      NO_BROWSER,
       PLANNOTATOR_READY_FILE: files.ready,
       PLANNOTATOR_HOST_RESULT_FILE: files.result,
       PLANNOTATOR_AI: "disabled",

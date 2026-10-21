@@ -542,6 +542,24 @@ describe('the plannotator tool', () => {
     expect(host.logs.filter((line) => line.includes('approved with no notes'))).toHaveLength(2)
   })
 
+  test('a gated code review posted to the PR platform is delivered with its status line (#1907)', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.runTool({ action: 'review', target: 'https://github.com/o/r/pull/7', gate: true })
+    await mod.runTool({ action: 'review', target: 'https://github.com/o/r/pull/8' })
+    const [gated, plain] = launches(host)
+    const status = (n: number) => ({ surface: 'review', decision: 'annotated', noop: true, platform: true, message: `Pull request approved on GitHub: https://github.com/o/r/pull/${n}` })
+    decide(host, gated!, status(7))
+    decide(host, plain!, status(8))
+    await host.tick()
+
+    expect(host.submits).toHaveLength(1)
+    expect(host.submits[0]).toMatch(/^Plannotator: .+ \(pn-[0-9a-f]{6}\) — Review posted\./)
+    expect(host.submits[0]).toContain('Pull request approved on GitHub: https://github.com/o/r/pull/7')
+    expect(host.logs.some((line) => line.includes('pull/8'))).toBe(true)
+  })
+
   test('the slash command keeps a bare gated approval as a log line', async () => {
     const host = fakeHost()
     serveOnLaunch(host)
