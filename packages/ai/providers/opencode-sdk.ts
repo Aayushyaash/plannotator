@@ -357,12 +357,14 @@ class OpenCodeSession extends BaseSession {
 					undefined,
 					{ signal: subscription.signal },
 				);
-				iterator = stream[Symbol.asyncIterator]();
+				const events: AsyncIterator<{ type?: string; properties?: Record<string, unknown> }> =
+					stream[Symbol.asyncIterator]();
+				iterator = events;
 				// First frame only proves the subscriber is live. Do not treat it as
 				// this turn — it can be server.connected or leftover idle from a
 				// previous query on the same session.
 				const first = await nextEventWithin(
-					iterator,
+					events,
 					this.config.firstEventTimeoutMs ?? OPENCODE_FIRST_EVENT_TIMEOUT_MS,
 					signal,
 				);
@@ -411,7 +413,7 @@ class OpenCodeSession extends BaseSession {
 
 				const state = createOpenCodeQueryState();
 				while (!signal.aborted) {
-					const next = await iterator!.next();
+					const next = await events.next();
 					if (next.done) break;
 					const { messages, done } = consumeOpenCodeEvent(
 						next.value,
