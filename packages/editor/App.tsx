@@ -245,6 +245,7 @@ import {
   usePlanDiffViewAutoExit,
 } from './hooks/usePlanDiffViewAutoExit';
 import { AppHeader } from './components/AppHeader';
+import { useLiveAnnotateVersion, type LiveAnnotateVersion } from './hooks/useLiveAnnotateVersion';
 import { useHtmlRefresh, type HtmlRefreshedDocument } from './hooks/useHtmlRefresh';
 import { useAnnotationJump } from './hooks/useAnnotationJump';
 import { planRevisionBlocker, usePlanRevisions, type PlanRevisionSnapshot } from './hooks/usePlanRevisions';
@@ -784,6 +785,16 @@ const App: React.FC = () => {
   const [initialPlanRevision, setInitialPlanRevision] = useState<number | null>(null);
   // The last revision loaded in place; keys the diff base so it re-seeds.
   const [appliedPlanRevision, setAppliedPlanRevision] = useState<number | null>(null);
+  // The version an agent's edit to the open file became (#2037): a new diff
+  // identity, so the diff base re-seeds from that version's own previous one.
+  const [liveSavedVersion, setLiveSavedVersion] = useState<number | null>(null);
+  // The editable-document key of the session's own file (single-file
+  // annotate), so a reload of THAT file, not of a linked one, saves a version.
+  const rootSourceKeyRef = useRef<string | null>(null);
+  // /api/plan's `liveVersions`: the server keeps this file's history and
+  // takes live versions (absent with PLANNOTATOR_ANNOTATE_HISTORY=0, for a
+  // file that is not Markdown/text, and from servers older than #2037).
+  const [liveVersionsSupported, setLiveVersionsSupported] = useState(false);
   const [aiSessionEnabled, setAISessionEnabled] = useState(false);
   const [aiAvailable, setAiAvailable] = useState(false);
   const [aiProviders, setAiProviders] = useState<Array<{ id: string; name: string; capabilities?: Record<string, boolean>; models?: Array<{ id: string; label: string; default?: boolean }> }>>([]);
@@ -1492,7 +1503,11 @@ const App: React.FC = () => {
     activeDocDiffFetchers,
     // A revision loaded in place is a new root identity: the diff base
     // re-seeds from the revision's own previous version.
-    activeDocFilepath ?? (appliedPlanRevision !== null ? `plan-revision:${appliedPlanRevision}` : null),
+    activeDocFilepath ?? (
+      liveSavedVersion !== null
+        ? `live-version:${liveSavedVersion}`
+        : appliedPlanRevision !== null ? `plan-revision:${appliedPlanRevision}` : null
+    ),
   );
   // Exit diff view when the active document switches to one with no diff
   // baseline (e.g. a history-less folder file) — otherwise the stale active
@@ -3533,6 +3548,28 @@ const App: React.FC = () => {
 
   const sourceReconcileSeqRef = useRef<Map<string, number>>(new Map());
 
+  // An agent's edit to the open file becomes a version once the file settles
+  // (#2037), so the +N/-M badge and the Version Browser show that edit in this
+  // session. Only where the server advertises it (`liveVersions`: history on,
+  // a Markdown/text file), which also covers a file that was empty at open
+  // and so has no version yet: its first text becomes version 1.
+  const liveVersion = useLiveAnnotateVersion({
+    enabled: annotateMode && liveVersionsSupported && !submitted && !archive.archiveMode,
+    onSaved: useCallback((saved: LiveAnnotateVersion) => {
+      setPreviousPlan(saved.previousPlan);
+      setVersionInfo(saved.versionInfo);
+      setLiveSavedVersion(saved.versionInfo.version);
+    }, []),
+  });
+  const scheduleLiveVersion = liveVersion.schedule;
+  // Every path that puts the session's own file's disk text on screen (the
+  // watcher's reload, "Reload from disk", a save that found the file changed)
+  // asks for the version through the same settle timer and hash rule.
+  const noteRootDiskText = useCallback((record: { key: string; sourceSave?: SourceSaveCapability | null } | null | undefined) => {
+    if (!record || record.key !== rootSourceKeyRef.current || !record.sourceSave?.enabled) return;
+    scheduleLiveVersion(record.sourceSave.hash);
+  }, [scheduleLiveVersion]);
+
   const reconcileOpenSourceDocuments = useCallback(async (changedDir?: string) => {
     const activeKey = editableDocuments.getActiveKey();
     if (isEditingMarkdownRef.current && activeKey) {
@@ -3562,6 +3599,7 @@ const App: React.FC = () => {
       }
 
       if (event.type === 'clean-updated') {
+        noteRootDiskText(result.record);
         if (result.record.key === editableDocuments.getActiveKey()) {
           const remapped = applyEditedDocument(result.record.currentText);
           repaintHighlights(remapped);
@@ -3598,7 +3636,7 @@ const App: React.FC = () => {
       onEvent: handleReconcileEvent,
     });
     if (changed) scheduleDraftSave();
-  }, [applyEditedDocument, editableDocuments, repaintHighlights, scheduleDraftSave]);
+  }, [applyEditedDocument, editableDocuments, repaintHighlights, noteRootDiskText, scheduleDraftSave]);
   const reconcileOpenSourceDocumentsRef = useRef(reconcileOpenSourceDocuments);
   useEffect(() => {
     reconcileOpenSourceDocumentsRef.current = reconcileOpenSourceDocuments;
@@ -3758,7 +3796,7 @@ const App: React.FC = () => {
         if (!res.ok) throw new Error('Not in API mode');
         return res.json();
       })
-      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'annotate-app' | 'annotate-bundle' | 'archive' | 'goal-setup'; bundle?: unknown; goalSetup?: GoalSetupBundle; filePath?: string; appUrl?: string; targetUrl?: string; liveToken?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; approvalNotesSupported?: boolean; clientLease?: AnnotateClientLeaseConfig; renderAs?: DocumentRenderAs; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; planRevision?: number; serverSession?: string; archivePlans?: ArchivedPlan[]; projectRoot?: string; planDir?: string; isWSL?: boolean; markdownExtensions?: string[]; documentDrafts?: boolean; serverConfig?: { displayName?: string; gitUser?: string; autoUpdate?: boolean; autoUpdateEnv?: boolean; updateCheck?: boolean; updateCheckEnv?: boolean }; autoUpdateNotice?: unknown; updateAvailable?: unknown; autoUpdateSupported?: boolean; autoUpdateActive?: boolean; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; feedbackTemplates?: AnnotateFeedbackTemplates }) => {
+      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'annotate-app' | 'annotate-bundle' | 'archive' | 'goal-setup'; bundle?: unknown; goalSetup?: GoalSetupBundle; filePath?: string; appUrl?: string; targetUrl?: string; liveToken?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; approvalNotesSupported?: boolean; clientLease?: AnnotateClientLeaseConfig; renderAs?: DocumentRenderAs; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; liveVersions?: boolean; planRevision?: number; serverSession?: string; archivePlans?: ArchivedPlan[]; projectRoot?: string; planDir?: string; isWSL?: boolean; markdownExtensions?: string[]; documentDrafts?: boolean; serverConfig?: { displayName?: string; gitUser?: string; autoUpdate?: boolean; autoUpdateEnv?: boolean; updateCheck?: boolean; updateCheckEnv?: boolean }; autoUpdateNotice?: unknown; updateAvailable?: unknown; autoUpdateSupported?: boolean; autoUpdateActive?: boolean; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; feedbackTemplates?: AnnotateFeedbackTemplates }) => {
         // Initialize config store with server-provided values (config file > cookie > default)
         configStore.init(data.serverConfig);
         // Stale-tab guard: every decision echoes this server's nonce.
@@ -3832,6 +3870,8 @@ const App: React.FC = () => {
           if (data.mode === 'annotate' && data.sourceSave?.enabled) {
             const key = editableDocumentKey(data.sourceSave, `file:${data.sourceSave.path}`);
             editableDocuments.openDocument({ key, text: normalizedPlan, sourceSave: data.sourceSave });
+            rootSourceKeyRef.current = key;
+            setLiveVersionsSupported(data.liveVersions === true);
           }
         }
         setIsApiMode(true);
@@ -5745,6 +5785,7 @@ const App: React.FC = () => {
                 description: 'Choose whether to overwrite disk or reload the file.',
               });
             } else if (result.type === 'clean-updated') {
+              noteRootDiskText(result.record);
               if (editableDocuments.getActiveKey() === activeDocument.key) {
                 const remapped = applyEditedDocument(result.record.currentText);
                 repaintHighlights(remapped);
@@ -5821,7 +5862,7 @@ const App: React.FC = () => {
       toast.error('Save failed');
       return true;
     }
-  }, [applyEditedDocument, editableDocuments, isEditingMarkdown, repaintHighlights, scheduleDraftSave]);
+  }, [applyEditedDocument, editableDocuments, isEditingMarkdown, noteRootDiskText, repaintHighlights, scheduleDraftSave]);
 
   const handleOverwriteDiskConflict = useCallback(() => {
     void handleSaveEditedSourceFile({ overwriteDiskConflict: true });
@@ -5832,6 +5873,7 @@ const App: React.FC = () => {
     if (!activeDocument?.diskConflict) return;
     const reloaded = editableDocuments.reloadDiskConflict(activeDocument.key);
     if (!reloaded) return;
+    noteRootDiskText(reloaded);
     const remapped = applyEditedDocument(reloaded.currentText);
     repaintHighlights(remapped);
     editSessionBaseRef.current = reloaded.currentText;
@@ -5840,7 +5882,7 @@ const App: React.FC = () => {
     setEditStats(null);
     scheduleDraftSave();
     toast.success(`Reloaded ${reloaded.basename} from disk`);
-  }, [applyEditedDocument, editableDocuments, repaintHighlights, scheduleDraftSave]);
+  }, [applyEditedDocument, editableDocuments, noteRootDiskText, repaintHighlights, scheduleDraftSave]);
 
   // Agent Instructions — copy a clipboard payload teaching external agents
   // (Claude Code, Codex, etc.) how to POST annotations into this session via
