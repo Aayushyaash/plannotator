@@ -504,6 +504,26 @@ const HostResolvedImage: React.FC<{
 };
 
 /**
+ * Whether a digit-only 6/8-digit `#123456` is an issue ref (when a ref link can
+ * be built) rather than a hex swatch. Off by default: every host renders such
+ * values as colours. The Plannotator Inbox turns it on through
+ * `configurePlannotatorUI({ digitHexIssueRefs: true })` (#1932).
+ */
+let digitHexIssueRefs = false;
+
+export function setDigitHexIssueRefs(on: boolean): void {
+  digitHexIssueRefs = on;
+}
+
+export function resetDigitHexIssueRefs(): void {
+  digitHexIssueRefs = false;
+}
+
+export function getDigitHexIssueRefs(): boolean {
+  return digitHexIssueRefs;
+}
+
+/**
  * Scanner that walks a text string and emits React nodes for inline markdown:
  * emphasis (**bold**, *italic*, _italic_, ***both***), `code`, ~~strikethrough~~,
  * [label](url) / ![alt](src) / <autolink>, bare https:// URLs, [[wiki-links]],
@@ -846,9 +866,19 @@ export const InlineMarkdown: React.FC<{
     }
 
     // Hex color swatch — 3/4-digit forms need an a-f letter to avoid matching issue refs like #123.
+    // 6/8-digit forms with no letter (#186379) are ambiguous. By default they
+    // stay swatches (greys like #333333 are common in docs; six-digit issues are
+    // rare). A host that opts in with `configurePlannotatorUI({ digitHexIssueRefs:
+    // true })` (the Plannotator Inbox, #1932) gets an issue ref instead, but only
+    // when a ref link can actually be built (`refLinks`: a repo path on a known
+    // forge) and the ref branch below would take it: a word boundary and no
+    // leading zero (issue numbers never start with 0, so #000000 stays a colour).
     match = remaining.match(
       /^(#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{4}|(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{3}))(?![0-9a-fA-F\w])/,
     );
+    if (match && digitHexIssueRefs && refLinks && /^#[1-9]\d*$/.test(match[1]) && !/\w/.test(previousChar)) {
+      match = null;
+    }
     if (match) {
       const hex = match[1];
       parts.push(
@@ -872,8 +902,8 @@ export const InlineMarkdown: React.FC<{
     }
 
     // Issue / PR reference: #123 — only at word boundary, digits only.
-    // Hex-swatch branch above already consumed #fff / #123abc etc., so a bare
-    // #\d+ here is safe to treat as an issue ref.
+    // Hex-swatch branch above already consumed #fff / #123abc etc. (and digit-only
+    // #123456 / #12345678 unless the host opted in), so a bare #\d+ here is an issue ref.
     if (!/\w/.test(previousChar)) {
       match = remaining.match(/^#(\d+)(?!\w)/);
       if (match) {

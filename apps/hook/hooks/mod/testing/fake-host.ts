@@ -78,6 +78,8 @@ export function fakeHost(): FakeHost {
       if (argv[3] === 'plannotator-launch') {
         const dir = argv[4] as string
         if (!host.files.has(`${dir}/pid`)) host.files.set(`${dir}/pid`, '4242\n')
+      } else if (argv[3] === 'plannotator-rm') {
+        host.files.delete(argv[4] as string)
       } else if (argv[3] === 'plannotator-claim') {
         // mkdir "$dir/settled" (one winner), naming the claimant; a claimant's own claim wins again.
         const dir = argv[4] as string

@@ -107,6 +107,8 @@ configurePlannotatorUI({
   // ui's own hover text (annotation panel and toolbar, question cards, links to attachments) as ui's Tooltip,
   // never a native title (the owner, 2026-10-17).
   componentTooltips: true,
+  // A digit-only #186379 in a message is a PR or issue of the project's repo, not a colour (#1932).
+  digitHexIssueRefs: true,
   // Images in a message load from the Inbox's per-message route (#1813).
   imageSrcResolver: inboxImageSrcResolver,
   webmcp: { enabled: false, namePrefix: 'plannotator.' },

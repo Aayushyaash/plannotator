@@ -11,6 +11,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import type { TailscaleRunner } from "@plannotator/shared/tailscale";
 import { startInboxServer, type InboxServer } from "./inbox";
 import { takeDownInboxTailscale } from "./inbox-tailscale";
@@ -146,6 +147,80 @@ describe("Inbox over your tailnet", () => {
     // The window's own port is unchanged: loopback works, the tailnet name does not.
     expect((await fetch(`http://127.0.0.1:${inbox.port}/api/inbox/threads`)).status).toBe(200);
     expect((await fetch(`http://127.0.0.1:${inbox.port}/api/inbox/threads`, { headers: { Host: `${MAGIC}:${inbox.port}` } })).status).toBe(403);
+  });
+
+  test("the window page (#2032): compressed through the tailnet (br and gzip, Vary, a weak ETag and 304, private no-cache), unchanged on loopback, and the listener's checks still run first", async () => {
+    const dataDir = world({ inboxTailscale: true });
+    const ts = fakeTailscale();
+    const page = `<!doctype html><title>Inbox</title>${"<p>the window, a large single-file page</p>\n".repeat(20000)}`;
+    const inbox = await start(dataDir, ts.run, { htmlContent: page });
+    const listener = inbox.tailscale.listenerPort()!;
+    // Bun's fetch decodes bodies by itself; read the bytes as sent.
+    const raw = (path: string, headers: Record<string, string>, method = "GET", login: string | null = OWNER) =>
+      fetch(`http://127.0.0.1:${listener}${path}`, {
+        method,
+        headers: { Host: `${MAGIC}:${inbox.port}`, ...(login ? { "Tailscale-User-Login": login } : {}), ...headers },
+        decompress: false,
+      } as RequestInit);
+    const sent = Buffer.byteLength(page);
+
+    const br = await raw("/", { "Accept-Encoding": "gzip, deflate, br" });
+    expect(br.status).toBe(200);
+    expect(br.headers.get("content-encoding")).toBe("br");
+    expect(br.headers.get("vary")).toBe("Accept-Encoding");
+    expect(br.headers.get("cache-control")).toBe("private, no-cache");
+    expect(br.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(br.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(br.headers.get("x-frame-options")).toBe("DENY");
+    const brBytes = Buffer.from(await br.arrayBuffer());
+    expect(brBytes.length).toBeLessThan(sent / 10);
+    expect(brotliDecompressSync(brBytes).toString("utf8")).toBe(page);
+    const etag = br.headers.get("etag")!;
+    expect(etag).toMatch(/^W\/"/);
+
+    const gz = await raw("/", { "Accept-Encoding": "gzip, deflate" });
+    expect(gz.headers.get("content-encoding")).toBe("gzip");
+    expect(gz.headers.get("vary")).toBe("Accept-Encoding");
+    expect(gz.headers.get("etag")).toBe(etag);
+    expect(gunzipSync(Buffer.from(await gz.arrayBuffer())).toString("utf8")).toBe(page);
+
+    const plain = await raw("/", {});
+    expect(plain.headers.get("content-encoding")).toBeNull();
+    expect(plain.headers.get("vary")).toBe("Accept-Encoding");
+    expect(await plain.text()).toBe(page);
+
+    // A repeat open revalidates: 304, no body, the same headers that matter.
+    const again = await raw("/", { "Accept-Encoding": "br", "If-None-Match": etag });
+    expect(again.status).toBe(304);
+    expect((await again.arrayBuffer()).byteLength).toBe(0);
+    expect(again.headers.get("etag")).toBe(etag);
+    expect(again.headers.get("cache-control")).toBe("private, no-cache");
+    expect((await raw("/", { "Accept-Encoding": "br", "If-None-Match": 'W/"other"' })).status).toBe(200);
+
+    const head = await raw("/", { "Accept-Encoding": "br" }, "HEAD");
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-encoding")).toBe("br");
+    expect((await head.arrayBuffer()).byteLength).toBe(0);
+
+    // The listener's checks still come first: another login, another Host, another site's fetch.
+    expect((await raw("/", { "Accept-Encoding": "br" }, "GET", "someone@example.com")).status).toBe(403);
+    expect((await raw("/", { "Accept-Encoding": "br", Host: `127.0.0.1:${inbox.port}` })).status).toBe(403);
+    expect((await raw("/", { "Accept-Encoding": "br", "If-None-Match": etag }, "GET", null)).status).toBe(403);
+    expect((await raw("/", { "Accept-Encoding": "br", "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty" })).status).toBe(403);
+
+    // The data routes stay no-store and uncompressed.
+    const threads = await raw("/api/inbox/threads", { "Accept-Encoding": "br" });
+    expect(threads.headers.get("cache-control")).toBe("no-store");
+    expect(threads.headers.get("content-encoding")).toBeNull();
+
+    // The window's own loopback port: exactly as before.
+    const local = await fetch(`http://127.0.0.1:${inbox.port}/`, { headers: { "Accept-Encoding": "gzip, deflate, br" }, decompress: false } as RequestInit);
+    expect(local.status).toBe(200);
+    expect(local.headers.get("content-encoding")).toBeNull();
+    expect(local.headers.get("vary")).toBeNull();
+    expect(local.headers.get("etag")).toBeNull();
+    expect(local.headers.get("cache-control")).toBe("no-store");
+    expect(await local.text()).toBe(page);
   });
 
   test("through the tailnet the connection surface is unreachable, even with the token and a loopback Host claim, and the window's guards still apply", async () => {

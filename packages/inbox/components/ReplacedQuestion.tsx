@@ -106,6 +106,7 @@ export function ReplacedQuestionCard({
   replacement,
   answer,
   onJump,
+  refRepo,
 }: {
   question: InboxQuestion;
   number: number;
@@ -114,8 +115,11 @@ export function ReplacedQuestionCard({
   /** The pick saved on it (never sent), or null. */
   answer: QuestionAnswer | null;
   onJump: (target: JumpTarget) => void;
+  /** The thread's repo, so `#123` refs in the old prompt and choices link as in the message. */
+  refRepo?: { display: string; host?: string } | null;
 }) {
   const id = useId();
+  const repo = { githubRepo: refRepo?.display, repoHost: refRepo?.host };
   const [open, setOpen] = useState(false);
   const promptId = `${id}-p`;
   const newsId = `${id}-news`;
@@ -141,7 +145,7 @@ export function ReplacedQuestionCard({
         </span>
       </div>
       <p className="ib-q-prompt" id={promptId}>
-        <InlineMarkdown text={question.prompt} />
+        <InlineMarkdown text={question.prompt} {...repo} />
       </p>
       <div className="ib-q-repl" id={newsId} data-replaced-row="">
         <Icon name="turnDown" size={14} />
@@ -182,12 +186,12 @@ export function ReplacedQuestionCard({
                   <input type={question.kind === 'multi' ? 'checkbox' : 'radio'} disabled checked={on} readOnly name={`${id}-old`} />
                   <span className="ib-q-lbl">
                     <b>
-                      <InlineMarkdown text={choice.label} />
+                      <InlineMarkdown text={choice.label} {...repo} />
                     </b>
                     {choice.description && (
                       <span className="ib-q-desc">
                         {' '}
-                        — <InlineMarkdown text={choice.description} />
+                        — <InlineMarkdown text={choice.description} {...repo} />
                       </span>
                     )}
                     {on && <span className="ib-tag ib-t-notsent">Not sent</span>}
