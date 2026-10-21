@@ -94,7 +94,7 @@ function questionsOf(messageId: string, body: string): InboxQuestion[] {
 }
 
 function sentAs(q: InboxQuestion, selected: string[], replyId: string): InboxQuestion {
-  return { ...q, state: 'sent', revision: 1, sent_revision: 1, sent_reply_id: replyId, answer: { v: 1, key: q.key, kind: q.kind, prompt: q.prompt, selected } };
+  return { ...q, state: 'sent', revision: 1, sent_revision: 1, sent_reply_id: replyId, answer: { v: 1, key: q.key, kind: q.kind as 'single', prompt: q.prompt, selected } };
 }
 
 function message(id: string, author: InboxAuthor, seq: number, body: string, extra: Partial<InboxMessageWire> = {}): InboxMessageWire {
@@ -252,7 +252,7 @@ test.skipIf(!hasDom)('read messages fold to lines; the new, the last and one hol
   const thread = seven();
   const a3 = thread.messages[4]!;
   const [q] = questionsOf('msg_A3', ONE_OPEN);
-  thread.messages[4] = { ...a3, body: ONE_OPEN, questions: [{ ...q!, message_id: 'msg_A3', state: 'picked', answer: { v: 1, key: q!.key, kind: q!.kind, prompt: q!.prompt, selected: ['Cmd K only'] }, picked_at: '2026-10-10T13:00:00.000Z' }] };
+  thread.messages[4] = { ...a3, body: ONE_OPEN, questions: [{ ...q!, message_id: 'msg_A3', state: 'picked', answer: { v: 1, key: q!.key, kind: q!.kind as 'single', prompt: q!.prompt, selected: ['Cmd K only'] }, picked_at: '2026-10-10T13:00:00.000Z' }] };
   act(() => root!.unmount());
   host!.remove();
   const again = await render(thread);

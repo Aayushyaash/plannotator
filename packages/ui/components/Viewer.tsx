@@ -306,6 +306,13 @@ export interface ViewerProps {
   /** Host content right under a question card's prompt, per question (e.g.
    *  "Replaces <an earlier question>"); null for none. Absent: nothing there. */
   renderQuestionBelowPrompt?: (question: IndexedQuestion) => React.ReactNode;
+  /** A host's own drawing of a directive block that is not a question (ui
+   *  seam for a host's own directives, such as the Plannotator Inbox's
+   *  `:::action` to-do card). Called per `:::kind` block; a returned node is
+   *  drawn in place of the block's callout, inside a wrapper carrying the
+   *  block's `data-block-id`; `undefined` keeps the callout. Absent: every
+   *  such block draws as today. */
+  renderDirectiveBlock?: (block: Block) => React.ReactNode | undefined;
   onAskAI?: CommentAskAIHandler;
   /** Whether comment popovers offer image attachments. Hosts without an
    *  uploadTransport pass false so the attach affordance never dead-ends.
@@ -738,6 +745,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   questionStatusTag,
   questionStatusLabel,
   renderQuestionCard,
+  renderDirectiveBlock,
   renderQuestionBelowPrompt,
   onAskAI,
   allowImages = true,
@@ -1712,7 +1720,9 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               const question = questionIndex.byBlock.get(group.block.id);
               const hostCard = question && renderQuestionCard
                 ? renderQuestionCard(question, answersByKey.get(question.question.key))
-                : undefined;
+                : !question && group.block.type === 'directive' && renderDirectiveBlock
+                  ? renderDirectiveBlock(group.block)
+                  : undefined;
               if (hostCard !== undefined) {
                 return (
                   <div key={group.block.id} data-block-id={group.block.id} data-block-type="directive" className={textCommentsOnly ? 'annotation-exclude' : undefined}>

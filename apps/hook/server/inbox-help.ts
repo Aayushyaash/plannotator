@@ -24,6 +24,7 @@
 import { INBOX_CARD_ACTION_ON, INBOX_SECTIONS, INBOX_THREAD_NAME_MAX, inboxToolCostText, type InboxSectionId } from "@plannotator/core/inbox-types";
 import { QUESTION_AUTHORING_GUIDE } from "@plannotator/core/question-block";
 import { INBOX_SET_ASIDE_HEADING } from "@plannotator/core/inbox-questions";
+import { INBOX_ACTION_EXAMPLE, INBOX_ACTION_GUIDE, INBOX_ACTIONS_HEADING } from "@plannotator/core/inbox-actions";
 import { HARNESSES, harnessPanel, shellLine, type ConnectContext, type Harness } from "@plannotator/inbox/harnesses";
 import { join } from "node:path";
 import { INBOX_MCP_TOOLS, INBOX_SERVED_TOOLS, INBOX_WAIT_DEFAULT_MS, INBOX_WAIT_MAX_SECONDS } from "@plannotator/server/inbox-mcp";
@@ -94,17 +95,18 @@ export const INBOX_HELP_CODE_EXAMPLES = ["run.sh", "build.mjs", "app.ts", "main.
 /** One block per MCP tool, in INBOX_MCP_TOOLS order. */
 export const TOOL_GUIDE: Record<InboxMcpToolName, InboxToolGuide> = {
   send_message: {
-    args: ["body", "subject", "thread", "reply_to", "supersedes", "attachments", "idempotency_key"],
+    args: ["body", "subject", "thread", "reply_to", "supersedes", "done", "attachments", "idempotency_key"],
     lines: [
       "Post a markdown message to the person. `body` is required; question blocks in it render as answerable cards (see \"Asking the reviewer questions\").",
       "- `subject`: used when the message starts a thread; one line of plain text (a line break or leaked tool-call text such as `</subject>` is refused with `validation_error`). Default: the first question's prompt, else the first line.",
       "- `thread`, `reply_to`: where it lands (see \"Threads\"). `thread` is a name: a message id there (`msg_…`) is refused with `validation_error`. To write in an existing thread, pass its id as `reply_to`; beside `reply_to`, leave `thread` out unless you are naming a thread the person started.",
       "- Name a thread the person started: on your reply into it (`reply_to`), pass `thread` with a few words saying what it is about. The first name you give sets it, once; later ones are ignored. Only the session the thread is addressed to may name it (or, once the person sent it to another session, also the first agent that replied). Until then read_thread and wait_for_reply say `name_this_thread: true`, and a reply without a name says so in its result. The result's `named_thread` is the name set, or null while the thread stays unnamed. A name another open thread of the project already has is refused (`naming_refused: \"thread_name_taken\"`, an invalid one `\"invalid_thread_name\"`): pick another name and reply again with it.",
       "- `supersedes`: earlier questions of the thread this message lands in that no longer apply, so the person can no longer answer them: `\"<message id>/<key>\"` for one question (read_thread gives each question's `key`) or `\"<message id>\"` for every open question of that message. With exactly one question in this message, it replaces them; otherwise they read \"No longer applies\". To name the replacement exactly, write a `Replaces:` line in the new block instead (see \"Only in the Inbox\"). A pick the person saved on a superseded question is never sent. An id that names no open question of the thread refuses the whole send with `invalid_supersedes: …`, which lists the thread's open questions. The result's `superseded` lists what it superseded. Withdraw your own questions that are still open (read_thread state `open` or `picked`; a sent, skipped or closed one is refused) this way as the thread moves on, so they stop keeping the thread at the top of the person's list.",
+      "- `done`: your own to-dos (`:::action` blocks, see \"To-dos only the person can do\") in the thread this message lands in that you saw done yourself, e.g. the deployment you were watching is Ready: `\"<message id>/<key>\"` (the key starts with `a-`; read_thread gives it) or `\"<message id>\"` for every open to-do of that message. The card then says you saw it done; nothing is sent to the person. An id that names no open to-do of the thread refuses the whole send with `invalid_done: …`, which lists the thread's open to-dos. The result's `done` lists what it marked. Never mark done what you did not see happen.",
       `- \`attachments\`: files to show the person beside your message, e.g. \`["docs/plan.md", "proto/admin.html", "/tmp/shot.png"]\`: absolute (anywhere you can read) or relative to \`project_path\`. Any regular file, of any size. Markdown, plain text, config and data files, Mermaid and Graphviz sources and HTML open in Plannotator's viewers; images (PNG, JPEG, GIF, WebP, SVG, AVIF, BMP, ICO) show in the message; videos (MP4, MOV, WebM) play beside it, and the person comments at moments (each comment comes back with its time, \`At 1:42 (102.4 s of 7:41)\`, and the path of the paused frame, which you can read); source code, scripts (${INBOX_HELP_CODE_EXAMPLES.map(code).join(", ")} and the like) and any other text open as code with line comments (text over 16 MB is offered as a download); PDFs and every other file are offered as a download. The kind is read from the bytes, so an image, video or PDF needs no particular name. Folders and \`.env\` files are refused, and one refused file refuses the whole send. The Inbox keeps the version you sent and shows the file as it is now; the person's annotations, including comments on images and code lines, come back in their reply. Each attachment in the result has a \`kind\` (\`markdown\`, \`text\`, \`html\`, \`mermaid\`, \`graphviz\`, \`code\`, \`image\`, \`video\`, \`pdf\`, \`file\`); treat a kind you do not know as \`file\`.`,
-      "- `idempotency_key`: any unique string. Sending again with the same key returns the first message instead of posting twice; the same key with another body, thread, `reply_to` or `supersedes` is refused.",
+      "- `idempotency_key`: any unique string. Sending again with the same key returns the first message instead of posting twice; the same key with another body, thread, `reply_to`, `supersedes` or `done` is refused.",
       "- Images in `body` (`![alt](path)`, `<img src=\"path\">`) show in the message from anywhere you can read: a path relative to `project_path`, or absolute (`/tmp/shot.png` works). PNG, JPEG, GIF, WebP, SVG, AVIF, BMP and ICO, up to 10 MB and 50 megapixels. Not shown: a dotenv-named file; anything in a hidden folder (a segment starting with `.`) outside your project and the folder you send from (hidden folders inside them show, `.walkthrough/` say, unless the project is your home folder itself or a folder above it); and web images (`https://…`, `//host/…`). The message is still sent, and the result's `images_not_shown` (`[{ ref, reason, not_yet? }]`, at most 10, with `images_not_shown_more` counting the rest, and a line in the text) names each image that will not show; copy it to a plain folder and link that path, or attach it with `attachments`. An image not written yet (`not_yet: true`) shows once the file exists. The person's own replies show images from the project only.",
-      "- Returns `message_id`, `thread_id`, `new_thread`, `cursor` and the thread's `url`.",
+      "- Returns `message_id`, `thread_id`, `new_thread`, `cursor` and the thread's `url`, and `actions` (each to-do's `key` and what to do) when the body has `:::action` blocks.",
     ],
   },
   read_thread: {
@@ -149,7 +151,7 @@ export const TOOL_GUIDE: Record<InboxMcpToolName, InboxToolGuide> = {
   submit_guide: {
     args: ["guide", "patch", "snapshot", "body"],
     lines: [
-      "Send the person a guided review of a code change: `guide` (the shape get_guide_brief gives) plus `patch` (the exact unified diff it describes), or a complete `snapshot` instead of both. `body` is your note above the card (default: the guide's intent). It takes send_message's routing fields (`subject`, `thread`, `reply_to`, `supersedes`, `idempotency_key`). A guide that does not match its patch is refused with `invalid_guide: …` naming the file. Code diffs only.",
+      "Send the person a guided review of a code change: `guide` (the shape get_guide_brief gives) plus `patch` (the exact unified diff it describes), or a complete `snapshot` instead of both. `body` is your note above the card (default: the guide's intent). It takes send_message's routing fields (`subject`, `thread`, `reply_to`, `supersedes`, `done`, `idempotency_key`). A guide that does not match its patch is refused with `invalid_guide: …` naming the file. Code diffs only.",
     ],
   },
   card: {
@@ -273,6 +275,7 @@ export function formatInboxHelp(options: InboxHelpOptions): string {
     "",
     "- A question you cannot settle from the code or the conversation, which can wait for an answer.",
     "- A blocker: say what stops you (a `Stopped:` line, below). When you can go on with other work, leave `Stopped:` out and name what waits in `Holds up:`; a question that stops you can carry both.",
+    "- A true blocker only the person can clear, outside this conversation (approve a deploy, sign in, touch a security key, merge a pull request you cannot merge): one `:::action` to-do (see \"To-dos only the person can do\").",
     "- Long work you finished while the person was away: one short summary, with the files to look at in `attachments`.",
     "- A plan, document, HTML prototype or diagram the person should read and annotate (`attachments`).",
     "- A guided review of a finished code change (get_guide_brief, then submit_guide).",
@@ -282,6 +285,7 @@ export function formatInboxHelp(options: InboxHelpOptions): string {
     "",
     "- Something you need answered in the current chat right now: ask in the chat.",
     "- Routine progress or each small step: send one message per real need.",
+    "- A to-do list, a status update or a decision written as `:::action` blocks: a to-do is only for something the person must go and do before you can go on.",
     "- A sign-off on this plan, document or diff before you go on: use a Plannotator review (plan review, `plannotator annotate`, `plannotator review`).",
     "",
     "## How to reach it",
@@ -335,7 +339,8 @@ export function formatInboxHelp(options: InboxHelpOptions): string {
     "- A reply that answers none of them (the person only wrote back, or sent annotations) leaves them all open and says so after their words: `No questions answered yet; all N are still open. Don't re-ask them; the person will answer in the Inbox.` Do not ask them again: the answers come in a later reply.",
     "- The person may mark your latest message 👍 Looks good: they read it and need nothing more. About ten seconds later (after the person's Undo window) it reaches you: with a connection that wakes you, as one short message, `Plannotator Inbox: <subject> (<id>)` and then `The person marked your message 👍 Looks good (<message id>). No reply needed unless you have a question.`; otherwise wait_for_reply returns `status: \"acknowledged\"`, and read_thread shows `ack: { label, at }` on that message. Do not answer it; go on, and use `reply_to` only if you have something new for them. Only a message with no open question takes it, so it never answers a question. A wait on every thread you asked (no `thread_id`, no `cursor`) is not answered again by a 👍 you were already given.",
     `- The person may press Re-ask: you get one message (with a wake: \`Plannotator Inbox: <subject> (<id>)\`, then \`${INBOX_REASK_INSTRUCTION}\`) listing your questions still open in the thread by id. Check each against where the work is now and send ONE message with \`reply_to\` that id: the ones still needed, asked again with the context the person needs today and a \`Replaces: <id>\` line in each block; the ids of those that no longer apply in \`supersedes\`, with a line on why. Answers the person had picked come with it under "Answers to your questions": don't ask those again. Until you do, the old questions stay open and the thread waits on you.`,
-    `- The person may mark a thread read without answering: its waiting questions close unanswered, and you get one message from them that starts \`${INBOX_SET_ASIDE_HEADING}\` and lists them. Do not wait on those; ask again if you must.`,
+    `- The person may mark a thread read without answering: its waiting questions and to-dos close unanswered, and you get one message from them that starts \`${INBOX_SET_ASIDE_HEADING}\` and lists them (questions as \`- Q1.\`, to-dos as \`- A1.\`). Do not wait on those; ask again if you must.`,
+    `- When the person marks one of your to-dos Done or Can't do it, it reaches you about ten seconds later (after their Undo window) as their reply: \`Did 1 action.\` (or \`Couldn't do 1 action.\`), then a section \`## ${INBOX_ACTIONS_HEADING}\` with \`### A1. <what to do>\` and \`Done, 3:12 PM.\` (and \`Note: …\` when they added one) or \`Can't do it: <their reason>\`. Go on with the work it unblocks; on Can't do it, find another way or ask.`,
     "",
     QUESTION_AUTHORING_GUIDE.trimEnd(),
     "",
@@ -358,6 +363,16 @@ export function formatInboxHelp(options: InboxHelpOptions): string {
     "```markdown",
     INBOX_REPLACES_EXAMPLE,
     "```",
+    "",
+    "### To-dos only the person can do",
+    "",
+    INBOX_ACTION_GUIDE,
+    "",
+    "```markdown",
+    INBOX_ACTION_EXAMPLE,
+    "```",
+    "",
+    "The first line is the to-do; every other line that is not `Where:`, `Run:`, `Stopped:`, `Holds up:`, `Watching:` or `Replaces:` is the why. A to-do counts like an open question in the person's list (`Stopped:` puts the thread under \"" + SECTION_LABEL("stopped") + "\"), and its key starts with `a-`.",
     "",
     "Attach the files a question points to (send_message's `attachments`, here `[\"load-test.html\"]`) and link them from its context, as above: the link opens the file beside the thread. A link to a file you did not attach shows as \"Not attached\". Add a screenshot (`![alt](path)`) when the question is about something visual.",
     "",

@@ -171,7 +171,7 @@ describe('a thread with two sessions: the row and the thread line agree on who a
       const m2 = store.sendMessage({ project_id: project.id, author: { kind: 'agent', host: 'claude-code', session: 'ses_b', name: null }, body: 'I can clean up the buckets too.', reply_to: m1.id, wakes: true }).message;
       if (picked) {
         const q = store.questionsOf(m1.id)[0] as InboxQuestion;
-        const answer: QuestionAnswer = { v: 1, key: q.key, kind: q.kind, prompt: q.prompt, selected: ['eu-west'] };
+        const answer: QuestionAnswer = { v: 1, key: q.key, kind: q.kind as 'single', prompt: q.prompt, selected: ['eu-west'] };
         store.savePicks(m1.id, [{ key: q.key, revision: q.revision, answer }]);
       }
       store.sendReply(m2.id, { words: 'Clean them up.', idempotency_key: 'k1' });

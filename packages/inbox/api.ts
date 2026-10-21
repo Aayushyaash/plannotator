@@ -5,6 +5,7 @@
  * writing into a store it did not read.
  */
 
+import { isActionRecord, questionsOnly, splitThreadActions } from './actions';
 import type {
   InboxGuideRef,
   InboxHealth,
@@ -556,10 +557,12 @@ export const inboxApi = {
     return get<ArchivedModel>(`/api/inbox/threads/archived${qs ? `?${qs}` : ''}`);
   },
   /** One thread; with `timeoutMs`, a read with no answer by then fails (InboxReadTimeout) instead of waiting for good. */
+  // A thread's to-dos move out of `questions` into `actions` here (actions.ts), so nothing that picks or sends answers meets one.
   thread: (threadId: string, timeoutMs?: number) =>
-    timeoutMs === undefined
+    (timeoutMs === undefined
       ? get<ThreadModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}`)
-      : getWithin<ThreadModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}`, timeoutMs),
+      : getWithin<ThreadModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}`, timeoutMs)
+    ).then((model) => ({ ...model, thread: splitThreadActions(model.thread) })),
   settings: () => get<SettingsModel>('/api/inbox/settings'),
   /**
    * The person looked at the thread. `throughSeq`: the seq of the newest
@@ -592,7 +595,17 @@ export const inboxApi = {
   pick: (messageId: string, key: string, revision: number, answer: QuestionAnswer | null) =>
     post<{ questions: InboxQuestion[] }>(`/api/inbox/messages/${encodeURIComponent(messageId)}/picks`, {
       questions: [{ key, revision, answer }],
-    }),
+    }).then((result) => ({ ...result, questions: questionsOnly(result.questions) })),
+  /**
+   * A to-do's Done (with an optional note) or Can't do it (with the reason),
+   * or its Undo (`null`): sent to the agent once the Undo window passes.
+   * Answers the message's to-dos.
+   */
+  markAction: (messageId: string, key: string, mark: { outcome: 'done' | 'cant'; note?: string | null } | null) =>
+    post<{ questions: InboxQuestion[] }>(
+      `/api/inbox/messages/${encodeURIComponent(messageId)}/actions/${encodeURIComponent(key)}`,
+      mark ? { outcome: mark.outcome, ...(mark.note ? { note: mark.note } : {}) } : { outcome: null },
+    ).then((result) => ({ actions: result.questions.filter(isActionRecord) })),
   reply: (
     messageId: string,
     input: {
@@ -619,14 +632,21 @@ export const inboxApi = {
        */
       clear_draft?: string;
     },
-  ) => post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reply`, input),
+  ) =>
+    post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reply`, input).then((result) => ({
+      ...result,
+      questions: questionsOnly(result.questions),
+    })),
   /**
    * Re-ask (approval "inbox-reask"): a note asking the session that wrote this
    * message for its open questions again, in one message. `to`: another live
    * session, because the one that asked has ended.
    */
   reask: (messageId: string, input: { idempotency_key: string; to?: { host: string; session: string } }) =>
-    post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reask`, input),
+    post<ReplyResult>(`/api/inbox/messages/${encodeURIComponent(messageId)}/reask`, input).then((result) => ({
+      ...result,
+      questions: questionsOnly(result.questions),
+    })),
   resolve: (messageId: string, resolved: boolean) =>
     post<unknown>(`/api/inbox/messages/${encodeURIComponent(messageId)}/resolve`, { resolved }),
   health: () => get<InboxHealth>('/api/inbox/health'),

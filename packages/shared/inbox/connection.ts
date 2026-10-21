@@ -204,9 +204,12 @@ export const INBOX_AGENT_FIELD_DESCRIPTIONS: Readonly<Record<string, Readonly<Re
       ':::',
       '',
       '`:::question-multi` takes several choices, `:::question-text` free text. The person can always answer Other, add a note or skip, so never add an Other choice yourself. `Stopped: <why>` only when you cannot go on until it is answered (never `Stopped: no`); `Holds up: <work>` names work that waits while you go on. Ask only what you cannot decide alone, about 8 a round at most. Answers come back in the reply under "Answers to your questions".',
+      '',
+      'Only for a true blocker the person must go and do outside this chat, that you cannot do yourself (approve a deploy, sign in, touch a security key, merge a PR you cannot merge), write a `:::action` block: first line the order, then why; optional `Where: <url>`, `Run: <command>`, `Stopped:`, `Watching: <what you watch>`. Never for a decision or a question, for what you can do yourself, or as a to-do list or status update; most messages need none. Done or Can\'t do it comes back under "Actions you asked for".',
     ].join('\n'),
     thread: "A short thread name, one line, to keep separate work apart: the same name in this project is the same open thread, across sessions. Without it, your messages join your session's open thread. Ignored with reply_to, except when you are asked to name a thread the person started: then it names that thread, once.",
     supersedes: 'Your own questions in this thread that are still open (read_thread state open or picked) and no longer apply: a newer message replaces them, or the reply settled them in words. "<message id>/<key>" for one, "<message id>" for all of that message\'s; send with reply_to into their thread. With one question in this message it replaces them, otherwise they read "No longer applies".',
+    done: 'Your own open to-dos (`:::action`) in this thread that you saw done yourself, e.g. the deploy you watch is Ready: "<message id>/<key>" (key a-…); send with reply_to into their thread. The card says you saw it done; nothing is sent to the person.',
     attachments: 'Files to show the person beside the message, absolute or relative to project_path: a plan, a screenshot, an HTML mock, code, a video, any file. Link one from the body (`[the mock](mock.html)`) to open it beside the thread. Their comments on the files come back in the reply. Folders and .env files are refused.',
   },
   submit_guide: {

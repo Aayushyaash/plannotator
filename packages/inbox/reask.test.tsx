@@ -120,7 +120,7 @@ describe('the rules (reask.ts)', () => {
   test('picks count as waiting and go with it; a session whose questions are all picked is left out', () => {
     const msgs = base();
     const q = msgs[0]!.questions![0]!;
-    msgs[0]!.questions![0] = { ...q, state: 'picked', answer: { v: 1, key: q.key, kind: q.kind, prompt: q.prompt, selected: ['Yes'] } };
+    msgs[0]!.questions![0] = { ...q, state: 'picked', answer: { v: 1, key: q.key, kind: q.kind as 'single', prompt: q.prompt, selected: ['Yes'] } };
     const [t] = reaskTargets(msgs);
     expect(t).toMatchObject({ open: 2, picked: 1 });
     expect(reaskTooltip([t!])).toContain('Your 1 pick is sent too.');
@@ -129,7 +129,7 @@ describe('the rules (reask.ts)', () => {
   test('a session with only picks gets a plain reply carrying them, never stranded (A asks 2, B asks 1, B picked)', () => {
     const msgs = [agent(M1, BODY1, '2026-10-20T10:42:00.000Z'), agent(M3, block('Pin Node?'), '2026-10-20T10:47:00.000Z', B)];
     const qb = msgs[1]!.questions![0]!;
-    msgs[1]!.questions![0] = { ...qb, state: 'picked', revision: 1, answer: { v: 1, key: qb.key, kind: qb.kind, prompt: qb.prompt, selected: ['Yes'] } };
+    msgs[1]!.questions![0] = { ...qb, state: 'picked', revision: 1, answer: { v: 1, key: qb.key, kind: qb.kind as 'single', prompt: qb.prompt, selected: ['Yes'] } };
     const targets = reaskTargets(msgs);
     expect(targets.map((t) => [t.kind, t.session, t.open, t.picked])).toEqual([
       ['reask', 'ses_a', 2, 0],
@@ -305,7 +305,7 @@ test.skipIf(!hasDom)('while the note waits: no Re-ask, the note reads as one lin
 test.skipIf(!hasDom)('A asks 2, B asks 1 and B is picked: one press sends A its note and B a plain reply with the pick', async () => {
   const msgs = [agent(M1, BODY1, '2026-10-20T10:42:00.000Z'), agent(M3, block('Pin Node?'), '2026-10-20T10:47:00.000Z', B)];
   const qb = msgs[1]!.questions![0]!;
-  msgs[1]!.questions![0] = { ...qb, state: 'picked', revision: 1, picked_at: '2026-10-20T10:48:00.000Z', answer: { v: 1, key: qb.key, kind: qb.kind, prompt: qb.prompt, selected: ['Yes'] } };
+  msgs[1]!.questions![0] = { ...qb, state: 'picked', revision: 1, picked_at: '2026-10-20T10:48:00.000Z', answer: { v: 1, key: qb.key, kind: qb.kind as 'single', prompt: qb.prompt, selected: ['Yes'] } };
   const el = await render(thread(msgs));
   await act(async () => reaskButton(el)!.click());
   await settle();

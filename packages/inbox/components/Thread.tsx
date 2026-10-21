@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Viewer, type ViewerHandle } from '@plannotator/ui/components/Viewer';
-import type { Annotation } from '@plannotator/ui/types';
+import type { Annotation, Block } from '@plannotator/ui/types';
 import { annotationOwnsHighlight } from '@plannotator/ui/utils/annotationOwnsHighlight';
 import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
 import { parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
@@ -63,6 +63,8 @@ import type { MentionSource } from '@plannotator/ui/utils/mentions';
 import { TAG_TOKEN_CLASS } from './ComposerField';
 import { HostMark } from '../icons';
 import { INBOX_REPLY_SKILL_AUDIENCE, annotationSkillTexts, inboxSkillsBlock, withSkillsBlock } from '../skills';
+import { ActionCard, type ActionMark } from './ActionCard';
+import { actionForBlock } from '../actions';
 import { splitInboxSkillsBlock } from '@plannotator/core/skill-reference-block';
 import { Tip } from './Tip';
 import { selectionToolbarShowing } from '../selectionToolbar';
@@ -227,6 +229,7 @@ export function MessageBody({
   footerFor,
   renderReplacedCard,
   renderReplacesLine,
+  renderAction,
   comments,
 }: {
   message: InboxMessageWire;
@@ -246,6 +249,8 @@ export function MessageBody({
   renderReplacedCard?: (key: string, number: number) => React.ReactNode | undefined;
   /** The "Replaces …" line under a question's prompt, or null. */
   renderReplacesLine?: (key: string) => React.ReactNode;
+  /** A `:::action` block's To do card (approval "inbox-next-actions"), or undefined to keep the block as text. */
+  renderAction?: (block: { startLine: number; content: string }) => React.ReactNode | undefined;
   /**
    * Comments on the text (an agent's message that can still be answered;
    * approval "inbox-message-comments"): the person's comments on this message
@@ -425,6 +430,13 @@ export function MessageBody({
     (question: IndexedQuestion) => replacesRef.current?.(question.question.key) ?? null,
     [message.questions],
   );
+  // To-dos: the To do card in place of a `:::action` block's callout. A new identity when they change, so a card redraws.
+  const actionRef = useRef(renderAction);
+  actionRef.current = renderAction;
+  const directiveBlock = useCallback(
+    (block: Block) => (block.directiveKind === 'action' ? actionRef.current?.(block) : undefined),
+    [message.actions],
+  );
 
   // ── Comments on the text (approval "inbox-message-comments") ──────────────
   // The highlights are drawn once per mount for the comments already saved;
@@ -532,6 +544,7 @@ export function MessageBody({
         questionStatusLabel={statusLabel}
         renderQuestionCard={renderReplacedCard ? questionCard : undefined}
         renderQuestionBelowPrompt={renderReplacesLine ? belowPrompt : undefined}
+        renderDirectiveBlock={renderAction ? directiveBlock : undefined}
       />
       {skills && <SkillsLine split={skills} />}
       {tagLabels && (
@@ -608,6 +621,13 @@ export interface ThreadPaneProps {
    * agent for the toast. Absent: no Looks good button.
    */
   onAck?: (messageId: string, on: boolean, agent: string) => void;
+  /**
+   * A to-do's Done or Can't do it (`mark`), or its Undo (`null`), approval
+   * "inbox-next-actions": the window writes it and shows the toast with
+   * Undo. Resolves false when it was refused. Absent: the pane writes it
+   * itself and reads the thread again.
+   */
+  onAction?: (messageId: string, key: string, mark: ActionMark | null, info: { agent: string; prompt: string }) => Promise<boolean>;
   /** Archive (`true`) or Unarchive. Absent: the pane calls the resolve route itself. */
   onArchive?: (archived: boolean) => void;
   /** The thread whose reply box should open (the warning toast's Reply); the pane calls `onReplyOpened` once it has. */
@@ -782,7 +802,7 @@ async function replyLanded(threadId: string, key: string): Promise<'yes' | 'no' 
 
 const THREAD_GONE_TEXT = 'This thread was deleted, so nothing was sent.';
 
-export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged = 0, onClose, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
+export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged = 0, onClose, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onAction, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
   // "Open in" (OpenIn.tsx): apps on this computer; a new tab only through the tailnet or on a phone.
   const openIn: OpenInSurface | undefined = phone || remote === true ? 'tab' : remote === null ? undefined : 'apps';
   const root = thread.messages[0]!;
@@ -805,11 +825,25 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   // message, offered only while no question in the thread waits on the person
   // (open or picked) and the thread is not archived.
   const ackTarget = agentMessages.at(-1) ?? null;
-  const questionWaits = agentMessages.some((m) => (m.questions ?? []).some((q) => q.state === 'open' || q.state === 'picked'));
+  // A to-do counts like a question here (approval "inbox-next-actions"): the store refuses a 👍 while one waits.
+  const questionWaits = agentMessages.some((m) => [...(m.questions ?? []), ...(m.actions ?? [])].some((q) => q.state === 'open' || q.state === 'picked'));
   // Nor once the person wrote back after it (their reply is the answer; its Sent / Delivered line stays).
   const personWroteLast = lastNonNote(thread.messages)?.author.kind === 'person';
   const ackOffered = onAck !== undefined && ackTarget !== null && !archived && !questionWaits && !personWroteLast;
   const ackOn = ackTarget?.ack != null;
+
+  // To-dos: Done / Can't do it / Undo, through the window (its toast and Undo) or, without it, straight to the server.
+  const markAction = async (messageId: string, key: string, mark: ActionMark | null, agent: string, prompt: string): Promise<boolean> => {
+    if (onAction) return onAction(messageId, key, mark, { agent, prompt });
+    try {
+      await inboxApi.markAction(messageId, key, mark);
+      await onChanged();
+      return true;
+    } catch {
+      await onChanged();
+      return false;
+    }
+  };
 
   // Picks saved at once; shown before the server answers, then from the server.
   const [pending, setPending] = useState<ReadonlyMap<string, QuestionAnswer | null>>(new Map());
@@ -2890,6 +2924,24 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                   footerFor={footerFor(message)}
                   renderReplacedCard={replacedCard}
                   renderReplacesLine={replacesLine}
+                  renderAction={
+                    isAgent && (message.actions?.length ?? 0) > 0
+                      ? (block) => {
+                          const action = actionForBlock(message.body, message.actions, block);
+                          if (!action) return undefined;
+                          return (
+                            <ActionCard
+                              action={action}
+                              number={action.position + 1}
+                              total={message.actions!.length}
+                              agent={name}
+                              readOnly={!liveMessage(message)}
+                              onMark={(mark) => markAction(message.id, action.key, mark, name, action.prompt)}
+                            />
+                          );
+                        }
+                      : undefined
+                  }
                   comments={
                     isAgent && liveMessage(message)
                       ? {

@@ -1,7 +1,7 @@
 import { memo, useCallback, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { InboxListRow, InboxListSection } from '@plannotator/core/inbox-types';
 import { threadChipName } from '../threadChip';
-import { agentName, formatCount, questionCount, shortTime } from '../format';
+import { agentName, formatCount, shortTime, waitCount } from '../format';
 import { reaskRowLine, sentRowLine } from '../deliveryLine';
 import { sentRecipientsWords } from '../tags';
 import { TagStack } from './TagPicker';
@@ -123,7 +123,7 @@ function countOf(row: InboxListRow): ReactNode {
   // An older Inbox (no `unsent`): its own words.
   if (row.answered_not_sent) return 'Answered, not sent';
   if (row.section === 'sent' && row.addressee) return `To ${agentName(rowAgent(row))}`;
-  return questionCount(row.questions.open);
+  return waitCount(row.questions.open, row.questions.actions ?? 0);
 }
 
 /** The thread's name as a chip, unless the subject already starts with it (`threadChipName`). */

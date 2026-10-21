@@ -3669,3 +3669,44 @@ ol.ib-rl-two .ib-rw-cmd { font-weight: 400; margin-top: 6px; }
 .ib-reask-d summary { cursor: pointer; min-height: 24px; width: fit-content; font-size: var(--ib-fs-12-5, 12.5px); color: var(--muted-foreground); border-radius: 4px; }
 .ib-reask-d summary:hover { color: var(--foreground); }
 .ib-reask-d pre { margin: 8px 0 0; padding: 10px 12px; border-radius: 8px; background: color-mix(in oklch, var(--muted) 60%, transparent); font-family: var(--font-mono); font-size: var(--ib-fs-12, 12px); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--foreground); }
+
+/* ── To-dos (approval "inbox-next-actions", direction "In the thread"): an agent's `:::action` block drawn
+   as a card in its message. Raised like a question card, never outlined; its badges are the list's. ── */
+.pn-inbox .ib-todo { margin: 8px 0 6px; border-radius: var(--ib-lr-xl, 12px); background: var(--ib-raise); padding: 14px 16px 12px; }
+.pn-inbox .ib-todo-eye { display: flex; align-items: center; gap: 7px; font-size: var(--ib-fs-13, 13px); color: var(--muted-foreground); }
+.pn-inbox .ib-todo-eye .ib-ic { width: 15px; height: 15px; color: var(--primary); flex: none; }
+.pn-inbox .ib-todo-eye .ib-badge { margin-left: auto; }
+.pn-inbox .ib-badge.ib-b-ok { background: color-mix(in oklch, var(--success) 15%, transparent); color: color-mix(in oklab, var(--success) 65%, var(--foreground)); border-color: transparent; }
+.pn-inbox .ib-badge.ib-b-mut { color: var(--muted-foreground); }
+.pn-inbox .ib-todo-do { font-size: var(--ib-fs-17, 17px); font-weight: 650; line-height: 1.35; margin: 8px 0 4px; overflow-wrap: anywhere; }
+.pn-inbox .ib-todo[data-action-state]:not([data-action-state="open"]) .ib-todo-do { color: var(--muted-foreground); }
+.pn-inbox .ib-todo-why { margin: 0 0 10px; color: color-mix(in oklch, var(--muted-foreground) 70%, var(--foreground)); line-height: 1.5; white-space: pre-line; overflow-wrap: anywhere; }
+.pn-inbox .ib-todo-where { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: var(--ib-lr-lg, 10px); background: var(--card); min-width: 0; }
+.pn-inbox .ib-todo-logo { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--ib-fill); flex: none; }
+.pn-inbox .ib-todo-logo .ib-ic { width: 16px; height: 16px; }
+.pn-inbox .ib-todo-wt { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 1px; }
+.pn-inbox .ib-todo-wt b { font-weight: 600; font-size: var(--ib-fs-13-5, 13.5px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pn-inbox .ib-todo-host { color: var(--muted-foreground); font-size: var(--ib-fs-12-5, 12.5px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pn-inbox .ib-todo-cmd { font-family: var(--font-mono); font-size: var(--ib-fs-12-5, 12.5px); background: var(--ib-fill); padding: 1px 5px; border-radius: 5px; align-self: flex-start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pn-inbox .ib-todo-where .ib-btn { flex: none; text-decoration: none; color: inherit; }
+.pn-inbox .ib-todo-where .ib-btn .ib-ic { width: 14px; height: 14px; }
+.pn-inbox .ib-todo-watch, .pn-inbox .ib-todo-settled { display: flex; align-items: flex-start; gap: 7px; margin: 10px 2px 0; font-size: var(--ib-fs-13, 13px); color: var(--muted-foreground); line-height: 1.45; }
+.pn-inbox .ib-todo-settled { margin-top: 6px; }
+.pn-inbox .ib-todo-watch .ib-ic, .pn-inbox .ib-todo-settled .ib-ic { width: 15px; height: 15px; margin-top: 1px; flex: none; }
+.pn-inbox .ib-todo[data-action-state="done"] .ib-todo-settled .ib-ic,
+.pn-inbox .ib-todo[data-action-state="seen"] .ib-todo-settled .ib-ic { color: var(--success); }
+.pn-inbox .ib-todo[data-action-state="cant"] .ib-todo-settled .ib-ic { color: var(--destructive); }
+.pn-inbox .ib-act-undo { margin-left: 4px; color: var(--primary); font-weight: 550; text-decoration: underline; text-underline-offset: 2px; }
+.pn-inbox .ib-todo-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.pn-inbox .ib-todo-foot .ib-btn .ib-ic { width: 15px; height: 15px; }
+.pn-inbox .ib-todo-hint { margin-left: auto; color: var(--muted-foreground); font-size: var(--ib-fs-12-5, 12.5px); }
+.pn-inbox .ib-todo-compose { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.pn-inbox .ib-todo-compose label { font-size: var(--ib-fs-13, 13px); color: var(--muted-foreground); }
+.pn-inbox .ib-todo-note { width: 100%; min-height: 56px; resize: vertical; border: 1px solid var(--border); border-radius: 8px; background: var(--card); padding: 8px 10px; font: inherit; color: inherit; }
+.pn-inbox .ib-todo-compose .ib-todo-foot { margin-top: 4px; }
+@media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
+  .pn-inbox .ib-todo-foot .ib-btn { height: 44px; }
+  .pn-inbox .ib-todo-where .ib-btn { height: 44px; }
+  .pn-inbox .ib-todo-hint { margin-left: 0; flex-basis: 100%; }
+  .pn-inbox .ib-todo-note { font-size: var(--ib-fs-16-in, 16px); }
+}

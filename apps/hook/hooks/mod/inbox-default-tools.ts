@@ -17,7 +17,7 @@ export const INBOX_DEFAULT_TOOLS: readonly InboxToolInfo[] = [
         "body": {
           "type": "string",
           "minLength": 1,
-          "description": "The message, markdown. Question blocks render as answerable cards.\n\nTwo Inbox-only lines a question block can carry, each on its own line after the question:\n- `Stopped: <why>` only when you truly cannot go on until this is answered: the thread goes first in the person's list, under \"Stopped on you\". Otherwise leave the line out. A negative value (`no`, `none`, `n/a`, `-`) means no stop, so never write `Stopped: no`.\n- `Holds up: <work>; <work>` names the work that waits on the answer while you go on: listed under \"Holding up work\" (a `Stopped:` line wins). A `none` entry holds nothing up.\n\n:::question\nWhich database password should I use for staging?\n\nStopped: can't run the migration without it\nHolds up: staging deploy; release notes\n\n- [ ] The one in 1Password \"staging-db\"\n- [ ] Make a new one\n:::"
+          "description": "The message, markdown. Question blocks render as answerable cards.\n\nTwo Inbox-only lines a question block can carry, each on its own line after the question:\n- `Stopped: <why>` only when you truly cannot go on until this is answered: the thread goes first in the person's list, under \"Stopped on you\". Otherwise leave the line out. A negative value (`no`, `none`, `n/a`, `-`) means no stop, so never write `Stopped: no`.\n- `Holds up: <work>; <work>` names the work that waits on the answer while you go on: listed under \"Holding up work\" (a `Stopped:` line wins). A `none` entry holds nothing up.\n\n:::question\nWhich database password should I use for staging?\n\nStopped: can't run the migration without it\nHolds up: staging deploy; release notes\n\n- [ ] The one in 1Password \"staging-db\"\n- [ ] Make a new one\n:::\n\nA to-do, only for a true blocker: something the person must go and do outside this conversation before you can go on, that you cannot do yourself (approve a deploy, sign in, touch a security key, click something in another app, merge a pull request you cannot merge). Write it as an Inbox-only `:::action` block: the first line is what to do, as an order; then why, in a line or two. Optional lines: `Where: <url or place>` (a URL becomes an Open button), `Run: <command>` (a command to copy), `Stopped:` / `Holds up:` as for questions, and `Watching: <what you watch>` when you will notice it done by yourself (then pass its id in `done`).\nNever use it for a decision or a question (ask a :::question), for anything you can do yourself, or as a to-do list or a status update: one block per real blocker, and most messages need none. The person marks it Done or Can't do it (with a reason); that comes back in their reply under \"Actions you asked for\".\n\n:::action\nApprove the production deploy on Vercel\nThe 4.2 build passed every check and waits under \"Promote to Production\". Nothing else needs changing.\n\nWhere: https://vercel.com/acme/web/deployments\nStopped: release 4.2 cannot go out until it is approved\nWatching: the deployment; I go on by myself once it is Ready\n:::"
         },
         "project_path": {
           "description": "Absolute path of the repository or folder you work in; the thread lands in that project's row. The `plannotator inbox mcp` shim fills it from its working folder.",
@@ -37,6 +37,13 @@ export const INBOX_DEFAULT_TOOLS: readonly InboxToolInfo[] = [
         },
         "supersedes": {
           "description": "Earlier questions in this thread that no longer apply, so the person cannot answer them any more. Withdraw your own questions that are still open (read_thread state open or picked; a sent, skipped or closed one is refused) this way as the thread moves on: when this message replaces them, makes them moot or follows up on them, or the person's reply settled them in words, so they stop keeping the thread at the top of the person's list. \"<message id>/<key>\" for one question (read_thread gives each question's key) or \"<message id>\" for every open question of that message. With exactly one question in this message, it replaces them; otherwise they read \"No longer applies\". To replace one with a particular new question, put `Replaces: <message id>/<key>` in that question's block instead. The person's pick on a superseded question is never sent. Every id must name an open question of the thread this message lands in (use reply_to); otherwise nothing is sent and the refusal, invalid_supersedes, lists the thread's open questions.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "done": {
+          "description": "Your own to-dos (`:::action` blocks) in this thread that you saw done yourself, e.g. the deployment you were watching is Ready: \"<message id>/<key>\" for one (the key starts with a-; read_thread gives it) or \"<message id>\" for every open to-do of that message. The card then says you saw it done, and nothing is sent to the person. Only to-dos still open in the thread this message lands in (use reply_to); otherwise nothing is sent and the refusal, invalid_done, lists the thread's open to-dos. Never mark done what you did not see happen.",
           "type": "array",
           "items": {
             "type": "string"
@@ -307,6 +314,13 @@ export const INBOX_DEFAULT_TOOLS: readonly InboxToolInfo[] = [
         },
         "supersedes": {
           "description": "Earlier questions in this thread that no longer apply, so the person cannot answer them any more. Withdraw your own questions that are still open (read_thread state open or picked; a sent, skipped or closed one is refused) this way as the thread moves on: when this message replaces them, makes them moot or follows up on them, or the person's reply settled them in words, so they stop keeping the thread at the top of the person's list. \"<message id>/<key>\" for one question (read_thread gives each question's key) or \"<message id>\" for every open question of that message. With exactly one question in this message, it replaces them; otherwise they read \"No longer applies\". To replace one with a particular new question, put `Replaces: <message id>/<key>` in that question's block instead. The person's pick on a superseded question is never sent. Every id must name an open question of the thread this message lands in (use reply_to); otherwise nothing is sent and the refusal, invalid_supersedes, lists the thread's open questions.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "done": {
+          "description": "Your own to-dos (`:::action` blocks) in this thread that you saw done yourself, e.g. the deployment you were watching is Ready: \"<message id>/<key>\" for one (the key starts with a-; read_thread gives it) or \"<message id>\" for every open to-do of that message. The card then says you saw it done, and nothing is sent to the person. Only to-dos still open in the thread this message lands in (use reply_to); otherwise nothing is sent and the refusal, invalid_done, lists the thread's open to-dos. Never mark done what you did not see happen.",
           "type": "array",
           "items": {
             "type": "string"

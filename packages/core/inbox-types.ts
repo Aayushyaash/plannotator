@@ -425,7 +425,7 @@ export interface InboxMessage {
    * it reports (`<message id>/<key>`), sent once the Undo window passed.
    * Absent on every other message.
    */
-  actions?: string[];
+  action_report?: string[];
   /**
    * On a thread's root whose subject the agent did not give: the question
    * (`<message id>/<key>`) the subject was derived from, so the thread's
@@ -900,8 +900,18 @@ export interface InboxQuestionSummary {
 }
 
 export interface InboxMessageWire extends InboxMessage {
-  /** Omitted when the message asks no question (the Workspaces rule). */
+  /**
+   * Omitted when the message asks no question (the Workspaces rule). The
+   * server lists the message's to-dos (`kind: "action"`) here too, after its
+   * questions; a reader that does not know `"action"` must not answer them.
+   */
   questions?: InboxQuestion[];
+  /**
+   * Never sent by the server: the Inbox window moves a message's to-dos here
+   * out of `questions` when it reads a thread (packages/inbox/actions.ts), so
+   * nothing that picks and sends answers ever meets one.
+   */
+  actions?: InboxQuestion[];
   /**
    * The seq of the message's first line in the event log. Rides only on
    * `GET /api/inbox/threads/:id` (the window's thread), is never stored and
@@ -1488,14 +1498,19 @@ export type InboxToolCostHost = "pi" | "opencode";
  * entry in Pi's request shape (that computation gives 7,325 for the entry Pi
  * measured at 7,328); the Pi and OpenCode cost tests hold it to 5%. While the
  * card action is held back (INBOX_CARD_ACTION_ON false), the size without it.
+ * To-dos (approval "inbox-next-actions") then added the `:::action`
+ * paragraph to `body` and the `done` field: +861 bytes and +221 tokens with
+ * o200k_base on the generated entry in Pi's request shape (7,362 → 8,223
+ * bytes, 1,744 → 1,965 tokens), so 8,189 bytes (1,953 tokens) without the
+ * card action and 9,364 (2,268) with it, estimated, not re-measured on Pi.
  */
-const INBOX_TOOL_COST_NOW = INBOX_CARD_ACTION_ON ? { bytes: 8503, tokens: 2400 } : { bytes: 7328, tokens: 2000 };
+const INBOX_TOOL_COST_NOW = INBOX_CARD_ACTION_ON ? { bytes: 9364, tokens: 2700 } : { bytes: 8189, tokens: 2300 };
 export const INBOX_TOOL_COST: Readonly<Record<InboxToolCostHost, { bytes: number; tokens: number }>> = {
   pi: INBOX_TOOL_COST_NOW,
   opencode: INBOX_TOOL_COST_NOW,
 };
 
-/** "about 7 KB, roughly 2,000 tokens" for a host's measured cost. */
+/** "about 8 KB, roughly 2,300 tokens" for a host's measured cost. */
 export function inboxToolCostText(host: InboxToolCostHost): string {
   const cost = INBOX_TOOL_COST[host];
   return `about ${Math.round(cost.bytes / 1000)} KB, roughly ${cost.tokens.toLocaleString("en-US")} tokens`;

@@ -610,6 +610,22 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     (timer as { unref?: () => void }).unref?.();
     setAsideTimers.add(timer);
   };
+  // To-dos (approval "inbox-next-actions"): the person's Done or Can't do it goes to the agent once the same Undo window has passed.
+  const settleActions = () => {
+    try {
+      store.settleActions(setAsideDelayMs);
+    } catch (error) {
+      process.stderr.write(`Inbox: a to-do's Done was not sent: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+  };
+  const scheduleActionSettle = () => {
+    const timer = setTimeout(() => {
+      setAsideTimers.delete(timer);
+      settleActions();
+    }, setAsideDelayMs + 50);
+    (timer as { unref?: () => void }).unref?.();
+    setAsideTimers.add(timer);
+  };
   const token = createInboxToken();
   // Read once per start: the phone surface stays hidden until the iPhone app ships.
   const phonesOn = options.phones ?? resolveInboxPhones(loadConfig());
@@ -2124,6 +2140,19 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         return json(result);
       }
 
+      // A to-do (approval "inbox-next-actions"): the person's Done (with an
+      // optional note) or Can't do it (with a reason), sent to the agent once
+      // the Undo window passes; `{ outcome: null }` is the Undo.
+      const actionMatch = /^\/api\/inbox\/messages\/([A-Za-z0-9_]+)\/actions\/(a-[0-9a-f]{8}(?:-\d{1,3})?)$/.exec(path);
+      if (actionMatch) {
+        if (req.method !== "POST") return json({ error: "Use POST." }, 405);
+        const body = await readBody(req);
+        if (checkServerSession(body, serverSession) === "mismatch") return json(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409);
+        const questions = store.markAction(actionMatch[1]!, actionMatch[2]!, { outcome: body.outcome, note: body.note });
+        if (body.outcome !== null) scheduleActionSettle();
+        return json({ questions });
+      }
+
       // The project menu (design record "inbox-project-menu"): Mark all as
       // read and Archive all on one project, and their Undo. Loops over the
       // single actions (packages/shared/inbox/project-batch.ts); the same
@@ -2456,6 +2485,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     // An ack a stop interrupted inside its Undo window.
     settleAcks();
     if (store.acksPending() > 0) scheduleAckSettle();
+    // A to-do's Done a stop interrupted inside its Undo window.
+    settleActions();
+    if (store.actionsPending() > 0) scheduleActionSettle();
   }, 0);
 
   let stopped = false;

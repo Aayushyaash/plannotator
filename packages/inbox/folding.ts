@@ -294,6 +294,9 @@ export function holdingsOf(message: InboxMessageWire, options: { delivered: bool
   if (picks > 0) out.push({ kind: 'picks', text: `${plural(picks, 'pick')} in your draft`, say: `${plural(picks, 'pick')} in your draft`, count: picks });
   if (open > 0) out.push({ kind: 'open', text: `${open} open ${open === 1 ? 'question' : 'questions'}`, say: `${open} open ${open === 1 ? 'question' : 'questions'}`, count: open });
   if (sent > 0 && open === 0 && picks === 0) out.push({ kind: 'answered', text: `${sent} answered`, say: `${plural(sent, 'question')} answered`, count: sent });
+  // To-dos (approval "inbox-next-actions"): the ones still waiting on the person.
+  const todos = (message.actions ?? []).filter((a) => a.state === 'open').length;
+  if (todos > 0) out.push({ kind: 'open', text: `${todos} to do`, say: `${todos} to do`, count: todos });
   const files = message.attachments?.length ?? 0;
   if (files > 0) out.push({ kind: 'files', text: String(files), say: plural(files, 'attachment'), count: files });
   if (message.author.kind === 'person' && (message.sent_annotations ?? 0) > 0) {

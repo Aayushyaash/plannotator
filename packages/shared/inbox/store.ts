@@ -1877,7 +1877,7 @@ export class InboxStore {
         created_at: at,
         resolved_at: null,
         idempotency_key: null,
-        actions: sent.map((r) => r.id),
+        action_report: sent.map((r) => r.id),
       };
       try {
         for (const record of sent) this.appendQuestion(record, at);

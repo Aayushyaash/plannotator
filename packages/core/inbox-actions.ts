@@ -322,3 +322,35 @@ export function parseInboxDoneRef(value: unknown): { message_id: string; key: st
   if (!match) return null;
   return { message_id: match[1]!, key: match[2] ?? null };
 }
+
+// ─────────────────────────────── What agents are told ───────────────────────────────
+
+/**
+ * A `:::action` block as agents are shown it (send_message's `body`, the
+ * agent guide). inbox-actions.test.ts parses it with the store's own reader.
+ */
+export const INBOX_ACTION_EXAMPLE = [
+  ":::action",
+  "Approve the production deploy on Vercel",
+  'The 4.2 build passed every check and waits under "Promote to Production". Nothing else needs changing.',
+  "",
+  "Where: https://vercel.com/acme/web/deployments",
+  "Stopped: release 4.2 cannot go out until it is approved",
+  "Watching: the deployment; I go on by myself once it is Ready",
+  ":::",
+].join("\n");
+
+/**
+ * When to write a `:::action` block, and when not (the owner: "only when
+ * there's like a true blocker like a user actually has to do some shit").
+ * Rides send_message's `body` description (it reaches the model whole) and
+ * the agent guide. Never in QUESTION_AUTHORING_GUIDE: plan review shares it.
+ */
+export const INBOX_ACTION_GUIDE = [
+  "A to-do, only for a true blocker: something the person must go and do outside this conversation before you can go on, that you cannot do yourself (approve a deploy, sign in, touch a security key, click something in another app, merge a pull request you cannot merge). Write it as an Inbox-only `:::action` block: the first line is what to do, as an order; then why, in a line or two. Optional lines: `Where: <url or place>` (a URL becomes an Open button), `Run: <command>` (a command to copy), `Stopped:` / `Holds up:` as for questions, and `Watching: <what you watch>` when you will notice it done by yourself (then pass its id in `done`).",
+  "Never use it for a decision or a question (ask a :::question), for anything you can do yourself, or as a to-do list or a status update: one block per real blocker, and most messages need none. The person marks it Done or Can't do it (with a reason); that comes back in their reply under \"Actions you asked for\".",
+].join("\n");
+
+/** send_message's (and submit_guide's) `done`, as an agent reads it. */
+export const INBOX_DONE_DESCRIPTION =
+  "Your own to-dos (`:::action` blocks) in this thread that you saw done yourself, e.g. the deployment you were watching is Ready: \"<message id>/<key>\" for one (the key starts with a-; read_thread gives it) or \"<message id>\" for every open to-do of that message. The card then says you saw it done, and nothing is sent to the person. Only to-dos still open in the thread this message lands in (use reply_to); otherwise nothing is sent and the refusal, invalid_done, lists the thread's open to-dos. Never mark done what you did not see happen.";
