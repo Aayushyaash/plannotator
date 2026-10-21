@@ -89,11 +89,13 @@ export function ReloadLead({ where, updateCommand }: { where: string; updateComm
           <span>Update the plugin:</span>
           <CommandLine text={updateCommand} label="Copy the command that updates Plannotator's Claude Code plugin" announcement={UPDATE_COPIED_ANNOUNCEMENT} />
         </li>
-        <li className="ib-rl-line">
-          <span>
-            Then type <code>{RELOAD_COMMAND}</code> {where}.
-          </span>
-          <ReloadCopy />
+        <li>
+          <div className="ib-rl-line">
+            <span>
+              Then type <code>{RELOAD_COMMAND}</code> {where}.
+            </span>
+            <ReloadCopy />
+          </div>
         </li>
       </ol>
     );

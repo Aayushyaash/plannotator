@@ -3524,18 +3524,20 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
  * the line under a reply ("Steps"), the sidebar's "Reload Claude Code N", Settings → Agents' "Open sessions".
  */
 /* The lead (simplified 2026-10-21): one large line with Copy, the manual path folded under it. */
-.ib-rw-note, .ib-rl { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: var(--ib-lr-sm, 10px); border: 1px solid color-mix(in oklch, var(--warning) 35%, var(--border)); background: color-mix(in oklch, var(--warning) 7%, var(--card)); color: var(--foreground); min-width: 0; box-sizing: border-box; }
+.ib-rw-note, .ib-rl { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: var(--ib-lr-sm, 10px); border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border)); background: color-mix(in srgb, var(--warning) 7%, var(--card)); color: var(--foreground); min-width: 0; box-sizing: border-box; }
 .ib-rw-note { flex-basis: 100%; max-width: 640px; font-size: var(--ib-fs-13, 13px); line-height: 1.5; }
-.ib-rl { grid-column: 2 / -1; margin: 4px 0 2px; font-size: var(--ib-fs-13, 13px); line-height: 1.5; }
+.ib-rl { grid-column: 1 / -1; margin: 4px 0 2px; padding: 12px 14px; font-size: var(--ib-fs-13, 13px); line-height: 1.5; }
 .ib-rl-lead { margin: 0; color: var(--foreground); font-size: var(--ib-fs-14, 14px); font-weight: 550; min-width: 0; }
 .ib-rl .ib-rl-lead { font-size: var(--ib-fs-15, 15px); }
 .ib-rl-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
-.ib-rl-lead code { font-family: var(--font-mono); font-size: 0.93em; font-weight: 600; padding: 1px 5px; border-radius: 5px; background: color-mix(in oklch, var(--foreground) 8%, transparent); white-space: nowrap; }
+.ib-rl-line code { font-family: var(--font-mono); font-size: 0.93em; font-weight: 600; padding: 1px 5px; border-radius: 5px; background: color-mix(in oklch, var(--foreground) 8%, transparent); white-space: nowrap; }
 ol.ib-rl-two { padding: 0 0 0 20px; list-style: decimal; display: flex; flex-direction: column; gap: 8px; width: 100%; box-sizing: border-box; }
 ol.ib-rl-two > li { min-width: 0; }
 ol.ib-rl-two > li::marker { color: var(--muted-foreground); }
-ol.ib-rl-two .ib-rw-cmd { font-weight: 400; }
+ol.ib-rl-two .ib-rw-cmd { font-weight: 400; margin-top: 6px; }
 .ib-rl > .ib-rw-sess { margin: 0; width: 100%; box-sizing: border-box; background: var(--card); }
+.ib-rl .ib-rw-sess .ib-rw-sw { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 0 10px; }
+.ib-rl .ib-rw-sess .ib-rw-srow { padding-top: 6px; padding-bottom: 6px; min-height: 32px; box-sizing: border-box; }
 .ib-rl-fold { width: 100%; min-width: 0; }
 .pn-inbox .ib-rl-fold > .ib-rw-lnk { margin-left: 0; font-size: var(--ib-fs-12-5, 12.5px); color: var(--muted-foreground); font-weight: 500; }
 .ib-rl-fold > .ib-rw-steps { margin: 8px 0 0; max-width: none; }
