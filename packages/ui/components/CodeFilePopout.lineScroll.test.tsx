@@ -62,6 +62,32 @@ describe.if(hasDom)('whenCodeLineRendered', () => {
     area.remove();
   });
 
+  test('a line past the end of the file is never waited for', async () => {
+    const area = document.createElement('div');
+    document.body.appendChild(area);
+    const found: HTMLElement[] = [];
+    whenCodeLineRendered(area, 31, (el) => found.push(el), { lineCount: 30 });
+    whenCodeLineRendered(area, 0, (el) => found.push(el));
+    area.append(lineDiv(31), lineDiv(0));
+    await nextFrame();
+    await nextFrame();
+    expect(found).toHaveLength(0);
+    area.remove();
+  });
+
+  test('gives up when the line never comes within the time limit', async () => {
+    const area = document.createElement('div');
+    document.body.appendChild(area);
+    const found: HTMLElement[] = [];
+    whenCodeLineRendered(area, 5, (el) => found.push(el), { timeoutMs: 30 });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    area.appendChild(lineDiv(5));
+    await nextFrame();
+    await nextFrame();
+    expect(found).toHaveLength(0);
+    area.remove();
+  });
+
   test('stopping before the line appears never calls back', async () => {
     const area = document.createElement('div');
     document.body.appendChild(area);
@@ -79,8 +105,14 @@ describe.if(hasDom)('whenCodeLineRendered', () => {
 describe.if(hasDom)('CodeFileView with a referenced line', () => {
   const contents = Array.from({ length: 300 }, (_, i) => `const x${i + 1} = ${i + 1};`).join('\n');
 
+  let scrolled: string[] = [];
+
+  async function waitForScroll(count: number): Promise<void> {
+    for (let i = 0; i < 50 && scrolled.length < count; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
   async function renderView(props: Record<string, unknown>): Promise<string[]> {
-    const scrolled: string[] = [];
+    scrolled = [];
     HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
       scrolled.push(this.getAttribute('data-line') ?? this.getAttribute('data-code-annotation-id') ?? this.tagName);
     };
@@ -89,7 +121,7 @@ describe.if(hasDom)('CodeFileView with a referenced line', () => {
     document.body.appendChild(host);
     root = createRoot(host);
     await act(async () => root!.render(<CodeFileView filepath="/repo/src/big.ts" contents={contents} {...props} />));
-    for (let i = 0; i < 50 && scrolled.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForScroll(1);
     return scrolled;
   }
 
@@ -107,6 +139,19 @@ describe.if(hasDom)('CodeFileView with a referenced line', () => {
     expect(scrolled).toEqual(['120']);
     for (const line of [120, 121, 122, 123]) expect(lineElement(line)?.hasAttribute('data-selected-line')).toBe(true);
     expect(lineElement(124)?.hasAttribute('data-selected-line')).toBe(false);
+  });
+
+  test('a line past the end of the file scrolls nowhere', async () => {
+    expect(await renderView({ line: 400 })).toEqual([]);
+  });
+
+  test('reopening the same file and line scrolls to it again', async () => {
+    const { CodeFileView } = await import('./CodeFilePopout');
+    await renderView({ line: 250, revealKey: 1 });
+    expect(scrolled).toEqual(['250']);
+    await act(async () => root!.render(<CodeFileView filepath="/repo/src/big.ts" contents={contents} line={250} revealKey={2} />));
+    await waitForScroll(2);
+    expect(scrolled).toEqual(['250', '250']);
   });
 
   test('without a line nothing scrolls', async () => {

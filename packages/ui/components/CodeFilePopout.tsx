@@ -25,6 +25,8 @@ interface CodeFilePopoutProps {
   contents: string;
   line?: number;
   lineEnd?: number;
+  /** Changes on every open, so reopening the same file:line scrolls to it again. */
+  revealKey?: number;
   prerenderedHTML?: string;
   error?: string;
   requestedPath?: string;
@@ -291,6 +293,8 @@ export interface CodeFileViewProps {
   contents: string;
   line?: number;
   lineEnd?: number;
+  /** Changes on every open, so reopening the same file:line scrolls to it again. */
+  revealKey?: number;
   prerenderedHTML?: string;
   annotations?: CodeAnnotation[];
   selectedAnnotationId?: string | null;
@@ -319,6 +323,7 @@ export const CodeFileView: React.FC<CodeFileViewProps> = ({
   contents,
   line,
   lineEnd,
+  revealKey,
   prerenderedHTML,
   annotations = [],
   selectedAnnotationId,
@@ -402,13 +407,14 @@ export const CodeFileView: React.FC<CodeFileViewProps> = ({
   // only when the file or the line changes; a selected comment scrolls itself.
   const selectedAnnotationIdRef = useRef(selectedAnnotationId);
   selectedAnnotationIdRef.current = selectedAnnotationId;
+  const lineCount = useMemo(() => contents.split('\n').length, [contents]);
   useEffect(() => {
     const area = fileAreaRef.current;
     if (line == null || !area || selectedAnnotationIdRef.current) return;
     return whenCodeLineRendered(area, line, (lineEl) => {
       lineEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    });
-  }, [line, filepath]);
+    }, { lineCount });
+  }, [line, filepath, lineCount, revealKey]);
 
   const openCommentForRange = useCallback((
     range: { start: number; end: number },
@@ -575,6 +581,7 @@ export const CodeFilePopout: React.FC<CodeFilePopoutProps> = ({
   contents,
   line,
   lineEnd,
+  revealKey,
   prerenderedHTML,
   error,
   requestedPath,
@@ -679,6 +686,7 @@ export const CodeFilePopout: React.FC<CodeFilePopoutProps> = ({
         contents={contents}
         line={line}
         lineEnd={lineEnd}
+        revealKey={revealKey}
         prerenderedHTML={prerenderedHTML}
         annotations={annotations}
         selectedAnnotationId={selectedAnnotationId}

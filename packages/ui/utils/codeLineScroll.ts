@@ -22,17 +22,26 @@ export function findCodeLineElement(root: ParentNode, line: number): HTMLElement
   return null;
 }
 
+/** How long to wait for a line before giving up (a file that never draws it). */
+export const CODE_LINE_WAIT_MS = 5_000;
+
 /**
  * Call `onFound` once with code line `line` under `root`, in the frame after it
  * exists (so it has been laid out). Watches `root` and every Pierre shadow root
- * that appears under it until the line shows up. Returns a function that stops
- * watching; call it on unmount or when the line or file changes.
+ * that appears under it until the line shows up. Gives up at once when the line
+ * cannot exist (below 1, or past `lineCount`), and after `timeoutMs`. Returns a
+ * function that stops watching; call it on unmount or when the line or file
+ * changes.
  */
 export function whenCodeLineRendered(
   root: HTMLElement,
   line: number,
   onFound: (element: HTMLElement) => void,
+  options: { lineCount?: number; timeoutMs?: number } = {},
 ): () => void {
+  if (!Number.isInteger(line) || line < 1 || (options.lineCount != null && line > options.lineCount)) {
+    return () => {};
+  }
   let stopped = false;
   let frame: number | null = null;
   const observers: MutationObserver[] = [];
@@ -62,7 +71,7 @@ export function whenCodeLineRendered(
         // Look it up again: a highlight pass may have replaced the element.
         const element = findCodeLineElement(root, line);
         if (element) {
-          stopped = true;
+          stop();
           onFound(element);
           return;
         }
@@ -76,12 +85,16 @@ export function whenCodeLineRendered(
     }
   }
 
+  const stop = () => {
+    stopped = true;
+    stopWatching();
+    clearTimeout(giveUp);
+    if (frame != null) cancelAnimationFrame(frame);
+  };
+  const giveUp = setTimeout(stop, options.timeoutMs ?? CODE_LINE_WAIT_MS);
+
   watch(root);
   check();
 
-  return () => {
-    stopped = true;
-    stopWatching();
-    if (frame != null) cancelAnimationFrame(frame);
-  };
+  return stop;
 }
