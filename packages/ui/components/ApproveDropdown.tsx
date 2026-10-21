@@ -1,7 +1,8 @@
 import React, { useState, useRef, useCallback } from 'react';
 import type { Agent } from '../hooks/useAgents';
 import { useDismissablePopover } from '../hooks/useDismissablePopover';
-import { getAgentSwitchSettings, saveAgentSwitchSettings, type AgentSwitchSettings } from '../utils/agentSwitch';
+import { getAgentSwitchDefaults, saveAgentSwitchSettings, type AgentSwitchSettings } from '../utils/agentSwitch';
+import { useConfigValue } from '../config/useConfig';
 
 interface ApproveDropdownProps {
   onApprove: () => void;
@@ -37,7 +38,10 @@ export const ApproveDropdown: React.FC<ApproveDropdownProps> = ({
   disabled = false,
   isLoading = false,
 }) => {
-  const [setting, setSetting] = useState<AgentSwitchSettings>(() => getAgentSwitchSettings('plan'));
+  // Read reactively: config.json's value lands through configStore.init()
+  // once /api/plan answers, which may be after this mounts (#1390).
+  const stored = useConfigValue('agentSwitch');
+  const setting: AgentSwitchSettings = stored ?? getAgentSwitchDefaults('plan');
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -52,7 +56,6 @@ export const ApproveDropdown: React.FC<ApproveDropdownProps> = ({
   });
 
   const handleSelect = (newSetting: AgentSwitchSettings) => {
-    setSetting(newSetting);
     saveAgentSwitchSettings(newSetting);
     setIsOpen(false);
   };
