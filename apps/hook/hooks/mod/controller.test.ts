@@ -144,6 +144,67 @@ describe('plan review', () => {
     expect(launches(host)).toHaveLength(2)
   })
 
+  // #2007: on Team/Enterprise accounts Claude Code's built-in guard
+  // (cc-plugin-sec-default) sends classic.PermissionRequest past this mod, so
+  // the plugin's own command hook gets the approved call. The mod records the
+  // approval for it while the call is in flight.
+  test('approved: the passing call is recorded for the classic hook, and the record goes when the call settles', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.onPlanCall({ tool_use_id: 't1', plan: PLAN })
+    decide(host, launches(host)[0]!, {
+      surface: 'plan',
+      decision: 'approved',
+      message: 'Plan approved.',
+      noop: false,
+      approvedPlan: PLAN,
+      permissionMode: 'acceptEdits',
+    })
+    await host.tick()
+
+    const recordPath = '/data/claude-code-mod/session-1/plan-approvals/toolu_02.json'
+    expect(host.files.has(recordPath)).toBe(false)
+    expect(await mod.onPlanCall({ tool_use_id: 'toolu_02', plan: PLAN })).toEqual({ pass: true })
+
+    // Its folder is made owner-only before the record is written.
+    const mkdir = host.runs.find((call) => call.argv[3] === 'plannotator-mkdir' && call.argv[4] === '/data/claude-code-mod/session-1/plan-approvals')
+    expect(mkdir?.argv[2]).toContain('umask 077')
+    const record = JSON.parse(host.files.get(recordPath) ?? '{}')
+    expect(record).toEqual({ v: 1, hash: await host.sha256(PLAN.replace(/\s+$/, '')), plan: PLAN, permissionMode: 'acceptEdits', at: host.clock })
+
+    await mod.onPlanCallSettled('toolu_02')
+    expect(host.files.has(recordPath)).toBe(false)
+  })
+
+  test('a call that is not the approved plan records nothing for the classic hook', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.onPlanCall({ tool_use_id: 't1', plan: PLAN })
+    decide(host, launches(host)[0]!, { surface: 'plan', decision: 'approved', message: 'ok', noop: false, approvedPlan: PLAN })
+    await host.tick()
+
+    await mod.onPlanCall({ tool_use_id: 't2', plan: '# Something else\n' })
+
+    expect([...host.files.keys()].some((path) => path.includes('/plan-approvals/'))).toBe(false)
+  })
+
+  test('a record that cannot be written leaves the approved call passing as before', async () => {
+    const host = fakeHost()
+    serveOnLaunch(host)
+    const mod = new PlannotatorMod(host, SESSION)
+    await mod.onPlanCall({ tool_use_id: 't1', plan: PLAN })
+    decide(host, launches(host)[0]!, { surface: 'plan', decision: 'approved', message: 'ok', noop: false, approvedPlan: PLAN })
+    await host.tick()
+    const serve = host.onRun
+    host.onRun = (call) => (call.argv[3] === 'plannotator-mkdir' ? { exitCode: 1, stdout: '', stderr: 'read-only' } : serve(call))
+
+    expect(await mod.onPlanCall({ tool_use_id: 't2', plan: PLAN })).toEqual({ pass: true })
+    expect(mod.onPlanPermission('t2', {})?.behavior).toBe('allow')
+    expect([...host.files.keys()].some((path) => path.includes('/plan-approvals/'))).toBe(false)
+  })
+
   test('a revision while the review is open goes into the same tab', async () => {
     const host = fakeHost()
     serveOnLaunch(host)

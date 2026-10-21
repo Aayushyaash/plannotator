@@ -16,6 +16,12 @@ import {
 import type { DiffLineBgIntensity } from '@plannotator/core/config-types';
 import { isFaviconStyle, type FaviconStyle } from '@plannotator/core/favicon';
 import {
+  agentSwitchConfigValue,
+  isAgentSwitchName,
+  parseAgentSwitchConfig,
+  type AgentSwitchChoice,
+} from '@plannotator/core/agent-switch';
+import {
   DEFAULT_TOKEN_HOVER_DELAY_MS,
   isTokenHoverDelay,
   resolveStoredTokenHoverTrigger,
@@ -87,6 +93,27 @@ export function readThemePairCookies(keys?: ThemePairLegacyKeys): ThemePair | un
   if (!mode && !light && !dark && !legacy) return undefined;
   const seeded = seedThemePair(legacy, parseThemeMode(mode, getDefaultThemePair().mode));
   return normalizeThemePair({ mode, light: light ?? seeded.light, dark: dark ?? seeded.dark }, seeded);
+}
+
+/** Pre-registry cookie keys of the agent switch, kept so an upgrade keeps the choice. */
+const AGENT_SWITCH_COOKIE = 'plannotator-agent-switch';
+const AGENT_SWITCH_CUSTOM_COOKIE = 'plannotator-agent-custom';
+
+function readAgentSwitchCookies(): AgentSwitchChoice | undefined {
+  const choice = parseAgentSwitchConfig(storage.getItem(AGENT_SWITCH_COOKIE));
+  if (!choice) return undefined;
+  const customName = storage.getItem(AGENT_SWITCH_CUSTOM_COOKIE);
+  return isAgentSwitchName(customName) ? { switchTo: choice.switchTo, customName } : choice;
+}
+
+function writeAgentSwitchCookies(choice: AgentSwitchChoice | null): void {
+  // null = never chosen: write nothing, so the surface default keeps applying.
+  if (!choice) return;
+  storage.setItem(AGENT_SWITCH_COOKIE, choice.switchTo);
+  if (choice.customName) storage.setItem(AGENT_SWITCH_CUSTOM_COOKIE, choice.customName);
+  // Custom with its name cleared: drop the old name, or the next read would
+  // pair it with "custom" and switch to that old agent again.
+  else if (choice.switchTo === 'custom') storage.removeItem(AGENT_SWITCH_CUSTOM_COOKIE);
 }
 
 const DIFF_LINE_BG_INTENSITY_VALUES = ['subtle', 'normal', 'strong'] as const;
@@ -670,6 +697,35 @@ export const SETTINGS = {
       } catch {
         return {};
       }
+    },
+  },
+  /**
+   * OpenCode's agent switch after plan approval / review feedback (#1390).
+   * null = never chosen: each surface applies its own default (plan approval
+   * switches to "build", review feedback stays), see utils/agentSwitch.
+   *
+   * Server-synced to `agentSwitch` in ~/.plannotator/config.json because some
+   * webviews (Glimpse's WKWebView) keep no cookies between runs, and a lost
+   * choice silently hands the session to the build agent. The cookie keys
+   * are the pre-registry ones, so an upgrade keeps an existing choice.
+   */
+  agentSwitch: {
+    defaultValue: null as AgentSwitchChoice | null,
+    fromCookie: () => readAgentSwitchCookies(),
+    toCookie: (v: AgentSwitchChoice | null) => writeAgentSwitchCookies(v),
+    serverKey: 'agentSwitch',
+    fromServer: (sc: Record<string, unknown>) => {
+      const choice = parseAgentSwitchConfig(sc.agentSwitch);
+      // Custom with no name means no switch: never pair it with an old name.
+      if (!choice || choice.customName || choice.switchTo === 'custom') return choice;
+      // A plain choice keeps the name typed in the Custom field earlier, so
+      // picking Custom again shows it (the cookie is the only place it lives).
+      const customName = storage.getItem(AGENT_SWITCH_CUSTOM_COOKIE);
+      return isAgentSwitchName(customName) ? { ...choice, customName } : choice;
+    },
+    toServer: (v: AgentSwitchChoice | null) => {
+      const value = v ? agentSwitchConfigValue(v) : undefined;
+      return value === undefined ? {} : { agentSwitch: value };
     },
   },
   /**

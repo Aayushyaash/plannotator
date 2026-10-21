@@ -102,6 +102,7 @@ Pass any subset of these to `configurePlannotatorUI({ ... })`. Anything omitted 
 | `skillInstructionsDestination` | `string` | What a composer's "Includes skill instructions" line says the instructions go with (ui 0.53.0) | `'your feedback'` |
 | `webmcp` | `WebMcpPolicy` | The WebMCP provider policy, `{ enabled, namePrefix }` | Enabled whenever the browser exposes `document.modelContext`, prefix `plannotator.` |
 | `componentTooltips` | `boolean` | Draw ui's own hover text through `components/HostTitle` as ui's `Tooltip` instead of a native `title` (ui 0.53.0) | false: native titles |
+| `digitHexIssueRefs` | `boolean` | Render a digit-only 6/8-digit `#123456` / `#12345678` (word boundary, no leading zero) as an issue ref instead of a hex swatch, only where `InlineMarkdown` can build a ref link (`githubRepo` on a known forge). Also `setDigitHexIssueRefs` / `resetDigitHexIssueRefs` / `getDigitHexIssueRefs` on `components/InlineMarkdown` for tests (#1932) | false: swatches, exactly as before |
 
 ### Interface details worth knowing
 
