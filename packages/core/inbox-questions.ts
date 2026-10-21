@@ -345,11 +345,14 @@ function exportItem(record: InboxQuestionRecord, number: number): QuestionExport
 /**
  * The body a Send writes: "Answered N questions.", "Skipped N questions." or
  * "Answered N questions, skipped M." when it carries answers or skips,
- * the person's words if any (then, when it carries neither answers nor
- * skips, the line saying the questions are still open), then Plannotator's "Answers to your questions"
- * section over every question of the message, with the answers this Send
- * carries and earlier sent answers that still stand. Empty when there is
- * nothing to send.
+ * the person's words if any, then the line saying which questions stay open
+ * (when any do), then Plannotator's "Answers to your questions" section over
+ * every question of the message, with the answers this Send carries and
+ * earlier sent answers that still stand. Empty when there is nothing to send.
+ *
+ * A Send never skips on its own (approval "inbox-explicit-skip",
+ * 2026-10-21): every question it neither answers nor skips stays open, and
+ * the reply says so, so the agent does not guess or ask again.
  */
 export function composeInboxReplyBody(input: {
   questions: readonly InboxQuestionRecord[];
@@ -357,38 +360,82 @@ export function composeInboxReplyBody(input: {
   earlier: readonly QuestionAnswer[];
   words: string | undefined;
   /**
-   * The questions the still-open line counts when the reply sends no answer
-   * and no skip. Default: `questions`. The Inbox passes every question the
-   * replied-to message's session asked in the thread, so words sent to its
-   * later plain update still tell it that its questions stay open.
+   * The questions the still-open line counts. Default: the questions of
+   * every message the reply answers. The Inbox passes every question the
+   * replied-to message's session asked in the thread, so a reply to one
+   * message also tells the agent about its questions in the others. The
+   * questions this reply sends are never counted.
    */
   stillOpen?: readonly InboxQuestionRecord[];
+  /**
+   * One reply for one session (approval "inbox-explicit-skip", 2026-10-21):
+   * every message of the session the reply answers questions on, in thread
+   * order, each with its questions, the answers this reply sends on it and
+   * its earlier sent answers. Replaces `questions` / `sent` / `earlier` when
+   * given. When the reply sends answers on a message other than `replyTo`
+   * (or on several), the answers section names each message by its id.
+   */
+  messages?: readonly InboxReplyMessageAnswers[];
+  /** The message the reply answers (`reply_to`), for `messages`. */
+  replyTo?: string;
 }): string {
+  const groups: readonly InboxReplyMessageAnswers[] = input.messages ?? [
+    { message_id: input.questions[0]?.message_id ?? input.replyTo ?? "", questions: input.questions, sent: input.sent, earlier: input.earlier },
+  ];
   // The same rule as the answers section's "x of y answered" line
   // (formatQuestionAnswersSection): a pick, Other or text answers; a note
   // alone answers only a settled question; a skip that answers nothing is a
   // skip; a note alone on an open question is neither.
-  const settled = new Set(input.questions.filter((q) => q.parsed.choices.some((c) => c.settled)).map((q) => q.key));
   let answered = 0;
   let skipped = 0;
-  for (const a of input.sent) {
-    if (isQuestionAnswerEmpty(a)) continue;
-    if (isQuestionAnswered(a) || (settled.has(a.key) && !a.skipped)) answered += 1;
-    else if (a.skipped) skipped += 1;
+  for (const group of groups) {
+    const settled = new Set(group.questions.filter((q) => q.parsed.choices.some((c) => c.settled)).map((q) => q.key));
+    for (const a of group.sent) {
+      if (isQuestionAnswerEmpty(a)) continue;
+      if (isQuestionAnswered(a) || (settled.has(a.key) && !a.skipped)) answered += 1;
+      else if (a.skipped) skipped += 1;
+    }
   }
   const sentence = replySentence(answered, skipped);
+  const sentGroups = groups.filter((g) => g.sent.length > 0);
+  const labelled = sentGroups.length > 1 || (sentGroups.length === 1 && input.replyTo !== undefined && sentGroups[0]!.message_id !== input.replyTo);
+  let section = "";
+  if (sentGroups.length === 1 && !labelled) {
+    section = answersSection(sentGroups[0]!, 2);
+  } else if (sentGroups.length > 0) {
+    // One section, a sub-heading per message: the agent can tell which "Q1" is which.
+    const parts = sentGroups.flatMap((g) => {
+      const body = answersSection(g, 3).replace(/^### [^\n]*\n\n/, "");
+      return body === "" ? [] : [`### Your message ${g.message_id}\n\n${body}`];
+    });
+    if (parts.length > 0) section = `## ${QUESTION_ANSWERS_HEADING}\n\n${parts.join("\n\n")}`;
+  }
+  const words = input.words?.trim() ?? "";
+  // The questions this reply leaves open, and says so: the agent must not ask
+  // again. A reply that answers and skips nothing keeps its own wording.
+  const sentIds = new Set(groups.flatMap((g) => g.sent.map((a) => `${g.message_id}/${a.key}`)));
+  const pool = (input.stillOpen ?? groups.flatMap((g) => g.questions)).filter((q) => !sentIds.has(`${q.message_id}/${q.key}`));
+  const stillOpen = sentGroups.length === 0 ? inboxStillOpenLine(pool) : inboxOtherStillOpenLine(pool);
+  return [sentence, words, stillOpen, section].filter((part) => part !== "").join("\n\n");
+}
+
+/** One message a reply answers questions on (`composeInboxReplyBody`'s `messages`). */
+export interface InboxReplyMessageAnswers {
+  message_id: string;
+  questions: readonly InboxQuestionRecord[];
+  sent: readonly QuestionAnswer[];
+  earlier: readonly QuestionAnswer[];
+}
+
+/** One message's "Answers to your questions" section, at a heading level (its questions numbered as its cards are). */
+function answersSection(group: InboxReplyMessageAnswers, headingLevel: 2 | 3): string {
   // A superseded question is neither answered nor "Unanswered": the agent
   // withdrew it. The others keep their numbers ("Q2" stays the card's 2).
-  const items = [...input.questions]
+  const items = [...group.questions]
     .sort((a, b) => a.position - b.position)
     .map((q, i) => (q.superseded_by ? null : exportItem(q, i + 1)))
     .filter((item): item is QuestionExportItem => item !== null);
-  const section = input.sent.length > 0 ? formatQuestionAnswersSection(items, [...input.sent, ...input.earlier]).trimEnd() : "";
-  const words = input.words?.trim() ?? "";
-  // A reply that answers and skips nothing (words, annotations, or both)
-  // leaves every question open, and says so: the agent must not ask again.
-  const stillOpen = input.sent.length === 0 ? inboxStillOpenLine(input.stillOpen ?? input.questions) : "";
-  return [sentence, words, stillOpen, section].filter((part) => part !== "").join("\n\n");
+  return formatQuestionAnswersSection(items, [...group.sent, ...group.earlier], { headingLevel }).trimEnd();
 }
 
 /**
@@ -462,9 +509,25 @@ export function inboxStillOpenLine(questions: readonly InboxQuestionRecord[]): s
   return `No questions answered yet; all ${open} are still open. Don't re-ask them; the person will answer in the Inbox.`;
 }
 
-/** Matches `inboxStillOpenLine`'s line (one line of a reply body). */
+/**
+ * The line a reply that answers or skips some questions carries when others
+ * stay open (approval "inbox-explicit-skip", 2026-10-21): how many, that they
+ * stay open, and not to ask them again. Empty when none is left waiting on
+ * the person. `INBOX_STILL_OPEN_LINE` matches it too.
+ */
+export function inboxOtherStillOpenLine(questions: readonly InboxQuestionRecord[]): string {
+  const open = questions.filter((q) => {
+    const state = inboxQuestionState(q, false);
+    return state === "open" || state === "picked";
+  }).length;
+  if (open === 0) return "";
+  if (open === 1) return "You have 1 other question open in this thread. It stays open; the person will answer it in the Inbox. Don't re-ask it.";
+  return `You have ${open} other questions open in this thread. They stay open; the person will answer them in the Inbox. Don't re-ask them.`;
+}
+
+/** Matches `inboxStillOpenLine`'s and `inboxOtherStillOpenLine`'s line (one line of a reply body). */
 export const INBOX_STILL_OPEN_LINE =
-  /^(?:No questions? answered yet|No new answers in this reply); .* still open\. Don't re-ask (?:it|them); the person will answer in the Inbox\.$/;
+  /^(?:(?:No questions? answered yet|No new answers in this reply); .* still open\. Don't re-ask (?:it|them); the person will answer in the Inbox\.|You have \d+ other questions? open in this thread\. (?:It stays|They stay) open; the person will answer (?:it|them) in the Inbox\. Don't re-ask (?:it|them)\.)$/;
 
 const questionsWord = (n: number): string => `${n} question${n === 1 ? "" : "s"}`;
 

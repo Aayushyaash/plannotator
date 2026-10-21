@@ -270,7 +270,9 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
           words: op.words,
           idempotency_key: op.key,
           questions: picked.map((q) => ({ key: q.key, revision: q.revision })),
-          skip_unanswered: op.skip === true,
+          // "Skip them": the person chose to skip the message's open questions (approval "inbox-explicit-skip").
+          // The window lists what the chip counted; the store skips only the ones still open.
+          ...(op.skip === true ? { skip: store.questionsOf(target).map((q) => q.key) } : {}),
           ...(op.tag ? { tags: [{ host: "test", session: op.tag, wakes: op.tag !== "ses_t2" }] } : {}),
         });
         if (result.replayed) return "replayed";
@@ -1297,7 +1299,8 @@ class ThreadStateModel {
         const picks = message.questions.filter((q) => this.recordState(q) === "picked");
         const skips = op.skip ? message.questions.filter((q) => this.recordState(q) === "open") : [];
         if (picks.length === 0 && skips.length === 0 && op.words.trim() === "") {
-          return op.skip ? "refused:nothing_to_send" : "refused:validation_error";
+          // A listed skip whose questions closed meanwhile is a no-op; with nothing listed, nothing to send.
+          return op.skip && message.questions.length > 0 ? "refused:nothing_to_send" : "refused:validation_error";
         }
         for (const q of picks) q.sent = true;
         for (const q of skips) {

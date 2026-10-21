@@ -7,7 +7,7 @@ import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
 import { parseMarkdownToBlocks } from '@plannotator/ui/utils/parser';
 import type { InboxListRow, InboxMessageWire, InboxProjectRepo, InboxQuestion, InboxSentRecipient, InboxThread, InboxUpload } from '@plannotator/core/inbox-types';
 import type { IndexedQuestion, QuestionAnswer, QuestionStatus } from '@plannotator/core/question-block';
-import { inboxAskingMessage, inboxDefaultSkip, isInboxNote, isInboxTextKind, readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachment, type InboxAttachmentState, type InboxInlineImage, type InboxQuestionState } from '@plannotator/core/inbox-types';
+import { inboxAskingMessage, isInboxNote, isInboxTextKind, readInboxAttachmentKind, type InboxAnnotationRecord, type InboxAttachment, type InboxAttachmentState, type InboxInlineImage, type InboxQuestionState } from '@plannotator/core/inbox-types';
 import type { LocalLinkResolver } from '@plannotator/ui/components/LocalLinkContext';
 import { NOT_ATTACHED_TITLE, attachmentDeepLink, attachmentDisplayPath, attachmentForLink, openAttachmentTitle, useRefRepo } from '../links';
 import { InboxApiError, inboxApi, type AttachmentsModel } from '../api';
@@ -169,42 +169,8 @@ function HoldingChips({ holdings }: { holdings: Holding[] }) {
   );
 }
 
-/** The skip chip's state: the default, or the person's choice for this Send. */
-export type SkipChoice = 'auto' | 'skip' | 'keep';
-
-/**
- * Whether a Send skips the questions it leaves unanswered. By default only
- * when it answers at least one question: a reply of words (or annotations)
- * alone leaves them all open. The chip's choice wins either way.
- */
-export function skipsUnanswered(choice: SkipChoice, answersAny: boolean): boolean {
-  return choice === 'skip' || (choice === 'auto' && answersAny);
-}
-
 /** A wire message's question states, for the shared asking rule. */
 const questionStatesOf = (message: InboxMessageWire): InboxQuestionState[] => (message.questions ?? []).map((q) => q.state);
-
-/**
- * Whether a Send now would carry at least one answer: a saved pick not yet
- * sent, or one being saved (`pending`, keyed `<message id>/<key>`; null is a
- * pick being cleared).
- */
-export function sendAnswersAny(thread: InboxThread, pending: ReadonlyMap<string, QuestionAnswer | null> = new Map()): boolean {
-  // Nothing being saved: the shared default (core inbox-delivery), which the list row's delivery reads too.
-  if (pending.size === 0) return inboxDefaultSkip(thread.messages.filter((m) => m.author.kind === 'agent'), questionStatesOf);
-  for (const m of thread.messages) {
-    if (m.author.kind !== 'agent') continue;
-    for (const q of m.questions ?? []) {
-      const id = `${m.id}/${q.key}`;
-      if (pending.has(id)) {
-        if (pending.get(id) !== null && (q.state === 'open' || q.state === 'picked')) return true;
-      } else if (q.state === 'picked') {
-        return true;
-      }
-    }
-  }
-  return false;
-}
 
 /**
  * The session a Send reaches, when its message names one: the last target's
@@ -214,14 +180,31 @@ export function sendAnswersAny(thread: InboxThread, pending: ReadonlyMap<string,
  * carried words receives nothing, so its session is not asked about). With
  * nothing to send, the latest agent message's.
  */
-function askingSessionOf(thread: InboxThread, options: { skip: boolean; carries: boolean }): AskingSession | null {
-  // Nothing rides on the latest message: the shared rule the list row's delivery uses too (core inbox-delivery).
+function askingSessionOf(thread: InboxThread, options: { skip: ReadonlySet<string>; carries: boolean }): AskingSession | null {
+  // Nothing rides on the latest message: the shared rule the list row's delivery uses too (core
+  // inbox-delivery), plus the questions the person chose to skip, when any.
   const message = options.carries
     ? sendTargetsOf(thread, options.skip).at(-1)!.message
-    : inboxAskingMessage(thread.messages, questionStatesOf, options.skip);
+    : (lastSkipOrPick(thread, options.skip) ?? inboxAskingMessage(thread.messages, questionStatesOf, false));
   if (!message) return null;
   if (message.author.kind !== 'agent' || !message.author.session) return null;
   return { message, session: message.author.session, host: message.author.host ?? '', name: agentName(message.author) };
+}
+
+/** The last agent message a pick or a chosen skip answers (null when the person chose no skip: the shared rule decides). */
+function lastSkipOrPick(thread: InboxThread, skip: ReadonlySet<string>): InboxMessageWire | null {
+  if (skip.size === 0) return null;
+  let found: InboxMessageWire | null = null;
+  for (const m of thread.messages) {
+    if (m.author.kind !== 'agent') continue;
+    if ((m.questions ?? []).some((q) => q.state === 'picked' || (q.state === 'open' && skip.has(`${m.id}/${q.key}`)))) found = m;
+  }
+  return found;
+}
+
+/** The key a reply of a Send keeps across retries: one per session (a message with no session is its own). */
+function replyKeyOf(message: InboxMessageWire): string {
+  return message.author.kind === 'agent' && message.author.session ? `s:${message.author.host ?? ''}\u0000${message.author.session}` : `m:${message.id}`;
 }
 
 /** The sessions a comment tags with `@` (ui's `Annotation.mentions`): a tag there sends the whole reply to them. */
@@ -868,15 +851,13 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     replyFiles.reset();
   };
   /**
-   * What this Send does with the questions it leaves unanswered: `auto` skips
-   * them once the Send answers at least one question and keeps them open
-   * otherwise (a reply of words alone leaves every question open, approval
-   * "inbox-words-only-reply"); the chip's button picks `skip` or `keep`.
+   * The questions the person chose to skip with this Send ("Skip them" on the
+   * chip), as `<message id>/<key>`: the ones the chip counted when it was
+   * pressed, so a question that lands later is never skipped. Null, the
+   * default: a Send skips nothing (approval "inbox-explicit-skip",
+   * 2026-10-21). It holds for one Send.
    */
-  const [skipChoice, setSkipChoice] = useState<SkipChoice>('auto');
-  /** Keep open: this Send leaves the unanswered questions open instead of skipping them. */
-  const keepOpen = !skipsUnanswered(skipChoice, sendAnswersAny(thread, pending));
-  const toggleKeepOpen = () => setSkipChoice(keepOpen ? 'skip' : 'keep');
+  const [skipArmed, setSkipArmed] = useState<ReadonlySet<string> | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const sendKeys = useRef<Map<string, string> | null>(null);
@@ -1192,7 +1173,23 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   // the Send actually reaches: the latest agent message's when words or
   // annotations ride on it, else the last message a pick or a skip answers.
   // Only finished uploads count: a tile still uploading or refused is not what Send carries.
-  const asking = askingSessionOf(thread, { skip: !keepOpen, carries: boxWords !== '' || records.length > 0 || replyUploads.length > 0 });
+  // What a Send leaves unanswered: every question still open with no pick (one being saved counts as picked).
+  const unanswered = thread.messages.flatMap((m) =>
+    m.author.kind === 'agent'
+      ? (m.questions ?? []).filter((q) => {
+          if (q.state !== 'open') return false;
+          const id = `${m.id}/${q.key}`;
+          return !(pending.has(id) && pending.get(id) !== null);
+        }).map((q) => ({ id: `${m.id}/${q.key}`, question: q }))
+      : [],
+  );
+  /** What this Send skips: only what the person chose with "Skip them", while still unanswered. */
+  const skipIds = skipArmed ? new Set(unanswered.filter((u) => skipArmed.has(u.id)).map((u) => u.id)) : new Set<string>();
+  /** Keep open, the default: this Send leaves every unanswered question open. */
+  const keepOpen = skipIds.size === 0;
+  const toggleKeepOpen = () => setSkipArmed(keepOpen ? new Set(unanswered.map((u) => u.id)) : null);
+  const skipping = !keepOpen;
+  const asking = askingSessionOf(thread, { skip: skipIds, carries: boxWords !== '' || records.length > 0 || replyUploads.length > 0 });
   const askerToWatch = asking && askerCanEnd(asking) ? asking.session : null;
   // New message (record 5.x): the project's live sessions, and what the button opened.
   const { model: live, load: loadLive } = useLiveSessions(thread.thread_id, askerToWatch);
@@ -1426,7 +1423,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     setStale([]);
     setGuard(false);
     setRoute(CLOSED_ROUTE);
-    setSkipChoice('auto');
+    setSkipArmed(null);
     sendKeys.current = null;
     sendContents.current = null;
     revisions.current.clear();
@@ -1817,18 +1814,6 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   const waiting = picksCount > 0 || records.length > 0;
   /** The box is closed and its words are kept as a draft (Cancel or Escape kept them): Edit draft brings them back. */
   const draftKept = !box.open && (replyDraft.draft !== null || replyDraft.conflict !== null);
-  // What a Send skips: every question still open with no pick (one being
-  // saved counts as picked), unless the person pressed Keep open.
-  const unanswered = thread.messages.flatMap((m) =>
-    m.author.kind === 'agent'
-      ? (m.questions ?? []).filter((q) => {
-          if (q.state !== 'open') return false;
-          const id = `${m.id}/${q.key}`;
-          return !(pending.has(id) && pending.get(id) !== null);
-        })
-      : [],
-  );
-  const skipping = !keepOpen && unanswered.length > 0;
 
   const openBox = (withDraft: boolean) => {
     setNewMessage(null);
@@ -1949,7 +1934,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     sendContents.current = null;
     unconfirmed.delete(threadRef.current.thread_id);
     setRoute(CLOSED_ROUTE);
-    setSkipChoice('auto');
+    setSkipArmed(null);
     const carried = new Set(carriedUploads);
     const sentFiles = new Set(replyFiles.current().filter((f) => f.upload && carried.has(f.upload.upload_id)).map((f) => f.key));
     const later = replyFiles.current().some((f) => !sentFiles.has(f.key));
@@ -2055,14 +2040,15 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
         draftSavedAs = kept?.updated_at ?? null;
       }
       sendWords = words;
-      // A pick saved just now, or still being saved when Send was pressed, counts as an answer.
-      const skip = skipsUnanswered(skipChoice, sendAnswersAny(current) || sendAnswersAny(thread, pending));
+      // Only the questions the person chose to skip, and only while still open (sendTargetsOf reads the
+      // thread as it is now): a pick saved meanwhile is sent instead, a question that landed is left open.
+      const skip = skipArmed ?? new Set<string>();
       const pendingAnnotations = records;
       const uploads = box.open ? replyUploads : [];
       const carries = words !== '' || pendingAnnotations.length > 0 || uploads.length > 0;
-      // The latest agent message rides last only to carry the words, the
+      // One reply per session. The latest agent message rides last only to carry the words, the
       // annotations and the pasted files; with none, a target with nothing to send is left out.
-      const plain = sendTargetsOf(current, skip).filter((t, index, all) => t.questions.length > 0 || t.skips || (carries && index === all.length - 1));
+      const plain = sendTargetsOf(current, skip).filter((t, index, all) => t.questions.length > 0 || t.skip.length > 0 || (carries && index === all.length - 1));
       // A comment on another session's message rides a reply to that message (routeSendAnnotations).
       const { targets, carried } = routeSendAnnotations(current, plain, pendingAnnotations);
       if (targets.length === 0) {
@@ -2078,12 +2064,14 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
         tagOpts,
       );
       if (!sendKeys.current) sendKeys.current = new Map();
-      for (const t of targets) if (!sendKeys.current.has(t.message.id)) sendKeys.current.set(t.message.id, crypto.randomUUID());
+      // One key per session's reply, kept for a retry.
+      for (const t of targets) if (!sendKeys.current.has(replyKeyOf(t.message))) sendKeys.current.set(replyKeyOf(t.message), crypto.randomUUID());
       // A retry whose words, files or annotations changed: each reply carrying them is a new one.
       const contents = new Map(
         targets.map((t) => [
-          t.message.id,
+          replyKeyOf(t.message),
           JSON.stringify([
+            t.message.id,
             t.message.id === lastId ? [words, uploads, sendTags.get(lastId) ?? []] : [],
             (carried.get(t.message.id) ?? []).map((r) => [r.id, r.updated_at]),
           ]),
@@ -2106,10 +2094,10 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
         // The agents tagged anywhere in this Send ride the last reply (a tag in a file comment sends the whole reply).
         const tags = sendTags.get(target.message.id) ?? [];
         requests.push({ messageId: target.message.id, input: {
-          idempotency_key: sendKeys.current.get(target.message.id) ?? crypto.randomUUID(),
+          idempotency_key: sendKeys.current.get(replyKeyOf(target.message)) ?? crypto.randomUUID(),
           words: last ? words : '',
           questions: target.questions,
-          skip_unanswered: skip,
+          ...(target.skip.length > 0 ? { skip: target.skip } : {}),
           ...(feedback ? { feedback } : {}),
           ...(own.length > 0 ? { annotation_ids: own.map((r) => r.id) } : {}),
           // The pasted files ride the reply that carries the words, as attachments.
@@ -2380,7 +2368,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
       // A session with only picks: a plain reply carries them, so the Re-ask strands none (owner's rule 2).
       for (const target of targets.filter((t) => t.kind === 'picks')) {
         for (const reply of target.replies) {
-          await inboxApi.reply(reply.message.id, { idempotency_key: keyFor(`picks:${reply.message.id}`), words: '', questions: reply.questions, skip_unanswered: false });
+          await inboxApi.reply(reply.message.id, { idempotency_key: keyFor(`picks:${reply.message.id}`), words: '', questions: reply.questions });
           went += 1;
         }
       }
@@ -3157,7 +3145,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                       {plural(picksCount, 'pick')}
                     </span>
                   )}
-                  <SkipChip count={unanswered.length} keepOpen={keepOpen} onToggle={toggleKeepOpen} />
+                  <SkipChip count={keepOpen ? unanswered.length : skipIds.size} keepOpen={keepOpen} onToggle={toggleKeepOpen} />
                   {dropped.length > 0 && (
                     <Tip content="Replaced; this pick won't be sent">
                       <span className="ib-rchip ib-dropped" data-dropped-picks-chip="">
@@ -3180,7 +3168,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
               )}
             </div>
             <div className="ib-sr" role="status">
-              {skipping ? `${plural(unanswered.length, 'unanswered question')} will be skipped when you send.` : ''}
+              {skipping ? `${plural(skipIds.size, 'question')} will be skipped when you send.` : ''}
             </div>
             {route.open && asking ? (
               routeChoice
@@ -3248,7 +3236,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
               <>
                 <span className="ib-sp" />
                 <span className={keepOpen ? 'ib-keep' : undefined}>
-                  <SkipChip count={unanswered.length} keepOpen={keepOpen} onToggle={toggleKeepOpen} />
+                  <SkipChip count={keepOpen ? unanswered.length : skipIds.size} keepOpen={keepOpen} onToggle={toggleKeepOpen} />
                 </span>
               </>
             )}
@@ -3335,9 +3323,10 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
 }
 
 /**
- * What a Send does with the questions left unanswered: "↷ 3 unanswered
- * questions will be skipped · Keep open", or, after Keep open, "3 unanswered
- * questions stay open · Skip them". Nothing when none is unanswered.
+ * What a Send does with the questions left unanswered (approval
+ * "inbox-explicit-skip", 2026-10-21): by default "3 questions stay open ·
+ * Skip them"; after Skip them, "↷ 3 questions will be skipped · Keep open",
+ * for that one Send. Nothing when none is unanswered.
  */
 function SkipChip({ count, keepOpen, onToggle }: { count: number; keepOpen: boolean; onToggle: () => void }) {
   if (count === 0) return null;
@@ -3347,7 +3336,7 @@ function SkipChip({ count, keepOpen, onToggle }: { count: number; keepOpen: bool
       {/* The icon and the sentence are one item, so where the chip wraps (a narrow reply box) the icon stays with its words. */}
       <span className="ib-skip-s">
         {!keepOpen && <Icon name="forward" size={14} />}
-        {keepOpen ? `${plural(count, 'unanswered question')} ${count === 1 ? 'stays' : 'stay'} open` : `${plural(count, 'unanswered question')} will be skipped`}
+        {keepOpen ? `${plural(count, 'question')} ${count === 1 ? 'stays' : 'stay'} open` : `${plural(count, 'question')} will be skipped`}
       </span>
       <button type="button" onClick={onToggle} data-skip-toggle="">
         {keepOpen ? `Skip ${them}` : 'Keep open'}
