@@ -105,6 +105,20 @@ export const reviewEditorShortcuts = defineShortcutScope({
       hint: 'Available when staging is supported (not in PR review mode).',
       displayOrder: 20,
     },
+    nextChange: {
+      description: 'Next change',
+      bindings: ['N'],
+      section: 'File Navigation',
+      hint: 'Scrolls to the next run of changed lines: in the open file, or in All files across the expanded files. Collapsed files and Markdown files shown rendered are skipped.',
+      displayOrder: 50,
+    },
+    prevChange: {
+      description: 'Previous change',
+      bindings: ['Shift+N'],
+      section: 'File Navigation',
+      hint: 'Scrolls to the previous run of changed lines.',
+      displayOrder: 60,
+    },
   },
 });
 
