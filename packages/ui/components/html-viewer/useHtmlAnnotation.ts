@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useRef, type RefObject } from "react";
-import { AnnotationType, type Annotation, type EditorMode, type HtmlAnnotationTarget, type HtmlElementAnchor, type HtmlElementContext, type ImageAttachment } from "../../types";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, type RefObject } from "react";
+import { AnnotationType, type Annotation, type EditorMode, type HostDraft, type HtmlAnnotationTarget, type HtmlElementAnchor, type HtmlElementContext, type ImageAttachment } from "../../types";
 import { THUMBS_UP_LABEL, type QuickLabel } from "../../utils/quickLabels";
 import { getIdentity } from "../../utils/identity";
 import type {
@@ -9,6 +9,11 @@ import type {
   UseAnnotationHighlighterReturn,
 } from "../../hooks/useAnnotationHighlighter";
 import { BRIDGE_PROTOCOL_VERSION } from "./bridge-script";
+import {
+  parseHtmlElementContext,
+  MAX_ELEMENT_CONTEXT_BYTES,
+  MAX_PAGE_URL_LENGTH,
+} from "@plannotator/core/html-anchor";
 
 const PREFIX = "plannotator-bridge-";
 
@@ -133,9 +138,6 @@ export interface HtmlLiveSession {
   token: string;
 }
 
-/** Cap for live-mode page identity strings (mirrors the bridge's slice). */
-export const MAX_PAGE_URL_LENGTH = 2048;
-
 /** Cap for a link href relayed out of the framed document. */
 const MAX_LINK_HREF_LENGTH = 2048;
 /** Control characters never appear in a real href; they are how structure gets smuggled. */
@@ -197,6 +199,10 @@ export interface UseHtmlAnnotationOptions {
   /** scrollIntoView behavior for scroll-to (selecting an annotation).
    *  Absent: smooth, as before; pass 'auto' to honor reduced motion. */
   scrollBehavior?: 'smooth' | 'auto';
+  /** The composer handed to the host (see `HostDraft` and HtmlViewer's
+   *  `onHostDraft`): a selection or a pin reports a draft instead of opening
+   *  the toolbar or the composer. Absent: unchanged. */
+  onHostDraft?: (draft: HostDraft | null) => void;
 }
 
 /** Clamp a host cap into the package's bound; anything unusable is the default. */
@@ -326,154 +332,14 @@ function parseTargetLabel(value: unknown): string | undefined {
     : collapsed;
 }
 
-// Element-context caps. The bridge builds the context under the same numbers,
-// but this side is the authoritative one: every scalar is re-collapsed (a
-// hostile page can embed newlines that would become markdown structure in the
-// exported feedback), every list re-capped, unknown keys dropped, and the
-// serialized whole bounded. A malformed context is DROPPED, never fatal to
-// the annotation it rides on (the same additive rule as the anchor point).
-export const MAX_ELEMENT_CONTEXT_BYTES = 2048;
-const MAX_CONTEXT_TAG_LENGTH = 32;
-const MAX_CONTEXT_ID_LENGTH = 100;
-const MAX_CONTEXT_CLASSES = 9; // 8 + the "+N more" marker
-const MAX_CONTEXT_CLASS_LENGTH = 48;
-const MAX_CONTEXT_PATH_LENGTH = 512;
-const MAX_CONTEXT_ROLE_LENGTH = 32;
-const MAX_CONTEXT_NAME_LENGTH = 120;
-const MAX_CONTEXT_ATTRS = 10;
-const MAX_CONTEXT_ATTR_NAME_LENGTH = 40;
-const MAX_CONTEXT_ATTR_VALUE_LENGTH = 120;
-const MAX_CONTEXT_TEXT_LENGTH = 300;
-const MAX_CONTEXT_OUTLINE_LENGTH = 600;
-const MAX_CONTEXT_OUTLINE_LINES = 40;
-const MAX_CONTEXT_LANDMARK_LENGTH = 80;
-const MAX_CONTEXT_HEADING_LENGTH = 130;
-const MAX_CONTEXT_COMPONENT_LENGTH = 100;
-const MAX_CONTEXT_PAGE_TITLE_LENGTH = 200;
-/** Attribute names the context may carry (mirrors CONTEXT_ATTRS in the bridge). */
-const CONTEXT_ATTR_ALLOWLIST = new Set([
-  "href", "src", "alt", "title", "type", "name", "role", "placeholder", "for", "target", "rel",
-  "aria-label", "aria-labelledby", "aria-describedby", "aria-current", "aria-expanded", "aria-hidden", "aria-controls",
-  "data-annotate", "data-testid", "data-test", "data-test-id", "data-cy", "data-qa", "data-component", "data-id",
-]);
-
-function capAt(text: string, max: number): string {
-  let cut = max;
-  const last = text.charCodeAt(cut - 1);
-  if (last >= 0xd800 && last <= 0xdbff) cut -= 1;
-  return text.slice(0, cut);
-}
-
-/** Collapse control characters and whitespace runs, then cap. */
-function collapseContextScalar(value: unknown, max: number): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const collapsed = value.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/\s+/g, " ").trim();
-  if (!collapsed) return undefined;
-  return collapsed.length > max ? capAt(collapsed, max) : collapsed;
-}
-
-/** The outline keeps its line breaks (it is fenced on export) but nothing
- *  else: control characters go, each line is whitespace-collapsed, and a
- *  backtick run that could close the export's fence is defused. */
-function collapseContextOutline(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const lines = value
-    .replace(/[\x00-\x09\x0b-\x1f\x7f]+/g, " ")
-    .replace(/`{3,}/g, "'''")
-    .split("\n")
-    .map((line) => {
-      // Keep the skeleton's indentation (capped), collapse everything else.
-      const indent = (/^ */.exec(line)?.[0] ?? "").slice(0, 12);
-      return indent + line.slice(indent.length).replace(/\s+/g, " ").trim();
-    })
-    .filter((line) => line.trim().length > 0)
-    .slice(0, MAX_CONTEXT_OUTLINE_LINES);
-  const joined = lines.join("\n").trim();
-  if (!joined) return undefined;
-  return joined.length > MAX_CONTEXT_OUTLINE_LENGTH ? capAt(joined, MAX_CONTEXT_OUTLINE_LENGTH) : joined;
-}
-
-function contextBytes(value: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(value)).length;
-}
-
-/** Validate a bridge-posted element context. Exported for protocol tests. */
-export function parseHtmlElementContext(value: unknown): HtmlElementContext | undefined {
-  if (!isRecord(value)) return undefined;
-  const tag = collapseContextScalar(value.tag, MAX_CONTEXT_TAG_LENGTH);
-  if (!tag) return undefined;
-  const context: HtmlElementContext = { tag: tag.toLowerCase() };
-  const id = collapseContextScalar(value.id, MAX_CONTEXT_ID_LENGTH);
-  if (id) context.id = id;
-  if (Array.isArray(value.classes)) {
-    const classes: string[] = [];
-    for (const entry of value.classes) {
-      if (classes.length >= MAX_CONTEXT_CLASSES) break;
-      const cls = collapseContextScalar(entry, MAX_CONTEXT_CLASS_LENGTH);
-      if (cls) classes.push(cls);
-    }
-    if (classes.length) context.classes = classes;
-  }
-  const path = collapseContextScalar(value.path, MAX_CONTEXT_PATH_LENGTH);
-  if (path) context.path = path;
-  const role = collapseContextScalar(value.role, MAX_CONTEXT_ROLE_LENGTH);
-  if (role) context.role = role;
-  const name = collapseContextScalar(value.name, MAX_CONTEXT_NAME_LENGTH);
-  if (name) context.name = name;
-  if (Array.isArray(value.attrs)) {
-    const attrs: Array<[string, string]> = [];
-    for (const entry of value.attrs) {
-      if (attrs.length >= MAX_CONTEXT_ATTRS) break;
-      if (!Array.isArray(entry) || entry.length !== 2) continue;
-      const attrName = collapseContextScalar(entry[0], MAX_CONTEXT_ATTR_NAME_LENGTH);
-      if (!attrName || !CONTEXT_ATTR_ALLOWLIST.has(attrName.toLowerCase())) continue;
-      if (typeof entry[1] !== "string") continue;
-      attrs.push([attrName.toLowerCase(), collapseContextScalar(entry[1], MAX_CONTEXT_ATTR_VALUE_LENGTH) ?? ""]);
-    }
-    if (attrs.length) context.attrs = attrs;
-  }
-  const text = collapseContextScalar(value.text, MAX_CONTEXT_TEXT_LENGTH);
-  if (text) context.text = text;
-  const outline = collapseContextOutline(value.outline);
-  if (outline) context.outline = outline;
-  if (typeof value.children === "number" && Number.isFinite(value.children) && value.children >= 0) {
-    context.children = Math.min(100000, Math.floor(value.children));
-  }
-  if (isRecord(value.rect)) {
-    const rect = value.rect;
-    const nums = ["x", "y", "w", "h", "vw", "vh"].map((key) => {
-      const n = rect[key];
-      return typeof n === "number" && Number.isFinite(n) ? Math.round(Math.max(-1e6, Math.min(1e6, n))) : null;
-    });
-    if (nums.every((n) => n !== null)) {
-      const [x, y, w, h, vw, vh] = nums as number[];
-      context.rect = { x: x!, y: y!, w: w!, h: h!, vw: vw!, vh: vh! };
-    }
-  }
-  const landmark = collapseContextScalar(value.landmark, MAX_CONTEXT_LANDMARK_LENGTH);
-  if (landmark) context.landmark = landmark;
-  const heading = collapseContextScalar(value.heading, MAX_CONTEXT_HEADING_LENGTH);
-  if (heading) context.heading = heading;
-  const component = collapseContextScalar(value.component, MAX_CONTEXT_COMPONENT_LENGTH);
-  if (component) context.component = component;
-  if (isRecord(value.page)) {
-    const url = collapseContextScalar(value.page.url, MAX_PAGE_URL_LENGTH);
-    if (url) {
-      context.page = { url };
-      const title = collapseContextScalar(value.page.title, MAX_CONTEXT_PAGE_TITLE_LENGTH);
-      if (title) context.page.title = title;
-    }
-  }
-  // Serialized bound, re-enforced here: shed the expendable fields in the
-  // bridge's order until the whole fits (validated per-field caps make this
-  // unreachable for an honest bridge; a forged message cannot exceed it).
-  const shedOrder: Array<keyof HtmlElementContext> = ["outline", "text", "attrs", "classes", "path", "heading", "landmark", "component"];
-  for (const field of shedOrder) {
-    if (contextBytes(context) <= MAX_ELEMENT_CONTEXT_BYTES) break;
-    delete context[field];
-  }
-  return contextBytes(context) <= MAX_ELEMENT_CONTEXT_BYTES ? context : undefined;
-}
+// Re-exported so `components/html-viewer` stays the one import site a host
+// needs for the parent trust boundary; the definitions live in
+// `@plannotator/core/html-anchor`, never mirrored here.
+export {
+  parseHtmlElementContext,
+  MAX_ELEMENT_CONTEXT_BYTES,
+  MAX_PAGE_URL_LENGTH,
+};
 
 function parseBridgeRect(value: unknown): BridgeRect | null {
   if (!isRecord(value)) return null;
@@ -603,6 +469,7 @@ export function useHtmlAnnotation({
   onUnanchoredChange,
   maxAdditionalTargets,
   scrollBehavior,
+  onHostDraft,
 }: UseHtmlAnnotationOptions): Omit<
   UseAnnotationHighlighterReturn,
   "highlighterRef" | "highlightRange" | "highlightMathElement"
@@ -615,8 +482,8 @@ export function useHtmlAnnotation({
   flashDraftTarget: (key: string) => void;
   /** Bumped after every target add/remove so the composer can refocus its textarea. */
   composerFocusToken: number;
-  /** Composer one-click "Looks good": submits the hardcoded positive label
-   *  with the same anchor and multi-select targets a typed comment would carry. */
+  /** Composer one-click 👍: submits the hardcoded positive label with the
+   *  same anchor and multi-select targets a typed comment would carry. */
   handleCommentLooksGood: () => void;
   /** Ids this module minted for locally created annotations (create-mark),
    *  for the unanchored union: a minted id the host never listed is a
@@ -674,6 +541,10 @@ export function useHtmlAnnotation({
   onPageChangeRef.current = onPageChange;
   const onLinkClickRef = useRef(onLinkClick);
   onLinkClickRef.current = onLinkClick;
+  const onHostDraftRef = useRef(onHostDraft);
+  onHostDraftRef.current = onHostDraft;
+  // The id of the draft the host holds, so a stale cancel cannot drop a newer one.
+  const hostDraftIdRef = useRef<string | null>(null);
   // The effective cap and whether the host set one: only an explicit cap
   // rides on arm-multi-select, so an unconfigured viewer posts today's message.
   const maxTargetsRef = useRef(resolveMaxAdditionalTargets(maxAdditionalTargets));
@@ -766,7 +637,9 @@ export function useHtmlAnnotation({
     [iframeRef, getOrCreateAnchor],
   );
 
-  useEffect(() => {
+  // A layout effect, like HtmlViewer's own listener: listening from the
+  // commit that inserts the iframe, before its document can post anything.
+  useLayoutEffect(() => {
     function handler(e: MessageEvent<unknown>) {
       if (e.source !== iframeRef.current?.contentWindow) return;
       // Live sessions verify origin + session token BEFORE parsing. The
@@ -797,6 +670,39 @@ export function useHtmlAnnotation({
         pendingAnchorRef.current = message.anchor ?? null;
         pendingContextRef.current = message.context ?? null;
         setDraftTargets([]); // a new selection always starts a fresh draft
+        const reportDraft = onHostDraftRef.current;
+        if (reportDraft) {
+          // The host composes: HTML is comment-only, so every selection or
+          // pin is a comment draft, and nothing of ours opens.
+          const id = nextHtmlAnnId();
+          hostDraftIdRef.current = id;
+          reportDraft({
+            annotation: {
+              id,
+              blockId: "",
+              startOffset: 0,
+              endOffset: 0,
+              type: AnnotationType.COMMENT,
+              text: "",
+              originalText: message.text,
+              author: getIdentity(),
+              createdA: Date.now(),
+              htmlAnchor: message.anchor,
+              elementContext: message.context,
+            },
+            intent: message.pinpoint ? "compose" : "selection",
+            label: message.targetLabel,
+            cancel: () => {
+              if (hostDraftIdRef.current !== id) return;
+              hostDraftIdRef.current = null;
+              post({ type: `${PREFIX}cancel-selection` });
+              pendingTextRef.current = "";
+              pendingAnchorRef.current = null;
+              pendingContextRef.current = null;
+            },
+          });
+          return;
+        }
         const anchor = positionAnchor(message.rect);
         if (!anchor) return;
 
@@ -892,6 +798,10 @@ export function useHtmlAnnotation({
       }
 
       if (type === `${PREFIX}selection-clear`) {
+        if (onHostDraftRef.current && hostDraftIdRef.current) {
+          hostDraftIdRef.current = null;
+          onHostDraftRef.current(null);
+        }
         setToolbarState(null);
         // Keep the captured text alive while a comment/quick-label is open: the user
         // is composing, and the selection collapsing or scrolling out of view must
@@ -1048,8 +958,14 @@ export function useHtmlAnnotation({
     [getOrCreateAnchor],
   );
 
-  const handleCommentSubmit = useCallback(
-    (comment: string, images?: ImageAttachment[]) => {
+  // One commit path for everything the pinpoint composer submits (a typed
+  // comment or the one-click 👍), so both carry the same anchor, element
+  // context and multi-select targets.
+  const commitComposerDraft = useCallback(
+    (
+      body: Pick<Annotation, "text"> &
+        Partial<Pick<Annotation, "images" | "mentions" | "isQuickLabel" | "quickLabelTip">>,
+    ) => {
       if (!enabledRef.current) return;
       // Prefer the text captured when the popover opened — it can't be clobbered by
       // a later selection change or clear while the user is composing the comment.
@@ -1077,11 +993,10 @@ export function useHtmlAnnotation({
         startOffset: 0,
         endOffset: 0,
         type: AnnotationType.COMMENT,
-        text: comment,
         originalText: text,
         author: getIdentity(),
         createdA: Date.now(),
-        images,
+        ...body,
         htmlAnchor: pendingAnchorRef.current ?? undefined,
         elementContext: pendingContextRef.current ?? undefined,
         htmlAdditionalTargets: additionalTargets,
@@ -1096,53 +1011,32 @@ export function useHtmlAnnotation({
     [post],
   );
 
-  // The composer's one-click "Looks good" (the restored thumbs-up for
-  // comment-only surfaces, where pinpoint clicks land straight in the
-  // composer and never see the selection toolbar). Mirrors
-  // handleCommentSubmit — same anchor, same multi-select targets — but
-  // emits the hardcoded positive label instead of typed prose.
-  const handleCommentLooksGood = useCallback(() => {
-    if (!enabledRef.current) return;
-    const text = commentPopoverRef.current?.selectedText || pendingTextRef.current;
-    if (!text) return;
+  const handleCommentSubmit = useCallback(
+    (comment: string, images?: ImageAttachment[], mentions?: readonly string[]) =>
+      commitComposerDraft({
+        text: comment,
+        images,
+        // Host capability: present only when a mentionSource was supplied AND
+        // a token survived, so a comment without one is unchanged.
+        ...(mentions && mentions.length > 0 ? { mentions } : {}),
+      }),
+    [commitComposerDraft],
+  );
 
-    const targets = draftTargetsRef.current;
-    const additionalTargets: HtmlAnnotationTarget[] | undefined =
-      targets.length > 1
-        ? targets.slice(1, 1 + maxTargetsRef.current).map((t) => ({
-            label: t.label,
-            text: t.text,
-            anchor: t.anchor ?? undefined,
-            ...(t.context ? { context: t.context } : {}),
-          }))
-        : undefined;
-
-    const id = nextHtmlAnnId();
-    mintedIdsRef.current.add(id);
-    post({ type: `${PREFIX}create-mark`, id, annotationType: "comment" });
-    onAddRef.current?.({
-      id,
-      blockId: "",
-      startOffset: 0,
-      endOffset: 0,
-      type: AnnotationType.COMMENT,
-      text: THUMBS_UP_LABEL.text,
-      originalText: text,
-      isQuickLabel: true,
-      quickLabelTip: THUMBS_UP_LABEL.tip,
-      author: getIdentity(),
-      createdA: Date.now(),
-      htmlAnchor: pendingAnchorRef.current ?? undefined,
-      elementContext: pendingContextRef.current ?? undefined,
-      htmlAdditionalTargets: additionalTargets,
-    });
-
-    setCommentPopover(null);
-    setDraftTargets([]);
-    pendingTextRef.current = "";
-    pendingAnchorRef.current = null;
-    pendingContextRef.current = null;
-  }, [post]);
+  // The composer's one-click 👍. A pinpoint click opens this composer
+  // directly and never shows the selection toolbar, so without it a reviewer
+  // could not mark an element "looks good" in one click. Emits the same
+  // hardcoded positive label as the toolbar's 👍 (the only label comment-only
+  // surfaces may create), on the pinned element(s).
+  const handleCommentLooksGood = useCallback(
+    () =>
+      commitComposerDraft({
+        text: THUMBS_UP_LABEL.text,
+        isQuickLabel: true,
+        quickLabelTip: THUMBS_UP_LABEL.tip,
+      }),
+    [commitComposerDraft],
+  );
 
   const handleCommentClose = useCallback(() => {
     post({ type: `${PREFIX}cancel-selection` });

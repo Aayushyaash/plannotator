@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
@@ -228,6 +228,15 @@ function reservePort(): Promise<number> {
     });
   });
 }
+
+// Sandbox every test's data dir so a contributor's ~/.plannotator/config.json
+// (e.g. reviewAnalysis.semanticDiff: false) can never change server behavior.
+// The root bunfig preload does this too, but not when bun runs from this
+// package directory (its own `bun test` script). Tests that need a specific
+// dir still override it; afterEach restores the original value.
+beforeEach(() => {
+  process.env.PLANNOTATOR_DATA_DIR = makeTempDir("plannotator-pi-server-data-");
+});
 
 afterEach(() => {
   process.chdir(originalCwd);
@@ -1270,6 +1279,8 @@ describe("pi review server", () => {
         `${server.url}/api/image?path=${encodeURIComponent(uploadPayload.path)}`,
       );
       expect(imageResponse.status).toBe(200);
+      expect(imageResponse.headers.get("content-security-policy")).toStartWith("sandbox;");
+      expect(imageResponse.headers.get("x-content-type-options")).toBe("nosniff");
       expect(await imageResponse.text()).toBe("png-bytes");
 
       const draftDelete = await fetch(`${server.url}/api/draft`, { method: "DELETE" });

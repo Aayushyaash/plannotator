@@ -17,8 +17,14 @@
  *
  * Dwell and batch windows are compressed through the hook's documented test
  * overrides so this runs in milliseconds.
+ *
+ * Dwell is measured on Date.now(), so the clock is frozen for every test and
+ * moves only through `pass(ms)`. A verdict like "b.ts was only glanced at"
+ * then cannot depend on how fast the runner is: a loaded CI runner once took
+ * longer than DWELL_MS between two rerenders, and a file that was never read
+ * came back checked off.
  */
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test';
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { useAutoViewed, type UseAutoViewedOptions, type UseAutoViewedResult } from './useAutoViewed';
@@ -63,6 +69,18 @@ async function mount(opts: UseAutoViewedOptions): Promise<Session> {
 
 const wait = (ms: number) => act(async () => { await new Promise((r) => setTimeout(r, ms)); });
 
+let clock = 0;
+/**
+ * Let `ms` of reading time pass: the frozen clock moves by exactly `ms`, and
+ * real time passes too so the hook's own timers (the bottom-of-diff retry)
+ * get to run.
+ */
+async function pass(ms: number) {
+  clock += ms;
+  setSystemTime(clock);
+  await wait(ms);
+}
+
 function baseOptions(over: Partial<UseAutoViewedOptions> = {}): UseAutoViewedOptions {
   return {
     enabled: true,
@@ -78,7 +96,13 @@ function baseOptions(over: Partial<UseAutoViewedOptions> = {}): UseAutoViewedOpt
   };
 }
 
+beforeEach(() => {
+  clock = Date.parse('2026-01-01T00:00:00.000Z');
+  setSystemTime(clock);
+});
+
 afterEach(async () => {
+  setSystemTime();
   if (root) await act(async () => root?.unmount());
   root = null;
   host?.remove();
@@ -96,7 +120,7 @@ describe.if(hasDom)('useAutoViewed', () => {
 
     for (const [file, next] of [['a.ts', 'b.ts'], ['b.ts', 'c.ts'], ['c.ts', 'd.ts']] as const) {
       act(() => s.api.current!.handleReadingFileChange(file));
-      await wait(DWELL_MS + 10);
+      await pass(DWELL_MS + 10);
       act(() => {
         s.api.current!.handleReadingFileChange(next);
         s.api.current!.handleFileScrolledPast(file);
@@ -114,7 +138,7 @@ describe.if(hasDom)('useAutoViewed', () => {
     const marked: string[] = [];
     const s = await mount(baseOptions({ enabled: false, onMark: (p) => marked.push(...p) }));
     act(() => s.api.current!.handleReadingFileChange('a.ts'));
-    await wait(DWELL_MS + 10);
+    await pass(DWELL_MS + 10);
     act(() => {
       s.api.current!.handleReadingFileChange('b.ts');
       s.api.current!.handleFileScrolledPast('a.ts');
@@ -129,7 +153,7 @@ describe.if(hasDom)('useAutoViewed', () => {
       onMark: (p) => marked.push(...p),
     }));
     act(() => s.api.current!.handleReadingFileChange('a.ts'));
-    await wait(DWELL_MS + 10);
+    await pass(DWELL_MS + 10);
     act(() => {
       s.api.current!.handleReadingFileChange('b.ts');
       s.api.current!.handleFileScrolledPast('a.ts');
@@ -141,7 +165,7 @@ describe.if(hasDom)('useAutoViewed', () => {
     const marked: string[] = [];
     const s = await mount(baseOptions({ suspended: true, onMark: (p) => marked.push(...p) }));
     act(() => s.api.current!.handleReadingFileChange('a.ts'));
-    await wait(DWELL_MS * 3);
+    await pass(DWELL_MS * 3);
     act(() => {
       s.api.current!.handleReadingFileChange('b.ts');
       s.api.current!.handleFileScrolledPast('a.ts');
@@ -163,7 +187,7 @@ describe.if(hasDom)('useAutoViewed', () => {
     const s = await mount(baseOptions({ onMark: (p) => marked.push(...p) }));
 
     await s.rerender(baseOptions({ singleFileReadingFile: 'a.ts', onMark: (p) => marked.push(...p) }));
-    await wait(DWELL_MS + 10);
+    await pass(DWELL_MS + 10);
     // Opening it and sitting on it must not check it off — the reviewer has
     // not moved on yet.
     expect(marked).toEqual([]);
@@ -172,6 +196,7 @@ describe.if(hasDom)('useAutoViewed', () => {
     expect(marked).toEqual(['a.ts']);
 
     // A 2-second glance at b.ts is not a review of it.
+    await pass(DWELL_MS / 2);
     await s.rerender(baseOptions({ singleFileReadingFile: 'c.ts', onMark: (p) => marked.push(...p) }));
     expect(marked).toEqual(['a.ts']);
   });
@@ -182,7 +207,7 @@ describe.if(hasDom)('useAutoViewed', () => {
     const marked: string[] = [];
     const s = await mount(baseOptions({ onMark: (p) => marked.push(...p) }));
     act(() => s.api.current!.handleReadingFileChange('a.ts'));
-    await wait(DWELL_MS + 10);
+    await pass(DWELL_MS + 10);
     await s.rerender(baseOptions({ snapshotKey: 'snap-2', onMark: (p) => marked.push(...p) }));
     act(() => {
       s.api.current!.handleReadingFileChange('b.ts');
@@ -200,7 +225,7 @@ describe.if(hasDom)('useAutoViewed', () => {
     // The at-bottom emission arrives immediately, well before the floor.
     act(() => s.api.current!.handleFileScrolledPast('last.ts'));
     expect(marked).toEqual([]);
-    await wait(DWELL_MS + 60);
+    await pass(DWELL_MS + 60);
     expect(marked).toEqual(['last.ts']);
   });
 });
