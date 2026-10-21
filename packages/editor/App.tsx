@@ -288,6 +288,7 @@ import {
   type AgentTerminalDeliveryRecord,
   type AnnotateFeedbackTarget,
 } from './agentTerminalIntegration';
+import { resolveDocumentAreaClassName } from './documentAreaLayout';
 import { askAIAnnotationParams } from './askAIDrafts';
 import {
   buildPlanEditPanelItem,
@@ -6570,6 +6571,20 @@ const App: React.FC = () => {
       )}
     </div>
   ) : null;
+  const canShowCollapsedSidebarTabs =
+    !isCompactTouchLayout &&
+    wideModeType === null &&
+    !sidebar.isOpen &&
+    !goalSetupMode &&
+    !(isHtmlSurface && htmlToolsHidden);
+  // Beside a left-docked Agent TUI the rail sits 2px off the terminal's edge
+  // and above its resize handle, whose grab zone reaches 8px past the edge
+  // (ResizeHandle, side "left") and would otherwise cover the rail's buttons.
+  // The handle stays grabbable in the gap, on the terminal side and between
+  // the buttons.
+  const collapsedSidebarTabsStyle = isLeftAgentTerminalVisible
+    ? { left: `calc(var(--agent-terminal-w, ${agentTerminalResize.width}px) + 2px)` }
+    : undefined;
   // Only greet in a normal authoring context — not on a read-only shared session
   // (a viewer would also be able to flip the owner's gridEnabled), nor over the
   // goal-setup / permission-mode flows. Deferred (not marked seen) until then.
@@ -7119,7 +7134,7 @@ const App: React.FC = () => {
           {taterMode && <TaterSpriteRunning />}
           {showAgentTerminalOnLeft && agentTerminalPanel}
           {/* Left Sidebar: collapsed tab flags (when sidebar is closed) */}
-          {!isCompactTouchLayout && wideModeType === null && !sidebar.isOpen && !goalSetupMode && !isLeftAgentTerminalVisible && !(isHtmlSurface && htmlToolsHidden) && (
+          {canShowCollapsedSidebarTabs && (
             <SidebarTabs
               activeTab={sidebar.activeTab}
               onToggleTab={toggleSidebarTab}
@@ -7133,7 +7148,8 @@ const App: React.FC = () => {
               onToggleAgentTerminal={toggleAgentTerminal}
               hasMessageAnnotations={activeMessageAnnotationCounts.size > 0}
               hasFileAnnotations={hasFileAnnotations}
-              className="hidden lg:flex absolute left-0 top-0 z-20"
+              className={`hidden lg:flex absolute left-0 top-0 ${isLeftAgentTerminalVisible ? 'z-[56]' : 'z-20'}`}
+              style={collapsedSidebarTabsStyle}
             />
           )}
 
@@ -7148,7 +7164,11 @@ const App: React.FC = () => {
           {/* Document Area */}
           <OverlayScrollArea
             element="main"
-            className={`flex-1 min-w-0 ${isHtmlSurface ? 'bg-background' : `${gridEnabled ? "bg-grid " : "bg-card "}${!goalSetupMode && !sidebar.isOpen && !isLeftAgentTerminalVisible && wideModeType === null ? 'lg:pl-[30px]' : ''}`}`}
+            className={resolveDocumentAreaClassName({
+              isHtmlSurface,
+              gridEnabled,
+              hasCollapsedSidebarTabs: canShowCollapsedSidebarTabs,
+            })}
             data-print-region="document"
             overflowX={usesDocumentScroll ? 'visible' : 'hidden'}
             overflowY={usesDocumentScroll ? 'visible' : 'auto'}

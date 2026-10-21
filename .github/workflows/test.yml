@@ -296,6 +296,7 @@ jobs:
           packages/editor/planDiffAutoExit.test.tsx
           packages/editor/App.archiveReadOnly.test.tsx
           packages/editor/App.htmlChrome.test.tsx
+          packages/editor/App.sidebarTabsAgentTerminal.test.tsx
           packages/editor/App.htmlLinkDraft.test.tsx
           packages/editor/App.decisionControl.test.tsx
           packages/editor/App.planRevision.test.tsx
