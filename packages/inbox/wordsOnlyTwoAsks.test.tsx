@@ -74,7 +74,7 @@ async function askAgain(w: World): Promise<string> {
   return (JSON.parse(lines.at(-1)!) as { sent: string }).sent;
 }
 
-const TESTS = 6;
+const TESTS = 8;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -205,7 +205,8 @@ const replies = () => posted.filter((p) => p.path.endsWith('/reply'));
 /** What every words-only Send in this thread must come to, on the wire and on the server. */
 async function expectWordsOnly(firstId: string, secondId: string, words: string) {
   expect(replies().map((p) => p.path)).toEqual([`/api/inbox/messages/${secondId}/reply`]);
-  expect(replies()[0]!.body).toMatchObject({ words, questions: [], skip_unanswered: false });
+  expect(replies()[0]!.body).toMatchObject({ words, questions: [] });
+  expect(replies()[0]!.body.skip).toBeUndefined();
   const model = await readThread(firstId);
   expect(model.thread.messages.flatMap((m) => m.questions ?? []).map((q) => [q.state, q.answer])).toEqual([
     ['open', null],
@@ -322,7 +323,67 @@ test.skipIf(!hasDom)('one session asked twice: a second words-only Send after th
   act(() => button(el, 'Send').click());
   await until(() => el.querySelector('textarea') === null, 'the second Send');
   expect(replies().map((p) => p.path)).toEqual([`/api/inbox/messages/${second}/reply`]);
-  expect(replies()[0]!.body).toMatchObject({ words: 'Two.', questions: [], skip_unanswered: false });
+  expect(replies()[0]!.body).toMatchObject({ words: 'Two.', questions: [] });
+  expect(replies()[0]!.body.skip).toBeUndefined();
   const model = await readThread(world.waiting);
   expect(model.thread.messages.flatMap((m) => m.questions ?? []).map((q) => q.state)).toEqual(['open', 'open']);
+});
+
+// Approval "inbox-explicit-skip" (2026-10-21): one Send to one session is ONE reply, even with answers on
+// both of its messages, and a Send skips only what the person chose with "Skip them".
+
+test.skipIf(!hasDom)('one session asked twice, a pick on each card: ONE reply to the latest message, carrying both answers', async () => {
+  const second = await askAgain(world);
+  const el = await renderApp(`#thread=${world.waiting}`);
+  await until(() => el.querySelectorAll('fieldset[data-question-key]').length === 2, 'both questions');
+  for (const index of [0, 1]) {
+    const card = el.querySelectorAll('fieldset[data-question-key]')[index] as HTMLElement;
+    act(() => (card.querySelector('[data-question-option] input') as HTMLInputElement).click());
+    await settle();
+  }
+  await until(async () => (await readThread(world.waiting)).thread.messages.flatMap((m) => m.questions ?? []).every((q) => q.state === 'picked'), 'both picks saved');
+  await settle();
+  act(() => button(el.querySelector('.ib-pfoot') as HTMLElement, 'Send').click());
+  await until(() => replies().length > 0 && el.querySelector('.ib-pfoot button[disabled]') === null, 'the Send');
+  await settle();
+  expect(replies().map((p) => p.path)).toEqual([`/api/inbox/messages/${second}/reply`]);
+  const questions = replies()[0]!.body.questions as { message_id?: string; key: string }[];
+  expect(questions).toHaveLength(2);
+  expect(questions.filter((q) => q.message_id === world.waiting)).toHaveLength(1);
+  expect(replies()[0]!.body.skip).toBeUndefined();
+  const model = await readThread(world.waiting);
+  expect(model.thread.messages.flatMap((m) => m.questions ?? []).map((q) => q.state)).toEqual(['sent', 'sent']);
+  const mine = model.thread.messages.filter((m) => m.author.kind === 'person');
+  expect(mine).toHaveLength(1);
+  expect(mine[0]!.reply_to).toBe(second);
+  expect(mine[0]!.body).toStartWith('Answered 2 questions.');
+  expect(mine[0]!.body).toContain(`### Your message ${world.waiting}`);
+});
+
+test.skipIf(!hasDom)('one session asked twice: a pick on the second, the first stays open; Skip them skips it, in the same one reply', async () => {
+  const second = await askAgain(world);
+  const el = await renderApp(`#thread=${world.waiting}`);
+  await until(() => el.querySelectorAll('fieldset[data-question-key]').length === 2, 'both questions');
+  const card = el.querySelectorAll('fieldset[data-question-key]')[1] as HTMLElement;
+  act(() => (card.querySelector('[data-question-option] input') as HTMLInputElement).click());
+  await until(async () => (await readThread(world.waiting)).thread.messages.flatMap((m) => m.questions ?? []).some((q) => q.state === 'picked'), 'the pick saved');
+  await settle();
+  // The default: the other question stays open.
+  const chip = () => el.querySelector('[data-skip-chip]') as HTMLElement;
+  await until(() => chip()?.textContent?.includes('1 question stays open') === true, 'the chip');
+  expect(chip().getAttribute('data-skip-chip')).toBe('keep');
+  act(() => button(chip(), 'Skip it').click());
+  expect(chip().getAttribute('data-skip-chip')).toBe('skip');
+  expect(chip().textContent).toContain('1 question will be skipped');
+  act(() => button(el.querySelector('.ib-pfoot') as HTMLElement, 'Send').click());
+  await until(() => replies().length > 0 && el.querySelector('.ib-pfoot button[disabled]') === null, 'the Send');
+  await settle();
+  expect(replies().map((p) => p.path)).toEqual([`/api/inbox/messages/${second}/reply`]);
+  expect(replies()[0]!.body.skip).toEqual([{ message_id: world.waiting, key: expect.any(String) }]);
+  const model = await readThread(world.waiting);
+  expect(model.thread.messages.flatMap((m) => m.questions ?? []).map((q) => [q.state, q.answer?.skipped ?? false])).toEqual([
+    ['sent', true],
+    ['sent', false],
+  ]);
+  expect(model.thread.messages.filter((m) => m.author.kind === 'person')).toHaveLength(1);
 });

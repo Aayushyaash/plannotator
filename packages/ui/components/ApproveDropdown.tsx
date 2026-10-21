@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback } from 'react';
 import type { Agent } from '../hooks/useAgents';
 import { useDismissablePopover } from '../hooks/useDismissablePopover';
-import { getAgentSwitchDefaults, saveAgentSwitchSettings, type AgentSwitchSettings } from '../utils/agentSwitch';
+import { agentSwitchTargetLabel, getAgentSwitchDefaults, saveAgentSwitchSettings, type AgentSwitchSettings } from '../utils/agentSwitch';
 import { useConfigValue } from '../config/useConfig';
 
 interface ApproveDropdownProps {
@@ -12,12 +12,7 @@ interface ApproveDropdownProps {
 }
 
 function getSelectedLabel(setting: AgentSwitchSettings, agents: Agent[]): string | null {
-  if (setting.switchTo === 'disabled') return null;
-  if (setting.switchTo === 'custom' && setting.customName) {
-    return setting.customName;
-  }
-  const match = agents.find(a => a.id.toLowerCase() === setting.switchTo.toLowerCase());
-  return match?.name ?? setting.switchTo;
+  return agentSwitchTargetLabel(setting, agents);
 }
 
 function isSelected(agentId: string, setting: AgentSwitchSettings): boolean {

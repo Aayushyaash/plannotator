@@ -143,6 +143,13 @@ test("a reply that answered nothing: the store's still-open line and what follow
   expect(replyWords('No questions answered yet, sorry.')).toBe('No questions answered yet, sorry.');
 });
 
+test("a reply that answered some (approval inbox-explicit-skip): the line about the others is dropped with the answers", () => {
+  const line = "You have 10 other questions open in this thread. They stay open; the person will answer them in the Inbox. Don't re-ask them.";
+  expect(replyWords(`Answered 1 question.\n\nShip it.\n\n${line}\n\n## Answers to your questions\n\n1 of 1 question answered.`).trim()).toBe('Ship it.');
+  expect(replyWords(`Answered 1 question.\n\n${line}`).trim()).toBe('');
+  expect(replyWords("Skipped 1 question.\n\nYou have 1 other question open in this thread. It stays open; the person will answer it in the Inbox. Don't re-ask it.").trim()).toBe('');
+});
+
 test('a reply of pasted files alone: the snippet names the files, never the still-open line the agent reads', () => {
   const line = "No question answered yet; it is still open. Don't re-ask it; the person will answer in the Inbox.";
   const file = (name: string) => ({ id: `att_${name}`, name }) as NonNullable<InboxMessageWire['attachments']>[number];

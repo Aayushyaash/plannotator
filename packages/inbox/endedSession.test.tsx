@@ -439,7 +439,7 @@ test.skipIf(!hasDom)('a Send answering two sessions: `to` rides only the ended a
     ['asker', { host: 'claude-code', session: 'ses_other' }],
   ]);
   expect(el.querySelector('.ib-route-error')?.textContent).toBe(
-    'That Claude Code session ended before all of your reply went. Your answers to 1 of 2 messages were sent; the rest was not. Pi is selected now.',
+    'That Claude Code session ended before all of your reply went. 1 of 2 agents got their reply; the rest did not. Pi is selected now.',
   );
 });
 

@@ -278,8 +278,8 @@ describe("no question's state is ever lost from a windowed read", () => {
     const one = await send({ body: `Round one.\n\n${block("Ship A?")}\n\n${block("Ship B?")}`, thread: "rich" });
     await w.post(`/api/inbox/messages/${one.message_id}/reply`, { idempotency_key: "one", words: "Go.", questions: one.questions.map((q: any) => ({ key: q.key, revision: 0, answer: answer(q, "Yes") })) });
     const two = await send({ body: `Round two.\n\n${block("Ship C?")}\n\n${block("Ship D?")}\n\n${block("Ship E?")}`, reply_to: one.message_id });
-    // C answered, the rest skipped by the reply.
-    await w.post(`/api/inbox/messages/${two.message_id}/reply`, { idempotency_key: "two", words: "Only C.", skip_unanswered: true, questions: [{ key: two.questions[0].key, revision: 0, answer: answer(two.questions[0], "No") }] });
+    // C answered, the rest skipped by the reply ("Skip them").
+    await w.post(`/api/inbox/messages/${two.message_id}/reply`, { idempotency_key: "two", words: "Only C.", skip: [two.questions[1].key, two.questions[2].key], questions: [{ key: two.questions[0].key, revision: 0, answer: answer(two.questions[0], "No") }] });
     const three = await send({ body: `Round three.\n\n${block("Ship F?")}\n\n${block("Ship G?")}\n\n${block("Ship H?")}`, reply_to: two.message_id });
     // F picked, not sent.
     await w.post(`/api/inbox/messages/${three.message_id}/picks`, { questions: [{ key: three.questions[0].key, revision: 0, answer: answer(three.questions[0], "Yes") }] });
@@ -542,6 +542,28 @@ describe("the review's fixes: answers whole, the answers section cut exactly, th
     // Text that does not follow the section's grammar exactly is never cut.
     const odd = { ...w.server.store.messageWire((await answered(w, "")).replyId)!, body: "My words.\n\n## Answers to your questions\n\nI wrote this heading myself." } as InboxMessageWire;
     expect(withoutAnswersSection(odd)).toBe(odd.body);
+  });
+
+  test("withoutAnswersSection cuts a reply's answers on several messages too (one reply for one session), and only that", async () => {
+    const w = await world();
+    const block = (prompt: string) => `:::question\n${prompt}\n\n- [ ] Yes\n- [ ] No\n:::`;
+    const send = async (args: Record<string, unknown>) => (await call(w.client, "send_message", { project_path: w.project, agent_session: "ses_two", agent_name: "Claude Code", ...args })).structuredContent;
+    const first = await send({ body: block("Ship A?"), thread: "two-messages" });
+    const second = await send({ body: block("Ship B?"), reply_to: first.message_id });
+    const answer = (q: { key: string; kind: string; prompt: string }) => ({ v: 1, key: q.key, kind: q.kind, prompt: q.prompt, selected: ["Yes"] });
+    const reply = await w.post(`/api/inbox/messages/${second.message_id}/reply`, {
+      idempotency_key: "both",
+      words: "Both.",
+      feedback: FEEDBACK,
+      questions: [
+        { message_id: first.message_id, key: first.questions[0].key, revision: 0, answer: answer(first.questions[0]) },
+        { key: second.questions[0].key, revision: 0, answer: answer(second.questions[0]) },
+      ],
+    });
+    const wire = w.server.store.messageWire(reply.reply.id)!;
+    expect(wire.body).toContain(`### Your message ${first.message_id}`);
+    const marker = "[Answers to your questions: left out here; each answer is on its question above, and expand shows this reply as sent]";
+    expect(withoutAnswersSection(wire)).toBe(`Answered 2 questions.\n\nBoth.\n\n${marker}\n\n${FEEDBACK}`);
   });
 
   test("an answer is shown whole, line breaks kept, however long (4,000 characters), on a one-line message too", async () => {

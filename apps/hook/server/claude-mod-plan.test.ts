@@ -78,9 +78,12 @@ describe("claude-mod-plan", () => {
     const ack = await waitFor(() => (existsSync(`${files.revision}.ack`) ? readFileSync(`${files.revision}.ack`, "utf8") : null));
     expect(JSON.parse(ack)).toMatchObject({ seq: 1, accepted: true, revision: 1 });
 
-    const shown = (await (await fetch(`${base}/api/plan`)).json()) as { plan: string; planRevision?: number };
+    const shown = (await (await fetch(`${base}/api/plan`)).json()) as { plan: string; planRevision?: number; approvalNotesSupported?: boolean };
     expect(shown.plan).toBe("# Plan\n\n1. First.\n2. Second.\n");
     expect(shown.planRevision).toBe(1);
+    // #1057: the mod delivers an approval's notes, so the tab offers
+    // "Approve with notes" here (the classic hook's tab must not).
+    expect(shown.approvalNotesSupported).toBe(true);
 
     const approve = await fetch(`${base}/api/approve`, {
       method: "POST",

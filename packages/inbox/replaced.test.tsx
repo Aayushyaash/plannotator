@@ -252,11 +252,21 @@ test.skipIf(!hasDom)('no replacement: "No longer applies", and the row links to 
   expect(document.activeElement?.getAttribute('data-message-article')).toBe(M2);
 });
 
+/** The person's words in the reply box (the box opens empty: the picks are listed beside the words, never written in). */
+function typeWords(text: HTMLTextAreaElement, words: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+  act(() => {
+    setter.call(text, words);
+    text.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
 test.skipIf(!hasDom)('the stale guard: a pick replaced while the person writes stops Send once, says why, and Esc keeps editing', async () => {
   const el = await render(before());
   act(() => button(el, 'Edit draft').click());
   const text = el.querySelector('textarea') as HTMLTextAreaElement;
   // The person types; then the agent replaces question 1.
+  typeWords(text, 'Leaning this way for now.');
   act(() => root!.render(pane(after('replace'))));
   await settle();
   expect(el.querySelector('[data-replaced-notice]')?.textContent).toContain("replaced question 1 at");
@@ -283,20 +293,21 @@ test.skipIf(!hasDom)('the stale guard: a pick replaced while the person writes s
   expect(document.activeElement?.textContent).toBe('Send');
 
   // Once per replacement: Send now goes, with the words only (no pick).
-  // With no pick in it, the Send leaves the questions open (Keep open by
-  // default, approval "inbox-words-only-reply"): one reply, the words.
+  // The Send leaves the questions open (Keep open by default, approval
+  // "inbox-explicit-skip"): one reply, the words.
   act(() => button(el, 'Send').click());
   await settle();
   const replies = posted.filter((p) => p.path.endsWith('/reply'));
   expect(replies).toHaveLength(1);
   expect((replies[0]!.body as { questions: unknown[] }).questions).toEqual([]);
-  expect((replies[0]!.body as { skip_unanswered?: boolean }).skip_unanswered).toBe(false);
+  expect((replies[0]!.body as { skip?: unknown }).skip).toBeUndefined();
   expect((replies[0]!.body as { words: string }).words).toBe(text.value.trim());
 });
 
 test.skipIf(!hasDom)('Answer the new question keeps the draft and goes to the new card', async () => {
   const el = await render(before());
   act(() => button(el, 'Edit draft').click());
+  typeWords(el.querySelector('textarea') as HTMLTextAreaElement, 'Leaning this way for now.');
   act(() => root!.render(pane(after('replace'))));
   await settle();
   act(() => button(el, 'Send').click());

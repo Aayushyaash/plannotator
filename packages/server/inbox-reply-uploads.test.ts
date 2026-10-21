@@ -139,7 +139,7 @@ describe("a reply carrying pasted files", () => {
     const { ask, upload, reply, poll, thread } = await setup();
     const asked = await ask(QUESTION);
     const shot = await upload("pasted-image-2026-10-16-0913.png", PNG);
-    const response = await reply(asked.message_id, { idempotency_key: "r1", words: "", skip_unanswered: false, uploads: [shot.upload_id] });
+    const response = await reply(asked.message_id, { idempotency_key: "r1", words: "", uploads: [shot.upload_id] });
     expect(response.status).toBe(200);
     const sent = (await response.json()) as { reply: InboxMessage; questions: { state: string }[] };
     expect(sent.questions.map((q) => q.state)).toEqual(["open"]);

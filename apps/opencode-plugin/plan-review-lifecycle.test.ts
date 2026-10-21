@@ -82,7 +82,10 @@ describe("OpenCode embedded plan-review lifetime", () => {
 
     const firstUrl = await firstReady.ready;
     expect(firstUrl).toBe(`http://localhost:${port}`);
-    expect((await fetch(`${firstUrl}/api/plan`)).status).toBe(200);
+    const shownPlan = await fetch(`${firstUrl}/api/plan`);
+    expect(shownPlan.status).toBe(200);
+    // #1057: submit_plan delivers an approval's notes, so the tab offers them.
+    expect(((await shownPlan.json()) as { approvalNotesSupported?: boolean }).approvalNotesSupported).toBe(true);
     const abortReason = new DOMException("Cancelled by OpenCode", "AbortError");
     firstController.abort(abortReason);
     await expectRejectedWith(firstReview, abortReason);

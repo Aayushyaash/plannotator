@@ -39,6 +39,15 @@ describe('plannotator tool: arguments', () => {
     expect(args({ action: 'last' })).toEqual([])
   })
 
+  // #1907: a review's gate is the host's (deliver a bare Approve as a
+  // message); passing --gate on would make a CLI older than `review --gate`
+  // refuse the launch.
+  test('a gated review is accepted and its gate is never passed to the CLI', () => {
+    const parsed = parsePlannotatorToolInput({ action: 'review', gate: true, options: { base: 'main' } })
+    expect(parsed).toEqual({ ok: true, input: { action: 'review', gate: true, options: { base: 'main' } } })
+    expect(args({ action: 'review', gate: true, target: '../wt' })).toEqual(['../wt'])
+  })
+
   test('false defaults a model fills in are ignored, not errors', () => {
     expect(args({ action: 'review', gate: false, options: { markdown: false } })).toEqual([])
     expect(args({ action: 'last', gate: false, options: {} })).toEqual([])
@@ -54,7 +63,7 @@ describe('plannotator tool: strict validation', () => {
     expect(error({ action: 'annotate', target: 'a.md\nb.md' })).toContain('control')
     expect(error({ action: 'annotate', target: '  ' })).toContain('empty')
     expect(error({ action: 'last', target: 'x.md' })).toContain('no target')
-    expect(error({ action: 'review', gate: true })).toContain('gate')
+    expect(error({ action: 'last', gate: true })).toContain('gate')
     expect(error({ action: 'annotate', target: 'a.md', options: { base: 'main' } })).toContain('options.base')
     expect(error({ action: 'review', options: { base: '-c' } })).toContain('"-"')
     expect(error({ action: 'review', options: { base: 'a b' } })).toContain('spaces')

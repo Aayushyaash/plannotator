@@ -1,10 +1,11 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AIChatEntry, PendingPermission } from '../../hooks/useAIChat';
-import { hasNonInterruptibleSession, type AIProviderOption } from '../../utils/aiProvider';
+import { hasPendingBusyChoice, type AIChatEntry, type PendingPermission } from '../../hooks/useAIChat';
+import { findSessionBridge, hasNonInterruptibleSession, type AIProviderOption } from '../../utils/aiProvider';
 import { formatRelativeTime, renderChatMarkdown } from '../../utils/aiChatFormat';
 import { OverlayScrollArea } from '../OverlayScrollArea';
 import { SparklesIcon } from '../SparklesIcon';
 import { AIProviderBar } from './AIProviderBar';
+import { NewChatButton } from './NewChatButton';
 import { SessionAskActions, SessionAskNote, SessionAskStatus, sessionAskErrorTone, type SessionAskAction } from './SessionAskNotice';
 import { submitHint } from '../../utils/platform';
 
@@ -24,6 +25,12 @@ interface DocumentAIChatPanelProps {
   onSessionAskAction?: (questionId: string, action: SessionAskAction) => void;
   /** Optional note under the provider bar on how to get "Ask this session" (askSessionSetupHint). */
   askSessionSetupHint?: string | null;
+  /**
+   * Start a new chat: clear the panel so the next question starts a fresh AI
+   * session (#1981). Shown above the messages once there are any; disabled
+   * while an answer is in flight. Absent: no button, the panel renders as before.
+   */
+  onNewChat?: () => void;
 }
 
 function truncate(text: string, max = 180): string {
@@ -71,6 +78,7 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
   onAIConfigChange,
   onSessionAskAction,
   askSessionSetupHint,
+  onNewChat,
 }) => {
   // A session that is never interrupted (T3 Code): Stop only stops listening.
   const listenOnly = hasNonInterruptibleSession(aiProviders);
@@ -85,6 +93,16 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
     last?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages.length, latestResponseText]);
 
+  const rootRef = useRef<HTMLDivElement>(null);
+  const handleNewChat = useCallback(() => {
+    if (!onNewChat) return;
+    onNewChat();
+    // The button leaves with the messages; keep focus in the panel.
+    requestAnimationFrame(() => {
+      rootRef.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
+    });
+  }, [onNewChat]);
+
   const handleGeneralSubmit = useCallback(() => {
     const question = generalInput.trim();
     if (!question || !onAskGeneral) return;
@@ -93,7 +111,15 @@ export const DocumentAIChatPanel: React.FC<DocumentAIChatPanelProps> = ({
   }, [generalInput, onAskGeneral]);
 
   return (
-    <div className="flex flex-col flex-1 min-h-0">
+    <div ref={rootRef} className="flex flex-col flex-1 min-h-0">
+      {onNewChat && messages.length > 0 && (
+        <NewChatButton
+          onNewChat={handleNewChat}
+          busy={isStreaming || isCreatingSession}
+          pendingChoice={hasPendingBusyChoice(messages)}
+          sessionBridge={!!findSessionBridge(aiProviders)}
+        />
+      )}
       <OverlayScrollArea className="flex-1 min-h-0">
         <div ref={scrollRef} className="p-2 space-y-3">
           {messages.length === 0 && !isCreatingSession && (

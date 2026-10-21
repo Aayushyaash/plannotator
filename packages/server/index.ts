@@ -124,6 +124,17 @@ export interface ServerOptions {
    * host that never revises keeps a tab that never polls.
    */
   planRevisions?: boolean;
+  /**
+   * Whether the host that launched this review delivers notes sent WITH an
+   * approval (`feedback` on /api/approve) to the agent. Advertised on
+   * /api/plan as `approvalNotesSupported`, which gates the decision control's
+   * "Approve with notes" / "Approve with a note…" rows and words the Approve
+   * warning. Set per host, never from the origin's name: the Claude Code mod
+   * (`claude-mod-plan`), OpenCode and Pi deliver them; the classic Claude
+   * Code hook, Gemini CLI, Codex, Copilot CLI and Mistral Vibe drop them.
+   * Default false, so an unknown host is never offered a row that loses text.
+   */
+  approvalNotesSupported?: boolean;
 }
 
 /** What `updatePlan` did with a revised plan pushed into the open review. */
@@ -185,6 +196,7 @@ export async function startPlannotatorServer(
   options: ServerOptions
 ): Promise<ServerResult> {
   const { origin, htmlContent, permissionMode, sharingEnabled = true, shareBaseUrl, pasteApiUrl, onReady, mode, customPlanPath, planFilePath } = options;
+  const approvalNotesSupported = options.approvalNotesSupported === true;
   // `plan`, its slug, file trust and version diff are `let`: a host with
   // `planRevisions` pushes revised plans into the open review (updatePlan).
   let plan = options.plan;
@@ -452,7 +464,7 @@ export async function startPlannotatorServer(
                 ...getUpdateAdvert(origin, { exposed: isRemote }),
               });
             }
-            return Response.json({ plan, origin, permissionMode, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, serverSession, ...(options.planRevisions ? { planRevision } : {}), projectRoot: process.cwd(), planDir: planFile?.dir, isWSL: wslFlag, serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge, options.opencodeToolCapable)), ...getAutoUpdateAdvert(), ...getUpdateAdvert(origin, { exposed: isRemote }) });
+            return Response.json({ plan, origin, permissionMode, approvalNotesSupported, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, serverSession, ...(options.planRevisions ? { planRevision } : {}), projectRoot: process.cwd(), planDir: planFile?.dir, isWSL: wslFlag, serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge, options.opencodeToolCapable)), ...getAutoUpdateAdvert(), ...getUpdateAdvert(origin, { exposed: isRemote }) });
           }
 
           // API: The live plan revision (open reviews that receive revised plans)
