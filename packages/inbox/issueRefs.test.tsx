@@ -84,3 +84,11 @@ test.skipIf(!hasDom)('without a repo (a folder, or an older Inbox) the ref stays
     host = null;
   }
 });
+
+test.skipIf(!hasDom)("with the Inbox's own configuration, a digit-only #186379 is an issue link, not a colour swatch (#1932)", async () => {
+  // App.tsx configures ui at import (digitHexIssueRefs: true); dropping the flag there fails this.
+  await import('./App');
+  await render('Merged in #186379.', { display: 'home-assistant/core', host: 'github.com' });
+  expect(host!.querySelector('a[href="https://github.com/home-assistant/core/issues/186379"]')).not.toBeNull();
+  expect(host!.querySelector('[style*="background-color"]')).toBeNull();
+});

@@ -970,6 +970,52 @@ describe("review-core", () => {
     expect(result.patch.length).toBeLessThan(4_000);
   }, 20_000);
 
+  test("a failed size probe never lets a textconv driver render an oversized blob (#1206)", async () => {
+    // core.bigFileThreshold only applies when git decides binaryness itself. A
+    // textconv driver skips that decision and formats the whole converted blob,
+    // so on the probe-failure path (no JS-side exclusion) the rendered diff
+    // must turn textconv off to keep the git-native bound.
+    const repoDir = initRepo();
+    git(repoDir, ["config", "diff.inflate.textconv", "sed p"]);
+    writeFileSync(join(repoDir, ".gitattributes"), "*.big diff=inflate\n", "utf-8");
+    git(repoDir, ["add", ".gitattributes"]);
+    git(repoDir, ["commit", "-m", "textconv driver"]);
+    const lines = Math.ceil((MAX_REVIEW_FILE_CONTENT_BYTES + 1) / 2);
+    writeFileSync(join(repoDir, "huge.big"), "a\n".repeat(lines), "utf-8");
+    writeFileSync(join(repoDir, "tracked.txt"), "after\n", "utf-8");
+    git(repoDir, ["add", "huge.big", "tracked.txt"]);
+
+    const runtime = makeConfigForwardingRuntime(repoDir, (args) =>
+      args.some((arg) => arg.startsWith("--batch-check"))
+        ? { stdout: "", stderr: "fatal: probe unavailable", exitCode: 128 }
+        : null,
+    );
+
+    const result = await runGitDiff(runtime, "staged", "main");
+
+    // Length first, so a regression fails without printing megabytes.
+    expect(result.patch.length).toBeLessThan(4_000);
+    expect(result.patch).toContain("+after");
+    expect(result.patch).toContain("Binary files /dev/null and b/huge.big differ");
+  }, 20_000);
+
+  test("a working size probe keeps textconv for files under the cap", async () => {
+    // The textconv opt-out is for the probe-failure path only: with sizes
+    // known, oversized paths are excluded up front and small textconv'd files
+    // keep rendering through their driver.
+    const repoDir = initRepo();
+    git(repoDir, ["config", "diff.upper.textconv", "tr a-z A-Z <"]);
+    writeFileSync(join(repoDir, ".gitattributes"), "*.up diff=upper\n", "utf-8");
+    git(repoDir, ["add", ".gitattributes"]);
+    git(repoDir, ["commit", "-m", "textconv driver"]);
+    writeFileSync(join(repoDir, "note.up"), "hello\n", "utf-8");
+    git(repoDir, ["add", "note.up"]);
+
+    const result = await runGitDiff(makeConfigForwardingRuntime(repoDir), "staged", "main");
+
+    expect(result.patch).toContain("+HELLO");
+  }, 20_000);
+
   test("a failed size probe still excludes oversized working-tree files by stat", async () => {
     const repoDir = initRepo();
     const largeSize = MAX_REVIEW_FILE_CONTENT_BYTES + 1;

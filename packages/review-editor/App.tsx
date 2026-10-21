@@ -2852,6 +2852,17 @@ const ReviewApp: React.FC = () => {
       return next;
     });
   }, [persistViewed]);
+  // Guided Review (#1786): ticking a section "Reviewed" marks its files viewed.
+  // It is the reviewer's own gesture, so it does what the per-file Viewed
+  // checkbox does for each newly viewed file: persist it, lift any auto-view
+  // suppression, and sync the platform's Viewed state in PR mode.
+  const handleGuideMarkFilesViewed = useCallback((paths: string[]) => {
+    const newlyViewed = paths.filter(path => !viewedFilesRef.current.has(path));
+    if (newlyViewed.length === 0) return;
+    markFilesViewed(newlyViewed);
+    for (const path of newlyViewed) applyAutoViewSuppression(path, true);
+    syncPlatformViewed(newlyViewed, true);
+  }, [markFilesViewed, applyAutoViewSuppression, syncPlatformViewed]);
   const handleAutoView = useCallback(() => {
     // The notice fires the first time auto-view demonstrates itself. Deferred
     // (not lost) behind the guide takeover or a first-run dialog — the file
@@ -5725,6 +5736,7 @@ const ReviewApp: React.FC = () => {
                 onClose={() => setGuideOpen(false)}
                 onOpenFixedGuide={handleOpenGuide}
                 onOpenSavedGuide={handleOpenGuide}
+                onMarkFilesViewed={handleGuideMarkFilesViewed}
               />
             </div>
           )}
