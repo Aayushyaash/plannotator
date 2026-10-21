@@ -60,6 +60,31 @@ during): takeovers 1 ms (close), 8 ms (reload),
 loaded it 533 ms after one tab closed, the new build loaded a ninth in 459 ms;
 the Inbox restart reconnected in 1.2 s; notify_reach steps 0/27/0/28 ms.
 
+## Second review
+
+- A tab that came to lead while its catch-up ran, the catch-up then failing,
+  used to hold every frame of its own stream for good (the reviewer's probe:
+  0 of 5 records 3 s later). It now clears what it holds and handles its
+  stream. The unit test `a tab that comes to lead while its catch-up runs…`
+  fails on the previous code and passes now; the random stress with stopping
+  leaders now also fails catch-ups (some at the end of a slow answer) and
+  fails on the previous code too.
+- CI (GitHub's Linux runner): the crashed leader was taken over in 2.6 s
+  against a 1 s bound (2-3 ms on macOS). A crashed tab's lock is freed when the
+  browser notices the renderer died; on Linux the tab in front may take it
+  first through its check. The crash case's bound is now the stalled-leader
+  takeover (7 s: the check every 3 s, no answer in 2 s, room for a slow
+  runner), two streams allowed for a moment, and each takeover records how it
+  came (`queue` or `steal`; locally every case but the stall is `queue`). The
+  freeze bound is 2 s, and the follower-crash step of the reach proof 8 s.
+- `inbox-shared-windows.test.ts` "after the whole browser goes…" waited for
+  the count, not for the notice (the expiry timer fires 1 ms past the grace):
+  it now waits for the notice, 20 of 20 runs passing.
+- Rerun on the head that merges origin/main again: unit 26 pass, server
+  `packages/server/inbox*` 689 pass (694 tests), DOM 564 pass, shared-events
+  e2e Chromium 12 pass (the old-build proof and the soak skipped: no baseline
+  binary or soak time set) and WebKit 7 pass.
+
 ## Unit and server tests
 
 | Test | Result |
