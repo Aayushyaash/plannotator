@@ -49,8 +49,12 @@ reference's lines after its subscribe cursor, once each, in order.
 | `GET /api/inbox/events` from another site | server | `Sec-Fetch-Site` cross-site / same-site, a foreign Origin and `Origin: null`: 403 `cross_origin`, not counted; same-origin, `none`, no metadata (the phone's door, agents) and the page's own Origin: 200 |
 | Page errors | both | none |
 
-Final run after the review fixes (Chromium 14 tests in 6.4 min with the soak,
-WebKit 7 in 36 s, on the last build): takeovers 1 ms (close), 8 ms (reload),
+Final run after the review fixes, repeated on the head that merges origin/main
+(Chromium 14 tests in 6.4 min with a 4.5-minute soak, WebKit 7 in 37 s, both
+times all passing; numbers from the first, the second within a few ms: stall
+3.38 s / gap 3.17 s, WebKit stall 3.78 s / 3.71 s, soak 5,050 messages with 7
+of 7 stalls taken over, streams never above 1 outside stalls, never above 2
+during): takeovers 1 ms (close), 8 ms (reload),
 2 ms (crash), 223 ms (freeze), 3.4 s (stall), 12 ms (WebKit close), 3.8 s
 (WebKit stall); the old build (origin/main) stalled the seventh tab 8 s and
 loaded it 533 ms after one tab closed, the new build loaded a ninth in 459 ms;
@@ -62,10 +66,10 @@ the Inbox restart reconnected in 1.2 s; notify_reach steps 0/27/0/28 ms.
 | --- | --- |
 | `packages/inbox/sharedEvents.test.ts` (fakes for Web Locks with `steal`, BroadcastChannel, the server's stream, and a paused tab whose main thread runs nothing): 1/3/12 tabs, cursor skip, served_by, all frame kinds, leader close/crash during writes, follower gone (crash and close), freeze/resume, back/forward cache, a sleeping follower behind a new leader, a late subscriber, a failed catch-up retried at the next hello, a stopped leader taken over by a visible follower and following when it runs again, a leader that answers never taken over, hidden followers at the hidden pace, a failed catch-up keeping its gap (the reviewer's [3,4] probe now gives [1,2,3,4]), the early channel closed when no subscription follows, junk messages, unsubscribe, 40 seeded random lives of up to 12 tabs, 30 seeded random lives with leaders stopping and tabs shown and hidden (at most 2 streams, every record once) | 25 pass; the 4 new review tests fail on the previous code |
 | `packages/server/inbox-shared-windows.test.ts`: served_by, gone, the grace through a handover, two tabs naming each other never counted, one link further never counted, the whole browser gone (followers stop counting one grace after the leader's stream, and the pages hear it), event_streams, once=1, the cross-site refusal | 7 pass |
-| `packages/server/inbox*.test.ts` (tailnet, door included) | 681 pass, 0 fail (686 tests) |
-| `packages/inbox` DOM tests (`DOM_TESTS=1 --isolate`), which run the fallback path (happy-dom has no Web Locks) | 552 pass |
+| `packages/server/inbox*.test.ts` (tailnet, door included) | 685 pass, 0 fail (690 tests, on the merged head) |
+| `packages/inbox` DOM tests (`DOM_TESTS=1 --isolate`), which run the fallback path (happy-dom has no Web Locks) | 562 pass (merged head) |
 | Typecheck (`bun run typecheck`) | clean |
-| Existing e2e specs that read the event stream (Chromium, compiled binary): `notifications`, `inbox-sound`, `inbox`, `inbox-reply-drafts`, `inbox-send-now`, `inbox-open-stays-put`, `inbox-seen-on-sight`, `inbox-restart`, `inbox-updates` | 66 pass, 1 skipped (as on main) |
+| Existing e2e specs that read the event stream (Chromium, compiled binary): `notifications`, `inbox-sound`, `inbox`, `inbox-reply-drafts`, `inbox-send-now`, `inbox-open-stays-put`, `inbox-seen-on-sight`, `inbox-restart`, `inbox-updates`, and main's new `inbox-picks-composing`, `inbox-refresh` | 74 pass, 1 skipped (as on main) |
 
 ## Not verified
 
