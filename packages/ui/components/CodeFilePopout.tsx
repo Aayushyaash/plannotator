@@ -7,6 +7,7 @@ import { CommentPopover } from './CommentPopover';
 import { ImageThumbnail } from './ImageThumbnail';
 import type { CodeAnnotation, ImageAttachment } from '../types';
 import { copyTextToClipboard } from '../utils/clipboard';
+import { whenCodeLineRendered } from '../utils/codeLineScroll';
 
 export interface CodeFileAnnotationInput {
   filePath: string;
@@ -22,6 +23,10 @@ interface CodeFilePopoutProps {
   onClose: () => void;
   filepath: string;
   contents: string;
+  line?: number;
+  lineEnd?: number;
+  /** Changes on every open, so reopening the same file:line scrolls to it again. */
+  revealKey?: number;
   prerenderedHTML?: string;
   error?: string;
   requestedPath?: string;
@@ -286,6 +291,10 @@ const CodeInlineAnnotation: React.FC<{
 export interface CodeFileViewProps {
   filepath: string;
   contents: string;
+  line?: number;
+  lineEnd?: number;
+  /** Changes on every open, so reopening the same file:line scrolls to it again. */
+  revealKey?: number;
   prerenderedHTML?: string;
   annotations?: CodeAnnotation[];
   selectedAnnotationId?: string | null;
@@ -312,6 +321,9 @@ export interface CodeFileViewProps {
 export const CodeFileView: React.FC<CodeFileViewProps> = ({
   filepath,
   contents,
+  line,
+  lineEnd,
+  revealKey,
   prerenderedHTML,
   annotations = [],
   selectedAnnotationId,
@@ -374,8 +386,11 @@ export const CodeFileView: React.FC<CodeFileViewProps> = ({
     if (selectedCodeAnnotation) {
       return { start: selectedCodeAnnotation.lineStart, end: selectedCodeAnnotation.lineEnd };
     }
+    if (line != null) {
+      return { start: line, end: lineEnd ?? line };
+    }
     return null;
-  }, [pendingComment, selectedCodeAnnotation]);
+  }, [pendingComment, selectedCodeAnnotation, line, lineEnd]);
   const effectivePrerenderedHTML = lineAnnotations.length === 0 ? prerenderedHTML : undefined;
 
   useEffect(() => {
@@ -387,6 +402,19 @@ export const CodeFileView: React.FC<CodeFileViewProps> = ({
     }, 100);
     return () => clearTimeout(timer);
   }, [selectedAnnotationId, filepath]);
+
+  // Bring the referenced line into view once Pierre has drawn it. Runs again
+  // only when the file or the line changes; a selected comment scrolls itself.
+  const selectedAnnotationIdRef = useRef(selectedAnnotationId);
+  selectedAnnotationIdRef.current = selectedAnnotationId;
+  const lineCount = useMemo(() => contents.split('\n').length, [contents]);
+  useEffect(() => {
+    const area = fileAreaRef.current;
+    if (line == null || !area || selectedAnnotationIdRef.current) return;
+    return whenCodeLineRendered(area, line, (lineEl) => {
+      lineEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, { lineCount });
+  }, [line, filepath, lineCount, revealKey]);
 
   const openCommentForRange = useCallback((
     range: { start: number; end: number },
@@ -551,6 +579,9 @@ export const CodeFilePopout: React.FC<CodeFilePopoutProps> = ({
   onClose,
   filepath,
   contents,
+  line,
+  lineEnd,
+  revealKey,
   prerenderedHTML,
   error,
   requestedPath,
@@ -653,6 +684,9 @@ export const CodeFilePopout: React.FC<CodeFilePopoutProps> = ({
       <CodeFileView
         filepath={filepath}
         contents={contents}
+        line={line}
+        lineEnd={lineEnd}
+        revealKey={revealKey}
         prerenderedHTML={prerenderedHTML}
         annotations={annotations}
         selectedAnnotationId={selectedAnnotationId}
