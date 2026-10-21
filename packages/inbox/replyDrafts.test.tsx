@@ -10,7 +10,7 @@
  * fetches carried over loopback. DOM-gated: runs under DOM_TESTS=1
  * (happy-dom), from the test.yml DOM list.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, setDefaultTimeout, test } from 'bun:test';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -21,6 +21,13 @@ import { unsentReply } from './unsent';
 
 const hasDom = typeof document !== 'undefined';
 const { InboxApp } = (hasDom ? await import('./App') : {}) as typeof import('./App');
+
+// Every test here drives the window against a real Inbox with deliberate delays (a
+// 1.5 s held reply, 200 ms settles); on CI's runners several take just over bun's 5 s
+// default. A test that times out also makes bun kill "dangling" processes, which takes
+// the shared DOM server (spawned in beforeAll) down with it, so every later test then
+// fails on "the foot". Give them room.
+setDefaultTimeout(30_000);
 
 const SERVER_SCRIPT = resolve(import.meta.dir, '../../tests/helpers/inbox-dom-server.ts');
 
