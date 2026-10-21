@@ -24,6 +24,26 @@ version_ge() {
     [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]
 }
 
+# A plain release tag: "v" and three dot-separated runs of ASCII digits,
+# nothing else (no suffix, no slash, no query, no whitespace). Used for the
+# tag "latest" resolves to, which comes from the network (the API's
+# tag_name, or the releases/latest redirect) and goes into download URLs,
+# the attestation --source-ref and git clone --branch. Digits are spelled
+# out instead of [0-9] so a non-C locale's collation cannot widen the range.
+is_release_tag() {
+    case "$1" in
+        v*) ;;
+        *) return 1 ;;
+    esac
+    _rt_rest="${1#v}"
+    case "$_rt_rest" in
+        ''|*[!0123456789.]*|.*|*.|*..*) return 1 ;;
+        *.*.*.*) return 1 ;;
+        *.*.*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 VERSION="latest"
 # Tracks whether a version was explicitly set via --version or positional.
 # Used to reject mixing --version <tag> with a stray positional token,
@@ -465,10 +485,7 @@ if [ "$VERSION" = "latest" ]; then
         # the first quoted value on that line ("url") instead (#1655). Only a
         # plain vX.Y.Z-style tag is accepted; anything else counts as a failure.
         latest_tag=$(printf '%s' "$_api_body" | tr -d '\n\r' | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-        case "$latest_tag" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) latest_tag="" ;;
-        esac
+        is_release_tag "$latest_tag" || latest_tag=""
     else
         latest_tag=""
     fi
@@ -476,8 +493,19 @@ if [ "$VERSION" = "latest" ]; then
     # in the environment exactly as the user set them.
     unset _gh_token GH_AUTH_HEADER _api_url _api_body _api_code
 
+    # The API failed (anonymous rate limit of 60/hour per IP, a proxy that
+    # blocks api.github.com): read the tag from the redirect that
+    # github.com/<repo>/releases/latest answers with (.../releases/tag/vX.Y.Z),
+    # which is not rate-limited and needs no token or gh.
     if [ -z "$latest_tag" ]; then
-        echo "Failed to fetch latest version" >&2
+        _latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null) || true
+        latest_tag="${_latest_url##*/}"
+        is_release_tag "$latest_tag" || latest_tag=""
+        unset _latest_url
+    fi
+
+    if [ -z "$latest_tag" ]; then
+        echo "Failed to fetch latest version (check your connection, or pass --version vX.Y.Z)" >&2
         exit 1
     fi
 else
