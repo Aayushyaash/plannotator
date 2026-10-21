@@ -1168,8 +1168,17 @@ async function buildBoundedTrackedDiff(
   ];
   const rawResult = assertGitSuccess(await runtime.runGit(rawArgs, { cwd }), rawArgs);
   const entries = parseRawDiffEntries(rawResult.stdout);
+  // Set once any side's size is unknown and nothing else bounds it, so the
+  // rendered diff relies on core.bigFileThreshold alone. Git consults that
+  // threshold only when it decides binaryness itself, and a textconv driver
+  // skips that decision and formats the whole converted blob (#1206). Such a
+  // render therefore turns textconv off.
+  let gitBoundOnly = false;
   const render = async (patchArgs: string[]) => {
-    const flags = fileIdentities ? ["--raw", "-z", "--patch", "--no-abbrev"] : [];
+    const flags = [
+      ...(gitBoundOnly && !args.includes("--no-textconv") ? ["--no-textconv"] : []),
+      ...(fileIdentities ? ["--raw", "-z", "--patch", "--no-abbrev"] : []),
+    ];
     const command = [...patchArgs.slice(0, diffIndex + 1), ...flags, ...patchArgs.slice(diffIndex + 1)];
     const result = assertGitSuccess(await runtime.runGit(command, { cwd, config: BOUNDED_DIFF_GIT_CONFIG }), command);
     return fileIdentities ? extractReviewPatch(runtime, result.stdout, fileIdentities, cwd) : result.stdout;
@@ -1226,6 +1235,10 @@ async function buildBoundedTrackedDiff(
       ? await getWorkingTreeFileInfo(runtime, root, entry.newPath)
       : null;
     const newSize = newObjectSize ?? workingTreeInfo?.size ?? null;
+    if ((!isNullObjectId(entry.oldObjectId) && oldSize === null)
+      || (!isNullObjectId(entry.newObjectId) && newSize === null)) {
+      gitBoundOnly = true;
+    }
     if (oldSize === null && newSize === null) continue;
     if ((oldSize ?? 0) <= MAX_REVIEW_FILE_CONTENT_BYTES
       && (newSize ?? 0) <= MAX_REVIEW_FILE_CONTENT_BYTES) {
