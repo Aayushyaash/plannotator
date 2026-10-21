@@ -256,7 +256,7 @@ class World {
   /** Catch-ups fail while this is set (the Inbox restarting). */
   catchUpFails = false;
   /** Timings every tab gets (the leader check, the catch-up retry). */
-  timing: SharedEventsEnv['timing'] = { pingEveryMs: 40, pongTimeoutMs: 30, retryMs: 20, retryMaxMs: 80 };
+  timing: SharedEventsEnv['timing'] = { pingEveryMs: 40, hiddenPingEveryMs: 150, pongTimeoutMs: 30, retryMs: 20, retryMaxMs: 80 };
   tabs = new Map<number, Tab>();
   gone: { by: number; window: string; unloading: boolean }[] = [];
   catchUps: { tab: number; cursor: number }[] = [];
@@ -750,8 +750,9 @@ test('a leader that answers is never taken over, however often visible followers
   for (const f of followers) expectAll(f, 0, 10);
 });
 
-test('hidden followers never take the stream from a stopped leader; the first that becomes visible does', async () => {
+test('hidden followers check on a stopped leader less often; one that becomes visible checks at once', async () => {
   const w = world();
+  w.timing = { ...w.timing, hiddenPingEveryMs: 60_000 };
   const a = w.open();
   await settle();
   const b = w.open();
@@ -759,6 +760,7 @@ test('hidden followers never take the stream from a stopped leader; the first th
   w.pause(a);
   w.server.write(2);
   await new Promise((done) => setTimeout(done, 200));
+  // Hidden, and its next check a minute away: nothing taken yet.
   expect(w.locks.steals).toBe(0);
   expect(b.records).toEqual([]);
   // B becomes visible: it checks at once, hears nothing, and leads.
@@ -771,6 +773,32 @@ test('hidden followers never take the stream from a stopped leader; the first th
   w.resume(a);
   await settle(20);
   expect(w.server.streams.size).toBe(1);
+});
+
+test('with every tab hidden, a stopped leader is still taken over (at the hidden pace), so notifications are not owed for long', async () => {
+  const w = world();
+  const a = w.open();
+  await settle();
+  const b = w.open();
+  const c = w.open();
+  await settle(8);
+  const pausedAt = Date.now();
+  w.pause(a);
+  w.server.write(2);
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline && (b.records.length < 2 || c.records.length < 2)) await new Promise((done) => setTimeout(done, 5));
+  const tookMs = Date.now() - pausedAt;
+  expectAll(b, 0, 2);
+  expectAll(c, 0, 2);
+  // At the hidden pace (150 ms here), not the visible one; one or two steals (two hidden tabs may both time out).
+  expect(tookMs).toBeGreaterThanOrEqual(100);
+  expect(w.locks.steals).toBeGreaterThanOrEqual(1);
+  w.resume(a);
+  await settle(20);
+  expect(w.server.streams.size).toBe(1);
+  w.server.write(1);
+  await settle(12);
+  for (const t of [a, b, c]) expectAll(t, 0, 3);
 });
 
 test('a catch-up that fails keeps the gap: the frames that came meanwhile wait, and the retry fetches from the old seq', async () => {

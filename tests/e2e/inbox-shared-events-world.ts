@@ -40,7 +40,7 @@ export const baselineBinary = process.env.PLANNOTATOR_E2E_BASELINE_BINARY ? reso
 export const proofDir = join(resolve(process.env.PLANNOTATOR_E2E_PROOF_DIR ?? join(repo, '.local/proof')), 'shared-events');
 
 export interface LogEntry {
-  type: 'subscribe' | 'record' | 'lead' | 'step-down';
+  type: 'subscribe' | 'record' | 'lead' | 'step-down' | 'steal' | 'stolen' | 'catch-up-failed';
   at: number;
   seq?: number;
   via?: 'stream' | 'channel' | 'catch-up';

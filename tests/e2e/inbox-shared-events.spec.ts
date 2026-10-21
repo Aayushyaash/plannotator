@@ -14,6 +14,9 @@
  * - the leader closes, reloads, crashes (a renderer crash) or is frozen while
  *   an agent writes: another tab leads within a second, nothing missed or
  *   handled twice, one stream;
+ * - the leader stalls (the debugger holds it, no freeze): the tab in front
+ *   takes the lock within seconds, two streams at most, nothing missed or
+ *   twice, and the old leader follows when it runs again;
  * - notifications once and the sound once across the tabs; a follower in
  *   front raises the notice itself and keeps the sound quiet; a question in
  *   the thread it has open raises nothing;
@@ -22,8 +25,9 @@
  * - two origins (localhost and a *.localhost name, as the tailnet address is
  *   another origin) never share: one stream each;
  * - no Web Locks: each tab its own stream, as before.
- * - a soak (PLANNOTATOR_E2E_SOAK_MS): tabs opening, closing, reloading and
- *   crashing at random while an agent writes, for minutes.
+ * - a soak (PLANNOTATOR_E2E_SOAK_MS): tabs opening, closing, reloading,
+ *   crashing, coming to the front and leaders stalling at random while an
+ *   agent writes, for minutes.
  *
  * Build the binary first (see inbox.spec.ts), then
  * `bunx playwright test -c tests/e2e/playwright.config.ts inbox-shared-events`.
@@ -149,16 +153,25 @@ test('the code before this change stalls the seventh tab; the shared stream load
   results.stall = { oldLoadsMs: oldLoads, oldSeventhStalledForMs: stalledMs, oldSeventhLoadedAfterOneClosedMs: afterFreeMs, newLoadsMs: newLoads, newNinthMs: ninth.ms };
 });
 
-/** Close, reload, crash or freeze the leader while an agent writes; measure how fast another tab leads. */
-async function handover(browser: Browser, how: 'close' | 'reload' | 'crash' | 'freeze'): Promise<Record<string, unknown>> {
+/**
+ * Close, reload, crash, freeze or stall the leader while an agent writes;
+ * measure how fast another tab leads and the longest a tab in front went
+ * without a record. A stalled leader is held by the debugger with no freeze
+ * event (as a long script, or a phone's browser suspending a background tab,
+ * holds it): it keeps its lock, and the follower in front takes it.
+ */
+async function handover(browser: Browser, how: 'close' | 'reload' | 'crash' | 'freeze' | 'stall'): Promise<Record<string, unknown>> {
   const w = await world(browser);
   await seed(w);
   for (let i = 0; i < 4; i++) await openTab(w);
   const [leader] = await leaders(w.pages);
   expect(leader).toBeDefined();
+  const others = w.pages.filter((p) => p !== leader);
+  // One follower is in front, as when the person reads the Inbox while the leader is a background tab.
+  const front = others[0]!;
+  await setFront(front, true, true);
   const sender = keepSending(w.agents[0]!, w.project, 40);
   await new Promise((done) => setTimeout(done, 600));
-  const others = w.pages.filter((p) => p !== leader);
   const at = Date.now();
   let cdp: Awaited<ReturnType<typeof w.context.newCDPSession>> | null = null;
   if (how === 'close') {
@@ -170,6 +183,11 @@ async function handover(browser: Browser, how: 'close' | 'reload' | 'crash' | 'f
     cdp = await w.context.newCDPSession(leader!);
     void cdp.send('Page.crash').catch(() => {});
     forget(w, leader!);
+  } else if (how === 'stall') {
+    // No freeze event: the debugger holds the page's main thread from its next script on (its stream's next frame).
+    cdp = await w.context.newCDPSession(leader!);
+    await cdp.send('Debugger.enable');
+    await cdp.send('Debugger.pause');
   } else {
     // Chrome freezes a page by dispatching `freeze`, running its microtasks, then running nothing more until
     // `resume`. Headless pages are always visible, so CDP's Page.setWebLifecycleState does not freeze them
@@ -180,6 +198,15 @@ async function handover(browser: Browser, how: 'close' | 'reload' | 'crash' | 'f
     await leader!.evaluate(() => document.dispatchEvent(new Event('freeze')));
     await cdp.send('Debugger.pause');
   }
+  // Streams on the server, sampled until the leader runs again (never more than two: the stalled one and the new).
+  const streamSamples: number[] = [];
+  let sampling = true;
+  const sampler = (async () => {
+    while (sampling) {
+      streamSamples.push(await streams(w));
+      await new Promise((done) => setTimeout(done, 100));
+    }
+  })();
   // Another tab leads: when its log says so.
   const takeover = await waitFor(
     async () => {
@@ -190,25 +217,62 @@ async function handover(browser: Browser, how: 'close' | 'reload' | 'crash' | 'f
       return null;
     },
     (v) => v !== null,
-    5000,
+    how === 'stall' ? 10_000 : 5000,
   );
-  await new Promise((done) => setTimeout(done, 1500));
+  // A stalled leader stays stopped for eight seconds in all (the reviewer's probe), the agent writing throughout.
+  await new Promise((done) => setTimeout(done, how === 'stall' ? Math.max(1500, 8000 - (Date.now() - at)) : 1500));
   const sent = await sender.stop();
+  const resumedAt = Date.now();
   if (how === 'freeze') {
     await expect.poll(() => streams(w)).toBe(1);
     // It wakes: it fetches what it missed and follows.
     await cdp!.send('Debugger.resume');
     await leader!.evaluate(() => document.dispatchEvent(new Event('resume')));
   }
+  if (how === 'stall') {
+    await cdp!.send('Debugger.resume');
+    // It runs again: it learns the lock was taken, closes its stream and follows.
+    const rejoin = await waitFor(
+      async () => (await logOf(leader!)).filter((e) => e.at >= at).map((e) => e.type),
+      (types) => types.includes('stolen') && types.includes('step-down'),
+      5000,
+    );
+    await expect.poll(() => streams(w)).toBe(1);
+    expect((await leaders(w.pages)).includes(leader!)).toBe(false);
+    results.stallRejoinMs = rejoin.ms;
+    // It learned only when the debugger let it run: it was stopped all along.
+    results.stallOldLeaderLearnedAtMs = (await logOf(leader!)).find((e) => e.type === 'stolen' && e.at >= at)!.at - at;
+    expect(results.stallOldLeaderLearnedAtMs as number).toBeGreaterThan(7000);
+    // It is a follower now: what is written next reaches it too.
+    await sendSome(w, 3);
+  }
+  sampling = false;
+  await sampler;
+  // The tab in front never waited long for a record: its longest gap from the stall on.
+  const frontRecords = (await logOf(front)).filter((e) => e.type === 'record' && e.at >= at - 1000).map((e) => e.at);
+  const frontGaps = frontRecords.slice(1).map((t, i) => t - frontRecords[i]!);
+  const frontLongestGapMs = Math.max(0, frontRecords[0]! - at, ...frontGaps.filter((_, i) => frontRecords[i + 1]! <= resumedAt));
   if (how === 'reload') await expect(leader!.locator('.ib-lbody [data-thread-id]').first()).toBeVisible();
   const checked = await expectEveryRecordOnce(w, w.pages, { exact: false });
   await expect.poll(() => streams(w)).toBe(1);
   expect(await leaders(w.pages)).toHaveLength(1);
-  expect(takeover.value!).toBeLessThan(1000);
+  // A leader that is gone or frozen hands over within a second; a stalled one, after the follower's check (3 s) and wait (2 s).
+  expect(takeover.value!).toBeLessThan(how === 'stall' ? 6500 : 1000);
+  expect(frontLongestGapMs).toBeLessThan(how === 'stall' ? 6500 : 1500);
+  expect(Math.max(...streamSamples)).toBeLessThanOrEqual(how === 'stall' ? 2 : 1);
   // A crashed target answers nothing more: never wait on it.
   if (cdp && how !== 'crash') await cdp.detach().catch(() => {});
   if (how === 'crash') void leader!.close().catch(() => {});
-  return { takeoverMs: takeover.value, messagesSentDuringTest: sent, lines: checked.total, perTab: checked.perTab, tabsExactlyEveryLine: `${checked.exactTabs}/${w.pages.length}` };
+  return {
+    takeoverMs: takeover.value,
+    frontLongestGapMs,
+    streamsPeak: Math.max(...streamSamples),
+    streamSamples: streamSamples.length,
+    messagesSentDuringTest: sent,
+    lines: checked.total,
+    perTab: checked.perTab,
+    tabsExactlyEveryLine: `${checked.exactTabs}/${w.pages.length}`,
+  };
 }
 
 test('the leader closes while an agent writes: another tab leads within a second, nothing missed or twice', async ({ browser }) => {
@@ -225,6 +289,10 @@ test('the leader crashes (renderer crash, no unload) while an agent writes: anot
 
 test('the leader is frozen (Chrome page lifecycle) while an agent writes: another tab leads; the frozen tab catches up as it wakes', async ({ browser }) => {
   results.freezeLeader = await handover(browser, 'freeze');
+});
+
+test('the leader stalls (debugger-paused, no freeze) while an agent writes: the follower in front takes over within seconds; the old leader follows when it runs again', async ({ browser }) => {
+  results.stallLeader = await handover(browser, 'stall');
 });
 
 test('notifications once and the sound once across the tabs; a follower in front raises the notice and keeps the sound quiet; nothing for the thread it has open', async ({ browser }) => {
@@ -376,7 +444,7 @@ test('without Web Locks each tab holds its own stream, as before, and still gets
   results.noLocks = { streams: 3 };
 });
 
-test('soak: tabs open, close, reload and crash at random while an agent writes; one stream, nothing lost or twice', async ({ browser }) => {
+test('soak: tabs open, close, reload, crash, come to the front and stall at random while an agent writes; one stream, nothing lost or twice', async ({ browser }) => {
   const soakMs = Number(process.env.PLANNOTATOR_E2E_SOAK_MS ?? 0);
   test.skip(!(soakMs > 0), 'PLANNOTATOR_E2E_SOAK_MS sets how long the soak runs');
   test.setTimeout(soakMs + 300_000);
@@ -384,8 +452,17 @@ test('soak: tabs open, close, reload and crash at random while an agent writes; 
   await seed(w);
   for (let i = 0; i < 3; i++) await openTab(w);
   const sender = keepSending(w.agents[0]!, w.project, 50);
-  const actions: Record<string, number> = { open: 0, close: 0, reload: 0, crash: 0 };
+  const actions: Record<string, number> = { open: 0, close: 0, reload: 0, crash: 0, front: 0, stall: 0, stallTakenOver: 0 };
   const streamSamples: number[] = [];
+  /** Samples taken while a leader was stalled: two streams then are expected (the stalled one and the new). */
+  const stallSamples: number[] = [];
+  /** The tab in front (the others are in the background). */
+  let front: Page | null = null;
+  const bringToFront = async (page: Page | null) => {
+    if (front && front !== page && w.pages.includes(front)) await setFront(front, false, false);
+    front = page;
+    if (page) await setFront(page, true, true);
+  };
   const crashed: Page[] = [];
   let seed32 = 1021;
   const random = () => {
@@ -403,8 +480,32 @@ test('soak: tabs open, close, reload and crash at random while an agent writes; 
   };
   const until = Date.now() + soakMs;
   while (Date.now() < until) {
+    if (front && !w.pages.includes(front)) front = null;
     const roll = random();
-    if (roll < 0.35 && w.pages.length < 10) {
+    if (roll < 0.1 && w.pages.length > 0) {
+      await bringToFront(w.pages[Math.floor(random() * w.pages.length)]!);
+      actions.front++;
+    } else if (roll < 0.17 && w.pages.length > 1) {
+      // The leader stalls (the debugger holds it, no freeze) for 3 to 9 s with another tab in front.
+      const [leader] = await leaders(w.pages);
+      if (leader) {
+        if (!front || front === leader) await bringToFront(w.pages.find((p) => p !== leader)!);
+        const cdp = await w.context.newCDPSession(leader);
+        await cdp.send('Debugger.enable');
+        await cdp.send('Debugger.pause');
+        const stallUntil = Date.now() + 3000 + Math.floor(random() * 6000);
+        while (Date.now() < stallUntil) {
+          await new Promise((done) => setTimeout(done, 300));
+          stallSamples.push(await streams(w));
+        }
+        await cdp.send('Debugger.resume');
+        await cdp.detach().catch(() => {});
+        actions.stall++;
+        if ((await logOf(leader)).some((e) => e.type === 'stolen')) actions.stallTakenOver++;
+        // It runs again: one stream once it learns the lock was taken.
+        await expect.poll(() => streams(w)).toBe(1);
+      }
+    } else if (roll < 0.4 && w.pages.length < 10) {
       await openTab(w);
       actions.open++;
     } else if (roll < 0.6 && w.pages.length > 1) {
@@ -439,7 +540,22 @@ test('soak: tabs open, close, reload and crash at random while an agent writes; 
   const over = streamSamples.filter((n) => n > 1).length;
   expect(Math.max(...streamSamples)).toBeLessThanOrEqual(2);
   expect(over / streamSamples.length).toBeLessThan(0.05);
-  results.soak = { ms: soakMs, actions, tabsCheckedBeforeLeaving: checkedBeforeLeaving, messagesSent: sent, lines: checked.total, tabsAtEnd: w.pages.length, tabsExactlyEveryLine: `${checked.exactTabs}/${w.pages.length}`, streamSamples: streamSamples.length, samplesAboveOne: over };
+  // While a leader is stalled: two streams at most (the stalled one, the new leader's).
+  expect(Math.max(0, ...stallSamples)).toBeLessThanOrEqual(2);
+  expect(actions.stall === 0 || actions.stallTakenOver > 0, 'a stall was taken over').toBe(true);
+  results.soak = {
+    ms: soakMs,
+    actions,
+    tabsCheckedBeforeLeaving: checkedBeforeLeaving,
+    messagesSent: sent,
+    lines: checked.total,
+    tabsAtEnd: w.pages.length,
+    tabsExactlyEveryLine: `${checked.exactTabs}/${w.pages.length}`,
+    streamSamples: streamSamples.length,
+    samplesAboveOne: over,
+    stallSamples: stallSamples.length,
+    stallSamplesPeak: Math.max(0, ...stallSamples),
+  };
 });
 
 test('no page errors along the way', () => {

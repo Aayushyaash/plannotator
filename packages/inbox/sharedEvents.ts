@@ -59,9 +59,15 @@ export type SharedEventsMessage =
   | { v: 1; type: 'ping'; window: string; nonce: string }
   | { v: 1; type: 'pong'; leader: string; to: string; nonce: string };
 
-/** How often a visible follower checks that the leader answers, and how long it waits for the answer. */
-export const LEADER_PING_EVERY_MS = 5000;
-export const LEADER_PONG_TIMEOUT_MS = 3000;
+/**
+ * How often a follower checks that the leader answers: a visible one every
+ * few seconds (and when it becomes visible or gets focus), a hidden one less
+ * often (the person is away, but a notification is still owed); and how long
+ * it waits for the answer.
+ */
+export const LEADER_PING_EVERY_MS = 3000;
+export const LEADER_HIDDEN_PING_EVERY_MS = 15_000;
+export const LEADER_PONG_TIMEOUT_MS = 2000;
 /** A failed catch-up is tried again after this, doubling up to `CATCH_UP_RETRY_MAX_MS`. */
 export const CATCH_UP_RETRY_MS = 1000;
 export const CATCH_UP_RETRY_MAX_MS = 30_000;
@@ -90,10 +96,10 @@ export interface SharedEventsEnv {
   sendGone: (windowId: string, unloading: boolean) => void;
   /** Where `freeze`, `resume` (document) and `pagehide`, `pageshow` (window) arrive; null in tests that drive them. */
   lifecycle: { document: EventTarget; window: EventTarget } | null;
-  /** Whether the person can see this tab (only a visible follower checks on the leader). Default: never. */
+  /** Whether the person can see this tab (a visible follower checks on the leader more often). Default: never. */
   isVisible?: () => boolean;
   /** Test knobs for the leader check and the catch-up retry (defaults above). */
-  timing?: { pingEveryMs?: number; pongTimeoutMs?: number; retryMs?: number; retryMaxMs?: number };
+  timing?: { pingEveryMs?: number; hiddenPingEveryMs?: number; pongTimeoutMs?: number; retryMs?: number; retryMaxMs?: number };
 }
 
 export function sharedInboxEventsSupported(): boolean {
@@ -260,8 +266,9 @@ function isMessage(value: unknown): value is SharedEventsMessage {
  * script in an attached page's frame, a phone's browser suspending a
  * background tab) keeps its lock and passes nothing on. So a follower the
  * person can see asks the leader every few seconds (and when it becomes
- * visible or gets focus); a leader answers from its message handler. No answer
- * in time: the follower takes the lock (`steal`) and leads. The old leader
+ * visible or gets focus), a hidden one every fifteen; a leader answers from
+ * its message handler. No answer in time: the follower takes the lock
+ * (`steal`) and leads. The old leader
  * learns it lost the lock when it runs again, closes its stream and follows.
  * Records the two pass on meanwhile are told apart by seq.
  */
@@ -272,6 +279,7 @@ export function subscribeSharedInboxEvents(
   env: SharedEventsEnv,
 ): () => void {
   const pingEveryMs = env.timing?.pingEveryMs ?? LEADER_PING_EVERY_MS;
+  const hiddenPingEveryMs = env.timing?.hiddenPingEveryMs ?? LEADER_HIDDEN_PING_EVERY_MS;
   const pongTimeoutMs = env.timing?.pongTimeoutMs ?? LEADER_PONG_TIMEOUT_MS;
   const retryMs = env.timing?.retryMs ?? CATCH_UP_RETRY_MS;
   const retryMaxMs = env.timing?.retryMaxMs ?? CATCH_UP_RETRY_MAX_MS;
@@ -306,6 +314,8 @@ export function subscribeSharedInboxEvents(
   /** The leader check in flight: a ping waiting for its pong. */
   let check: { nonce: string; timer: ReturnType<typeof setTimeout> } | null = null;
   let pingTimer: ReturnType<typeof setInterval> | null = null;
+  /** When this tab last checked (a hidden tab checks every `hiddenPingEveryMs` only). */
+  let lastCheckAt = Date.now();
 
   let channel: ChannelLike;
   let backlog: unknown[] = [];
@@ -510,14 +520,16 @@ export function subscribeSharedInboxEvents(
     clearTimeout(check.timer);
     check = null;
   };
-  /** A visible follower asks the leader whether it is alive; no answer in time, it takes the stream. */
+  /** A follower asks the leader whether it is alive; no answer in time, it takes the stream. */
   const checkLeader = () => {
-    if (stopped || suspended || leading || stealing || check || !isVisible()) return;
+    if (stopped || suspended || leading || stealing || check) return;
+    if (!isVisible() && Date.now() - lastCheckAt < hiddenPingEveryMs) return;
+    lastCheckAt = Date.now();
     const nonce = Math.random().toString(36).slice(2, 12);
     const timer = setTimeout(() => {
       if (check?.nonce !== nonce) return;
       check = null;
-      if (stopped || suspended || leading || !isVisible()) return;
+      if (stopped || suspended || leading) return;
       trace({ type: 'steal', from: leader });
       acquire(true);
     }, pongTimeoutMs);
