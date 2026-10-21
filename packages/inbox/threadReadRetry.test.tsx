@@ -1,23 +1,23 @@
 /**
- * Opening a thread whose first read fails (the owner, 0.28.25: "i clicked to
- * open …#thread=… and the right side stayed empty for like 5-10s before
- * loading the thread"). Measured in a sandbox Inbox: the window and the
- * server answer a thread of that shape in about 0.5 s cold and under 0.1 s
- * from the list, but ONE failed read of `GET /api/inbox/threads/:id` (a
- * dropped connection, a 5xx) left the right side blank, with no word and no
- * retry, until some agent wrote anywhere in the Inbox (the event stream
- * re-reads the open thread): in Chromium the pane came at 6.9 s when an
- * unrelated agent message landed at ~7 s, and never (20 s+) with no agent
- * writing.
+ * Opening a thread whose read fails or hangs. Context: the owner (0.28.25)
+ * saw the right side stay empty for 5-10 s after opening a thread link; why
+ * his read failed is not known. Measured in a sandbox Inbox: a thread of that
+ * shape opens in about 0.5 s cold, but ONE failed read of
+ * `GET /api/inbox/threads/:id` (a dropped connection, a 5xx) left the right
+ * side blank, with no word and no retry, until some agent wrote anywhere in
+ * the Inbox (the event stream re-reads the open thread), and a read with no
+ * answer waited for good.
  *
  * What is proved, over the whole window (InboxApp) and a REAL Inbox in a temp
  * data dir (its own process, tests/helpers/inbox-dom-server.ts): with the
  * first read failing as a dropped connection and as a 500, and NO store line
  * written meanwhile (the event stream is a stand-in nobody pokes), the thread
- * is on screen within the first retry and its look is recorded; while the
+ * is on screen within the first retry and its look is recorded; a read with
+ * no answer fails after THREAD_READ_TIMEOUT_MS and is read again; while the
  * read is failing the thread's place says so and offers Try again, which
- * reads at once; a thread the server does not have (404) says so with Close
- * and is not read again.
+ * reads at once and, holding focus, hands it to the thread's subject; opening
+ * another thread or closing stops the retries; a thread the server does not
+ * have (404) says so with Close and is not read again.
  *
  * DOM-gated: runs under DOM_TESTS=1 (happy-dom), from the test.yml DOM list.
  */
@@ -31,7 +31,7 @@ import { join, resolve } from 'node:path';
 import { PHONE_QUERY } from './phone';
 
 const hasDom = typeof document !== 'undefined';
-const { InboxApp, THREAD_READ_RETRY_MS } = (hasDom ? await import('./App') : {}) as typeof import('./App');
+const { InboxApp, THREAD_READ_RETRY_MS, THREAD_READ_TIMEOUT_MS } = (hasDom ? await import('./App') : {}) as typeof import('./App');
 
 const SERVER_SCRIPT = resolve(import.meta.dir, '../../tests/helpers/inbox-dom-server.ts');
 
@@ -48,7 +48,7 @@ let savedFetch: typeof fetch;
 let savedEventSource: unknown;
 let savedMatchMedia: typeof window.matchMedia;
 /** How each read of the thread fails, first to last; past the list it is answered by the server. */
-let failures: ('reset' | 500)[] = [];
+let failures: ('reset' | 500 | 'hang')[] = [];
 /** Every read of `GET /api/inbox/threads/<id>` the window made. */
 let threadReads: string[] = [];
 let posted: string[] = [];
@@ -76,7 +76,7 @@ async function readLine(): Promise<string> {
   return line.trim();
 }
 
-const TESTS = 4;
+const TESTS = 6;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -121,6 +121,13 @@ beforeEach(() => {
       threadReads.push(path);
       const failure = failures.shift();
       if (failure === 'reset') throw new TypeError('Failed to fetch');
+      // No answer: only the window's own timeout (its AbortSignal) ends it.
+      if (failure === 'hang')
+        return await new Promise<Response>((_, fail) => {
+          const signal = init?.signal;
+          if (!signal) return;
+          signal.addEventListener('abort', () => fail(new DOMException('The operation was aborted.', 'AbortError')));
+        });
       if (failure === 500) return new Response(JSON.stringify({ error: 'Internal error.' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
     const answer = await loopback(path, method, init?.body ? String(init.body) : undefined);
@@ -187,7 +194,7 @@ const pane = (el: HTMLElement, id: string) => el.querySelector(`section.ib-pane[
 const waiting = (el: HTMLElement) => el.querySelector<HTMLElement>('[data-thread-wait]');
 
 for (const kind of ['reset', 500] as const) {
-  test(`a first read that fails (${kind === 'reset' ? 'a dropped connection' : 'a 500'}) is read again: the thread shows with no agent writing`, async () => {
+  test(`a first read that fails (${kind === 'reset' ? 'a dropped connection' : 'a 500'}) is read again by itself, with no event-stream re-read`, async () => {
     if (!hasDom) return;
     failures = [kind];
     const opened = performance.now();
@@ -217,10 +224,64 @@ test('Try again reads at once; a read that keeps failing keeps being tried', asy
   expect(threadReads.length).toBe(2);
   // Try again: one read now, not after the wait.
   failures = [];
-  act(() => el.querySelector<HTMLButtonElement>('[data-thread-wait-retry]')!.click());
+  const retry = el.querySelector<HTMLButtonElement>('[data-thread-wait-retry]')!;
+  act(() => {
+    retry.focus();
+    retry.click();
+  });
   await until(() => pane(el, world.stopped) !== null, 'the thread after Try again', 1500);
   expect(threadReads.length).toBe(3);
+  // Focus was on Try again: it goes to the thread's subject, not to the page.
+  expect(document.activeElement).toBe(pane(el, world.stopped)!.querySelector('.ib-subject'));
 });
+
+test('a read with no answer fails after THREAD_READ_TIMEOUT_MS and is read again', async () => {
+  if (!hasDom) return;
+  failures = ['hang'];
+  const opened = performance.now();
+  const el = renderAt(`#thread=${world.waiting}`);
+  await until(() => waiting(el)?.getAttribute('data-thread-wait') === 'loading', 'the opening line');
+  expect(waiting(el)!.getAttribute('aria-busy')).toBe('true');
+  await until(() => pane(el, world.waiting) !== null, 'the thread after the timeout', THREAD_READ_TIMEOUT_MS + 3000);
+  const took = performance.now() - opened;
+  expect(took).toBeGreaterThanOrEqual(THREAD_READ_TIMEOUT_MS);
+  expect(took).toBeLessThan(THREAD_READ_TIMEOUT_MS + THREAD_READ_RETRY_MS[0] + 2500);
+  expect(threadReads.length).toBe(2);
+}, THREAD_READ_TIMEOUT_MS + 8000);
+
+test('opening another thread, or closing, stops the retries', async () => {
+  if (!hasDom) return;
+  failures = Array.from({ length: 50 }, () => 'reset' as const);
+  const el = renderAt(`#thread=${world.waiting}`);
+  await until(() => threadReads.length >= 2, 'a retry of the first thread', 2000);
+  // Another thread opens (its reads are answered): the first one is not read again.
+  failures = [];
+  act(() => {
+    window.location.hash = `#thread=${world.stopped}`;
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+  });
+  await until(() => pane(el, world.stopped) !== null, 'the second thread');
+  const firstReads = () => threadReads.filter((p) => p.endsWith(world.waiting)).length;
+  const before = firstReads();
+  await wait(THREAD_READ_RETRY_MS[1] + THREAD_READ_RETRY_MS[2] + 300);
+  expect(firstReads()).toBe(before);
+  // A failing thread, then closed: no read after the close.
+  failures = Array.from({ length: 50 }, () => 'reset' as const);
+  act(() => {
+    window.location.hash = `#thread=${world.waiting}`;
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+  });
+  await until(() => waiting(el)?.getAttribute('data-thread-wait') === 'failed', 'the failed line again');
+  expect(waiting(el)!.getAttribute('aria-busy')).toBe('false');
+  act(() => {
+    window.location.hash = '';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+  });
+  await until(() => waiting(el) === null, 'the thread closed');
+  const atClose = threadReads.length;
+  await wait(THREAD_READ_RETRY_MS[1] + THREAD_READ_RETRY_MS[2] + 300);
+  expect(threadReads.length).toBe(atClose);
+}, 15000);
 
 test('a thread the server does not have says so, offers Close, and is not read again', async () => {
   if (!hasDom) return;
