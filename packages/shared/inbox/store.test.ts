@@ -427,45 +427,74 @@ describe("InboxStore invariants", () => {
   });
 
   test("a torn last line is skipped, and the next append reads back whole", () => {
+    // Every store file in turn, each on its own copy of the store: which file a
+    // directory listing names first differs by filesystem (creation order on
+    // APFS, hash order on ext4), and a card line torn on Linux CI once read as a
+    // failure because the next write was a message, which never lands in
+    // cards.jsonl. The next write is now one that lands in the torn file.
     fc.assert(
       fc.property(fc.array(opArb, { minLength: 1, maxLength: 20 }), fc.double({ min: 0.05, max: 0.95, noNaN: true }), (ops, cut) => {
         const dir = dataDir();
         const store = InboxStore.open(dir);
         const ids: string[] = [];
         for (const op of ops) run(store, op, ids);
-        const jsonl = storeFiles(dir).filter((f) => f.endsWith(".jsonl") && statSync(f).size > 0);
-        if (jsonl.length === 0) return;
-        const file = jsonl[0]!;
-        const text = readFileSync(file, "utf8");
-        const lastStart = text.lastIndexOf("\n", text.length - 2) + 1;
-        const lastLength = text.length - 1 - lastStart;
-        const tornLine = parseInboxLine(text.slice(lastStart))!;
-        // Crash mid-append: keep only part of the last line, no newline.
-        truncateSync(file, lastStart + Math.max(1, Math.floor(lastLength * cut)));
+        const torn = storeFiles(dir)
+          .filter((f) => f.endsWith(".jsonl") && statSync(f).size > 0)
+          .map((f) => f.slice(dir.length))
+          .sort();
+        for (const relative of torn) {
+          const copy = dataDir();
+          cpSync(dir, copy, { recursive: true });
+          const file = join(copy, relative);
+          const text = readFileSync(file, "utf8");
+          const lastStart = text.lastIndexOf("\n", text.length - 2) + 1;
+          const lastLength = text.length - 1 - lastStart;
+          const tornLine = parseInboxLine(text.slice(lastStart))!;
+          // Crash mid-append: keep only part of the last line, no newline.
+          truncateSync(file, lastStart + Math.max(1, Math.floor(lastLength * cut)));
 
-        const recovered = InboxStore.open(dir);
-        // Everything but the torn record's last snapshot survives; the torn line is gone.
-        expect(recovered.changesSince(0).some((l) => l.seq === tornLine.seq)).toBe(false);
-        expect(recovered.changesSince(0).length).toBeGreaterThan(0);
+          const recovered = InboxStore.open(copy);
+          // Everything but the torn record's last snapshot survives; the torn line is gone.
+          expect(recovered.changesSince(0).some((l) => l.seq === tornLine.seq)).toBe(false);
+          expect(recovered.changesSince(0).length).toBeGreaterThan(0);
 
-        // The next write to THAT file (a message, with a question, in the torn
-        // file's project) lands on its own line and reads back whole.
-        const key = file.split("/").at(-2)!;
-        const project = recovered.listProjects().find((p) => p.key === key)!;
-        const before = recovered.cursor();
-        const body = ":::question\nWritten after the crash?\n\n- [ ] Yes\n- [ ] No\n:::";
-        const written = recovered.sendMessage({
-          project_id: project.id,
-          author: { kind: "agent", host: null, session: null, name: null },
-          body,
-        });
-        const again = InboxStore.open(dir);
-        const after = again.changesSince(before);
-        expect(after.some((l) => l.kind === "message" && l.record.body === body)).toBe(true);
-        expect(after.some((l) => l.kind === "question" && l.record.message_id === written.message.id)).toBe(true);
-        expect(readFileSync(file, "utf8").endsWith("\n")).toBe(true);
+          // The next write to THAT file, in the torn file's project, lands on its own line and reads back whole.
+          const key = file.split("/").at(-2)!;
+          const project = recovered.listProjects().find((p) => p.key === key)!;
+          const before = recovered.cursor();
+          const again = () => InboxStore.open(copy).changesSince(before);
+          if (relative.endsWith("/cards.jsonl")) {
+            const card = recovered.createCard({ project_id: project.id, by: { kind: "person" }, title: "Written after the crash" }).card;
+            expect(again().some((l) => l.kind === "card" && l.record.id === card.id && l.record.title === "Written after the crash")).toBe(true);
+          } else {
+            const body = ":::question\nWritten after the crash?\n\n- [ ] Yes\n- [ ] No\n:::";
+            const written = recovered.sendMessage({
+              project_id: project.id,
+              author: { kind: "agent", host: null, session: null, name: null },
+              body,
+            });
+            const after = again();
+            expect(after.some((l) => l.kind === "message" && l.record.body === body)).toBe(true);
+            expect(after.some((l) => l.kind === "question" && l.record.message_id === written.message.id)).toBe(true);
+          }
+          expect(readFileSync(file, "utf8").endsWith("\n")).toBe(true);
+        }
       }),
-      { numRuns: 60 },
+      {
+        numRuns: 60,
+        // The two counterexamples CI found (Linux, where cards.jsonl was listed first): a card line torn.
+        examples: [
+          [
+            [
+              { op: "personStart", root: 0, key: "p1", session: "ses_a", body: "Idea: group the list by session." },
+              { op: "card", target: 0, card: { kind: "create" } },
+              { op: "personStart", root: 0, key: "p1", session: "ses_a", body: "Idea: group the list by session." },
+            ],
+            0.05,
+          ],
+          [[{ op: "send", root: 0, body: ":::question-text\nA,??\n:::", key: null }, { op: "card", target: 0, card: { kind: "create" } }], 0.05],
+        ],
+      },
     );
   });
 
