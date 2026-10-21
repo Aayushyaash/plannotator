@@ -102,7 +102,7 @@ function httpUrl(value: string): string | null {
 export function parseInboxActionWhere(value: string): { where: string | null; where_url: string | null } {
   const text = value.trim();
   if (text === "") return { where: null, where_url: null };
-  const link = /^\[([^\]]+)\]\(\s*<?([^)\s>]+)>?\s*\)\.?$/.exec(text);
+  const link = /^\[([^\]]+)\]\((.+)\)\.?$/.exec(text);
   if (link) {
     const url = httpUrl(link[2]!);
     return url ? { where: link[1]!.trim() || hostOf(url), where_url: url } : { where: link[1]!.trim(), where_url: null };
