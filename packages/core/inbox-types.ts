@@ -155,7 +155,7 @@ export function checkInboxSubject(value: unknown): { ok: true; subject: string |
     return {
       ok: false,
       message:
-        "contains tool-call text (such as </subject> or <parameter name=…>), so your call was malformed. Send again with the subject alone as its value and every other field as its own argument.",
+        "contains tool-call text (such as </subject> or <parameter name=…>), so your call was malformed. Send again with the subject alone as its value and every other field as its own argument. If you meant to write that text, reword it without the angle brackets.",
     };
   }
   if (SUBJECT_LINE_BREAK.test(subject)) {

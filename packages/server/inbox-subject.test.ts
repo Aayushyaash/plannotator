@@ -60,6 +60,7 @@ describe("send_message and submit_guide refuse a subject that is not one line", 
     expect(refused.isError).toBe(true);
     expect(refused.content[0]!.text).toMatch(/^validation_error: subject: contains tool-call text/);
     expect(refused.content[0]!.text).toContain("subject alone");
+    expect(refused.content[0]!.text).toContain("If you meant to write that text, reword it without the angle brackets.");
     // Nothing written: no project made, no file copied.
     expect(JSON.parse(await get(server, "/api/inbox/projects")).projects).toEqual([]);
     const blobs = join(dataDir, "inbox", "blobs");

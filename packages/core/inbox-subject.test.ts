@@ -35,6 +35,7 @@ describe("checkInboxSubject", () => {
       const message = refusal(value);
       expect(message, value).toContain("contains tool-call text");
       expect(message).toContain("subject alone");
+      expect(message).toContain("If you meant to write that text, reword it without the angle brackets.");
     }
   });
 
@@ -86,5 +87,10 @@ describe("displayInboxSubject", () => {
     for (const value of ["Vec<T> vs Box<dyn Trait>", "Replace <div> with <section>", "Auth refactor: next steps"]) {
       expect(displayInboxSubject(value)).toBe(value);
     }
+  });
+
+  test("a subject that mentions the markup is told how to say it without looping", () => {
+    expect(refusal("Fix leaked </subject> in Inbox subjects")).toContain("reword it without the angle brackets");
+    expect(checkInboxSubject("Fix leaked /subject in Inbox subjects")).toEqual({ ok: true, subject: "Fix leaked /subject in Inbox subjects" });
   });
 });
