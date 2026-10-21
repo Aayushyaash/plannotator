@@ -14,6 +14,16 @@ import {
 	hasReviewBrowserHtml,
 	loadPlannotatorBrowser,
 } from "./plannotator-browser-runtime.ts";
+import { isBrowserSessionStoppedError } from "./browser-session-error.ts";
+import { getProcessPiReviewRegistry } from "./plannotator-tool-host.ts";
+import {
+	newSessionEventId,
+	openSessionEvent,
+	sessionEndOf,
+	sessionEndOfError,
+	type PlannotatorSessionAction,
+	type SessionEventHandle,
+} from "./session-events.ts";
 
 type PlannotatorBrowserModule = typeof import("./plannotator-browser.ts");
 
@@ -383,6 +393,51 @@ export function registerPlannotatorEventListeners(
 			console.error(`Plannotator: could not answer a ${PLANNOTATOR_REQUEST_CHANNEL} request: ${describeError(err)}`);
 		}
 	};
+	/**
+	 * `plannotator:session-opened` for a review this request opened (#1589).
+	 * The bus only, on a microtask, guarded against a stale runtime: see
+	 * session-events.ts.
+	 */
+	const announceSessionOpened = (
+		ctx: ExtensionContext,
+		action: PlannotatorSessionAction,
+		url: string,
+		ids: { requestId?: string; reviewId?: string },
+	): SessionEventHandle => {
+		let piSessionId: string | undefined;
+		try {
+			piSessionId = ctx.sessionManager.getSessionId();
+		} catch {
+			piSessionId = undefined;
+		}
+		return openSessionEvent(pi, () => sessionLive, {
+			// Unique among the open reviews: the ones announced, and the ones
+			// the `plannotator` tool lists (the process registry).
+			id: newSessionEventId((id) => getProcessPiReviewRegistry().openAll().some((review) => review.id === id)),
+			action,
+			url,
+			...(piSessionId ? { piSessionId } : {}),
+			...(typeof ids.requestId === "string" && ids.requestId ? { requestId: ids.requestId } : {}),
+			...(ids.reviewId ? { reviewId: ids.reviewId } : {}),
+		});
+	};
+	/** Wait for a review's decision, announcing its open and close on the bus. */
+	const awaitAnnounced = async <T extends { approved?: boolean; exit?: boolean; closedBy?: string }>(
+		ctx: ExtensionContext,
+		action: PlannotatorSessionAction,
+		requestId: string | undefined,
+		session: { url: string; waitForDecision: () => Promise<T> },
+	): Promise<T> => {
+		const events = announceSessionOpened(ctx, action, session.url, { requestId });
+		try {
+			const result = await session.waitForDecision();
+			events.close(sessionEndOf(result));
+			return result;
+		} catch (err) {
+			events.close(sessionEndOfError(isBrowserSessionStoppedError(err)));
+			throw err;
+		}
+	};
 	const storeReviewStatus = (reviewId: string, status: PlannotatorReviewStatusResult): void => {
 		try {
 			setStoredReviewStatus(reviewStatusPath, reviewId, status);
@@ -448,6 +503,16 @@ export function registerPlannotatorEventListeners(
 					}
 					const session = await startPlanReview(ctx, planContent);
 					storeReviewStatus(session.reviewId, { status: "pending" });
+					const events = announceSessionOpened(ctx, "plan-review", session.url, {
+						requestId: request.requestId,
+						reviewId: session.reviewId,
+					});
+					// Only to learn when it ends (its decision, or its server stopped):
+					// the decision itself is delivered by onDecision below.
+					void session.waitForDecision().then(
+						(result) => events.close(sessionEndOf(result)),
+						(err: unknown) => events.close(sessionEndOfError(isBrowserSessionStoppedError(err))),
+					);
 					session.onDecision((result) => {
 						const reviewResult = {
 							reviewId: session.reviewId,
@@ -474,7 +539,7 @@ export function registerPlannotatorEventListeners(
 					return;
 				}
 				case "code-review": {
-					const result = await openCodeReview(ctx, {
+					const session = await startCodeReviewBrowserSession(ctx, {
 						cwd: request.payload?.cwd,
 						defaultBranch: request.payload?.defaultBranch,
 						diffType: request.payload?.diffType,
@@ -483,6 +548,7 @@ export function registerPlannotatorEventListeners(
 						prUrl: request.payload?.prUrl,
 						patchFile: request.payload?.patchFile,
 					});
+					const result = await awaitAnnounced(ctx, "code-review", request.requestId, session);
 					answer({ status: "handled", result });
 					return;
 				}
@@ -493,7 +559,7 @@ export function registerPlannotatorEventListeners(
 						return;
 					}
 					const sourceConverted = /\.html?$/i.test(payload.filePath) || /^https?:\/\//i.test(payload.filePath);
-					const result = await openMarkdownAnnotation(
+					const session = await startMarkdownAnnotationSession(
 						ctx,
 						payload.filePath,
 						payload.markdown ?? "",
@@ -502,6 +568,12 @@ export function registerPlannotatorEventListeners(
 						undefined,
 						sourceConverted,
 						payload.gate,
+					);
+					const result = await awaitAnnounced(
+						ctx,
+						payload.mode === "annotate-last" ? "annotate-last" : "annotate",
+						request.requestId,
+						session,
 					);
 					answer({ status: "handled", result });
 					return;
@@ -516,7 +588,8 @@ export function registerPlannotatorEventListeners(
 					}
 					const recent = usePayloadText ? [] : getRecentAssistantMessages(ctx, 25);
 					const pickerMessages = recent.length > 1 ? recent : undefined;
-					const result = await openLastMessageAnnotation(ctx, lastText, payload?.gate, pickerMessages);
+					const session = await startLastMessageAnnotationSession(ctx, lastText, payload?.gate, pickerMessages);
+					const result = await awaitAnnounced(ctx, "annotate-last", request.requestId, session);
 					answer({ status: "handled", result });
 					return;
 				}
@@ -543,3 +616,13 @@ export {
 	hasReviewBrowserHtml,
 	getStartupErrorMessage,
 };
+
+export {
+	PLANNOTATOR_SESSION_CLOSED_CHANNEL,
+	PLANNOTATOR_SESSION_OPENED_CHANNEL,
+	type PlannotatorSessionAction,
+	type PlannotatorSessionClosedBy,
+	type PlannotatorSessionClosedEvent,
+	type PlannotatorSessionOpenedEvent,
+	type PlannotatorSessionOutcome,
+} from "./session-events.ts";

@@ -18,6 +18,7 @@ import { configStore } from './config';
 import type { ServerSyncFn } from './config/configStore';
 import type { ExternalAnnotationEvent, VaultNode } from './types';
 import { setComponentTooltips } from './components/HostTitle';
+import { setDigitHexIssueRefs } from './components/InlineMarkdown';
 
 // One-stop type barrel: every seam contract a host implements is importable
 // from this module, next to configurePlannotatorUI itself.
@@ -127,6 +128,13 @@ export interface PlannotatorUIConfig {
    * as before. The Plannotator Inbox passes true.
    */
   componentTooltips?: boolean;
+  /**
+   * Render a digit-only 6/8-digit `#123456` (word boundary, no leading zero)
+   * as an issue ref instead of a hex colour swatch, when a ref link can be
+   * built (a repo on a known forge). Default: false, swatches exactly as
+   * before. The Plannotator Inbox passes true (#1932).
+   */
+  digitHexIssueRefs?: boolean;
   /** Re-hydrate settings from the installed (SYNCHRONOUS) storageBackend after install. */
   loadSettingsFromBackend?: boolean;
 }
@@ -152,6 +160,7 @@ export function configurePlannotatorUI(config: PlannotatorUIConfig): void {
   if (config.alertIconRenderer) setAlertIconRenderer(config.alertIconRenderer);
   if (config.fenceTheme) setFenceThemeResolver(config.fenceTheme);
   if (config.componentTooltips !== undefined) setComponentTooltips(config.componentTooltips);
+  if (config.digitHexIssueRefs !== undefined) setDigitHexIssueRefs(config.digitHexIssueRefs);
   // Re-hydrate AFTER storageBackend is installed (load-bearing order — gated last).
   if (config.loadSettingsFromBackend) configStore.loadFromBackend();
 }

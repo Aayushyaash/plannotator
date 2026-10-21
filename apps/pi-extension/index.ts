@@ -80,6 +80,16 @@ import {
 } from "./tool-scope.ts";
 import { getServerPorts, isRemoteSession } from "./server/network.ts";
 import { sessionOpenedMessage } from "./session-opened.ts";
+import {
+	claimSessionEventBus,
+	openSessionEvent,
+	releaseSessionEventBus,
+	sessionEndOf,
+	sessionEndOfError,
+	type PlannotatorSessionAction,
+	type SessionEventHandle,
+} from "./session-events.ts";
+import { checklistWindow } from "./checklist-window.ts";
 import { isBrowserSessionStoppedError } from "./browser-session-error.ts";
 import { classifyAnnotateOutcome } from "./annotate-outcome.ts";
 import { classifyReviewOutcome } from "./review-outcome.ts";
@@ -339,6 +349,8 @@ interface PendingPlanReview {
 	settled: boolean;
 	/** Its entry in the open-review registry (the `plannotator` tool's list). */
 	tracked?: PiOpenReview;
+	/** Its `plannotator:session-opened` / `session-closed` pair. */
+	events?: SessionEventHandle;
 }
 
 /**
@@ -348,6 +360,14 @@ interface PendingPlanReview {
  * older Pi ignores the key and activates every registered tool.
  */
 const NOT_ACTIVE_ON_REGISTRATION = { defaultActive: false } as const;
+
+/** The `plannotator:session-*` action for each kind of open review. */
+const SESSION_EVENT_ACTIONS: Record<PiReviewKind, PlannotatorSessionAction> = {
+	plan: "plan-review",
+	review: "code-review",
+	annotate: "annotate",
+	last: "annotate-last",
+};
 
 /** Host seams for tests. Production passes nothing. */
 export interface PlannotatorExtensionDeps {
@@ -473,6 +493,9 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 
 	pi.on("session_start", (_event, ctx) => {
 		sessionAlive = true;
+		// This instance's bus gets the session events of reviews whose opener
+		// was replaced (/reload, /resume): see session-events.ts.
+		claimSessionEventBus(pi);
 		currentPiSession.update(ctx);
 		settleAgentToolActivation(ctx);
 	});
@@ -503,12 +526,15 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	});
 
 	pi.on("session_shutdown", () => {
-		sessionAlive = false;
-		currentPiSession.clear();
 		// A plan decision belongs to the session that is planning: unlike review
 		// and annotate feedback it is not re-targeted to a replacement session,
-		// so an open plan review closes with its session.
+		// so an open plan review closes with its session. First, while this
+		// instance is still live, so its session-closed event goes out on this
+		// session's bus.
 		stopPendingPlanReview();
+		sessionAlive = false;
+		releaseSessionEventBus(pi);
+		currentPiSession.clear();
 		// Browser sessions deliberately outlive in-process session replacement so
 		// a tab opened before /new can still deliver feedback to the replacement
 		// session (withCurrentPiSessionFallbackHeader). On real process teardown
@@ -552,7 +578,10 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 
 	function updateWidget(ctx: ExtensionContext): void {
 		if (phase === "executing" && checklistItems.length > 0) {
-			const lines = checklistItems.map((item) => {
+			// Pi draws at most 10 lines of a widget (#1412): show the 10 items
+			// around the next open one, so what the agent works on stays in view.
+			// UI only: setWidget never reaches the conversation or the prompt.
+			const lines = checklistWindow(checklistItems).map((item) => {
 				if (item.completed) {
 					return (
 						ctx.ui.theme.fg("success", "☑ ") +
@@ -787,6 +816,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		pendingPlanReview = null;
 		review.settled = true;
 		if (review.tracked) openReviews.remove(review.tracked);
+		review.events?.close({ outcome: "closed", closedBy: "stopped" });
 		try {
 			// The open tab learns it was closed (draft kept) instead of offering
 			// a decision nothing could deliver.
@@ -903,6 +933,21 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		}
 	}
 
+	/**
+	 * Announce a review on the event bus (`plannotator:session-opened`; #1589).
+	 * The bus only: nothing reaches the conversation, so the request prefix is
+	 * unchanged. The handle emits `plannotator:session-closed` once.
+	 */
+	function announceSessionOpened(review: PiOpenReview): SessionEventHandle {
+		return openSessionEvent(pi, () => sessionAlive, {
+			id: review.id,
+			action: SESSION_EVENT_ACTIONS[review.kind],
+			url: review.url,
+			openedAt: review.startedAt,
+			...(review.owner ? { piSessionId: review.owner } : {}),
+		});
+	}
+
 	/** A decision message for the agent: the heading naming subject, id and outcome, then the prompt. */
 	function withDecisionHeading(review: PiOpenReview, outcome: string, body: string): string {
 		return `${plannotatorDecisionHeading(review.subject, review.id, outcome, review.target)}\n\n${body}`;
@@ -923,10 +968,12 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		deliver: (result: T, review: PiOpenReview) => Promise<void>,
 	): PiOpenReview {
 		const review = openReviews.add({ kind, ...names, url: session.url, owner: ownerOf(ctx), hostControl: session.hostControl });
+		const events = announceSessionOpened(review);
 		void session
 			.waitForDecision()
 			.then(async (result) => {
 				openReviews.remove(review);
+				events.close(sessionEndOf(result));
 				try {
 					if (result.closedBy === "agent") {
 						safeNotify(ctx, agentClosedNotice(review, result.unsentAnnotations), "info", origin);
@@ -939,6 +986,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			})
 			.catch((err) => {
 				openReviews.remove(review);
+				events.close(sessionEndOfError(isBrowserSessionStoppedError(err)));
 				reportBackgroundError(ctx, errors.session, err, origin);
 			});
 		return review;
@@ -1970,12 +2018,14 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				owner: ownerOf(ctx),
 				hostControl: session.hostControl,
 			});
+			review.events = announceSessionOpened(review.tracked);
 			persistState();
 
 			void session
 				.waitForDecision()
 				.then(async (result) => {
 					if (review.tracked) openReviews.remove(review.tracked);
+					review.events?.close(sessionEndOf(result));
 					if (review.settled) return;
 					review.settled = true;
 					if (pendingPlanReview === review) pendingPlanReview = null;
@@ -1984,6 +2034,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				.catch((err: unknown) => {
 					if (review.tracked) openReviews.remove(review.tracked);
 					const wasSettled = review.settled;
+					review.events?.close(sessionEndOfError(wasSettled || isBrowserSessionStoppedError(err)));
 					review.settled = true;
 					if (pendingPlanReview === review) pendingPlanReview = null;
 					// Stopped on purpose (plan mode left, session replaced): silent.
