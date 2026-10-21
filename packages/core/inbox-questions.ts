@@ -414,7 +414,7 @@ export function composeInboxReplyBody(input: {
   // The questions this reply leaves open, and says so: the agent must not ask
   // again. A reply that answers and skips nothing keeps its own wording.
   const sentIds = new Set(groups.flatMap((g) => g.sent.map((a) => `${g.message_id}/${a.key}`)));
-  const pool = (input.stillOpen ?? groups.flatMap((g) => g.questions)).filter((q) => !sentIds.has(`${q.message_id}/${q.key}`));
+  const pool = (input.stillOpen ?? groups.flatMap((g) => g.questions)).filter((q) => !sentIds.has(`${q.message_id ?? ""}/${q.key}`));
   const stillOpen = sentGroups.length === 0 ? inboxStillOpenLine(pool) : inboxOtherStillOpenLine(pool);
   return [sentence, words, stillOpen, section].filter((part) => part !== "").join("\n\n");
 }

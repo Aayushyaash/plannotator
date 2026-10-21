@@ -159,14 +159,15 @@ describe("POST /api/inbox/threads/:id/read and /unread", () => {
   });
 });
 
-describe("POST /api/inbox/messages/:id/reply with skip_unanswered", () => {
-  test("a words-only Send skips the question, and the row leaves the top", async () => {
+describe("POST /api/inbox/messages/:id/reply with a skip list (approval inbox-explicit-skip)", () => {
+  test("Skip them on a words-only Send skips the listed question, and the row leaves the top", async () => {
     const { server, threadId, messageId } = await setup();
+    const key = server.store.questionsOf(messageId)[0]!.key;
     const res = await post(server, `/api/inbox/messages/${messageId}/reply`, {
       idempotency_key: "k-1",
       words: "Redo the design.",
       questions: [],
-      skip_unanswered: true,
+      skip: [key],
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { reply: { body: string }; questions: InboxQuestion[] };
@@ -177,15 +178,32 @@ describe("POST /api/inbox/messages/:id/reply with skip_unanswered", () => {
     expect((await rowOf(server, threadId)).section).toBe("sent");
   });
 
-  test("a skip-only target whose questions closed meanwhile is a 200 no-op, not a refusal", async () => {
+  test("a skip-only Send whose questions closed meanwhile is a 200 no-op, not a refusal", async () => {
     const { server, threadId, messageId } = await setup();
+    const key = server.store.questionsOf(messageId)[0]!.key;
     await post(server, `/api/inbox/threads/${threadId}/read`, {});
-    const res = await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-2", questions: [], skip_unanswered: true });
+    const res = await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-2", questions: [], skip: [key] });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ reply: null, nothing_to_send: true });
     expect(server.store.thread(threadId)!.messages).toHaveLength(1);
-    // Without skip_unanswered an empty Send is still refused, as before.
+    // Without a skip list an empty Send is still refused, as before.
     expect((await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-3", questions: [] })).status).toBe(422);
+  });
+
+  test("skip_unanswered is ignored: words with it skip nothing; alone it is an empty Send (422)", async () => {
+    const { server, threadId, messageId } = await setup();
+    const res = await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-1", words: "Later.", questions: [], skip_unanswered: true });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { questions: InboxQuestion[] }).questions[0]).toMatchObject({ state: "open", answer: null });
+    expect((await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-2", questions: [], skip_unanswered: true })).status).toBe(422);
+    expect((await rowOf(server, threadId)).section).toBe("stopped");
+  });
+
+  test("a skip list that names no question of the message is refused, nothing written", async () => {
+    const { server, threadId, messageId } = await setup();
+    expect((await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-1", words: "x", skip: "all" })).status).toBe(422);
+    expect((await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-2", words: "x", skip: ["q-00000000"] })).status).toBe(404);
+    expect(server.store.thread(threadId)!.messages).toHaveLength(1);
   });
 });
 
@@ -198,7 +216,6 @@ describe("POST /api/inbox/messages/:id/reply with words only (approval inbox-wor
       idempotency_key: "k-1",
       words: "Received, I'll answer later.",
       questions: [],
-      skip_unanswered: false,
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { reply: { body: string }; questions: InboxQuestion[] };
@@ -211,7 +228,7 @@ describe("POST /api/inbox/messages/:id/reply with words only (approval inbox-wor
     expect(waited.structuredContent.reply?.body).toBe(`Received, I'll answer later.\n\n${STILL_OPEN}`);
   });
 
-  test("no skip_unanswered at all (the phone door, an older window): the same reply", async () => {
+  test("no skip list at all: the same reply", async () => {
     const { server, messageId } = await setup();
     const res = await post(server, `/api/inbox/messages/${messageId}/reply`, { idempotency_key: "k-1", words: "Still thinking." });
     expect(res.status).toBe(200);
