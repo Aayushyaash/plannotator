@@ -44,6 +44,10 @@ import { timingSafeEqual } from "node:crypto";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import {
   INBOX_APP_ID,
+  INBOX_CARD_COLUMNS,
+  isInboxCardColumn,
+  isInboxCardDropUnseen,
+  type InboxCardColumn,
   INBOX_SOUND_DEFAULT_VOLUME,
   INBOX_TEXT_SIZE_DEFAULT,
   INBOX_HOST_NAMES,
@@ -403,6 +407,14 @@ const ERROR_STATUS: Record<string, number> = {
   upload_too_large: 413,
   markup_too_large: 413,
   upload_not_found: 404,
+  // The Board's cards (approval "inbox-board"): who may move a card.
+  card_not_found: 404,
+  card_no_project: 404,
+  card_other_project: 422,
+  card_icebox_person_only: 403,
+  card_iceboxed: 409,
+  card_dropped_by_person: 409,
+  card_person_only: 403,
   // Over your tailnet (packages/server/inbox-tailscale.ts).
   tailscale_env_decides: 409,
   tailscale_unavailable: 409,
@@ -741,6 +753,53 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     if (!isInboxId("prj", value)) throw new InboxError("validation_error", "project: a prj_ id.", { field: "project" });
     if (!store.project(value)) throw new InboxError("project_not_found", `No project ${value}.`);
     return value;
+  };
+
+  /**
+   * The Board's cards (`GET /api/inbox/cards`): `?project=prj_…` and
+   * `?column=building,your_review` filter; every card otherwise, in the
+   * Board's column order, the latest move first.
+   */
+  const cardsModel = (url: URL) => {
+    const project = projectFilterOf(url);
+    const raw = url.searchParams.get("column");
+    let columns: Set<InboxCardColumn> | null = null;
+    if (raw !== null && raw !== "") {
+      columns = new Set();
+      for (const value of raw.split(",")) {
+        if (!isInboxCardColumn(value)) throw new InboxError("validation_error", `column: one or more of ${INBOX_CARD_COLUMNS.join(", ")}, comma-separated.`, { field: "column" });
+        columns.add(value);
+      }
+    }
+    const cards = store.listCards({ projectIds: project ? new Set([project]) : null, columns }).map((card) => store.cardWire(card));
+    // An agent's drops the person has not seen, in the project (or everywhere): the Board's "N dropped by an agent".
+    const droppedUnseen = store.listCards({ projectIds: project ? new Set([project]) : null, columns: new Set(["dropped"]) }).filter(isInboxCardDropUnseen).length;
+    return { serverSession, cursor: store.cursor(), cards, dropped_unseen: droppedUnseen };
+  };
+
+  /**
+   * The person's moves on a card (`POST /api/inbox/cards/:id`): `op` move
+   * (`column`, any; a move to dropped may carry `reason`), icebox (the pause
+   * only the person makes), drop (`reason` optional), restore (back to the
+   * column the card left for the Icebox or Dropped).
+   */
+  const personCardMove = (id: string, body: Record<string, unknown>) => {
+    if (!isInboxId("crd", id)) throw new InboxError("validation_error", "A card id (crd_).", { field: "card" });
+    const by = { kind: "person" } as const;
+    const reason = body.reason === undefined || body.reason === null || body.reason === "" ? undefined : body.reason;
+    switch (body.op) {
+      case "move":
+        if (body.column === undefined) throw new InboxError("validation_error", "column: where the card goes.", { field: "column" });
+        return store.updateCard(id, { by, column: body.column, reason: body.column === "dropped" ? reason : undefined });
+      case "icebox":
+        return store.updateCard(id, { by, column: "icebox" });
+      case "drop":
+        return store.updateCard(id, { by, column: "dropped", reason });
+      case "restore":
+        return store.updateCard(id, { by, restore: true });
+      default:
+        throw new InboxError("validation_error", "op: move, icebox, drop or restore.", { field: "op" });
+    }
   };
 
   /** `?archived=include|exclude` on the list: where archived threads go. Default `include` (in Quiet). */
@@ -1273,6 +1332,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         return { seq: line.seq, kind: line.kind, id: line.id, question: store.questionWire(line.record) };
       case "annotation":
         return { seq: line.seq, kind: line.kind, id: line.id, annotation: line.record };
+      case "card":
+        // A Board card (approval "inbox-board"). A reader that does not know the kind skips it.
+        return { seq: line.seq, kind: line.kind, id: line.id, card: store.cardWire(line.record) };
     }
   };
 
@@ -1926,6 +1988,32 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       // Reply drafts: the reply box's words per thread (approval "inbox-reply-drafts").
       const drafted = await replyDrafts.route(req, url);
       if (drafted) return drafted;
+
+      // The Board's cards (approval "inbox-board", step 1): the person's read and moves.
+      if (path === "/api/inbox/cards") {
+        if (req.method !== "GET") return json({ error: "Use GET." }, 405);
+        return json(cardsModel(url));
+      }
+      // The person looked at Dropped: an agent's drops there are seen (in `project`, or everywhere).
+      if (path === "/api/inbox/cards/dropped/seen") {
+        if (req.method !== "POST") return json({ error: "Use POST." }, 405);
+        const body = await readBody(req);
+        if (checkServerSession(body, serverSession) === "mismatch") return json(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409);
+        let projectIds: Set<string> | null = null;
+        if (body.project !== undefined && body.project !== null) {
+          if (!isInboxId("prj", body.project)) throw new InboxError("validation_error", "project: a prj_ id.", { field: "project" });
+          if (!store.project(body.project)) throw new InboxError("project_not_found", `No project ${body.project}.`);
+          projectIds = new Set([body.project]);
+        }
+        return json({ cards: store.markCardDropsSeen(projectIds).map((card) => store.cardWire(card)) });
+      }
+      const cardMatch = /^\/api\/inbox\/cards\/([A-Za-z0-9_]+)$/.exec(path);
+      if (cardMatch) {
+        if (req.method !== "POST") return json({ error: "Use POST." }, 405);
+        const body = await readBody(req);
+        if (checkServerSession(body, serverSession) === "mismatch") return json(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409);
+        return json({ card: store.cardWire(personCardMove(cardMatch[1]!, body)) });
+      }
 
       const threadMatch = /^\/api\/inbox\/threads\/([A-Za-z0-9_]+)$/.exec(path);
       if (threadMatch && req.method === "GET") {

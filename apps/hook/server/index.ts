@@ -217,7 +217,8 @@ import {
 } from "./cli";
 import { exitOnUnknownSubcommand } from "./unknown-subcommand";
 import { completeAnnotateCommand } from "./annotate-command";
-import { runInboxCommand, selfCommand as inboxSelfCommand } from "./inbox-command";
+import { ensureInboxRunning, runInboxCommand, selfCommand as inboxSelfCommand } from "./inbox-command";
+import { runCardCommand } from "./card-command";
 import { formatInboxHelp } from "./inbox-help";
 import { getPlannotatorDataDir } from "@plannotator/shared/data-dir";
 import { isAgentSdkEntrypoint } from "@plannotator/shared/t3-hook-command";
@@ -276,6 +277,22 @@ takeHostMessagesPath();
 const hostReviewId = takeHostReviewId();
 
 const rawArgs = process.argv.slice(2);
+// The Board's cards from a shell (unreleased, HIDDEN_SUBCOMMANDS): a thin
+// client over the Inbox's `card` tool, starting a stopped Inbox like the shim.
+// Before the strict-annotate parse, which takes `--json` and other flags for itself.
+{
+  const args = rawArgs;
+  if (args[0] === "card") {
+    const cardDataDir = getPlannotatorDataDir();
+    process.exit(
+      await runCardCommand(args.slice(1), {
+        cwd: process.env.PLANNOTATOR_CWD || process.cwd(),
+        env: process.env,
+        ensureRunning: () => ensureInboxRunning(cardDataDir),
+      }),
+    );
+  }
+}
 // T3 Code (opt-in, unreleased; HIDDEN_SUBCOMMANDS): `t3` is the connection's
 // CLI and worker, `t3-hook` the Claude Bash hook and its settings helper.
 // Loaded only when asked for, so no other subcommand evaluates any of it.

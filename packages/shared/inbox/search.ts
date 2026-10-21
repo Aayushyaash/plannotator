@@ -415,6 +415,8 @@ export class InboxSearchIndex {
         // Not indexed, but a comment waiting for a Send moves its thread's section (`unsent`).
         this.facts.delete(line.record.thread_id);
         return;
+      case "card":
+        return;
     }
     if (line.kind === "message" || line.kind === "question") {
       const threadId = line.kind === "message" ? line.record.thread_id : this.store.message(line.record.message_id)?.thread_id;

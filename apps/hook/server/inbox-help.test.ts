@@ -22,6 +22,7 @@ import { startInboxServer } from "@plannotator/server/inbox";
 import { INBOX_FILLED_ARGUMENTS } from "@plannotator/shared/inbox/connection";
 import { formatTopLevelHelp } from "./cli";
 import { inboxAttachmentKind, inboxAttachmentNameRefusal } from "@plannotator/core/inbox-types";
+import { INBOX_SERVED_TOOLS } from "@plannotator/server/inbox-mcp";
 import { formatInboxHelp, INBOX_HELP_CODE_EXAMPLES, INBOX_HELP_MCP_URL, INBOX_QUESTION_EXAMPLE, INBOX_REPLACES_EXAMPLE, TOOL_GUIDE } from "./inbox-help";
 import { removeStubbedHtml, stubHookDistHtml } from "../../../tests/helpers/hook-dist-stub";
 import { createAgentEnvironmentFor } from "@plannotator/server/inbox-agents";
@@ -72,7 +73,9 @@ describe("the guide against what it describes", () => {
     try {
       await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`)));
       const { tools } = await client.listTools();
-      expect(tools.map((tool) => tool.name).sort()).toEqual(Object.keys(TOOL_GUIDE).sort());
+      expect(tools.map((tool) => tool.name).sort()).toEqual([...INBOX_SERVED_TOOLS].sort());
+      // A tool held back (the Board's card action, INBOX_CARD_ACTION_ON) has no section until it ships.
+      for (const name of Object.keys(TOOL_GUIDE)) if (!(INBOX_SERVED_TOOLS as readonly string[]).includes(name)) expect(help).not.toContain(`\n### ${name}\n`);
       for (const tool of tools) {
         expect(help).toContain(`\n### ${tool.name}\n`);
         const properties = Object.keys((tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {});
