@@ -7,8 +7,8 @@
  * and Chromium drives the window.
  *
  * Proves: the tiles at the foot of the thread; the markdown plan beside the
- * thread with Full screen, drawn in Plannotator's plan look (Grid by default,
- * Clean under the `plannotator-grid-enabled=false` cookie), a selection comment listed in the reply box's
+ * thread with Full screen, always drawn in the Clean look (plan review's Grid
+ * setting is not read), a selection comment listed in the reply box's
  * annotations chip; the HTML prototype full screen with its relative image
  * resolved, its iframe loading the sibling page (never the Inbox, #1554), the
  * frame unable to read the Inbox API, a marker pinned on "Retry all"; leaving
@@ -354,35 +354,30 @@ test('the thread shows its attachments at the foot; the plan opens beside the th
   expect(page.url()).toContain(`file=${world.attachments.plan}`);
 });
 
-test("the plan follows Plannotator's look: Grid (the default) is the card on the grid paper, Clean the document edge to edge", async () => {
+test('the plan is always the Clean look: the document edge to edge on the card colour, even with Grid chosen in plan review', async () => {
   const page = world.page;
   const pane = page.locator(`[data-attachment-pane="${world.attachments.plan}"]`);
   const scroll = pane.locator('.ib-docscroll');
   const article = scroll.locator('article');
-  // No choice made: the registry's default, Grid (the store writes the default back as the cookie on first read), drawn with plan review's classes.
-  const seeded = (await world.context.cookies()).find((c) => c.name === 'plannotator-grid-enabled');
-  expect(seeded?.value ?? 'true').toBe('true');
-  await expect(scroll).toHaveAttribute('data-look', 'grid');
-  await expect(scroll).toHaveClass(/\bbg-grid\b/);
-  await expect(article).toHaveClass(/\bshadow-xl\b/);
-  await expect(article).toHaveClass(/\bborder\b/);
-  await shot('2.1b-plan-look-grid');
+  const isClean = async () => {
+    await expect(scroll).toHaveAttribute('data-look', 'clean');
+    await expect(scroll).toHaveClass(/\bbg-card\b/);
+    await expect(scroll).not.toHaveClass(/\bbg-grid\b/);
+    await expect(article).not.toHaveClass(/\bshadow-xl\b/);
+    await expect(article).toContainText('Retry worker for Stripe 409s');
+    const [scrollBg, articleBg] = await Promise.all([scroll, article].map((l) => l.evaluate((el) => getComputedStyle(el).backgroundColor)));
+    expect(articleBg).toBe(scrollBg);
+  };
+  await isClean();
+  await shot('2.1b-plan-look-clean');
 
-  // The cookie Plannotator's Settings writes for "Clean": the same pane draws the flat document on the card colour.
-  await world.context.addCookies([{ name: 'plannotator-grid-enabled', value: 'false', url: world.url }]);
+  // The cookie plan review's Settings writes for "Grid" changes nothing here.
+  await world.context.addCookies([{ name: 'plannotator-grid-enabled', value: 'true', url: world.url }]);
   await page.reload();
-  await expect(scroll).toHaveAttribute('data-look', 'clean');
-  await expect(scroll).toHaveClass(/\bbg-card\b/);
-  await expect(article).not.toHaveClass(/\bshadow-xl\b/);
-  await expect(article).toContainText('Retry worker for Stripe 409s');
-  const [scrollBg, articleBg] = await Promise.all([scroll, article].map((l) => l.evaluate((el) => getComputedStyle(el).backgroundColor)));
-  expect(articleBg).toBe(scrollBg);
-  await shot('2.1c-plan-look-clean');
-
-  // Back to the default for the rest of the proof.
+  await isClean();
   await world.context.clearCookies({ name: 'plannotator-grid-enabled' });
   await page.reload();
-  await expect(scroll).toHaveAttribute('data-look', 'grid');
+  await expect(scroll).toBeVisible();
 });
 
 test('a selection comment on the plan is saved and listed in the reply box chip', async () => {

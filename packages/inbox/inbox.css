@@ -1274,7 +1274,7 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 .pn-inbox .ib-vlink { color: var(--primary); font-weight: 550; }
 .ib-vbody { display: grid; grid-template-columns: minmax(0, 1fr) 300px; min-height: 0; }
 .ib-docarea { position: relative; overflow: hidden; background: var(--background); min-height: 0; }
-/* Plannotator's plan look: Grid is its card on the grid paper, Clean the document on the card colour (bg-grid or bg-card, Viewer's gridEnabled). */
+/* An attached file is always the Clean look: the document edge to edge on the card colour (bg-card, Viewer's gridEnabled false), never plan review's grid paper. */
 .ib-docscroll { position: absolute; inset: 0; overflow-y: auto; display: flex; flex-direction: column; align-items: center; padding: 58px 24px 24px; }
 /* The open file is one layer under the pane's own chrome. ui's Viewer wraps
    the document in a `relative z-50` layer (plan review's sticky lane sits at

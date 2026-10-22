@@ -139,6 +139,7 @@ jobs:
           packages/inbox/images.test.tsx
           packages/inbox/inlineImages.test.tsx
           packages/inbox/codeAttachment.test.tsx
+          packages/inbox/fileViewClean.test.tsx
           packages/inbox/links.test.tsx
           packages/inbox/issueRefs.test.tsx
           packages/inbox/attachmentKinds.test.tsx
