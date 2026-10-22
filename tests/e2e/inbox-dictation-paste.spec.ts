@@ -32,6 +32,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, rememberInboxOf, removeInboxScratch } from './inbox-scratch';
+import { forgetFileViewChoice } from './file-view';
 import { NO_BROWSER } from '../helpers/no-browser';
 import { FORCE_PLAIN_TEXT_PASTE_FLAG } from '../../packages/ui/utils/pasteInsert';
 
@@ -83,6 +84,9 @@ test.beforeAll(async ({ browser }) => {
   context = await browser.newContext({ viewport: { width: 1440, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
   page = await context.newPage();
 });
+
+/** A view pressed in a test is remembered in the shared context: forgotten after each (file-view.ts). */
+test.afterEach(async () => forgetFileViewChoice(context));
 
 test.afterAll(async () => {
   try {

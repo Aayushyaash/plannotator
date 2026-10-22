@@ -102,6 +102,90 @@ describe('InlineMarkdown angle autolinks', () => {
   });
 });
 
+// The hrefs of every <a> in the rendered HTML, in order.
+function linkHrefs(html: string): string[] {
+  return [...html.matchAll(/<a [^>]*href="([^"]*)"/g)].map((m) => m[1].replace(/&amp;/g, '&'));
+}
+
+describe('bare URL autolinks keep underscores (Workspaces ids: ws_, doc_, prj_)', () => {
+  // A bare URL after other text used to be cut at the first `_` (or `~`,
+  // `#`, `@`, `$`, `!`), because those end a plain-text chunk.
+  test('a URL after text is one link through its underscores', () => {
+    const url = 'http://localhost:3011/w/ws_01M5JCNXKERX0XDNABX0S8K9D0/docs/plan.md';
+    const html = renderInline(`Open ${url} now.`);
+    expect(linkHrefs(html)).toEqual([url]);
+    expect(html).toContain(`>${url}</a> now.`);
+  });
+
+  test('two underscore runs, ~, %, query and fragment stay in the link; the comma does not', () => {
+    const url = 'https://a.com/ws_x/doc_y/~me?q=a_b&r=c%20d#frag_1';
+    const html = renderInline(`see ${url}, then`);
+    expect(linkHrefs(html)).toEqual([url]);
+    expect(html).toContain('</a>, then');
+  });
+
+  test('two URLs on one line are two whole links', () => {
+    const html = renderInline('two: https://a.com/a_b and https://b.com/c_d.');
+    expect(linkHrefs(html)).toEqual(['https://a.com/a_b', 'https://b.com/c_d']);
+    expect(html).toContain('</a>.');
+  });
+
+  test('an unbalanced closing paren stays outside', () => {
+    const html = renderInline('(see https://a.com/x_y)');
+    expect(linkHrefs(html)).toEqual(['https://a.com/x_y']);
+    expect(html).toContain('</a>)');
+  });
+
+  test('a trailing ! stays outside the link', () => {
+    const html = renderInline('see https://a.com/a_b!');
+    expect(linkHrefs(html)).toEqual(['https://a.com/a_b']);
+    expect(html).toContain('</a>!');
+  });
+
+  test('$ inside a URL stays in it', () => {
+    expect(linkHrefs(renderInline('pay https://a.com/x$y_z ok'))).toEqual(['https://a.com/x$y_z']);
+  });
+
+  // Guards the one-pass path: a URL that ends inside its plain-text chunk
+  // must not get a loop turn of its own (each turn rescans the rest of the
+  // text). 32,000 URLs render in about 0.1 s in one pass and several seconds
+  // with a turn per URL, so the budget is far from both.
+  test('a paragraph of many plain URLs renders in one pass', () => {
+    const n = 32_000;
+    const text = Array.from({ length: n }, (_, i) => `https://a.com/p${i}`).join(' ');
+    const started = performance.now();
+    const html = renderInline(text);
+    const elapsed = performance.now() - started;
+    expect(html.split('<a ').length - 1).toBe(n);
+    expect(elapsed).toBeLessThan(2_000);
+  });
+
+  test('@ and # inside a URL stay in it', () => {
+    expect(linkHrefs(renderInline('at https://a.com/@user_1#top'))).toEqual(['https://a.com/@user_1#top']);
+  });
+
+  test('a URL inside underscore emphasis is linked whole inside the emphasis', () => {
+    const html = renderInline('an _italic https://a.com/x_y_ phrase');
+    expect(linkHrefs(html)).toEqual(['https://a.com/x_y']);
+    expect(html).toContain('<em>italic <a ');
+    expect(html).toContain('</a></em> phrase');
+  });
+
+  test('a URL in inline code stays code', () => {
+    const html = renderInline('code `https://a.com/x_y` here');
+    expect(linkHrefs(html)).toEqual([]);
+    expect(html).toContain('<code');
+  });
+
+  test('snake_case and _word_ outside URLs are unchanged', () => {
+    expect(renderInline('snake_case and _word_ stay')).toBe('snake_case and <em>word</em> stay');
+  });
+
+  test('a scheme glued to a word is not linked', () => {
+    expect(linkHrefs(renderInline('foohttps://a.com/x_y'))).toEqual([]);
+  });
+});
+
 describe('InlineMarkdown math', () => {
   // KaTeX reaches InlineMath through the renderer slot now (utils/math.ts);
   // Plannotator's apps fill it by importing utils/math-eager. Register it

@@ -224,7 +224,7 @@ function OpenInSplit({ attachment, version, label }: { attachment: InboxAttachme
  * same list as the header's. Shown on hover and keyboard focus, and always
  * on a touch screen.
  */
-export function OpenInTileMenu({ attachment, version }: { attachment: InboxAttachmentState; version: 'current' | 'sent' }) {
+export function OpenInTileMenu({ attachment, version, onOpenAs }: { attachment: InboxAttachmentState; version: 'current' | 'sent'; onOpenAs?: (view: 'full' | 'side') => void }) {
   const { menu, status, launch, copyPath } = useOpenIn(attachment, version);
   if (!menu) return null;
   return (
@@ -236,6 +236,20 @@ export function OpenInTileMenu({ attachment, version }: { attachment: InboxAttac
           </DropdownMenuTrigger>
         </Tip>
         <DropdownMenuContent align="end" sideOffset={6} className="min-w-[12rem]" finalFocus={false} data-open-in-menu={attachment.id}>
+          {onOpenAs && (
+            <>
+              {/* This file in that view; the remembered choice is unchanged (fileView.ts). */}
+              <DropdownMenuItem className="text-xs" onClick={() => onOpenAs('side')} data-open-as="side">
+                <Icon name="sideBySide" size={15} className="ib-appi ib-glyph" />
+                <span className="flex-1">Open side by side</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem className="text-xs" onClick={() => onOpenAs('full')} data-open-as="full">
+                <Icon name="frame" size={15} className="ib-appi ib-glyph" />
+                <span className="flex-1">Open full screen</span>
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+            </>
+          )}
           <OpenInMenuItems attachment={attachment} menu={menu} onLaunch={(item) => void launch(item)} onCopyPath={() => void copyPath()} />
         </DropdownMenuContent>
       </DropdownMenu>

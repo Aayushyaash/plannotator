@@ -86,6 +86,7 @@ import { installPasteFollowsField } from './pasteTarget';
 import { installPlainTextPaste } from '@plannotator/ui/utils/pasteInsert';
 import { LIST_MIN_WIDTH, THREAD_BESIDE_FILE_WIDTH, paneGutters, useStack } from './stack';
 import { backTo, pushScreen } from './history';
+import { parseFileView, sameScreenAnyView } from './fileView';
 import { adoptSavedTheme, inboxThemeSync } from './theme';
 import { adoptSavedTextSize, applyRememberedTextSize } from './textSize';
 import { parseSettingsHash, settingsHash, type SettingsSection } from './settingsRoute';
@@ -175,9 +176,10 @@ interface Route {
   thread: string | null;
   /**
    * An attachment open beside the thread: `file=att_…`, `v=sent` for the version the agent sent, `at=` an annotation to show,
-   * `linked=` a page the attached HTML page links to, shown read-only over it (its path in the page's folder, `#fragment` kept).
+   * `linked=` a page the attached HTML page links to, shown read-only over it (its path in the page's folder, `#fragment` kept),
+   * `view=full|side` the view it is shown in (fileView.ts; absent: the remembered choice, then the rule by kind).
    */
-  file?: { id: string; version: 'current' | 'sent'; focus: string | null; linked?: string | null } | null;
+  file?: { id: string; version: 'current' | 'sent'; focus: string | null; linked?: string | null; view?: 'full' | 'side' | null } | null;
   /** The message whose guided review is open over the window (`#thread=…&guide=msg_…`). */
   guide?: string | null;
   /**
@@ -209,7 +211,7 @@ function routeOf(fullHash: string): Route {
     page: 'inbox',
     project: params.get('project'),
     thread,
-    file: fileId ? { id: fileId, version: params.get('v') === 'sent' ? 'sent' : 'current', focus: params.get('at'), linked: params.get('linked') } : null,
+    file: fileId ? { id: fileId, version: params.get('v') === 'sent' ? 'sent' : 'current', focus: params.get('at'), linked: params.get('linked'), view: parseFileView(params.get('view')) } : null,
     guide: thread ? params.get('guide') : null,
     msg: thread ? params.get('msg') : null,
   };
@@ -231,6 +233,8 @@ function hashOf(route: Route): string {
       if (route.file.version === 'sent') params.set('v', 'sent');
       if (route.file.focus) params.set('at', route.file.focus);
       if (route.file.linked) params.set('linked', route.file.linked);
+      // The view rides the address (fileView.ts), so a reload or a shared link opens the same way.
+      if (route.file.view) params.set('view', route.file.view);
     }
     if (route.thread && route.guide) params.set('guide', route.guide);
     hash = params.toString();
@@ -2376,9 +2380,32 @@ function Inbox() {
             file={route.file ?? null}
             onOpenFile={(file, options) => {
               if (!file) return closeTo({ ...routeRef.current, file });
-              const next = { ...routeRef.current, file };
-              // Back through a linked page's stack: the browser's Back when this entry was opened from there.
-              if (options?.back && backTo(hashOf(next))) return;
+              // A call that names no view keeps the one in the address (the pane names it for a step, a version, a linked page).
+              const keepView = file.view === undefined ? (routeRef.current.file?.view ?? null) : file.view;
+              const next = { ...routeRef.current, file: { ...file, view: keepView } };
+              // Back through a linked page's stack: the browser's Back when this entry was opened from there,
+              // whatever view that entry names (the switch replaced only the entry on screen); once it lands,
+              // the view the person is in now replaces the one it named.
+              if (options?.back && backTo(hashOf(next), window.history, sameScreenAnyView)) {
+                const view = next.file.view;
+                if (view) {
+                  // Where the traversal lands (popstate, or only hashchange in some engines), once; a Back that never lands drops it.
+                  const landed = () => {
+                    stop();
+                    const now = readRoute();
+                    if (now.file && now.file.view !== view) writeRoute({ ...now, file: { ...now.file, view } }, { replace: true });
+                  };
+                  const stop = () => {
+                    clearTimeout(timer);
+                    window.removeEventListener('popstate', landed);
+                    window.removeEventListener('hashchange', landed);
+                  };
+                  const timer = setTimeout(stop, 1000);
+                  window.addEventListener('popstate', landed);
+                  window.addEventListener('hashchange', landed);
+                }
+                return;
+              }
               writeRoute(next, options);
             }}
             onOpenGuide={(messageId) => go({ ...route, guide: messageId })}
@@ -2404,6 +2431,7 @@ function Inbox() {
             stacked={stack.thread}
             fileStacked={stack.file}
             remote={settings ? (settings.via ?? 'local') === 'tailnet' : null}
+            onToast={(t) => showToast(t)}
             onBackToList={(fileName) => {
               // The file's own close (its ×), then focus on this thread's row and one line for a screen reader.
               const root = rootRef.current;

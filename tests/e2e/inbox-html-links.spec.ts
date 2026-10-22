@@ -335,8 +335,8 @@ test('beside the thread: a sibling page opens over the page, Escape and the brow
   const context = await browser.newContext();
   try {
     const page = await context.newPage();
-    // A deep link opens the page beside the thread (only a tile opens it full screen).
-    await page.goto(`${url}#thread=${thread}&file=${ids['SHEET.html']}`);
+    // A deep link that names side by side opens the page beside the thread (one without `view` opens HTML full screen).
+    await page.goto(`${url}#thread=${thread}&file=${ids['SHEET.html']}&view=side`);
     const pane = page.locator(`[data-attachment-pane="${ids['SHEET.html']}"]`);
     await expect(pane).toBeVisible();
     await expect(pane).not.toHaveAttribute('data-full-view', '');

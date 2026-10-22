@@ -31,6 +31,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync,
 import { join, resolve } from 'node:path';
 import { DEMO_MESSAGES, SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
+import { forgetFileViewChoice } from './file-view';
 import { cutInHeadRow } from './head-row';
 
 const repo = resolve(__dirname, '../..');
@@ -242,6 +243,9 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   };
 });
 
+/** A view pressed in a test is remembered: forgotten after each, so the next opens by today's rule (file-view.ts). */
+test.afterEach(async () => forgetFileViewChoice(world?.page));
+
 test.afterAll(async () => {
   try {
     if (!world) return;
@@ -407,7 +411,7 @@ test('a selection comment on the plan is saved and listed in the reply box chip'
   await expect(pane).toHaveClass(/ib-full/);
   await expect(pane.locator('[data-strip-chip]')).toContainText('2 annotations ride your next Send');
   await shot('2.3-full-screen-annotation-mode');
-  await pane.getByRole('button', { name: 'Exit full screen' }).click();
+  await pane.getByRole('button', { name: 'Side by side' }).click();
   await expect(pane).not.toHaveClass(/ib-full/);
 
   // The chip inside the reply box lists each annotation with its file, quote and comment.
@@ -433,9 +437,9 @@ test('the HTML prototype opens full screen: its image and frame load from its fo
   await page.getByRole('button', { name: 'Open admin-view.html' }).click();
   const pane = page.locator(`[data-attachment-pane="${world.attachments.html}"]`);
   await expect(pane).toBeVisible();
-  // HTML opens in the annotation mode by default: full screen, Exit full screen offered.
+  // HTML opens in the annotation mode by default: full screen, Side by side offered.
   await expect(pane).toHaveClass(/ib-full/);
-  await expect(pane.getByRole('button', { name: 'Exit full screen' })).toBeVisible();
+  await expect(pane.getByRole('button', { name: 'Side by side' })).toBeVisible();
   const frame = pageFrame(page);
   await expect(frame.locator('#retry-all')).toHaveText('Retry all (40)');
   // The relative image resolved against the file's own folder.
@@ -486,7 +490,7 @@ test('the HTML prototype opens full screen: its image and frame load from its fo
   expect(await tab.evaluate(() => [document.documentElement.getAttribute('data-ran'), document.documentElement.getAttribute('data-read')])).toEqual([null, null]);
   await tab.close();
 
-  await pane.getByRole('button', { name: 'Exit full screen' }).click();
+  await pane.getByRole('button', { name: 'Side by side' }).click();
   await expect(pane).not.toHaveClass(/ib-full/);
   await pane.getByRole('button', { name: 'Close admin-view.html' }).click();
   await expect(pane).toHaveCount(0);
@@ -582,7 +586,7 @@ test("the reply box's chips wrap inside it beside a file, stacked and on a phone
   // The reply box is open (picks, the skip chip, 3 annotations) from the tests above.
   await page.getByRole('button', { name: 'Open admin-view.html' }).click();
   const pane = page.locator(`[data-attachment-pane="${world.attachments.html}"]`);
-  await pane.getByRole('button', { name: 'Exit full screen' }).click();
+  await pane.getByRole('button', { name: 'Side by side' }).click();
   await expect(pane).not.toHaveClass(/ib-full/);
   // The 440 px thread column beside the file.
   await expect(page.locator('section.ib-pane .ib-rfoot [data-annotations-chip]')).toHaveText('3 annotations');
@@ -648,12 +652,12 @@ test('leaving full screen keeps the file beside the thread with ‹ Inbox leadin
   await page.getByRole('button', { name: 'Open admin-view.html' }).click();
   const pane = page.locator(`[data-attachment-pane="${world.attachments.html}"]`);
   await expect(pane).toHaveClass(/ib-full/);
-  const exit = pane.getByRole('button', { name: 'Exit full screen' });
+  const exit = pane.getByRole('button', { name: 'Side by side' });
   await exit.focus();
   await page.keyboard.press('Enter');
   await expect(pane).not.toHaveClass(/ib-full/);
-  // Focus stays on the toggle, now Full screen; the way back is in view at the top left, ahead of Mark read; Archive ends the header.
-  await expect(pane.getByRole('button', { name: 'Full screen' })).toBeFocused();
+  // Focus on the header switch's Side by side, now pressed; the way back is in view at the top left, ahead of Mark read; Archive ends the header.
+  await expect(pane.getByRole('button', { name: 'Side by side' })).toBeFocused();
   await expect(back).toBeVisible();
   await expect(back).toHaveAccessibleName('Back to Inbox');
   await expect(back).toHaveText('Inbox');

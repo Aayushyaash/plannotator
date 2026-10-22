@@ -5,7 +5,7 @@
  * carries page.html, plan.md, build.zip, shot.png). An HTML file opens full
  * screen with the toolbar showing, whatever plan review's shared hide-tools
  * choice says, and nothing here writes that choice; every opening starts
- * showing; Exit puts the file beside the thread; the comments drawer left
+ * showing; Side by side puts the file beside the thread; the comments drawer left
  * open comes back with the next file; a step keeps full screen.
  *
  * DOM-gated: runs under DOM_TESTS=1 (happy-dom), from the test.yml DOM list.
@@ -26,6 +26,7 @@ const { getHtmlChromeState, saveHtmlChromeState } = (hasDom ? await import('@pla
 const SERVER_SCRIPT = resolve(import.meta.dir, '../../tests/helpers/inbox-dom-server.ts');
 const CHROME_COOKIE = 'plannotator-html-chrome';
 const DRAWER_COOKIE = 'plannotator-inbox-file-comments';
+const VIEW_COOKIE = 'plannotator-inbox-file-view';
 
 type World = { project: string; openIn: { thread: string; ids: Record<string, string> } };
 
@@ -104,6 +105,7 @@ beforeEach(() => {
   world = worlds.shift()!;
   document.cookie = `${CHROME_COOKIE}=; path=/; max-age=0`;
   document.cookie = `${DRAWER_COOKIE}=; path=/; max-age=0`;
+  document.cookie = `${VIEW_COOKIE}=; path=/; max-age=0`;
   savedFetch = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const answer = await loopback(String(input), init?.method ?? 'GET', init?.body ? String(init.body) : undefined);
@@ -127,6 +129,7 @@ afterEach(() => {
   (globalThis as Record<string, unknown>).EventSource = savedEventSource;
   document.cookie = `${CHROME_COOKIE}=; path=/; max-age=0`;
   document.cookie = `${DRAWER_COOKIE}=; path=/; max-age=0`;
+  document.cookie = `${VIEW_COOKIE}=; path=/; max-age=0`;
 });
 
 async function until(check: () => boolean, what: string) {
@@ -177,24 +180,26 @@ test.skipIf(!hasDom)('an HTML file opens full screen with the toolbar showing, e
   expect(toolbarState()).toBe('pinned');
   expect(el.querySelector('[data-full-view-pen]')).not.toBeNull();
 
-  // Hide tucks it; Exit puts the file beside the thread, focus on Full screen.
+  // Hide tucks it; Side by side puts the file beside the thread, focus on the switch's Side by side.
   await act(async () => el.querySelector<HTMLButtonElement>('[data-full-view-hide]')!.click());
   expect(toolbarState()).toBe('tucked');
   await act(async () => el.querySelector<HTMLButtonElement>('[data-full-view-handle]')!.click());
   await act(async () => el.querySelector<HTMLButtonElement>('[data-full-view-exit="exit"]')!.click());
   await until(() => !inFullScreen(), 'beside the thread');
-  expect(document.activeElement).toBe(el.querySelector('.ib-vhead [data-full-screen-toggle]'));
+  expect(document.activeElement === el.querySelector('.ib-vhead [data-view-side]')).toBe(true);
 
   // Full screen again: the toolbar starts showing.
   await act(async () => el.querySelector<HTMLButtonElement>('.ib-vhead [data-full-screen-toggle]')!.click());
   await until(inFullScreen, 'full screen again');
   expect(toolbarState()).toBe('pinned');
 
-  // Closed and opened again: full screen, showing.
+  // Side by side again, closed and opened again: the page opens side by side (the remembered pick), and Full screen starts showing.
   await act(async () => el.querySelector<HTMLButtonElement>('[data-full-view-exit="exit"]')!.click());
   await close();
   await until(() => view() === null, 'the file closed');
   await openTile('page.html');
+  expect(inFullScreen()).toBe(false);
+  await act(async () => el.querySelector<HTMLButtonElement>('.ib-vhead [data-full-screen-toggle]')!.click());
   await until(inFullScreen, 'full screen once more');
   expect(toolbarState()).toBe('pinned');
   expect(getHtmlChromeState()).toEqual({ sidebarOpen: true, panelOpen: true, toolsHidden: true });
@@ -210,7 +215,7 @@ test.skipIf(!hasDom)('a markdown file opens beside the thread; Full screen takes
   await act(async () => el.querySelector<HTMLButtonElement>('.ib-vhead [data-full-screen-toggle]')!.click());
   await until(inFullScreen, 'full screen');
   expect(toolbarState()).toBe('pinned');
-  expect(document.activeElement).toBe(el.querySelector('[data-full-view-bar] button'));
+  expect(document.activeElement === el.querySelector('[data-full-view-bar] button')).toBe(true);
 
   await act(async () => el.querySelector<HTMLButtonElement>('[data-full-view-comments]')!.click());
   expect(view()!.classList.contains('ib-drawer')).toBe(true);

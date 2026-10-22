@@ -12,7 +12,7 @@ import { Tip as HoverTip } from './Tip';
  * thread (where the file cannot sit beside the thread: a phone, a stacked
  * window), the pen (HTML that takes comments), the comment count (opens the
  * comments drawer), the position `N/M ⌄` (opens the file peek; not on a
- * phone), ⋯ (Open in, Download, the other version), Exit full screen, and
+ * phone), ⋯ (Open in, Download, the other version), Side by side, and
  * » Hide tools.
  *
  * Hide tucks the toolbar into a handle flush with the corner (‹, the comment
@@ -67,7 +67,7 @@ export interface FullViewBarProps {
   more: ReactNode;
   moreOpen: boolean;
   /**
-   * The way out: Exit full screen (the file goes back beside the thread), or
+   * The way out: Side by side (the file goes back beside the thread; a pick, remembered), or
    * Back to the thread where the file can only be full screen (a phone, a
    * stacked window), which leads the bar instead.
    */
@@ -238,16 +238,19 @@ export const FullViewBar = forwardRef<FullViewBarHandle, FullViewBarProps>(funct
   const hideText = pinned ? 'Hide tools' : 'Keep tools out';
   const iconSize = phone ? 18 : 15;
 
+  // The way out of full screen names where it goes, "Side by side" (a pick: remembered); on a phone or a stacked window it is Back to the thread.
+  const exit = props.leave.kind === 'exit';
   const leaveButton = (
-    <Tip text={props.leave.kind === 'exit' ? 'Exit full screen' : 'Back to the thread'} note={props.leave.kind === 'exit' ? 'The file goes back beside the thread' : undefined} phone={phone}>
+    <Tip text={exit ? 'Side by side' : 'Back to the thread'} note={exit ? 'The file beside the thread; files open this way until you choose again' : undefined} phone={phone}>
       <button
         type="button"
-        className="ib-fvb ib-fvexit"
+        className={`ib-fvb ib-fvexit${exit ? ' ib-fvside' : ''}`}
         onClick={props.leave.onLeave}
-        aria-label={props.leave.kind === 'exit' ? 'Exit full screen' : 'Back to the thread'}
+        aria-label={exit ? 'Side by side' : 'Back to the thread'}
         data-full-view-exit={props.leave.kind}
       >
-        <Icon name={props.leave.kind === 'exit' ? 'collapse' : 'chevL'} size={props.leave.kind === 'exit' ? iconSize : phone ? 20 : 16} />
+        <Icon name={exit ? 'sideBySide' : 'chevL'} size={exit ? iconSize : phone ? 20 : 16} />
+        {exit && <span>Side by side</span>}
       </button>
     </Tip>
   );

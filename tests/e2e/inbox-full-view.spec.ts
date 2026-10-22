@@ -7,14 +7,14 @@
  * (and WebKit as an iPhone) drives the window.
  *
  * Proves: one full-screen mode. An HTML file opens full screen with its
- * toolbar showing (pen, count, N/M, ⋯, Exit full screen, » Hide tools), the
+ * toolbar showing (pen, count, N/M, ⋯, Side by side, » Hide tools), the
  * page filling the window, and plan review's shared hide-tools cookie neither
  * read nor written; a pin and a comment work and the count goes up without
  * opening the drawer; Hide tucks the toolbar into its corner handle, the
  * corner and the keyboard bring it back, the pin keeps it out; the count
  * opens the comments drawer and the page narrows beside it (remembered across
- * a reload); ⋯ holds Open in and Download; Exit puts the file beside the
- * thread and Full screen brings the toolbar back showing; Escape climbs one
+ * a reload); ⋯ holds Open in and Download; Side by side puts the file beside
+ * the thread and Full screen brings the toolbar back showing; Escape climbs one
  * rung per press (a draft, typed words asked about, the drawer, Annotate, the
  * page's own Escape left to the page) and only then leaves full screen;
  * ⌘⇧X from the window and the page tucks and shows; `]` keeps full screen
@@ -35,6 +35,7 @@ import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { NO_BROWSER } from '../helpers/no-browser';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
+import { forgetFileViewChoice } from './file-view';
 
 const repo = resolve(__dirname, '../..');
 const builtBinary = resolve(process.env.PLANNOTATOR_E2E_BINARY ?? join(repo, '.local/plannotator'));
@@ -146,6 +147,9 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
 });
 
 
+/** A view pressed in a test is remembered: forgotten after each, so the next opens by today's rule (file-view.ts). */
+test.afterEach(async () => forgetFileViewChoice(world?.page));
+
 test.afterAll(async () => {
   try {
     if (!world) return;
@@ -216,7 +220,7 @@ test('an HTML file opens full screen: the page fills the window, one toolbar is 
   // The page fills the window.
   const box = await pane().locator('iframe').first().boundingBox();
   expect(box).toEqual({ x: 0, y: 0, width: 1280, height: 800 });
-  // The toolbar: top right, showing; pen (armed), the count, the position, ⋯, Exit full screen, » Hide tools.
+  // The toolbar: top right, showing; pen (armed), the count, the position, ⋯, Side by side, » Hide tools.
   await expect(bar()).toHaveAttribute('role', 'toolbar');
   await expect(dock()).toHaveAttribute('data-bar', 'pinned');
   const barBox = (await bar().boundingBox())!;
@@ -225,7 +229,7 @@ test('an HTML file opens full screen: the page fills the window, one toolbar is 
   await expect(bar().locator('[data-full-view-pen]')).toHaveAttribute('aria-pressed', 'true');
   await expect(count()).toHaveAccessibleName('Comments, 0');
   await expect(bar().locator('[data-full-view-position]')).toHaveText('1/3');
-  await expect(bar().getByRole('button', { name: 'Exit full screen' })).toBeVisible();
+  await expect(bar().getByRole('button', { name: 'Side by side' })).toBeVisible();
   await expect(hide()).toHaveAccessibleName('Hide tools');
   await expect(pane().locator('[data-full-view-changed]')).toHaveCount(0);
   // The shared plan-review choice is neither read nor written.
@@ -306,7 +310,7 @@ test('the count opens the comments drawer: the page narrows beside it, its foot 
   await expect(pane()).toHaveAttribute('data-full-view', '');
 });
 
-test('⋯ holds Open in and Download; Exit full screen puts the file beside the thread, and Full screen brings the toolbar back showing', async () => {
+test('⋯ holds Open in and Download; Side by side puts the file beside the thread, and Full screen brings the toolbar back showing', async () => {
   const page = world.page;
   await bar().locator('[data-full-view-more]').click();
   const menu = page.locator(`[data-full-view-menu="${world.ids['turnkey.html']}"]`);
@@ -319,11 +323,12 @@ test('⋯ holds Open in and Download; Exit full screen puts the file beside the 
 
   await hide().click();
   await handle().click();
-  await bar().getByRole('button', { name: 'Exit full screen' }).click();
+  await bar().getByRole('button', { name: 'Side by side' }).click();
   await expect(pane()).not.toHaveClass(/ib-full/);
-  await expect(pane().locator('.ib-vhead [data-full-screen-toggle]')).toBeFocused();
+  await expect(pane().locator('.ib-vhead [data-view-side]')).toBeFocused();
   await expect(page.locator('[data-html-tools-toggle]')).toHaveCount(0);
   await shot(page, 'html-beside', ['dark']);
+  await pane().locator('.ib-vhead [data-full-screen-toggle]').focus();
   await page.keyboard.press('Enter');
   await expect(pane()).toHaveClass(/ib-full/);
   await expect(dock()).toHaveAttribute('data-bar', 'pinned');
@@ -391,20 +396,22 @@ async function climbTheLadder(page: Page) {
   await frame(page).locator('#q').press('Escape');
   await page.waitForTimeout(200);
   await expect(pane(page)).toHaveAttribute('data-full-view', '');
-  // One the page does not use: full screen ends, the file is beside the thread, focus on its Full screen.
+  // One the page does not use: full screen ends (nothing remembered), the file is beside the thread, focus on the switch's Side by side.
   // (A click on the headline moves the page's focus out of its field; in Interact it pins nothing.)
   await frame(page).locator('#headline').click();
   await page.waitForTimeout(200);
   await page.keyboard.press('Escape');
   await expect(pane(page)).not.toHaveAttribute('data-full-view', '');
-  await expect(pane(page).locator('.ib-vhead [data-full-screen-toggle]')).toBeFocused();
-  await expect(page.locator('[data-step-live]')).toHaveText('The file is beside the thread.');
+  await expect(pane(page).locator('.ib-vhead [data-view-side]')).toBeFocused();
+  await expect(page.locator('[data-step-live]')).toHaveText('Side by side: the file is beside the thread.');
+  expect((await page.context().cookies()).find((c) => c.name === 'plannotator-inbox-file-view')).toBeUndefined();
 }
 
 test('Escape climbs one rung per press (a draft, typed words asked about, the drawer, Annotate, then the page’s own Escape is respected) and then leaves full screen; ⌘⇧X from the window and from the page tucks and shows the toolbar', async () => {
   const page = world.page;
   await climbTheLadder(page);
   // Back in full screen (the toolbar showing) for the chord.
+  await pane().locator('.ib-vhead [data-full-screen-toggle]').focus();
   await page.keyboard.press('Enter');
   await expect(pane()).toHaveAttribute('data-full-view', '');
   await expect(dock()).toHaveAttribute('data-bar', 'pinned');
@@ -530,7 +537,7 @@ test('on an iPhone (WebKit): the same mode, the toolbar bottom right with 44 px 
         expect(b.height).toBeGreaterThanOrEqual(44);
       }
       await expect(bar(page).locator('[data-full-view-position]')).toHaveCount(0);
-      await expect(bar(page).getByRole('button', { name: 'Exit full screen' })).toHaveCount(0);
+      await expect(bar(page).getByRole('button', { name: 'Side by side' })).toHaveCount(0);
       // ⋯'s rows are 44 px targets on a phone too (the position, Download, the other version).
       await bar(page).locator('[data-full-view-more]').click();
       const rows = page.locator('[data-full-view-menu] [role="menuitem"]');

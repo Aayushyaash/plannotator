@@ -118,6 +118,8 @@ interface Harness {
   reply: number;
   closed: number;
   toggles: number;
+  /** Each toggle's `pick`: true for a button (remembered), false for Escape's last rung. */
+  picks: boolean[];
   setRecords?: (records: InboxAnnotationRecord[]) => void;
 }
 
@@ -162,8 +164,9 @@ function Pane({
       onVersion={(v) => harness.versions.push(v)}
       full={full || phone || locked}
       fullLocked={phone || locked}
-      onToggleFull={() => {
+      onToggleFull={(pick) => {
         harness.toggles++;
+        harness.picks.push(pick);
         setFull((v) => !v);
       }}
       focusId={null}
@@ -218,7 +221,7 @@ async function key(target: EventTarget, init: KeyboardEventInit): Promise<Keyboa
   return event;
 }
 
-const harnessOf = (): Harness => ({ versions: [], reply: 0, closed: 0, toggles: 0 });
+const harnessOf = (): Harness => ({ versions: [], reply: 0, closed: 0, toggles: 0, picks: [] });
 const pane = () => host!.querySelector<HTMLElement>('[data-attachment-pane]')!;
 const dock = () => host!.querySelector<HTMLElement>('[data-full-view-dock]');
 const bar = () => host!.querySelector<HTMLElement>('[data-full-view-bar]');
@@ -250,8 +253,14 @@ test.skipIf(!hasDom)('Full screen is one mode: the header, the changed line and 
   const harness = harnessOf();
   await render(<Pane start={notes} harness={harness} startFull={false} />);
   // Beside the thread: the header's Full screen, the stepper under the file, no eye anywhere.
+  // The header's view switch: Side by side pressed, Full screen not.
   const fullButton = host!.querySelector<HTMLButtonElement>('.ib-vhead [data-full-screen-toggle]')!;
+  const sideButton = host!.querySelector<HTMLButtonElement>('.ib-vhead [data-view-side]')!;
   expect(fullButton.textContent).toBe('Full screen');
+  expect(sideButton.textContent).toBe('Side by side');
+  expect(sideButton.getAttribute('aria-pressed')).toBe('true');
+  expect(fullButton.getAttribute('aria-pressed')).toBe('false');
+  expect(host!.querySelector('[data-view-switch]')!.getAttribute('role')).toBe('group');
   expect(host!.querySelector('[data-html-tools-toggle]')).toBeNull();
   expect(host!.querySelector('[data-view-foot]')).not.toBeNull();
   expect(bar()).toBeNull();
@@ -269,15 +278,21 @@ test.skipIf(!hasDom)('Full screen is one mode: the header, the changed line and 
   expect(barState()).toBe('pinned');
   expect(controls()).toEqual(['count', 'position', 'more', 'leave:exit', 'hide:hide']);
   expect(document.activeElement).toBe(bar()!.querySelector('button'));
-  expect(live()).toBe('Full screen. Exit full screen is in the toolbar.');
+  expect(live()).toBe('Full screen. Side by side is in the toolbar.');
+  // The way back is named for where it goes.
+  const exit = host!.querySelector<HTMLButtonElement>('[data-full-view-exit="exit"]')!;
+  expect(exit.getAttribute('aria-label')).toBe('Side by side');
+  expect(exit.textContent).toBe('Side by side');
   // The drawer starts closed (never opened by itself).
   expect(pane().classList.contains('ib-drawer')).toBe(false);
 
   await click(host!.querySelector('[data-full-view-exit="exit"]'));
   expect(harness.toggles).toBe(2);
+  // Both are picks with a button: the host remembers them.
+  expect(harness.picks).toEqual([true, true]);
   expect(bar()).toBeNull();
   expect(host!.querySelector('.ib-vhead')).not.toBeNull();
-  expect(document.activeElement).toBe(host!.querySelector('.ib-vhead [data-full-screen-toggle]'));
+  expect(document.activeElement === host!.querySelector('.ib-vhead [data-view-side]')).toBe(true);
 });
 
 test.skipIf(!hasDom)('an HTML file: the pen leads the toolbar and flips Annotate / Interact', async () => {
@@ -635,14 +650,16 @@ test.skipIf(!hasDom)('Escape closes one thing per press, innermost first, then l
   expect(document.activeElement).toBe(host!.querySelector('[data-full-view-comments]'));
   expect(live()).toBe('Comments closed.');
   expect(harness.toggles).toBe(0);
-  // Nothing left: full screen ends, the file is beside the thread, focus on its Full screen.
+  // Nothing left: full screen ends, the file is beside the thread, focus on the switch's Side by side.
   await escapeOn(document.activeElement!);
   // The count's tooltip, opened by that focus, takes a press of its own first (it is the innermost thing open).
   if (harness.toggles === 0) await escapeOn(document.activeElement!);
   expect(harness.toggles).toBe(1);
   expect(bar()).toBeNull();
-  expect(document.activeElement).toBe(host!.querySelector('.ib-vhead [data-full-screen-toggle]'));
-  expect(live()).toBe('The file is beside the thread.');
+  // Escape's last rung is not a pick: nothing is remembered.
+  expect(harness.picks).toEqual([false]);
+  expect(document.activeElement === host!.querySelector('.ib-vhead [data-view-side]')).toBe(true);
+  expect(live()).toBe('Side by side: the file is beside the thread.');
   // Beside the thread there is no ladder.
   await escapeOn(pane());
   expect(harness.toggles).toBe(1);

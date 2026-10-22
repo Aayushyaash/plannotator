@@ -380,6 +380,34 @@ export function trimUrlTail(url: string): string {
   return url;
 }
 
+// Index of the first bare `http(s)://` URL that starts after index 0 and
+// before `end` at a word boundary AND runs past `end`, or -1. Only such a
+// URL needs the chunk split: one that ends inside the chunk is linked by
+// emitPlainTextWithBareUrls in the same pass, exactly as before, so a
+// paragraph of many URLs stays one pass instead of a loop turn (and a
+// rescan of the rest of the text) per URL. Index 0 is left to the caller's
+// own bare-URL check, which already ran for it.
+const BARE_URL_SCHEME = /https?:\/\//g;
+const BARE_URL_AT = /https?:\/\/[^\s<>"']+/y;
+function bareUrlRunningPast(text: string, end: number): number {
+  // Only a scheme that starts before `end` counts, so read no further than
+  // `end` plus the longest scheme ("https://" less its first character).
+  const window = text.slice(0, end + 7);
+  BARE_URL_SCHEME.lastIndex = 1;
+  let m: RegExpExecArray | null;
+  while ((m = BARE_URL_SCHEME.exec(window)) !== null && m.index < end) {
+    if (/\w/.test(window[m.index - 1])) continue;
+    BARE_URL_AT.lastIndex = m.index;
+    const url = BARE_URL_AT.exec(text);
+    if (!url) continue;
+    const urlEnd = m.index + trimUrlTail(url[0]).length;
+    if (urlEnd > end) return m.index;
+    // The URL ends inside the chunk; look for the next one after it.
+    BARE_URL_SCHEME.lastIndex = Math.max(urlEnd, m.index + 1);
+  }
+  return -1;
+}
+
 // Scan a plain-text chunk for bare https?:// URLs and bare code file paths
 // at word boundaries, emitting them as interactive nodes. Surrounding text
 // passes through transformPlainText for emoji shortcodes + smart punctuation.
@@ -1302,6 +1330,19 @@ export const InlineMarkdown: React.FC<{
     // multi-char patterns like emoji shortcodes. Bare URLs are instead
     // detected inline via emitPlainTextWithBareUrls() below.
     const nextSpecial = remaining.slice(1).search(/[\*_`\[!~\\<#@$]/);
+    // A bare URL that starts inside this plain-text chunk and runs past its
+    // end would be cut there, and `_`, `~`, `#`, `@`, `$` and `!` all end a
+    // chunk (`…/w/ws_01…` rendered a link to `…/w/ws`). Stop the chunk where
+    // that URL starts instead, so the bare-URL branch above takes it whole.
+    const chunkEnd = nextSpecial === -1 ? remaining.length : nextSpecial + 1;
+    const urlStart = bareUrlRunningPast(remaining, chunkEnd);
+    if (urlStart !== -1) {
+      const before = remaining.slice(0, urlStart);
+      emitPlainTextWithBareUrls(before, previousChar, parts, () => key++, onOpenCodeFile, validation, imageBaseDir);
+      previousChar = before[before.length - 1] || previousChar;
+      remaining = remaining.slice(urlStart);
+      continue;
+    }
     const plainText = nextSpecial === -1 ? remaining : remaining.slice(0, nextSpecial + 1);
     emitPlainTextWithBareUrls(plainText, previousChar, parts, () => key++, onOpenCodeFile, validation, imageBaseDir);
     previousChar = plainText[plainText.length - 1] || previousChar;

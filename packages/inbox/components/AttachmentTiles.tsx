@@ -158,6 +158,7 @@ export function AttachmentTiles({
   openId = null,
   placement = 'foot',
   openIn,
+  onOpenAs,
 }: {
   attachments: readonly InboxAttachmentState[];
   annotationCounts: ReadonlyMap<string, number>;
@@ -168,6 +169,8 @@ export function AttachmentTiles({
   placement?: 'foot' | 'header';
   /** "Open in" on this computer (`apps`): each tile gets a ⋯ menu beside its button. Otherwise none. */
   openIn?: OpenInSurface;
+  /** The tile ⋯'s "Open side by side" / "Open full screen": this file in that view, the remembered choice unchanged. Absent on a phone or a stacked window. */
+  onOpenAs?: (attachment: InboxAttachmentState, view: 'full' | 'side') => void;
 }) {
   if (attachments.length === 0) return null;
   const header = placement === 'header';
@@ -230,7 +233,7 @@ export function AttachmentTiles({
             openIn === 'apps' ? (
               <div className="ib-att-w" key={attachment.id} data-open-in-tile={attachment.id}>
                 {tile}
-                <OpenInTileMenu attachment={attachment} version={readableVersion(attachment)} />
+                <OpenInTileMenu attachment={attachment} version={readableVersion(attachment)} onOpenAs={onOpenAs && opensInWindow(attachment) ? (view) => onOpenAs(attachment, view) : undefined} />
               </div>
             ) : (
               tile
