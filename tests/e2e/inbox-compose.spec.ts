@@ -245,7 +245,8 @@ test('no agent is running: compose says so, Send sends nothing, a file attaches,
   await expect(row).toContainText('Idea: let the Inbox list show which agent session wrote…');
   await shot(page, '04-drafts-list');
 
-  // A phone with no agent running: the sheet's top bar offers Save draft in Send's place.
+  // A phone with no agent running: empty, the top bar shows the disabled Send; once something is written,
+  // it offers Save draft in Send's place.
   const phone = await world.context.browser()!.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, colorScheme: 'dark' });
   const mobile = await phone.newPage();
   try {
@@ -253,9 +254,11 @@ test('no agent is running: compose says so, Send sends nothing, a file attaches,
     await mobile.locator('.ib-lhead [data-open-compose]').click();
     const sheet = mobile.locator('dialog[data-compose]');
     await expect(sheet.locator('[data-compose-to="none"]')).toBeVisible();
+    await expect(sheet.locator('.ib-cp-bar [data-compose-save]')).toHaveCount(0);
+    await expect(sheet.locator('.ib-cp-bar [data-compose-send]')).toHaveAttribute('aria-disabled', 'true');
+    await sheet.getByRole('textbox', { name: 'Message' }).fill('Idea: let the Inbox list show which agent session wrote each thread.');
     await expect(sheet.locator('.ib-cp-bar [data-compose-save]')).toHaveText('Save draft');
     await expect(sheet.locator('.ib-cp-bar [data-compose-send]')).toHaveCount(0);
-    await sheet.getByRole('textbox', { name: 'Message' }).fill('Idea: let the Inbox list show which agent session wrote each thread.');
     await sheet.getByRole('textbox', { name: 'Message' }).blur();
     await shot(mobile, '10b-phone-no-agent', ['dark', 'light']);
     await sheet.locator('[data-compose-cancel]').click();
@@ -267,7 +270,7 @@ test('no agent is running: compose says so, Send sends nothing, a file attaches,
   expect(world.errors).toEqual([]);
 });
 
-test('an agent connects: the draft reopens with To prefilled; Send starts a thread handed to that session alone, as a new-thread wake naming the file; Delivered; the answer lands in the thread', async () => {
+test('an agent connects: the draft (saved with nobody in To) reopens with To empty; picked, Send starts a thread handed to that session alone, as a new-thread wake naming the file; Delivered; the answer lands in the thread', async () => {
   const { page } = world;
   const claude = connect('ses-claude', 'claude-code', world.ledger);
   const other = connect('ses-other', 'pi', world.billing);
@@ -276,9 +279,13 @@ test('an agent connects: the draft reopens with To prefilled; Send starts a thre
   await row.locator('.ib-draft-open').click();
   const dialog = page.locator('dialog[data-compose]');
   await expect(dialog.locator('h2')).toHaveText('Draft');
-  // Preselected: no session was sent to before, and the list shows every project, so the most recently active one.
+  // Saved with nobody in To, it reopens with To empty though two sessions are live: never filled by itself.
   const to = dialog.locator('.ib-cp-tobtn');
-  await expect(to).not.toHaveAttribute('data-compose-to', 'choose', { timeout: 15_000 });
+  await expect(to).not.toHaveAttribute('data-loading', /.*/, { timeout: 15_000 });
+  await expect(to).toHaveAttribute('data-compose-to', 'choose');
+  await expect(to).toBeFocused();
+  await expect(dialog.locator('[data-compose-status]')).toHaveText('Choose an agent to send it.');
+  await expect(dialog.locator('[data-compose-send]')).toHaveAttribute('aria-disabled', 'true');
   await to.click();
   await expect(dialog.locator('[data-compose-picker]')).toBeVisible();
   // One line per live session (ledger and billing, one each): no project headers, so no start times.
@@ -394,9 +401,16 @@ test('⌘K: the Actions group opens compose for "Message <agent> in <project>"; 
     await mobile.locator('.ib-lhead [data-open-compose]').click();
     const sheet = mobile.locator('dialog[data-compose]');
     await expect(sheet.locator('.ib-cp-bar h2')).toHaveText('New message');
+    // Empty: no Save draft in Send's place, the Send there is disabled.
+    await expect(sheet.locator('.ib-cp-tobtn')).not.toHaveAttribute('data-loading', /.*/);
+    await expect(sheet.locator('.ib-cp-bar [data-compose-save]')).toHaveCount(0);
+    await expect(sheet.locator('.ib-cp-bar [data-compose-send]')).toHaveAttribute('aria-disabled', 'true');
     await sheet.getByRole('textbox', { name: 'Message' }).fill('Rename the Quiet section to “Done”? Quiet reads like “muted” to me.');
+    // To starts empty: the top bar offers Save draft until a session is picked.
+    await expect(sheet.locator('.ib-cp-tobtn')).toHaveAttribute('data-compose-to', 'choose');
+    await expect(sheet.locator('.ib-cp-bar [data-compose-save]')).toHaveText('Save draft');
     await sheet.locator('.ib-cp-tobtn').click();
-    await sheet.locator('[data-compose-picker] .ib-cp-back').click();
+    await sheet.locator('[data-compose-session="ses-claude"]').click();
     await shot(mobile, '10-phone-compose', ['dark', 'light']);
     await sheet.locator('.ib-cp-bar [data-compose-send]').click();
     await expect(sheet).toHaveCount(0);
@@ -406,6 +420,9 @@ test('⌘K: the Actions group opens compose for "Message <agent> in <project>"; 
     await expect(mobile.locator('[data-draft-id]')).toHaveCount(0);
     await mobile.locator('.ib-drafts [data-open-compose], .ib-drafts .ib-lhead-compose').first().click();
     await mobile.locator('dialog[data-compose] [data-compose-text] textarea').fill('A draft kept from a phone.');
+    // Kept for a live session (the Drafts page's "is live" chip, later): To is picked, never filled by itself.
+    await mobile.locator('dialog[data-compose] .ib-cp-tobtn').click();
+    await mobile.locator('dialog[data-compose] [data-compose-session="ses-claude"]').click();
     await mobile.locator('dialog[data-compose] [data-compose-cancel]').click();
     await mobile.locator('dialog[data-compose] [data-compose-keep]').click();
     await expect(mobile.locator('[data-draft-id]')).toHaveCount(1);

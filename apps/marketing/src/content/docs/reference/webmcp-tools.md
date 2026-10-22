@@ -60,4 +60,4 @@ Nothing. Feature detection is one check when the page mounts; when `document.mod
 
 ## Security boundaries
 
-Plannotator never registers tools inside the frames it does not own. The raw-HTML annotate viewer keeps its `sandbox="allow-scripts"` iframe with no `allow` attribute, and the live-app iframe delegates no `tools` permission, so a page under review cannot register or impersonate Plannotator's tools; in Chrome both frames answer `NotAllowedError` for `getTools` and `registerTool`. Tool descriptions and nudge messages are fixed strings; document and comment text travel only as data.
+Plannotator never registers tools inside the frames it does not own. The raw-HTML annotate viewer keeps its `sandbox="allow-scripts allow-modals"` iframe with no `allow` attribute, and the live-app iframe delegates no `tools` permission, so a page under review cannot register or impersonate Plannotator's tools; in Chrome both frames answer `NotAllowedError` for `getTools` and `registerTool`. Tool descriptions and nudge messages are fixed strings; document and comment text travel only as data.

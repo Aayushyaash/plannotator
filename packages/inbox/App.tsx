@@ -10,10 +10,10 @@
  * Decisions page (`#decisions=…`) opens the list.
  */
 
-import type { ActionMark } from './components/ActionCard';
+import type { ActionMark } from './components/ActionChecklist';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ThemeProvider } from '@plannotator/ui/components/ThemeProvider';
-import { TooltipProvider } from '@plannotator/ui/components/Tooltip';
+import { TooltipProvider, TOOLTIP_SKIP_DELAY_MS } from '@plannotator/ui/components/Tooltip';
 import { TIP_DELAY_MS } from './components/Tip';
 import { configurePlannotatorUI } from '@plannotator/ui/configure';
 import { selectionToolbarShowing } from './selectionToolbar';
@@ -135,7 +135,7 @@ configurePlannotatorUI({
 });
 
 const SIDEBAR_OPEN_COOKIE = 'plannotator-inbox-sidebar-open';
-/** The session the person last sent a new message to (compose preselects it while it is live). */
+/** The session the person last sent a new message to: first in the To picker and the palette's "Message <host>" while it is live; never put in To by itself. */
 const COMPOSE_LAST_COOKIE = 'plannotator-inbox-compose-last';
 /** How often the Drafts page reads its drafts again, so each chip follows its session. */
 const DRAFTS_REFRESH_MS = 10_000;
@@ -2613,7 +2613,7 @@ export function InboxApp() {
   return (
     <ThemeProvider defaultTheme="system">
       {/* Every tooltip in the window (Tip): 150 ms to open, and the next one at once within 400 ms. */}
-      <TooltipProvider delayDuration={TIP_DELAY_MS} skipDelayDuration={400} disableHoverableContent>
+      <TooltipProvider delayDuration={TIP_DELAY_MS} skipDelayDuration={TOOLTIP_SKIP_DELAY_MS} disableHoverableContent>
         <Inbox />
       </TooltipProvider>
     </ThemeProvider>

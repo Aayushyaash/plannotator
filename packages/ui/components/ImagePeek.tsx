@@ -177,7 +177,7 @@ export const ImagePeek = forwardRef<ImagePeekHandle, ImagePeekProps>(function Im
       data-image-peek={variant}
       className={
         sheet
-          ? `pointer-events-auto max-h-[78vh] w-full overflow-y-auto rounded-t-2xl border-t border-border bg-popover px-3 pb-[calc(16px+env(safe-area-inset-bottom))] pt-2 text-popover-foreground shadow-2xl ${className}`
+          ? `pointer-events-auto max-h-[78vh] w-full overflow-y-auto rounded-t-[12px] border-t border-border bg-popover px-3 pb-[calc(16px+env(safe-area-inset-bottom))] pt-2 text-popover-foreground shadow-2xl ${className}`
           : `max-h-[min(460px,62vh)] w-[min(600px,calc(100vw-24px))] overflow-y-auto rounded-xl border border-border bg-popover p-2 text-popover-foreground shadow-[0_14px_36px_rgba(0,0,0,0.28)] ${className}`
       }
     >

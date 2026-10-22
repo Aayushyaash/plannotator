@@ -17,7 +17,6 @@ import { AnnotationToolstrip } from '@plannotator/ui/components/AnnotationToolst
 import { HtmlSurfaceControls } from '@plannotator/ui/components/HtmlSurfaceControls';
 import { HtmlViewer } from '@plannotator/ui/components/html-viewer';
 import { Viewer, type ViewerHandle } from '@plannotator/ui/components/Viewer';
-import { useConfigValue } from '@plannotator/ui/config';
 import type { Annotation, EditorMode, InputMethod } from '@plannotator/ui/types';
 import { annotationOwnsHighlight } from '@plannotator/ui/utils/annotationOwnsHighlight';
 import { groupAnnotationsByDocument, type AnnotationScope } from '@plannotator/ui/utils/annotationScope';
@@ -288,8 +287,6 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
   const [armed, setArmed] = useState(true);
   const [scope, setScope] = useState<AnnotationScope>('all');
   const viewerRef = useRef<ViewerHandle>(null);
-  // Plannotator's plan look (Settings, "Grid" or "Clean"), read from the same registry and cookie as its windows.
-  const gridEnabled = useConfigValue('gridEnabled');
 
   // The current file cannot be read (gone, or no longer the file that was sent): the sent version opens.
   const currentUnavailable = attachment.unavailable !== null;
@@ -1627,7 +1624,7 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
             </div>
           )}
           {view && !isHtml && !isCode && (
-            <div className={`ib-docscroll ${gridEnabled ? 'bg-grid' : 'bg-card'}`} data-look={gridEnabled ? 'grid' : 'clean'}>
+            <div className="ib-docscroll bg-card" data-look="clean">
               <Viewer
                 key={`${attachment.id}:${view.version}:${view.attachment.current?.sha256 ?? ''}`}
                 ref={viewerRef}
@@ -1642,7 +1639,7 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
                 mode={isText ? mode : 'comment'}
                 inputMethod={isText ? inputMethod : 'drag'}
                 taterMode={false}
-                gridEnabled={gridEnabled}
+                gridEnabled={false}
                 maxWidth={full ? 760 : 640}
                 stickyActions={false}
                 disableCodePathValidation

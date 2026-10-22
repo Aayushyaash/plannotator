@@ -66,10 +66,13 @@ import type { MentionSource } from '@plannotator/ui/utils/mentions';
 import { TAG_TOKEN_CLASS } from './ComposerField';
 import { HostMark } from '../icons';
 import { INBOX_REPLY_SKILL_AUDIENCE, annotationSkillTexts, inboxSkillsBlock, withSkillsBlock } from '../skills';
-import { ActionCard, type ActionMark } from './ActionCard';
+import { ActionChecklist, type ActionMark } from './ActionChecklist';
 import { actionForBlock } from '../actions';
 import { splitInboxSkillsBlock } from '@plannotator/core/skill-reference-block';
 import { Tip } from './Tip';
+import { OpenQuestionsButton } from './OpenQuestions';
+import { laidOutChildren, pillHitsButtons } from '../footFit';
+import { openQuestionsShown, placeOf, threadOpenQuestions, type OpenQuestionPlace } from '../openQuestions';
 import { selectionToolbarShowing } from '../selectionToolbar';
 import { replyKeysToRenew, routeSendAnnotations, sendTargetAnswerIds, sendTargetsOf, type SendTarget, type SentContents } from '../sendTargets';
 
@@ -232,7 +235,7 @@ export function MessageBody({
   footerFor,
   renderReplacedCard,
   renderReplacesLine,
-  renderAction,
+  renderActions,
   comments,
 }: {
   message: InboxMessageWire;
@@ -252,8 +255,17 @@ export function MessageBody({
   renderReplacedCard?: (key: string, number: number) => React.ReactNode | undefined;
   /** The "Replaces …" line under a question's prompt, or null. */
   renderReplacesLine?: (key: string) => React.ReactNode;
-  /** A `:::action` block's Action item card (approval "inbox-next-actions"), or undefined to keep the block as text. */
-  renderAction?: (block: { startLine: number; content: string }) => React.ReactNode | undefined;
+  /**
+   * Action items (approval "action-items-checklist"): each run of adjacent
+   * `:::action` blocks (blank lines between them only) is drawn as one card
+   * in place of the run's first block; the run's other blocks draw nothing.
+   * `recordFor` names the record a block draws (null: the block stays text
+   * and ends the run); `render` draws a run's records, in body order.
+   */
+  renderActions?: {
+    recordFor: (block: { startLine: number; content: string }) => InboxQuestion | null;
+    render: (records: InboxQuestion[]) => React.ReactNode;
+  };
   /**
    * Comments on the text (an agent's message that can still be answered;
    * approval "inbox-message-comments"): the person's comments on this message
@@ -433,12 +445,37 @@ export function MessageBody({
     (question: IndexedQuestion) => replacesRef.current?.(question.question.key) ?? null,
     [message.questions],
   );
-  // Action items: the Action item card in place of a `:::action` block's callout. A new identity when they change, so a card redraws.
-  const actionRef = useRef(renderAction);
-  actionRef.current = renderAction;
+  // Action items: one checklist card per run of adjacent `:::action` blocks, in place of
+  // the run's first block; the run's other blocks draw nothing (inbox.css hides their empty
+  // wrapper). Prose between two blocks ends a run, so each stays where the agent put it.
+  const actionsRef = useRef(renderActions);
+  actionsRef.current = renderActions;
+  const actionRuns = useMemo(() => {
+    const runs = new Map<string, { first: boolean; records: InboxQuestion[] }>();
+    const draw = actionsRef.current;
+    if (!draw) return runs;
+    let run: InboxQuestion[] | null = null;
+    for (const block of blocks) {
+      const record = block.type === 'directive' && block.directiveKind === 'action' ? draw.recordFor(block) : null;
+      if (!record) {
+        run = null;
+        continue;
+      }
+      const first = run === null;
+      if (run === null) run = [];
+      run.push(record);
+      runs.set(block.id, { first, records: run });
+    }
+    return runs;
+  }, [blocks, message.actions, renderActions !== undefined]);
   const directiveBlock = useCallback(
-    (block: Block) => (block.directiveKind === 'action' ? actionRef.current?.(block) : undefined),
-    [message.actions],
+    (block: Block) => {
+      if (block.directiveKind !== 'action') return undefined;
+      const run = actionRuns.get(block.id);
+      if (!run) return undefined;
+      return run.first ? actionsRef.current?.render(run.records) : null;
+    },
+    [actionRuns],
   );
 
   // ── Comments on the text (approval "inbox-message-comments") ──────────────
@@ -547,7 +584,7 @@ export function MessageBody({
         questionStatusLabel={statusLabel}
         renderQuestionCard={renderReplacedCard ? questionCard : undefined}
         renderQuestionBelowPrompt={renderReplacesLine ? belowPrompt : undefined}
-        renderDirectiveBlock={renderAction ? directiveBlock : undefined}
+        renderDirectiveBlock={renderActions ? directiveBlock : undefined}
       />
       {skills && <SkillsLine split={skills} />}
       {tagLabels && (
@@ -2532,6 +2569,44 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     }
   };
 
+  // Open questions in this thread (approval "inbox-thread-open-questions", option A): the "N open questions"
+  // button beside Re-ask lists them, and a row takes the person to the card (unfolding its message).
+  const openQ = resolved && !cameBack ? { questions: [], replaced: 0 } : threadOpenQuestions(thread.messages, liveMessage);
+  const isFolded = (messageId: string) => fold.folded.has(messageId) || hiddenNow.has(messageId);
+  const openQShown = openQuestionsShown(openQ.questions, { messageCount: thread.messages.length, folded: isFolded });
+  /** Where each listed card sits now: in a folded message, or above or below the middle of the thread's view. */
+  const measureOpenQuestions = (): ReadonlyMap<string, OpenQuestionPlace> => {
+    const places = new Map<string, OpenQuestionPlace>();
+    const body = bodyRef.current;
+    const current = foldRef.current;
+    const hidden = new Set(current.hidden.flatMap((ids, index) => (current.revealed.has(index) ? [] : ids)));
+    const view = body?.getBoundingClientRect() ?? { top: 0, bottom: 0 };
+    for (const q of openQ.questions) {
+      if (current.folded.has(q.messageId) || hidden.has(q.messageId)) {
+        places.set(q.id, 'folded');
+        continue;
+      }
+      const card =
+        body?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(q.messageId)}"] [data-question-key="${CSS.escape(q.key)}"]`) ??
+        body?.querySelector<HTMLElement>(`[data-message-article="${CSS.escape(q.messageId)}"]`) ??
+        null;
+      places.set(q.id, placeOf(card?.getBoundingClientRect() ?? null, view));
+    }
+    return places;
+  };
+
+  // The error after a failed Send (or Re-ask) sits ABOVE the button row it belongs to (approval
+  // "thread-foot-status-right"), in the two states that have one: the reply box and the closed foot.
+  const errorAbove = !resolved && !(guard && staleQuestions.length > 0) && newMessage?.kind !== 'compose' && !(route.open && asking);
+  const errorLine = (
+    <div className="ib-error" role="alert" data-foot-error={errorAbove ? 'above' : undefined}>
+      {error}
+    </div>
+  );
+  // The closed foot's status (draft note, skip chip) describes Send and Edit draft: read with them, though drawn at the row's end.
+  const draftNoteId = `ib-foot-draft-${thread.thread_id}`;
+  const skipNoteId = `ib-foot-skip-${thread.thread_id}`;
+  const footStatusIds = [draftNoteId, waiting && unanswered.length > 0 ? skipNoteId : null].filter(Boolean).join(' ');
   const routeChoice = asking ? (
     <RouteChoice
       kind={routeFor}
@@ -2549,8 +2624,34 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   ) : null;
 
   // While new messages are below the view: a pill that goes to them.
+  // On a phone the pill sits over the middle of the foot's row; when a button lies under that middle, above the foot.
+  const footRowRef = useRef<HTMLDivElement>(null);
+  const [pillAbove, setPillAbove] = useState(false);
+  const pillOnRow = showNew && phone && !waiting && !draftKept;
+  const placePill = useCallback(() => {
+    const row = footRowRef.current;
+    const pill = row?.querySelector<HTMLElement>('.ib-npill');
+    const buttons = row?.querySelector('[data-foot-buttons]');
+    if (!row || !pill || !buttons) return;
+    const box = row.getBoundingClientRect();
+    if (box.width <= 0) return;
+    const size = pill.getBoundingClientRect();
+    const hits = pillHitsButtons(box, size, laidOutChildren(buttons).map((el) => el.getBoundingClientRect()));
+    setPillAbove((current) => (current === hits ? current : hits));
+  }, []);
+  // Every render (a button came or went, the count changed) and whenever the row resizes.
+  useLayoutEffect(() => {
+    if (pillOnRow) placePill();
+  });
+  useEffect(() => {
+    const row = footRowRef.current;
+    if (!pillOnRow || !row || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => placePill());
+    observer.observe(row);
+    return () => observer.disconnect();
+  }, [pillOnRow, placePill]);
   const newPill = (
-    <div className="ib-npill-wrap">
+    <div className="ib-npill-wrap" data-above={phone && pillAbove ? '' : undefined}>
       <button
         type="button"
         className="ib-npill"
@@ -3008,21 +3109,18 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                   footerFor={footerFor(message)}
                   renderReplacedCard={replacedCard}
                   renderReplacesLine={replacesLine}
-                  renderAction={
+                  renderActions={
                     isAgent && (message.actions?.length ?? 0) > 0
-                      ? (block) => {
-                          const action = actionForBlock(message.body, message.actions, block);
-                          if (!action) return undefined;
-                          return (
-                            <ActionCard
-                              action={action}
-                              number={action.position + 1}
-                              total={message.actions!.length}
+                      ? {
+                          recordFor: (block) => actionForBlock(message.body, message.actions, block),
+                          render: (records) => (
+                            <ActionChecklist
+                              actions={records}
                               agent={name}
                               readOnly={!liveMessage(message)}
-                              onMark={(mark) => markAction(message.id, action.key, mark, name, action.prompt)}
+                              onMark={(action, mark) => markAction(message.id, action.key, mark, name, action.prompt)}
                             />
-                          );
+                          ),
                         }
                       : undefined
                   }
@@ -3342,6 +3440,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             {route.open && asking ? (
               routeChoice
             ) : (
+              <>
+              {error && errorLine}
               <div className="ib-acts">
                 <button type="button" className="ib-btn ib-pri" ref={sendRef} onClick={() => void send()} disabled={sending}>
                   <Icon name="send" size={15} />
@@ -3354,65 +3454,91 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                 {/* The in-thread New message button is off (approval "inbox-acknowledge"); its route and code stay. */}
                 {SHOW_NEW_MESSAGE_BUTTON && !archived && <NewMessageButton live={live} mode={newMessage} onClick={() => void pressNewMessage()} />}
               </div>
+              </>
             )}
           </>
         ) : route.open && asking ? (
           routeChoice
         ) : (
           <>
-          <div className="ib-acts">
-            {(waiting || draftKept) && <DraftFootNote unsent={{ reply: draftKept, picks: picksCount, comments: records.length }} />}
-            {(waiting || draftKept) && (
-              <button type="button" className="ib-btn ib-pri" ref={sendRef} onClick={() => void send()} disabled={sending}>
-                <Icon name="send" size={15} />
-                Send
-              </button>
-            )}
-            <button type="button" className="ib-btn" onClick={() => openBox()} data-edit-draft={waiting || draftKept ? '' : undefined}>
-              <Icon name={waiting || draftKept ? 'pen' : 'reply'} size={15} />
-              {waiting || draftKept ? 'Edit draft' : 'Reply'}
-            </button>
-            {/* Re-ask (approval "inbox-reask"): the open questions again, in one message per session. */}
-            {reaskShown && (
-              <Tip content={reaskTooltip(reaskList)}>
-                <button type="button" className="ib-btn" ref={reaskRef} data-reask="" disabled={reasking} onClick={() => void sendReask()}>
-                  <Icon name="refresh" size={15} />
-                  Re-ask
+          {error && errorLine}
+          {/* Buttons on the left in today's order, the draft status and the skip chip at the right end (approval
+              "thread-foot-status-right", option A). Too narrow for one line, the status takes its own line ABOVE the
+              buttons (wrap-reverse; one item per line aligns to the start), so it never wraps between them. */}
+          <div className="ib-acts ib-footrow" data-foot-row="" ref={footRowRef}>
+            <div className="ib-footbtns" data-foot-buttons="">
+              {(waiting || draftKept) && (
+                <button type="button" className="ib-btn ib-pri" ref={sendRef} onClick={() => void send()} disabled={sending} aria-describedby={footStatusIds}>
+                  <Icon name="send" size={15} />
+                  Send
                 </button>
-              </Tip>
-            )}
-            {/* 👍 Looks good beside Reply: sent to the agent after the Undo window; hidden while a question waits. */}
-            {ackOffered && !waiting && !draftKept && (
-              <Tip
-                content={
-                  ackOn
-                    ? 'Take back Looks good'
-                    : `Tells ${agentName(ackTarget!.author)} you read it and need nothing more. Moves to Quiet until it writes again.`
-                }
+              )}
+              <button
+                type="button"
+                className="ib-btn"
+                onClick={() => openBox()}
+                data-edit-draft={waiting || draftKept ? '' : undefined}
+                data-reply-button=""
+                aria-describedby={waiting || draftKept ? footStatusIds : undefined}
               >
-                <button type="button" className="ib-btn ib-ack" data-ack="" aria-pressed={ackOn} onClick={() => onAck!(ackTarget!.id, !ackOn, agentName(ackTarget!.author))}>
-                  <span className="ib-ack-emoji" aria-hidden="true">
-                    👍
+                <Icon name={waiting || draftKept ? 'pen' : 'reply'} size={15} />
+                {waiting || draftKept ? 'Edit draft' : 'Reply'}
+              </button>
+              {/* Re-ask (approval "inbox-reask"): the open questions again, in one message per session. */}
+              {reaskShown && (
+                <Tip content={reaskTooltip(reaskList)}>
+                  <button type="button" className="ib-btn" ref={reaskRef} data-reask="" disabled={reasking} onClick={() => void sendReask()}>
+                    <Icon name="refresh" size={15} />
+                    Re-ask
+                  </button>
+                </Tip>
+              )}
+              {/* The thread's open questions (approval "inbox-thread-open-questions"): a list that takes the person to each card. */}
+              {openQShown && (
+                <OpenQuestionsButton
+                  questions={openQ.questions}
+                  replaced={openQ.replaced}
+                  phone={phone}
+                  measure={measureOpenQuestions}
+                  onPick={(q) => jumpTo({ kind: 'question', messageId: q.messageId, key: q.key })}
+                />
+              )}
+              {/* 👍 Looks good beside Reply: sent to the agent after the Undo window; hidden while a question waits. */}
+              {ackOffered && !waiting && !draftKept && (
+                <Tip
+                  content={
+                    ackOn
+                      ? 'Take back Looks good'
+                      : `Tells ${agentName(ackTarget!.author)} you read it and need nothing more. Moves to Quiet until it writes again.`
+                  }
+                >
+                  <button type="button" className="ib-btn ib-ack" data-ack="" aria-pressed={ackOn} onClick={() => onAck!(ackTarget!.id, !ackOn, agentName(ackTarget!.author))}>
+                    <span className="ib-ack-emoji" aria-hidden="true">
+                      👍
+                    </span>
+                    Looks good
+                  </button>
+                </Tip>
+              )}
+              {/* The in-thread New message button is off (approval "inbox-acknowledge", 2026-10-15): Reply and compose cover it.
+                  Its route, door row and code stay; turn SHOW_NEW_MESSAGE_BUTTON on to bring it back. */}
+              {SHOW_NEW_MESSAGE_BUTTON && !archived && <NewMessageButton live={live} mode={newMessage} onClick={() => void pressNewMessage()} />}
+            </div>
+            {(waiting || draftKept) && (
+              <div className="ib-footstatus" data-foot-status="">
+                <DraftFootNote id={draftNoteId} unsent={{ reply: draftKept, picks: picksCount, comments: records.length }} />
+                {waiting && unanswered.length > 0 && (
+                  <span className={keepOpen ? 'ib-keep' : undefined}>
+                    <SkipChip id={skipNoteId} count={keepOpen ? unanswered.length : skipIds.size} keepOpen={keepOpen} onToggle={toggleKeepOpen} />
                   </span>
-                  Looks good
-                </button>
-              </Tip>
-            )}
-            {/* The in-thread New message button is off (approval "inbox-acknowledge", 2026-10-15): Reply and compose cover it.
-                Its route, door row and code stay; turn SHOW_NEW_MESSAGE_BUTTON on to bring it back. */}
-            {SHOW_NEW_MESSAGE_BUTTON && !archived && <NewMessageButton live={live} mode={newMessage} onClick={() => void pressNewMessage()} />}
-            {waiting && unanswered.length > 0 && (
-              <>
-                <span className="ib-sp" />
-                <span className={keepOpen ? 'ib-keep' : undefined}>
-                  <SkipChip count={keepOpen ? unanswered.length : skipIds.size} keepOpen={keepOpen} onToggle={toggleKeepOpen} />
-                </span>
-              </>
+                )}
+              </div>
             )}
             {/* A phone has no room to float the pill over the messages (it sat on a sender's row): it sits in this
                 row's empty middle, laid over it, so the foot and the thread's view keep their size and Reply stays put.
-                With Send waiting the row has no empty middle, and no pill. */}
-            {showNew && phone && !waiting && newPill}
+                When a button sits under that middle (Reply, Re-ask and the open questions), it floats just above the
+                foot instead, never over a button. With Send waiting (picks or kept words), no pill. */}
+            {showNew && phone && !waiting && !draftKept && newPill}
           </div>
           </>
         )}
@@ -3428,11 +3554,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             onClose={() => setNewMessage(null)}
           />
         )}
-        {error && (
-          <div className="ib-error" role="alert">
-            {error}
-          </div>
-        )}
+        {error && !errorAbove && errorLine}
       </div>
     </section>
     {openAttachment && (
@@ -3501,13 +3623,13 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
  * Skip them"; after Skip them, "↷ 3 questions will be skipped · Keep open",
  * for that one Send. Nothing when none is unanswered.
  */
-function SkipChip({ count, keepOpen, onToggle }: { count: number; keepOpen: boolean; onToggle: () => void }) {
+function SkipChip({ count, keepOpen, onToggle, id }: { count: number; keepOpen: boolean; onToggle: () => void; id?: string }) {
   if (count === 0) return null;
   const them = count === 1 ? 'it' : 'them';
   return (
     <span className="ib-skipchip" data-skip-chip={keepOpen ? 'keep' : 'skip'}>
       {/* The icon and the sentence are one item, so where the chip wraps (a narrow reply box) the icon stays with its words. */}
-      <span className="ib-skip-s">
+      <span className="ib-skip-s" id={id}>
         {!keepOpen && <Icon name="forward" size={14} />}
         {keepOpen ? `${plural(count, 'question')} ${count === 1 ? 'stays' : 'stay'} open` : `${plural(count, 'question')} will be skipped`}
       </span>

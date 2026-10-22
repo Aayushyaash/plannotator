@@ -10,6 +10,7 @@ import { computeListIndices, groupBlocks, selectionSourceLines, type Frontmatter
 import { buildHeadingSlugMap } from '../utils/slugify';
 import { copyTextToClipboard } from '../utils/clipboard';
 import { BlockRenderer } from './BlockRenderer';
+import { BELOW_TITLE_SLOT_MARKER } from '../utils/belowTitleSlot';
 import { indexQuestionBlocks, type IndexedQuestion, type ParsedQuestion, type QuestionAnswer } from '@plannotator/core/question-block';
 import type { QuestionBlockProps } from './blocks/QuestionBlock';
 import { resolveQuestionAnswers } from '../utils/questionAnswers';
@@ -368,6 +369,23 @@ export interface ViewerProps {
    * unchanged.
    */
   onHostDraft?: (draft: HostDraft | null) => void;
+  /**
+   * Host content drawn right under the document's title (e.g. a host's
+   * references rows). The title is the body's first block when that is a
+   * level-1 heading; the node is drawn right after that heading. With no
+   * leading `# heading` it is drawn at the top of the body, before the first
+   * block (after the frontmatter card). The heading itself is unchanged.
+   *
+   * The wrapper (`[data-viewer-below-title]`, `data-placement` `below-title`
+   * or `top`) sits outside everything that addresses the document's text: it
+   * is `annotation-exclude` (no comment starts in it and its text is never
+   * searched or quoted), `data-pinpoint-ignore` (pinpoint and Vim skip it),
+   * `data-print-hide`, and has no `data-block-id`. Stored comment positions
+   * are kept as if it were not there, so its contents never renumber a
+   * comment's parent element. `null`, `undefined` and booleans count as
+   * absent: no wrapper is drawn and the DOM is exactly as without the prop.
+   */
+  belowTitle?: React.ReactNode;
 }
 
 export interface ViewerHandle {
@@ -757,6 +775,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   vimHudKeyPanelEnabled = true,
   onVimHudKeyPanelChange,
   onHostDraft,
+  belowTitle,
 }, ref) => {
   // Annotation authoring is off when read-only, and when the host only wants
   // answers (`answerOnly`); question cards and checkboxes follow `readOnly`.
@@ -1499,6 +1518,30 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     if (ids.length > 0) onRestoreReport({ attempted: ids, unanchored: ids });
   }, [annotations, diagramBlockKey, onRestoreReport]);
 
+  // The host's `belowTitle` slot (see the prop). Absent → the block list is
+  // returned as is, so the DOM is the one without the prop. The wrapper's
+  // attribute carries utils/belowTitleSlot's per-load marker, which is how
+  // the highlighter tells it from raw HTML an author wrote, to keep stored
+  // positions slot-free.
+  const belowTitleSlot = belowTitle == null || typeof belowTitle === 'boolean' ? null : belowTitle;
+  const titleLeads = blocks[0]?.type === 'heading' && blocks[0].level === 1;
+  const withBelowTitle = (rendered: React.ReactNode[]): React.ReactNode[] => {
+    if (belowTitleSlot === null) return rendered;
+    const slot = (
+      <div
+        key="viewer-below-title"
+        data-viewer-below-title={BELOW_TITLE_SLOT_MARKER}
+        data-placement={titleLeads ? 'below-title' : 'top'}
+        data-pinpoint-ignore=""
+        data-print-hide=""
+        className="annotation-exclude"
+      >
+        {belowTitleSlot}
+      </div>
+    );
+    return titleLeads ? [rendered[0], slot, ...rendered.slice(1)] : [slot, ...rendered];
+  };
+
   return (
     <CodePathValidationContext.Provider value={codePathValidation}>
     <LocalLinkContext.Provider value={resolveLocalLink ?? null}>
@@ -1587,7 +1630,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         )}
         {frontmatter && <><div className="clear-right md:hidden" /><FrontmatterCard frontmatter={frontmatter} /></>}
         {!frontmatter && blocks.length > 0 && blocks[0].type !== 'heading' && <div className="mt-4" />}
-        {groupBlocks(blocks).map(group =>
+        {withBelowTitle(groupBlocks(blocks).map(group =>
           group.type === 'list-group' ? (
             (() => {
               const indices = computeListIndices(group.blocks);
@@ -1774,7 +1817,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               return rendered;
             })()
           )
-        )}
+        ))}
 
         {/* Text selection toolbar */}
         {selectionCommentsOn && !hostComposes && toolbarState && (

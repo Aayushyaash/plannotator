@@ -164,7 +164,7 @@ async function boot() {
           learns the guide's palette only after the fetch, and the provider reads
           its default once. */}
       <ThemeProvider key={palette ?? ''} defaultTheme="system" defaultColorTheme={palette ?? 'plannotator'}>
-        <TooltipProvider delayDuration={200} skipDelayDuration={100}>{children}</TooltipProvider>
+        <TooltipProvider>{children}</TooltipProvider>
       </ThemeProvider>
     </React.StrictMode>
   );

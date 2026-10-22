@@ -2,7 +2,13 @@
  * Compose: send a new message to a connected agent (approval record
  * "inbox-compose-to-agent", 2026-10-14; variant Compose). A modal dialog
  * pinned to the upper part of the window like the search palette (a
- * full-screen sheet on a phone): To, prefilled, above the message.
+ * full-screen sheet on a phone): To above the message.
+ *
+ * - A plain New message opens with To EMPTY and focus on To, so the person
+ *   picks the agent before writing (the owner: "I keep sending messages to the
+ *   wrong agent"). Send says "Choose an agent to send it." until one is picked.
+ *   To is filled only where the person already chose: a reopened draft, and
+ *   "Message <host>" (the palette, the first-run screen) (`composeOpening`).
  *
  * - Sending needs a live session. With none, Send stays visible but does
  *   nothing except say so, and Save draft is offered.
@@ -36,7 +42,7 @@ import {
   findTarget,
   hostLabel,
   isDirty,
-  preselect,
+  composeOpening,
   statusLine,
   sendThreadName,
   suggestThreadName,
@@ -69,7 +75,7 @@ export interface ComposeDialogProps {
   phone: boolean;
   /** The project the person is looking at: the list's filter, or the open thread's. */
   current: { id: string | null; root: string | null; name: string | null } | null;
-  /** The session the person last sent to: preselected while it is live. */
+  /** The session the person last sent to: listed first in the picker while it is live; never put in To by itself. */
   lastSent: string | null;
   home: string | null;
   onSent: (sent: ComposeSent) => void;
@@ -84,6 +90,8 @@ export function ComposeDialog(props: ComposeDialogProps) {
   const { request, phone, current, lastSent, home } = props;
   const dialogRef = useRef<HTMLDialogElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  const toRef = useRef<HTMLButtonElement>(null);
+  const opening = useRef(composeOpening(request)).current;
   const uid = useId().replace(/[^A-Za-z0-9_-]/g, '');
   const titleId = `ib-cp-title-${uid}`;
   const statusId = `ib-cp-status-${uid}`;
@@ -92,7 +100,7 @@ export function ComposeDialog(props: ComposeDialogProps) {
   const [body, setBody] = useState(request.draft?.body ?? '');
   // The thread's name (its chip): follows the message until the person types in it (ThreadNameChip).
   const [nameState, setNameState] = useState<ThreadNameState>(() => threadNameStateOf(request.draft));
-  const [chosen, setChosen] = useState<string | null>(request.draft ? (request.draft.to?.session ?? null) : (request.session ?? null));
+  const [chosen, setChosen] = useState<string | null>(opening.chosen);
   // A paste is said in the dialog's own polite region (the window's is outside the modal dialog).
   const [pasteSaid, setPasteSaid] = useState('');
   const files = useComposeFiles(request.draft?.files ?? [], {
@@ -105,18 +113,17 @@ export function ComposeDialog(props: ComposeDialogProps) {
   const projects = model?.projects ?? [];
   const target = findTarget(projects, chosen);
   const anyLive = composeTargets(projects).length > 0;
-  const groups = useMemo(() => composeGroups(projects, current), [projects, current]);
+  const groups = useMemo(() => composeGroups(projects, current, lastSent), [projects, current, lastSent]);
 
-  // Preselect once the sessions are first read, unless To was set (a draft keeps its own, even an ended one).
-  const preselected = useRef(chosen !== null);
+  // To is never filled by itself. Focus that started on To moves to the message when the
+  // first read finds no live agent (To is then a line of text, not a button).
   useEffect(() => {
-    if (!model || preselected.current) return;
-    preselected.current = true;
-    const pick = preselect(model.projects, { last: lastSent, current });
-    if (pick) setChosen(pick.session);
-    // Once, at the first read.
+    if (!model || anyLive || opening.focus !== 'to') return;
+    const dialog = dialogRef.current;
+    const active = document.activeElement;
+    if (dialog && (!active || active === document.body || active === dialog || !dialog.contains(active))) textRef.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model]);
+  }, [model, anyLive]);
 
   // A draft's chosen session that is not live: struck through, never re-addressed on its own.
   const endedTo: InboxDraftTo | null = model && chosen && !target && draft?.to?.session === chosen ? draft.to : null;
@@ -155,6 +162,8 @@ export function ComposeDialog(props: ComposeDialogProps) {
   }, [body, chosen, threadName, nameState.edited ? '' : suggested, uploadIds.join(',')]);
   const draftId = useRef(request.draft?.id ?? inboxId('drf'));
 
+  // Nothing written: no words, no files, no typed thread name. An empty compose is never kept as a draft.
+  const empty = body.trim() === '' && files.files.length === 0 && threadName.trim() === '';
   const saved = draftSnapshot(draft);
   const dirty = isDirty({ body, session: chosen, files: uploadIds, threadName }, saved, draft !== null) || files.uploading;
   const projectName = current?.name ?? null;
@@ -170,6 +179,11 @@ export function ComposeDialog(props: ComposeDialogProps) {
         dialog.setAttribute('open', '');
       }
     } else dialog.setAttribute('open', '');
+    // A plain New message starts on To (empty: the person picks first); a draft or "Message <host>" starts in the message.
+    if (opening.focus === 'to' && toRef.current) {
+      toRef.current.focus();
+      return;
+    }
     const text = textRef.current;
     if (text) {
       text.focus();
@@ -187,7 +201,9 @@ export function ComposeDialog(props: ComposeDialogProps) {
       textRef.current?.focus();
       return;
     }
-    if (dirty) {
+    // Something written that was not saved: ask. An empty compose (a draft emptied too) is never kept, so it
+    // closes asking nothing; a reopened draft emptied this way stays saved as it was.
+    if (dirty && !empty) {
       setQuestion(true);
       return;
     }
@@ -249,6 +265,7 @@ export function ComposeDialog(props: ComposeDialogProps) {
 
   // ── drafts ──
   const save = async (base: string | null = draft?.updated_at ?? null): Promise<DraftView | null> => {
+    if (empty) return null;
     if (files.uploading) {
       setError('Wait for the files to finish uploading.');
       return null;
@@ -342,7 +359,8 @@ export function ComposeDialog(props: ComposeDialogProps) {
   const sendable = !!target;
   // While the sessions are read, neither Save draft nor a dead To: a neutral "Looking…" state.
   const loading = !model;
-  const saveOffered = !sendable && !loading;
+  // Save draft only for something written: an empty compose offers none (a phone shows the disabled Send instead).
+  const saveOffered = !sendable && !loading && !empty;
   const title = draft ? 'Draft' : 'New message';
   const status = statusLine({ target, anyLive, ended: endedTo, projectName: target?.project.name ?? projectName, loading: loading && !target });
   const endedNote = endedTo ?? (lost && !target ? { host: lost.host, session: lost.session, project_root: lost.project.root, project_name: lost.project.name, started_at: lost.started_at } : null);
@@ -357,6 +375,7 @@ export function ComposeDialog(props: ComposeDialogProps) {
         </span>
       ) : (
         <button
+          ref={toRef}
           type="button"
           className="ib-cp-tobtn"
           data-compose-to={target ? target.session : endedNote ? 'ended' : 'choose'}
@@ -460,7 +479,14 @@ export function ComposeDialog(props: ComposeDialogProps) {
               Save draft
             </button>
           ) : (
-            <button type="button" className="ib-cp-barb ib-strong" onClick={() => void send()} disabled={busy !== null} data-compose-send="">
+            <button
+              type="button"
+              className={`ib-cp-barb ib-strong${sendable ? '' : ' ib-dis'}`}
+              aria-disabled={!sendable || undefined}
+              onClick={() => void send()}
+              disabled={busy !== null}
+              data-compose-send=""
+            >
               Send
             </button>
           )}
@@ -485,7 +511,8 @@ export function ComposeDialog(props: ComposeDialogProps) {
           }}
           onClose={() => {
             setPicker(false);
-            textRef.current?.focus();
+            // Still nobody in To: back on To, where the choice is made.
+            (target ? textRef.current : (toRef.current ?? textRef.current))?.focus();
           }}
         />
       )}

@@ -119,6 +119,18 @@ test('layout corners are one scale; buttons keep their own', () => {
   expect(CODE).toMatch(/--ib-bt-r-s:\s*var\(--ib-soft-buttons\)\s*10px;/);
 });
 
+test("a phone's bottom sheet has the dialog corner on top (owner's ruling q8), from one token", () => {
+  expect(CODE).toMatch(/--ib-sheet-corner:\s*var\(--ib-lr-xl\);/);
+  // A sheet from the bottom edge (in the phone query) rounds only its top corners: it reads the token, never a
+  // literal (it was 16), so a new sheet cannot bring another corner back.
+  const media = mediaMask(CODE);
+  const literalTop = [...CODE.matchAll(/border-radius:\s*(\d+px\s+\d+px\s+0(?:px)?\s+0(?:px)?)/g)]
+    .filter((m) => media[m.index!])
+    .map((m) => m[1]);
+  expect(literalTop).toEqual([]);
+  expect(CODE.match(/border-radius: var\(--ib-sheet-corner, 12px\) var\(--ib-sheet-corner, 12px\) 0 0/g)?.length).toBeGreaterThanOrEqual(3);
+});
+
 test('rows part with no line between them in both modes (the prototype\'s rows); other lines keep today\'s colour', () => {
   expect(CODE).toMatch(/\.pn-inbox \{[^}]*--ib-soft-rows:\s*;/);
   const light = /:root\.light \.pn-inbox \{([^}]*)\}/.exec(CODE)?.[1] ?? '';

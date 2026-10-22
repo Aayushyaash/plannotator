@@ -225,11 +225,17 @@ async function checkStepListAbove(page: Page, label: string): Promise<void> {
  */
 async function closeSidebarPeek(page: Page): Promise<void> {
   const peek = page.locator('[data-sidebar-peek][data-visible]');
-  if ((await peek.count()) > 0) {
-    await page.mouse.move(60, 450);
-    await page.mouse.move(700, 450);
-  }
-  await expect(peek, 'the sidebar peek is closed before the strip is probed').toHaveCount(0);
+  // Park the pointer away from the edge first, then outlast the peek's 600 ms rest, so a peek that was about to
+  // open has opened (or never will) before it is checked; then enter and leave it until it is gone.
+  await page.mouse.move(700, 450);
+  await page.waitForTimeout(800);
+  await expect(async () => {
+    if ((await peek.count()) > 0) {
+      await page.mouse.move(60, 450);
+      await page.mouse.move(700, 450);
+    }
+    await expect(peek).toHaveCount(0, { timeout: 1000 });
+  }, 'the sidebar peek is closed before the strip is probed').toPass({ timeout: 10_000 });
 }
 
 test.describe.configure({ mode: 'serial' });
@@ -261,31 +267,28 @@ test('Inbox: the attached document never paints over the toolstrip, beside the t
       { label: 'inbox-phone', options: { ...devices['Pixel 7'] } },
     ];
     for (const layout of layouts) {
-      for (const look of ['grid', 'clean'] as const) {
-        const context = await browser.newContext(layout.options);
-        try {
-          if (look === 'clean') await context.addCookies([{ name: 'plannotator-grid-enabled', value: 'false', url }]);
-          const page = await context.newPage();
-          // Playwright's pointer starts at (0, 0), on the sidebar peek's edge strip: once a file closes the
-          // sidebar, resting there 600 ms opens the peek over everything, full screen included. Rest it in the
-          // middle, where a person reading the file would.
-          await page.mouse.move(400, 400);
-          await page.goto(fileUrl);
-          await expect(page.locator('[data-attachment-pane] .ib-docscroll table')).toBeVisible();
-          if (layout.full) {
-            await page.getByRole('button', { name: 'Full screen' }).click();
-            await expect(page.locator('.ib-view.ib-full')).toBeVisible();
-            // The comments drawer open beside the page, so the centred document reaches under the toolstrip.
-            await page.locator('[data-full-view-comments]').click();
-            await expect(page.locator('.ib-view.ib-drawer')).toBeVisible();
-          }
-          await closeSidebarPeek(page);
-          await checkSurface(page, `${layout.label}-${look}`, '[data-attachment-pane] .ib-docscroll', '[data-attachment-pane] .ib-toolstrip');
-          await checkTablePopoutCovers(page, `${layout.label}-${look}`, '[data-attachment-pane] .ib-docscroll', '[data-attachment-pane] .ib-toolstrip');
-          if (!layout.options.isMobile) await checkStepListAbove(page, `${layout.label}-${look}`);
-        } finally {
-          await context.close();
+      const context = await browser.newContext(layout.options);
+      try {
+        const page = await context.newPage();
+        // Playwright's pointer starts at (0, 0), on the sidebar peek's edge strip: once a file closes the
+        // sidebar, resting there 600 ms opens the peek over everything, full screen included. Rest it in the
+        // middle, where a person reading the file would.
+        await page.mouse.move(400, 400);
+        await page.goto(fileUrl);
+        await expect(page.locator('[data-attachment-pane] .ib-docscroll table')).toBeVisible();
+        if (layout.full) {
+          await page.getByRole('button', { name: 'Full screen' }).click();
+          await expect(page.locator('.ib-view.ib-full')).toBeVisible();
+          // The comments drawer open beside the page, so the centred document reaches under the toolstrip.
+          await page.locator('[data-full-view-comments]').click();
+          await expect(page.locator('.ib-view.ib-drawer')).toBeVisible();
         }
+        await closeSidebarPeek(page);
+        await checkSurface(page, layout.label, '[data-attachment-pane] .ib-docscroll', '[data-attachment-pane] .ib-toolstrip');
+        await checkTablePopoutCovers(page, layout.label, '[data-attachment-pane] .ib-docscroll', '[data-attachment-pane] .ib-toolstrip');
+        if (!layout.options.isMobile) await checkStepListAbove(page, layout.label);
+      } finally {
+        await context.close();
       }
     }
   } finally {

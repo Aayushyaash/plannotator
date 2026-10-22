@@ -65,6 +65,8 @@ export interface DocumentWebMcpInputs {
     error: string | null;
     getDocAnnotations: () => Map<string, CachedDocState>;
     open: (path: string) => Promise<void>;
+    /** Stop a Back scroll restore still settling, before a reveal scrolls. */
+    cancelScrollRestore?: () => void;
   };
   /** Folder sessions: the file browser's loaded directories (absolute dir path + relative tree). */
   fileBrowserDirs: DocumentWebMcpFileBrowserDir[];
@@ -326,6 +328,7 @@ export function useDocumentWebMcp(inputs: DocumentWebMcpInputs): { available: bo
         }
         const exists = annotations().some((a) => a.id === id);
         if (!exists) return false;
+        current().linkedDoc.cancelScrollRestore?.();
         current().selectAnnotation(id);
         return true;
       },
@@ -337,6 +340,7 @@ export function useDocumentWebMcp(inputs: DocumentWebMcpInputs): { available: bo
         if (typeof document === 'undefined') return false;
         const target = document.querySelector<HTMLElement>(`[data-block-id="${blockId}"]`);
         if (!target) return false;
+        current().linkedDoc.cancelScrollRestore?.();
         target.scrollIntoView({ behavior: 'smooth', block: 'start' });
         return true;
       },

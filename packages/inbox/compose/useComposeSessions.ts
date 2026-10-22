@@ -6,7 +6,7 @@ export const COMPOSE_SESSIONS_REFRESH_MS = 5_000;
 
 /**
  * Every live session (GET /api/inbox/sessions), read while `active` and every
- * few seconds after (never while the tab is hidden), so a session that starts fills To by itself and one that
+ * few seconds after (never while the tab is hidden), so a session that starts shows in the picker and one that
  * stops greys out. The last answer stays while the next is on its way.
  */
 export function useComposeSessions(active: boolean) {

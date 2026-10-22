@@ -44,6 +44,7 @@
     "plannotator-tool-host.ts",
     "session-opened.ts",
     "pi-host.ts",
+    "package-version.ts",
     "inbox.ts",
     "server.ts",
     "tool-scope.ts",

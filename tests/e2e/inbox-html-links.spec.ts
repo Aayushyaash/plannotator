@@ -266,6 +266,15 @@ for (const scheme of ['light', 'dark'] as const) {
       const lightbox = page.locator('[data-image-lightbox]');
       await expect(lightbox).toBeVisible();
       await expect.poll(() => lightbox.locator('img').evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(480);
+      // Shown at its own size in the middle of the screen (the zoom stage fills the overlay, #2067).
+      await expect
+        .poll(() =>
+          lightbox.locator('img').evaluate((img: HTMLImageElement) => {
+            const r = img.getBoundingClientRect();
+            return [Math.round(r.width), Math.round(r.left + r.width / 2 - innerWidth / 2), Math.round(r.top + r.height / 2 - innerHeight / 2)];
+          }),
+        )
+        .toEqual([480, 0, 0]);
       await shot(page, `3-unattached-image-lightbox-${scheme}`);
       await page.keyboard.press('Escape');
       await expect(lightbox).toHaveCount(0);

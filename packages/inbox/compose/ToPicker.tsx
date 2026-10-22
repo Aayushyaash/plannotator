@@ -13,6 +13,9 @@ import { filterGroups, hostLabel, pickerRows, type ComposeGroup, type ComposeTar
  * sessions. The current project first, then the most recently active.
  * ↓ ↑ move a wrapping highlight, Enter picks, Escape closes the picker only
  * (the dialog stays), typing filters by host, project and last subject.
+ * With nobody in To it opens with no row highlighted, so Enter picks nothing
+ * (the first row is the session last sent to: one Enter must not bring back
+ * the auto-fill compose dropped); typing or an arrow key highlights the first row.
  * Focus stays in the filter (`aria-activedescendant`).
  */
 export function ToPicker({
@@ -36,19 +39,21 @@ export function ToPicker({
   const options = useMemo(() => rows.map((row) => row.target), [rows]);
   // The highlight follows a session, not a row number: the list is read again
   // every 5 s, and a re-read that moves rows must not move the highlight.
+  // `null`: no row highlighted (-1), only while To is empty and nothing was typed or arrowed.
   const [hlSession, setHlSession] = useState<string | null>(null);
   const found = options.findIndex((t) => t.session === hlSession);
-  const hl = found >= 0 ? found : 0;
+  const hl = hlSession === null ? -1 : found >= 0 ? found : 0;
   const setHl = (index: number) => setHlSession(options[index]?.session ?? null);
   const uid = useId().replace(/[^A-Za-z0-9_-]/g, '');
   const optionId = (i: number) => `ib-cp-o-${uid}-${i}`;
   const inputRef = useRef<HTMLInputElement>(null);
   const ref = useRef<HTMLDivElement>(null);
 
-  // The highlight starts on the session To names, else the first row; a new filter snaps it to the first row.
+  // The highlight starts on the session To names, else on no row (To empty); a filter snaps it to the first row.
   useLayoutEffect(() => {
     const at = options.findIndex((t) => t.session === selected);
-    setHl(query === '' && at >= 0 ? at : 0);
+    if (query === '') setHlSession(at >= 0 ? options[at]!.session : null);
+    else setHl(0);
     // Only the filter moves it; the re-read keeps the session it is on.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query]);
@@ -79,13 +84,19 @@ export function ToPicker({
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       if (options.length === 0) return;
+      // Nothing highlighted yet: either arrow lands on the first row.
+      if (hl < 0) {
+        setHl(0);
+        return;
+      }
       const step = event.key === 'ArrowDown' ? 1 : -1;
       setHl((hl + step + options.length) % options.length);
       return;
     }
     if (event.key === 'Enter') {
       event.preventDefault();
-      const target = options[hl];
+      // Nothing highlighted: Enter picks nothing.
+      const target = hl >= 0 ? options[hl] : undefined;
       if (target) onPick(target);
     }
   };
@@ -110,7 +121,7 @@ export function ToPicker({
           aria-expanded="true"
           aria-autocomplete="list"
           aria-controls={`ib-cp-list-${uid}`}
-          aria-activedescendant={options[hl] ? optionId(hl) : undefined}
+          aria-activedescendant={hl >= 0 && options[hl] ? optionId(hl) : undefined}
           aria-label="Find an agent or project"
           placeholder="Find an agent or project"
           autoComplete="off"

@@ -36,14 +36,28 @@ export function findTarget(projects: readonly InboxComposeProject[], session: st
 const isCurrent = (project: InboxComposeProject['project'], current: { id: string | null; root: string | null } | null): boolean =>
   !!current && ((current.id !== null && project.id === current.id) || (current.root !== null && project.root === current.root));
 
-/** The picker's groups: the current project first, the others in the server's order. */
-export function composeGroups(projects: readonly InboxComposeProject[], current: { id: string | null; root: string | null } | null): ComposeGroup[] {
+/**
+ * The picker's groups: the session the person last sent to first (while it
+ * is live; its project leads, with that session first in it), then the
+ * current project, then the others in the server's order. `last` only orders
+ * the list: To is never filled from it (`composeOpening`).
+ */
+export function composeGroups(
+  projects: readonly InboxComposeProject[],
+  current: { id: string | null; root: string | null } | null,
+  last: string | null = null,
+): ComposeGroup[] {
   const groups = projects.map((group) => ({
     project: group.project,
     current: isCurrent(group.project, current),
     sessions: group.sessions.map((session) => ({ ...session, project: group.project })),
   }));
-  return [...groups.filter((g) => g.current), ...groups.filter((g) => !g.current)];
+  const ordered = [...groups.filter((g) => g.current), ...groups.filter((g) => !g.current)];
+  const at = last ? ordered.findIndex((g) => g.sessions.some((s) => s.session === last)) : -1;
+  if (at < 0) return ordered;
+  const lead = ordered[at]!;
+  const sessions = [...lead.sessions.filter((s) => s.session === last), ...lead.sessions.filter((s) => s.session !== last)];
+  return [{ ...lead, sessions }, ...ordered.filter((_, i) => i !== at)];
 }
 
 /** The groups narrowed by the picker's filter: host, project name or path, and the last thread's subject. */
@@ -78,20 +92,17 @@ export function pickerRows(shown: readonly ComposeGroup[], all: readonly Compose
 }
 
 /**
- * Who To names when compose opens, in order: the session the person last
- * sent to, while it is live; else the most recently active session of the
- * current project; else the most recently active live session anywhere.
- * Nothing when no session is live.
+ * What To names when compose opens, and where focus starts. A plain New
+ * message opens with To empty and focus on To, so the person picks the agent
+ * first (the owner: "I keep sending messages to the wrong agent"). To is
+ * filled only where the person already chose: a reopened draft keeps its own
+ * session (an ended one included), and "Message <host>" (the palette, the
+ * first-run screen) names its session; focus then starts in the message.
+ * A draft saved with nobody in To opens the same way as a plain one.
  */
-export function preselect(
-  projects: readonly InboxComposeProject[],
-  options: { last: string | null; current: { id: string | null; root: string | null } | null },
-): ComposeTarget | null {
-  const last = findTarget(projects, options.last);
-  if (last) return last;
-  const current = composeGroups(projects, options.current).find((group) => group.current);
-  if (current?.sessions[0]) return current.sessions[0];
-  return composeTargets(projects)[0] ?? null;
+export function composeOpening(request: { draft?: Pick<InboxDraft, 'to'> | null; session?: string | null }): { chosen: string | null; focus: 'to' | 'message' } {
+  const chosen = request.draft ? (request.draft.to?.session ?? null) : (request.session ?? null);
+  return { chosen, focus: chosen ? 'message' : 'to' };
 }
 
 /** "started 2:41 PM": when the session started, without its host. */
