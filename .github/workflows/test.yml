@@ -178,6 +178,7 @@ jobs:
           packages/inbox/ack.test.tsx
           packages/inbox/actionChecklist.test.tsx
           packages/inbox/wordsOnlyTwoAsks.test.tsx
+          packages/inbox/threadFoot.test.tsx
           packages/inbox/replyDrafts.test.tsx
           packages/inbox/skipNote.test.tsx
           packages/inbox/picksWhileComposing.test.tsx
