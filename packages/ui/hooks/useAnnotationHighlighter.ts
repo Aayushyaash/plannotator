@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState, useCallback, type RefObject } from 'react';
 import Highlighter from '@plannotator/web-highlighter';
 import type { Annotation, EditorMode, HostDraft, ImageAttachment } from '../types';
-import { metaWithBelowTitle, metaWithoutBelowTitle } from '../utils/belowTitleSlot';
+import { metaWithBelowTitle, metaWithoutBelowTitle, snapRangeOutOfBelowTitle } from '../utils/belowTitleSlot';
 import { AnnotationType } from '../types';
 import type { QuickLabel } from '../utils/quickLabels';
 import {
@@ -1522,8 +1522,8 @@ export function useAnnotationHighlighter({
       // its contents never renumber a comment's parent element (identity
       // when the document has no slot). See utils/belowTitleSlot.
       for (const created of sources) {
-        const startMeta = metaWithoutBelowTitle(containerRef.current, created.startMeta);
-        const endMeta = metaWithoutBelowTitle(containerRef.current, created.endMeta);
+        const startMeta = metaWithoutBelowTitle(containerRef.current, created.startMeta, 'start');
+        const endMeta = metaWithoutBelowTitle(containerRef.current, created.endMeta, 'end');
         if (startMeta !== created.startMeta) created.startMeta = startMeta;
         if (endMeta !== created.endMeta) created.endMeta = endMeta;
       }
@@ -1637,7 +1637,9 @@ export function useAnnotationHighlighter({
         pendingRangeRunsRef.current = null;
         return;
       }
-      if (snapRangeStartPastExcluded(range)) {
+      const snappedOutOfSlot = snapRangeOutOfBelowTitle(container, range);
+      const snappedPastExcluded = snapRangeStartPastExcluded(range);
+      if (snappedOutOfSlot || snappedPastExcluded) {
         selection.removeAllRanges();
         selection.addRange(range);
       }
@@ -1752,6 +1754,7 @@ export function useAnnotationHighlighter({
       // Same fail-closed rule as the pointer-end guard (#881): touch
       // selections settle on block boundaries just as often.
       if (isBlankQuote(sel.toString()) || !isSerializableRange(range)) return false;
+      snapRangeOutOfBelowTitle(containerRef.current, range);
       snapRangeStartPastExcluded(range);
       pendingRangeRunsRef.current = rangeTextPieces(range);
       try {
@@ -1804,6 +1807,7 @@ export function useAnnotationHighlighter({
     // visually hidden type word; snap off it before painting (the caller's own
     // range is left untouched).
     const painted = range.cloneRange();
+    snapRangeOutOfBelowTitle(container, painted);
     snapRangeStartPastExcluded(painted);
     pendingRangeRunsRef.current = rangeTextPieces(painted);
 

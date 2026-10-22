@@ -258,7 +258,12 @@ by). Use it instead of inserting into the Viewer's DOM.
   count elements by tag across the whole article, so a `<p>` or `<a>` in the
   slot would renumber later comments. The highlighter stores and restores
   positions as if the slot were not there, so the same comment has the same
-  metas with or without the slot, and with any slot contents.
+  metas with or without the slot, and with any slot contents. A selection
+  from the title that ends in the slot is cut back to the end of the title.
+  Only the wrapper the Viewer draws counts: its attribute carries a per-load
+  value, so a `<div data-viewer-below-title>` an author writes as raw HTML is
+  never taken for it. Match the wrapper by presence
+  (`[data-viewer-below-title]`), not by value.
 - **Absent is absent.** `undefined`, `null` and booleans draw no wrapper; the
   DOM is exactly the one without the prop.
 

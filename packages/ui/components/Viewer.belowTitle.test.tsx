@@ -126,7 +126,7 @@ const paragraphsByText = (article: HTMLElement, text: string) =>
   [...article.querySelectorAll<HTMLElement>('p[data-block-id]')].filter((p) => p.textContent === text);
 
 describe('Viewer belowTitle: where it renders', () => {
-  test.skipIf(!hasDom)('absent, null, undefined and false draw nothing: the same DOM as without the prop', async () => {
+  test.skipIf(!hasDom)('undefined, null, false and true draw nothing: the same DOM as without the prop', async () => {
     const without = (await mount({ passProp: false })).article.outerHTML;
     await unmount();
     for (const value of [undefined, null, false, true]) {
@@ -238,5 +238,56 @@ describe('Viewer belowTitle: comment positions ignore the slot', () => {
     const selection = await mount({ belowTitle: SLOT, mode: 'selection' });
     await select(selection.article.querySelector('[data-viewer-below-title]')!, 'Depends on');
     expect(document.querySelector('.annotation-toolbar')).toBeNull();
+  });
+
+  test.skipIf(!hasDom)('a selection from the title that ends inside the slot stores its end at the end of the title, never in the slot', async () => {
+    const made: Annotation[] = [];
+    const { article } = await mount({ belowTitle: SLOT, mode: 'redline', onAddAnnotation: (a) => made.push(a) });
+    const title = article.querySelector('h1')!;
+    const titleText = document.createTreeWalker(title, NodeFilter.SHOW_TEXT).nextNode() as Text;
+    const slotText = document.createTreeWalker(article.querySelector('[data-viewer-below-title]')!, NodeFilter.SHOW_TEXT).nextNode() as Text;
+    const range = document.createRange();
+    range.setStart(titleText, titleText.data.indexOf('plan'));
+    range.setEnd(slotText, 4);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    await act(async () => { article.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true })); });
+    await settle();
+
+    expect(made).toHaveLength(1);
+    const { startMeta, endMeta, originalText } = made[0]!;
+    expect(originalText).toBe('plan');
+    expect(startMeta).toEqual({ parentTagName: 'H1', parentIndex: 0, textOffset: 8 });
+    expect(endMeta).toEqual({ parentTagName: 'H1', parentIndex: 0, textOffset: 12 });
+  });
+
+  test.skipIf(!hasDom)('raw HTML in the document carrying the attribute is not the slot: stored metas are the same as without it', async () => {
+    const markdown = [
+      '# Release plan',
+      '',
+      '<div data-viewer-below-title=""><p>Author <span>text</span></p></div>',
+      '',
+      'Ship the same build twice.',
+    ].join('\n');
+    const made: Annotation[] = [];
+    const { article } = await mount({ markdown, passProp: false, mode: 'redline', onAddAnnotation: (a) => made.push(a) });
+    // A browser's DOMPurify keeps `data-*` (ALLOW_DATA_ATTR), so the author's
+    // div reaches the DOM. DOMPurify does not run under happy-dom (it drops
+    // the div), so put back what a browser renders inside the html block.
+    const htmlBlock = article.querySelectorAll<HTMLElement>('[data-block-id]')[1]!;
+    if (!htmlBlock.querySelector('[data-viewer-below-title]')) {
+      const authored = document.createElement('div');
+      authored.setAttribute('data-viewer-below-title', '');
+      authored.innerHTML = '<p>Author <span>text</span></p>';
+      htmlBlock.appendChild(authored);
+    }
+    expect(article.querySelector('[data-viewer-below-title]')).not.toBeNull();
+    await select(article, 'same build');
+    expect(made).toHaveLength(1);
+    const paragraphs: HTMLElement[] = [...article.getElementsByTagName('p')];
+    const live = paragraphs.indexOf(paragraphsByText(article, 'Ship the same build twice.')[0]!);
+    // The author's <p> is counted, exactly as web-highlighter counts it.
+    expect(made[0]!.startMeta).toEqual({ parentTagName: 'P', parentIndex: live, textOffset: 9 });
+    expect(live).toBeGreaterThan(0);
   });
 });

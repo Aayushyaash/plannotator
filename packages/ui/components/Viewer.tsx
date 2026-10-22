@@ -10,6 +10,7 @@ import { computeListIndices, groupBlocks, selectionSourceLines, type Frontmatter
 import { buildHeadingSlugMap } from '../utils/slugify';
 import { copyTextToClipboard } from '../utils/clipboard';
 import { BlockRenderer } from './BlockRenderer';
+import { BELOW_TITLE_SLOT_MARKER } from '../utils/belowTitleSlot';
 import { indexQuestionBlocks, type IndexedQuestion, type ParsedQuestion, type QuestionAnswer } from '@plannotator/core/question-block';
 import type { QuestionBlockProps } from './blocks/QuestionBlock';
 import { resolveQuestionAnswers } from '../utils/questionAnswers';
@@ -1519,8 +1520,9 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
 
   // The host's `belowTitle` slot (see the prop). Absent → the block list is
   // returned as is, so the DOM is the one without the prop. The wrapper's
-  // attribute is utils/belowTitleSlot's BELOW_TITLE_SLOT_ATTRIBUTE, which the
-  // highlighter reads to keep stored positions slot-free.
+  // attribute carries utils/belowTitleSlot's per-load marker, which is how
+  // the highlighter tells it from raw HTML an author wrote, to keep stored
+  // positions slot-free.
   const belowTitleSlot = belowTitle == null || typeof belowTitle === 'boolean' ? null : belowTitle;
   const titleLeads = blocks[0]?.type === 'heading' && blocks[0].level === 1;
   const withBelowTitle = (rendered: React.ReactNode[]): React.ReactNode[] => {
@@ -1528,7 +1530,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     const slot = (
       <div
         key="viewer-below-title"
-        data-viewer-below-title=""
+        data-viewer-below-title={BELOW_TITLE_SLOT_MARKER}
         data-placement={titleLeads ? 'below-title' : 'top'}
         data-pinpoint-ignore=""
         data-print-hide=""
