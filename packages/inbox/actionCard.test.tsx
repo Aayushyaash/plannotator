@@ -1,54 +1,80 @@
 /**
- * The Action item card (approval "inbox-next-actions", direction "In the thread")
- * and the row's count, as the window draws them. Failures to catch: the card
- * not replacing the `:::action` callout in its message (the Viewer seam); an
- * Open button for a link that is not http(s); Can't do it sent without its
- * reason; Done not offering Undo while its window runs; a closed card still
- * offering Done; the row not saying "1 action item"; an action item reaching the picks or
- * the Send (the api split).
+ * Action items as a checklist (approval "action-items-checklist", option A;
+ * first approved as one card per item, "inbox-next-actions"), as the window
+ * draws them. Failures to catch: adjacent `:::action` blocks drawn as separate
+ * cards, or blocks separated by prose gathered into one (the run rule); the
+ * block's own lines drawn beside the card; more than one row open, or a row
+ * whose disclosure is not wired (aria-expanded / aria-controls); the tick not
+ * marking Done, or not offering the Undo while its window runs; the next open
+ * item not opening after Done; Open dropped when an item also has a command
+ * (the old card's bug); the Holds up words dropped; the command cut; Can't do
+ * it sent without its reason; a settled row still offering Done; the row's
+ * count; an action item reaching the picks or the Send (the api split).
  *
  * DOM-gated: runs under DOM_TESTS=1 (happy-dom), from the test.yml DOM list.
  */
 import { afterEach, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { InboxListRow, InboxListSection, InboxMessageWire, InboxQuestion } from '@plannotator/core/inbox-types';
 import { parseInboxActionBlocks } from '@plannotator/core/inbox-actions';
 
 const hasDom = typeof document !== 'undefined';
-const { ActionCard } = (hasDom ? await import('./components/ActionCard') : {}) as typeof import('./components/ActionCard');
+const { ActionChecklist } = (hasDom ? await import('./components/ActionChecklist') : {}) as typeof import('./components/ActionChecklist');
 const { MessageBody } = (hasDom ? await import('./components/Thread') : {}) as typeof import('./components/Thread');
 const { InboxList } = (hasDom ? await import('./components/InboxList') : {}) as typeof import('./components/InboxList');
 const { SidebarProvider } = (hasDom ? await import('./shell/sidebar') : {}) as typeof import('./shell/sidebar');
-const { splitMessageActions } = await import('./actions');
+const { splitMessageActions, actionForBlock } = await import('./actions');
 const { waitCount } = await import('./format');
 
+const CLIENT_CMD = 'cd ~/workspaces/projects/appnotes/worktrees/main && pbpaste | npx wrangler secret put APPNOTES_GITHUB_APP_CLIENT_SECRET --env staging';
+
 const BODY = [
-  'Release 4.2 is built.',
+  'Staging is almost ready.',
+  '',
+  ':::action',
+  'Set the GitHub App client secret on staging',
+  'On the App\'s page, click "Generate a new client secret" and copy it. Then run the command below.',
+  'Where: https://github.com/organizations/acme/settings/apps/appnotes-staging',
+  `Run: \`${CLIENT_CMD}\``,
+  'Holds up: staging sign-in with GitHub',
+  "Watching: the staging secret list; I'll see it appear",
+  ':::',
+  '',
+  ':::action',
+  'Set the GitHub App private key on staging',
+  'On the same page, click "Generate a private key".',
+  'Run: `npx wrangler secret put APPNOTES_GITHUB_APP_PRIVATE_KEY --env staging < key.pem`',
+  'Holds up: the agent opening PRs on staging; the release notes',
+  "Watching: the staging secret list; I'll see it appear",
+  ':::',
+  '',
+  'After both of those, one more thing:',
   '',
   ':::action',
   'Approve the production deploy on Vercel',
   'The build waits under "Promote to Production".',
-  'Where: https://vercel.com/acme/web/deployments',
+  'Where: [Vercel](https://vercel.com/acme/web/deployments)',
   'Stopped: release 4.2 waits on it',
-  'Watching: the deployment; I go on by myself once it is Ready',
   ':::',
 ].join('\n');
 
-const parsed = parseInboxActionBlocks(BODY)[0]!;
+const PARSED = parseInboxActionBlocks(BODY);
 
-function todo(over: Partial<InboxQuestion> = {}): InboxQuestion {
+function record(index: number, over: Partial<InboxQuestion> = {}): InboxQuestion {
+  const p = PARSED[index]!;
   return {
-    key: parsed.key,
-    position: 0,
+    key: p.key,
+    position: index,
     kind: 'action',
-    prompt: parsed.prompt,
-    context: parsed.why,
+    prompt: p.prompt,
+    context: p.why,
     choices: [],
     recommendation: null,
     suggested_text: null,
-    stopped: parsed.stopped,
-    holds_up: [],
+    stopped: p.stopped,
+    holds_up: p.holds_up,
     asked_by_agent_id: 'ses_a',
     orphaned: false,
     state: 'open',
@@ -61,7 +87,7 @@ function todo(over: Partial<InboxQuestion> = {}): InboxQuestion {
     message_id: 'msg_01M5F3B7KD2WQ9XN4C8VJTR6YE',
     superseded_by: null,
     set_aside_at: null,
-    action: parsed.action,
+    action: p.action,
     action_result: null,
     ...over,
   };
@@ -87,6 +113,8 @@ function mount(node: React.ReactNode): HTMLElement {
   return host;
 }
 
+const rerender = (node: React.ReactNode) => act(() => root!.render(node));
+
 async function settle() {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -94,91 +122,32 @@ async function settle() {
 }
 
 const click = (el: Element) => act(() => (el as HTMLElement).click());
+const rowOf = (el: HTMLElement, index: number) => el.querySelector<HTMLElement>(`[data-action-card="${PARSED[index]!.key}"]`)!;
+const toggleOf = (row: HTMLElement) => row.querySelector<HTMLButtonElement>('[data-action-toggle]')!;
+const panelOf = (row: HTMLElement) => row.querySelector<HTMLElement>('[data-action-panel]')!;
 
-test.skipIf(!hasDom)('an open action item: what to do, why, Open for its link, what the agent watches, Done / Can\'t do it… / Add note', async () => {
-  const marks: unknown[] = [];
-  const el = mount(<ActionCard action={todo()} number={1} total={1} agent="Claude Code" onMark={async (mark) => (marks.push(mark), true)} />);
-  const card = el.querySelector('[data-action-card]')!;
-  expect(card.getAttribute('role')).toBe('group');
-  expect(card.getAttribute('aria-label')).toBe('Action item: Approve the production deploy on Vercel');
-  expect(card.textContent).toContain('Action item · something only you can do');
-  expect(card.querySelector('.ib-badge')!.textContent).toBe('Stopped');
-  expect(card.querySelector('h3')!.textContent).toBe('Approve the production deploy on Vercel');
-  const open = card.querySelector<HTMLAnchorElement>('[data-action-open]')!;
-  expect(open.href).toBe('https://vercel.com/acme/web/deployments');
-  expect(open.rel).toBe('noopener noreferrer');
-  expect(card.querySelector('[data-action-watching]')!.textContent).toBe('Claude Code is watching: the deployment; I go on by myself once it is Ready');
-  click(card.querySelector('[data-action-done]')!);
-  await settle();
-  expect(marks).toEqual([{ outcome: 'done' }]);
-
-  // Can't do it asks for the reason; nothing goes without one.
-  click(card.querySelector('[data-action-cant]')!);
-  const send = card.querySelector<HTMLButtonElement>('[data-action-cant-send]')!;
-  expect(send.disabled).toBe(true);
-  const area = card.querySelector<HTMLTextAreaElement>('textarea')!;
-  expect(card.querySelector('label')!.textContent).toBe("Why can't you? Claude Code gets this word for word.");
-  act(() => {
-    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
-    setter.call(area, "I'm not in the acme team; ask Dana.");
-    area.dispatchEvent(new Event('input', { bubbles: true }));
-  });
-  click(card.querySelector('[data-action-cant-send]')!);
-  await settle();
-  expect(marks.at(-1)).toEqual({ outcome: 'cant', note: "I'm not in the acme team; ask Dana." });
-});
-
-test.skipIf(!hasDom)('a run command is copied, not opened; a link that is not http(s) never becomes a button', () => {
-  const run = mount(<ActionCard action={todo({ action: { where: null, where_url: null, run: 'npm login', watching: null } })} number={1} total={2} agent="Pi" onMark={async () => true} />);
-  expect(run.querySelector('.ib-todo-cmd')!.textContent).toBe('npm login');
-  expect(run.querySelector('[data-action-copy]')).not.toBeNull();
-  expect(run.querySelector('[data-action-open]')).toBeNull();
-  expect(run.textContent).toContain('Action item 1 of 2');
-});
-
-test.skipIf(!hasDom)('after Done: Undo while the window runs; then the settled line, and no Done any more', async () => {
-  const marks: unknown[] = [];
-  const result = { outcome: 'done' as const, note: 'Approved.', at: '2026-10-21T15:12:00.000Z', by: 'person' as const };
-  const pending = mount(<ActionCard action={todo({ state: 'picked', revision: 1, action_result: result })} number={1} total={1} agent="Claude Code" onMark={async (mark) => (marks.push(mark), true)} />);
-  expect(pending.querySelector('[data-action-done]')).toBeNull();
-  expect(pending.querySelector('[data-action-settled]')!.textContent).toContain('Goes to Claude Code in a few seconds.');
-  click(pending.querySelector('[data-action-undo]')!);
-  await settle();
-  expect(marks).toEqual([null]);
-  act(() => root?.unmount());
-  host?.remove();
-
-  const sent = mount(<ActionCard action={todo({ state: 'sent', revision: 1, sent_revision: 1, action_result: result })} number={1} total={1} agent="Claude Code" onMark={async () => true} />);
-  expect(sent.querySelector('[data-action-card]')!.getAttribute('data-action-state')).toBe('done');
-  expect(sent.querySelector('.ib-badge')!.textContent).toBe('Done');
-  expect(sent.querySelector('[data-action-settled]')!.textContent).toContain('Sent to Claude Code.');
-  expect(sent.querySelector('[data-action-undo]')).toBeNull();
-  act(() => root?.unmount());
-  host?.remove();
-
-  const seen = mount(<ActionCard action={todo({ state: 'closed', revision: 1, action_result: { outcome: 'done', note: null, at: '2026-10-21T15:14:00.000Z', by: 'agent' } })} number={1} total={1} agent="Claude Code" onMark={async () => true} />);
-  expect(seen.querySelector('[data-action-settled]')!.textContent).toMatch(/^Claude Code saw it done, /);
-  expect(seen.querySelector('[data-action-done]')).toBeNull();
-});
-
-test.skipIf(!hasDom)("the card takes the `:::action` block's place in its message (the Viewer seam), and the window reads it out of `questions`", () => {
-  const wire = {
+function wireMessage(questions: InboxQuestion[]): InboxMessageWire {
+  return {
     id: 'msg_01M5F3B7KD2WQ9XN4C8VJTR6YE',
     project_id: 'prj_1',
     thread_id: 'msg_01M5F3B7KD2WQ9XN4C8VJTR6YE',
     reply_to: null,
     author: { kind: 'agent', host: 'claude-code', session: 'ses_a', name: null },
-    subject: 'Approve the production deploy on Vercel',
+    subject: 'Staging secrets',
     body: BODY,
     created_at: '2026-10-21T15:10:00.000Z',
     resolved_at: null,
     idempotency_key: null,
-    questions: [todo()],
+    questions,
   } as InboxMessageWire;
-  const message = splitMessageActions(wire);
-  // Out of `questions`: nothing that picks or sends answers meets it.
+}
+
+test.skipIf(!hasDom)('adjacent `:::action` blocks are one card; blocks separated by prose are separate cards, each in its place', () => {
+  const message = splitMessageActions(wireMessage([record(0), record(1), record(2)]));
+  // Out of `questions`: nothing that picks or sends answers meets them.
   expect(message.questions).toBeUndefined();
-  expect(message.actions!.map((a) => a.key)).toEqual([parsed.key]);
+  expect(message.actions!.map((a) => a.key)).toEqual(PARSED.map((p) => p.key));
+  const runs: string[][] = [];
   const el = mount(
     <MessageBody
       message={message}
@@ -188,16 +157,176 @@ test.skipIf(!hasDom)("the card takes the `:::action` block's place in its messag
       answers={new Map()}
       onPick={() => {}}
       footerFor={() => null}
-      renderAction={(block) => {
-        const action = message.actions!.find((a) => a.key === parseInboxActionBlocks(BODY).find((p) => p.startLine === block.startLine)?.key);
-        return action ? <ActionCard action={action} number={1} total={1} agent="Claude Code" onMark={async () => true} /> : undefined;
+      renderActions={{
+        recordFor: (block) => actionForBlock(message.body, message.actions, block),
+        render: (records) => {
+          runs.push(records.map((r) => r.key));
+          return <ActionChecklist actions={records} agent="Claude Code" onMark={async () => true} />;
+        },
       }}
     />,
   );
-  expect(el.textContent).toContain('Release 4.2 is built.');
-  expect(el.querySelectorAll('[data-action-card]')).toHaveLength(1);
+  const cards = [...el.querySelectorAll<HTMLElement>('[data-action-group]')];
+  expect(cards).toHaveLength(2);
+  expect(cards[0]!.querySelectorAll('[data-action-card]')).toHaveLength(2);
+  expect(cards[1]!.querySelectorAll('[data-action-card]')).toHaveLength(1);
+  expect(runs.at(-2)).toEqual([PARSED[0]!.key, PARSED[1]!.key]);
+  expect(runs.at(-1)).toEqual([PARSED[2]!.key]);
+  // The prose between the two runs stays between the two cards.
+  const text = el.textContent!;
+  const first = text.indexOf('Set the GitHub App private key');
+  const prose = text.indexOf('After both of those, one more thing:');
+  const second = text.indexOf('Approve the production deploy');
+  expect(first).toBeGreaterThan(text.indexOf('Staging is almost ready.'));
+  expect(prose).toBeGreaterThan(first);
+  expect(second).toBeGreaterThan(prose);
   // The block's own lines are never drawn as a callout beside the card.
-  expect(el.textContent).not.toContain('Where: https://vercel.com');
+  expect(text).not.toContain('Where: https://github.com');
+  expect(text).not.toContain('Run: ');
+});
+
+test.skipIf(!hasDom)('the header: how many, how many done, one badge (Holds up sums; Stopped wins); the watching line and the 10 s rule once', () => {
+  const el = mount(<ActionChecklist actions={[record(0), record(1)]} agent="Claude Code" onMark={async () => true} />);
+  const card = el.querySelector('[data-action-group]')!;
+  expect(card.getAttribute('role')).toBe('group');
+  expect(card.textContent).toContain('2 things only you can do');
+  expect(card.querySelector('[data-action-progress]')!.textContent).toBe('0 of 2 done');
+  expect(card.querySelector('[data-action-badge]')!.textContent).toBe('Holds up 3');
+  expect(card.querySelectorAll('[data-action-watching]')).toHaveLength(1);
+  expect(card.querySelector('[data-action-watching]')!.textContent).toBe("Claude Code is watching: the staging secret list; I'll see it appear.");
+  expect(card.querySelector('[data-action-hint]')!.textContent).toBe('Done reaches Claude Code after 10 s, so you can undo.');
+  act(() => root!.render(<ActionChecklist actions={[record(2), record(0)]} agent="Claude Code" onMark={async () => true} />));
+  expect(el.querySelector('[data-action-badge]')!.textContent).toBe('Stopped');
+  act(() => root!.render(<ActionChecklist actions={[record(2)]} agent="Claude Code" onMark={async () => true} />));
+  expect(el.textContent).toContain('1 thing only you can do');
+});
+
+test.skipIf(!hasDom)('rows are disclosures, one open at a time; the first open item starts open', () => {
+  const el = mount(<ActionChecklist actions={[record(0), record(1)]} agent="Claude Code" onMark={async () => true} />);
+  const a = rowOf(el, 0);
+  const b = rowOf(el, 1);
+  expect(toggleOf(a).getAttribute('aria-expanded')).toBe('true');
+  expect(toggleOf(b).getAttribute('aria-expanded')).toBe('false');
+  expect(toggleOf(b).getAttribute('aria-controls')).toBe(panelOf(b).id);
+  expect(panelOf(a).hidden).toBe(false);
+  expect(panelOf(b).hidden).toBe(true);
+  click(toggleOf(b));
+  expect(toggleOf(b).getAttribute('aria-expanded')).toBe('true');
+  expect(toggleOf(a).getAttribute('aria-expanded')).toBe('false');
+  expect(panelOf(a).hidden).toBe(true);
+  click(toggleOf(b));
+  expect(el.querySelectorAll('[aria-expanded="true"]')).toHaveLength(0);
+});
+
+test.skipIf(!hasDom)('an open row: why, the Holds up words, Open for its link and the whole command with Copy, both', () => {
+  const el = mount(<ActionChecklist actions={[record(0), record(1)]} agent="Claude Code" onMark={async () => true} />);
+  const panel = panelOf(rowOf(el, 0));
+  expect(panel.textContent).toContain('Generate a new client secret');
+  expect(panel.querySelector('[data-action-holds]')!.textContent).toBe('Holds up staging sign-in with GitHub');
+  const open = panel.querySelector<HTMLAnchorElement>('[data-action-open]')!;
+  expect(open.href).toBe('https://github.com/organizations/acme/settings/apps/appnotes-staging');
+  expect(open.rel).toBe('noopener noreferrer');
+  expect(open.textContent).toBe('Open github.com');
+  // The command, whole: every character is in the DOM, and the stylesheet wraps it rather than cutting it.
+  const cmd = panel.querySelector('[data-action-cmd]')!;
+  expect(cmd.textContent!.replace(/^\$\s/, '')).toBe(CLIENT_CMD);
+  expect(panel.querySelector('[data-action-copy]')).not.toBeNull();
+  const css = readFileSync(new URL('./inbox.css', import.meta.url), 'utf8');
+  const rule = /\.pn-inbox \.ib-chk-cmd \{([^}]*)\}/.exec(css)![1]!;
+  expect(rule).toContain('white-space: pre-wrap');
+  expect(rule).not.toContain('text-overflow');
+  expect(rule).not.toContain('nowrap');
+  // The second item's two hold-ups, and a Stopped item's words.
+  expect(panelOf(rowOf(el, 1)).querySelector('[data-action-holds]')!.textContent).toBe('Holds up the agent opening PRs on staging; the release notes');
+  act(() => root!.render(<ActionChecklist actions={[record(2)]} agent="Claude Code" onMark={async () => true} />));
+  expect(el.querySelector('[data-action-stopped]')!.textContent).toBe('Stopped release 4.2 waits on it');
+  expect(el.querySelector<HTMLAnchorElement>('[data-action-open]')!.textContent).toBe('Open Vercel');
+});
+
+test.skipIf(!hasDom)("the row's tick is Done; while the window runs the row is struck with its Undo; the next open item opens", async () => {
+  const marks: { key: string; mark: unknown }[] = [];
+  const onMark = async (action: InboxQuestion, mark: unknown) => (marks.push({ key: action.key, mark }), true);
+  const el = mount(<ActionChecklist actions={[record(0), record(1)]} agent="Claude Code" onMark={onMark} />);
+  const tick = rowOf(el, 0).querySelector<HTMLButtonElement>('[data-action-tick]')!;
+  expect(tick.getAttribute('aria-label')).toBe('Done: Set the GitHub App client secret on staging');
+  click(tick);
+  await settle();
+  expect(marks).toEqual([{ key: PARSED[0]!.key, mark: { outcome: 'done' } }]);
+  expect(toggleOf(rowOf(el, 1)).getAttribute('aria-expanded')).toBe('true');
+  expect(toggleOf(rowOf(el, 0)).getAttribute('aria-expanded')).toBe('false');
+
+  // The server's answer: picked, inside the Undo window.
+  const result = { outcome: 'done' as const, note: null, at: '2026-10-21T15:12:00.000Z', by: 'person' as const };
+  rerender(<ActionChecklist actions={[record(0, { state: 'picked', revision: 1, action_result: result }), record(1)]} agent="Claude Code" onMark={onMark} />);
+  const done = rowOf(el, 0);
+  expect(done.getAttribute('data-action-state')).toBe('pending');
+  expect(done.querySelector('[data-action-settled]')!.textContent).toContain('Goes to Claude Code in a few seconds.');
+  expect(el.querySelector('[data-action-progress]')!.textContent).toBe('1 of 2 done');
+  expect(el.querySelector('[data-action-badge]')!.textContent).toBe('Holds up 2');
+  const undoTick = done.querySelector<HTMLButtonElement>('[data-action-tick]')!;
+  expect(undoTick.getAttribute('aria-pressed')).toBe('true');
+  click(done.querySelector('[data-action-undo]')!);
+  await settle();
+  expect(marks.at(-1)).toEqual({ key: PARSED[0]!.key, mark: null });
+  click(undoTick);
+  await settle();
+  expect(marks.at(-1)).toEqual({ key: PARSED[0]!.key, mark: null });
+});
+
+test.skipIf(!hasDom)("Done from the open row's button moves focus to the next row's toggle", async () => {
+  const el = mount(<ActionChecklist actions={[record(0), record(1)]} agent="Claude Code" onMark={async () => true} />);
+  click(panelOf(rowOf(el, 0)).querySelector('[data-action-done]')!);
+  await settle();
+  expect(document.activeElement).toBe(toggleOf(rowOf(el, 1)));
+});
+
+test.skipIf(!hasDom)("Can't do it asks for the reason; nothing goes without one", async () => {
+  const marks: unknown[] = [];
+  const el = mount(<ActionChecklist actions={[record(0)]} agent="Claude Code" onMark={async (_a, mark) => (marks.push(mark), true)} />);
+  const panel = panelOf(rowOf(el, 0));
+  click(panel.querySelector('[data-action-cant]')!);
+  const send = panel.querySelector<HTMLButtonElement>('[data-action-cant-send]')!;
+  expect(send.disabled).toBe(true);
+  expect(panel.querySelector('label')!.textContent).toBe("Why can't you? Claude Code gets this word for word.");
+  const area = panel.querySelector<HTMLTextAreaElement>('textarea')!;
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+    setter.call(area, "I'm not an org owner; ask Dana.");
+    area.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  click(panel.querySelector('[data-action-cant-send]')!);
+  await settle();
+  expect(marks).toEqual([{ outcome: 'cant', note: "I'm not an org owner; ask Dana." }]);
+});
+
+test.skipIf(!hasDom)('settled rows: sent, can\'t do it with its reason, the agent saw it done, set aside; none offers Done', () => {
+  const at = '2026-10-21T15:12:00.000Z';
+  const el = mount(
+    <ActionChecklist
+      actions={[
+        record(0, { state: 'sent', revision: 1, sent_revision: 1, action_result: { outcome: 'done', note: null, at, by: 'person' } }),
+        record(1, { state: 'sent', revision: 1, sent_revision: 1, action_result: { outcome: 'cant', note: 'No access.', at, by: 'person' } }),
+        record(2, { state: 'closed', revision: 1, action_result: { outcome: 'done', note: null, at, by: 'agent' } }),
+      ]}
+      agent="Claude Code"
+      onMark={async () => true}
+    />,
+  );
+  expect(el.querySelector('[data-action-progress]')!.textContent).toBe('2 of 3 done');
+  expect(el.querySelector('[data-action-badge]')).toBeNull();
+  expect(el.querySelector('[data-action-hint]')).toBeNull();
+  expect(el.querySelector('[data-action-tick] , button[data-action-tick]')).toBeNull();
+  expect(el.querySelector('[data-action-done]')).toBeNull();
+  expect(el.querySelectorAll('[aria-expanded="true"]')).toHaveLength(0);
+  const sent = rowOf(el, 0);
+  expect(sent.getAttribute('data-action-state')).toBe('done');
+  expect(sent.querySelector('.ib-badge')!.textContent).toBe('Done');
+  click(toggleOf(sent));
+  expect(panelOf(sent).querySelector('[data-action-settled]')!.textContent).toContain('Sent to Claude Code.');
+  const cant = rowOf(el, 1);
+  expect(cant.querySelector('[data-action-settled]')!.textContent).toBe('Can\'t do it: “No access.” Sent to Claude Code.');
+  click(toggleOf(rowOf(el, 2)));
+  expect(panelOf(rowOf(el, 2)).querySelector('[data-action-settled]')!.textContent).toMatch(/^Claude Code saw it done, /);
 });
 
 test.skipIf(!hasDom)('the row says "1 action item", or "1 question, 1 action item", as plain text', () => {
