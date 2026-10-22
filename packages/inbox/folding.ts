@@ -6,7 +6,7 @@
  * (components/Thread.tsx) draws what these decide.
  */
 
-import { isInboxNote, type InboxMessageWire, type InboxQuestion, type InboxThread } from '@plannotator/core/inbox-types';
+import { isInboxActionReport, isInboxNote, type InboxMessageWire, type InboxQuestion, type InboxThread } from '@plannotator/core/inbox-types';
 import { QUESTION_ANSWERS_HEADING, type QuestionAnswer } from '@plannotator/core/question-block';
 import { INBOX_STILL_OPEN_LINE, sliceText } from '@plannotator/core/inbox-questions';
 import { withoutInboxSkillsBlock } from '@plannotator/core/skill-reference-block';
@@ -23,7 +23,7 @@ import { withoutInboxSkillsBlock } from '@plannotator/core/skill-reference-block
 export function lookBoundary(thread: InboxThread): number | null {
   if (thread.messages.length === 0 || thread.messages.some((m) => typeof m.seq !== 'number')) return null;
   let seen = thread.messages[0]!.person_seen_seq ?? 0;
-  for (const message of thread.messages) if (isPersonReply(message)) seen = Math.max(seen, message.seq!);
+  for (const message of thread.messages) if (isPersonLook(message)) seen = Math.max(seen, message.seq!);
   return seen;
 }
 
@@ -36,6 +36,15 @@ export function lastNonNote(messages: readonly InboxMessageWire[]): InboxMessage
 /** The person's own message (a reply or a New message), never one of the Inbox's notes. */
 export function isPersonReply(message: InboxMessageWire): boolean {
   return message.author.kind === 'person' && !isInboxNote(message);
+}
+
+/**
+ * The person's own message that counts as a look: a reply or a New message,
+ * never the Inbox's notes nor a to-do's report (the Inbox writes it seconds
+ * after the click, so agent news that landed meanwhile stays new).
+ */
+export function isPersonLook(message: InboxMessageWire): boolean {
+  return isPersonReply(message) && !isInboxActionReport(message);
 }
 
 /** The agent messages after the boundary: new since the person's last look. */
@@ -193,6 +202,9 @@ export function foldSnippet(message: InboxMessageWire, messages: readonly InboxM
   }
   const words = firstWords(message.body);
   if (!words && questions.length > 0) return { kind: 'words', text: plainPrompt(questions[0]!.prompt) };
+  // A message that is only a to-do: its line ("To do: Approve the deploy").
+  const todo = (message.actions ?? []).find((a) => a.state !== 'superseded');
+  if (!words && todo) return { kind: 'words', text: `To do: ${plainPrompt(todo.prompt)}` };
   return { kind: 'words', text: words };
 }
 
@@ -268,7 +280,7 @@ export function firstWords(markdown: string, max = 240): string {
 
 /** One thing a message holds, for its folded line. */
 export interface Holding {
-  kind: 'picks' | 'open' | 'answered' | 'files' | 'annotations' | 'guide' | 'delivered';
+  kind: 'picks' | 'open' | 'todo' | 'answered' | 'files' | 'annotations' | 'guide' | 'delivered';
   /** What the line shows. */
   text: string;
   /** What a screen reader hears. */
@@ -296,7 +308,7 @@ export function holdingsOf(message: InboxMessageWire, options: { delivered: bool
   if (sent > 0 && open === 0 && picks === 0) out.push({ kind: 'answered', text: `${sent} answered`, say: `${plural(sent, 'question')} answered`, count: sent });
   // To-dos (approval "inbox-next-actions"): the ones still waiting on the person.
   const todos = (message.actions ?? []).filter((a) => a.state === 'open').length;
-  if (todos > 0) out.push({ kind: 'open', text: `${todos} to do`, say: `${todos} to do`, count: todos });
+  if (todos > 0) out.push({ kind: 'todo', text: `${todos} to do`, say: `${todos} to do`, count: todos });
   const files = message.attachments?.length ?? 0;
   if (files > 0) out.push({ kind: 'files', text: String(files), say: plural(files, 'attachment'), count: files });
   if (message.author.kind === 'person' && (message.sent_annotations ?? 0) > 0) {

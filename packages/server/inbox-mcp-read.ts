@@ -715,9 +715,17 @@ export function windowedThreadText(result: ThreadWindowResult, order: readonly s
   } else {
     out.push(`Waiting on the person (${thread.open_questions.length}):`);
     for (const q of thread.open_questions) {
-      const state = q.state === "picked" ? `picked, not sent${q.answer ? `: ${answerWords(q.answer)}` : ""}` : "open";
+      // A to-do (key `a-…`): A1, A2…, "to do", or what the person marked inside its Undo window.
+      const todo = q.key.startsWith("a-");
+      const state = todo
+        ? q.state === "picked"
+          ? `${q.result ?? "marked"}`
+          : "to do"
+        : q.state === "picked"
+          ? `picked, not sent${q.answer ? `: ${answerWords(q.answer)}` : ""}`
+          : "open";
       const choices = q.choices.length > 0 ? ` Choices: ${q.choices.map((c) => clip(c, 200)).join(" | ")}` : "";
-      out.push(`- ${q.message_id}/${q.key} (Q${q.q}) ${state}: ${q.prompt}${choices}`);
+      out.push(`- ${q.message_id}/${q.key} (${todo ? "A" : "Q"}${q.q}) ${state}: ${q.prompt}${choices}`);
     }
   }
   if (thread.questions?.length) {

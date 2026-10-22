@@ -88,6 +88,9 @@ describe("parseInboxActionBlocks", () => {
     const [block] = parseInboxActionBlocks(`:::action\nApprove the deploy\nReplaces: ${id}\n:::`);
     expect(block!.replaces).toEqual([id]);
     expect(block!.why).toBeNull();
+    // A to-do replaces only a to-do: a question's id on its Replaces: line is prose.
+    const [questionId] = parseInboxActionBlocks(":::action\nApprove the deploy\nReplaces: msg_01M5F3B7KD2WQ9XN4C8VJTR6YE/q-4f2c19e0\n:::");
+    expect(questionId!.replaces).toEqual([]);
     const [prose] = parseInboxActionBlocks(":::action\nApprove the deploy\nReplaces: the manual promote step\n:::");
     expect(prose!.replaces).toEqual([]);
     expect(prose!.why).toBe("Replaces: the manual promote step");

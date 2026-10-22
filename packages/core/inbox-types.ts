@@ -241,6 +241,17 @@ export function isInboxNote(message: {
   );
 }
 
+/**
+ * The reply the Inbox writes for the person's Done / Can't do it on a to-do
+ * (`action_report`, approval "inbox-next-actions"), once its Undo window
+ * passed. It is the person's reply for delivery (Sent, the wake, Send now),
+ * but not a look: it is written by the Inbox seconds after the click, so an
+ * agent message that landed meanwhile stays new.
+ */
+export function isInboxActionReport(message: { author: { kind: string }; action_report?: readonly string[] | null }): boolean {
+  return message.author.kind === "person" && (message.action_report?.length ?? 0) > 0;
+}
+
 export const INBOX_HOST_NAMES: Readonly<Record<string, string>> = {
   "claude-code": "Claude Code",
   claude: "Claude Code",

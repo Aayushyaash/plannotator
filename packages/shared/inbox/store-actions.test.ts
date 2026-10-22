@@ -151,6 +151,106 @@ describe("Done and Can't do it", () => {
   });
 });
 
+describe("review fixes", () => {
+  test("the report is not a look: an agent message landing inside the Undo window stays new (unseen, bold), the row shows the news", () => {
+    const { store, clock, project, asked, action } = setup();
+    store.markSeen(asked.thread_id);
+    store.markAction(asked.id, action.key, { outcome: "done" });
+    clock.now += 3_000;
+    store.sendMessage({ project_id: project.id, author: AGENT, body: "Also: the CDN purge finished.", reply_to: asked.id });
+    clock.now += UNDO_MS;
+    const [report] = store.settleActions(UNDO_MS);
+    expect(report).toBeDefined();
+    const row = rowOf(store, asked.thread_id);
+    expect(row.unseen).toBe(1);
+    expect(row.unread).toBe(true);
+    // The question in the message still waits: Waiting on you. The report still rides `sent` for its delivery.
+    expect(row.section).toBe("waiting");
+    expect(row.sent?.at).toBe(report!.created_at);
+    // A look (markSeen) is still due: the report did not record one.
+    expect(store.markSeen(asked.thread_id).unseen).toBe(0);
+  });
+
+  test("with nothing else waiting, a report after unseen news puts the row in New, not Sent", () => {
+    const { store, clock, project } = open();
+    const p = store.ensureProject({ name: "web", root: "/work/news" });
+    void project;
+    const m = store.sendMessage({ project_id: p.id, author: AGENT, body: ":::action\nTouch your YubiKey\n:::" }).message;
+    store.markSeen(m.thread_id);
+    const key = actionOf(store, m.id).key;
+    store.markAction(m.id, key, { outcome: "done" });
+    store.sendMessage({ project_id: p.id, author: AGENT, body: "Signed; tagging now.", reply_to: m.id });
+    clock.now += UNDO_MS;
+    store.settleActions(UNDO_MS);
+    expect(rowOf(store, m.thread_id)).toMatchObject({ section: "new", unseen: 1, unread: true });
+  });
+
+  test("two Done clicks seconds apart on one message go together, in one reply, once the later window passed", () => {
+    const { store, clock, project } = open();
+    const p = store.ensureProject({ name: "web", root: "/work/two" });
+    void project;
+    const m = store.sendMessage({ project_id: p.id, author: AGENT, body: ":::action\nApprove the deploy\n:::\n\n:::action\nSign in to npm\n:::" }).message;
+    const [a1, a2] = store.questionsOf(m.id).filter((q) => q.kind === "action");
+    store.markAction(m.id, a1!.key, { outcome: "done" });
+    clock.now += 4_000;
+    store.markAction(m.id, a2!.key, { outcome: "done" });
+    clock.now += UNDO_MS - 4_000;
+    expect(store.settleActions(UNDO_MS)).toEqual([]);
+    clock.now += 4_000;
+    const replies = store.settleActions(UNDO_MS);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]!.body).toContain("Did 2 actions.");
+    expect(replies[0]!.body).toContain("2 of 2 done.");
+    expect(replies[0]!.action_report).toHaveLength(2);
+  });
+
+  test("supersedes: one question and one to-do in the new message, the old question is Replaced by the question; a to-do never replaces a question", () => {
+    const { store, project, asked, question } = setup();
+    const next = store.sendMessage({
+      project_id: project.id,
+      author: AGENT,
+      reply_to: asked.id,
+      body: ":::question\nAnnounce it in #releases and #general?\n\n- [ ] Yes\n- [ ] No\n:::\n\n:::action\nApprove the canary\n:::",
+      supersedes: [`${asked.id}/${question.key}`],
+    }).message;
+    const newQuestion = store.questionsOf(next.id).find((q) => q.kind !== "action")!;
+    expect(store.questionsOf(asked.id).find((q) => q.key === question.key)!.superseded_by).toEqual({ message_id: next.id, key: newQuestion.key });
+
+    const second = setup();
+    const lone = second.store.sendMessage({
+      project_id: second.project.id,
+      author: AGENT,
+      reply_to: second.asked.id,
+      body: ":::action\nApprove the canary\n:::",
+      supersedes: [`${second.asked.id}/${second.question.key}`],
+    }).message;
+    void lone;
+    expect(second.store.questionsOf(second.asked.id).find((q) => q.key === second.question.key)!.superseded_by).toEqual({ message_id: lone.id, key: null });
+    // A to-do's own Replaces: line reaches only a to-do.
+    const replacesQuestion = () =>
+      second.store.sendMessage({
+        project_id: second.project.id,
+        author: AGENT,
+        reply_to: second.asked.id,
+        body: `:::action\nApprove the rollout\nReplaces: ${second.asked.id}/${second.action.key}\n:::`,
+      });
+    const by = replacesQuestion().message;
+    expect(second.store.questionsOf(second.asked.id).find((q) => q.kind === "action")!.superseded_by).toEqual({ message_id: by.id, key: expect.stringMatching(/^a-/) });
+  });
+
+  test("Done, then Archive, then Unarchive: the Done is held back while archived and goes once the thread is open again", () => {
+    const { store, clock, asked, action } = setup();
+    store.markAction(asked.id, action.key, { outcome: "done" });
+    store.resolveThread(asked.id, true);
+    clock.now += UNDO_MS;
+    expect(store.settleActions(UNDO_MS)).toEqual([]);
+    store.resolveThread(asked.id, false);
+    expect(actionOf(store, asked.id).state).toBe("picked");
+    expect(store.settleActions(UNDO_MS)).toHaveLength(1);
+    expect(actionOf(store, asked.id).state).toBe("sent");
+  });
+});
+
 describe("Re-ask", () => {
   test("asks for the open questions only: a to-do waits on its card, and with only a to-do open there is nothing to re-ask", () => {
     const { store, asked, action, question } = setup();
@@ -190,9 +290,8 @@ describe("Mark read", () => {
 });
 
 describe("the agent marks its own to-do done", () => {
-  test("done closes it as seen by the agent, nothing is sent; a Done the person pressed inside the window is never sent", () => {
+  test("done closes it as seen by the agent, nothing is sent", () => {
     const { store, clock, project, asked, action } = setup();
-    store.markAction(asked.id, action.key, { outcome: "done" });
     const ref = `${asked.id}/${action.key}`;
     const result = store.sendMessage({ project_id: project.id, author: AGENT, body: "The deployment is Ready.", reply_to: asked.id, done: [ref] });
     expect(result.done).toEqual([ref]);
@@ -201,6 +300,23 @@ describe("the agent marks its own to-do done", () => {
     clock.now += UNDO_MS;
     expect(store.settleActions(UNDO_MS)).toEqual([]);
     expect(store.pendingReplies("ses_a")).toEqual([]);
+  });
+
+  test("never overrides the person: a to-do they marked (inside its Undo window) is refused, and their Done still goes", () => {
+    const { store, clock, project, asked, action } = setup();
+    store.markAction(asked.id, action.key, { outcome: "cant", note: "No access." });
+    const ref = `${asked.id}/${action.key}`;
+    expect(() => store.sendMessage({ project_id: project.id, author: AGENT, body: "Ready.", reply_to: asked.id, done: [ref] })).toThrow(/the person already marked it/);
+    clock.now += UNDO_MS;
+    const [reply] = store.settleActions(UNDO_MS);
+    expect(reply!.body).toContain("Can't do it: No access.");
+  });
+
+  test("only the session that wrote a to-do marks it done", () => {
+    const { store, project, asked, action } = setup();
+    const other = { ...AGENT, session: "ses_other" };
+    expect(() => store.sendMessage({ project_id: project.id, author: other, body: "Ready.", reply_to: asked.id, done: [`${asked.id}/${action.key}`] })).toThrow(/another session's/);
+    expect(actionOf(store, asked.id).state).toBe("open");
   });
 
   test("refuses another thread, a question, an unknown id and a to-do no longer open, writing nothing", () => {

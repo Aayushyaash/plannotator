@@ -18,7 +18,7 @@ import type { OpenInSurface } from './OpenIn';
 import { attachmentSequence } from '../stepping';
 import { AnnotationsChip } from './AnnotationsChip';
 import { agentName, clockTime, dayWords, fullTime, plural, whenTime } from '../format';
-import { foldSnippet, holdingsOf, isDelivered, isPersonReply, lastNonNote, lookBoundary, newSinceLook, planFolds, snippetText, type FoldSnippet, type Holding } from '../folding';
+import { foldSnippet, holdingsOf, isDelivered, isPersonLook, isPersonReply, lastNonNote, lookBoundary, newSinceLook, planFolds, snippetText, type FoldSnippet, type Holding } from '../folding';
 import { highlightSearchHits } from '../search/highlight';
 import { AuthorMark, Icon } from '../icons';
 import { PILL_BAND_PX, atEnd, followBy, lookThrough, measureFirstLines, unseenArrivals, useSeenOnSight } from '../seenOnSight';
@@ -160,7 +160,7 @@ function HoldingChips({ holdings }: { holdings: Holding[] }) {
   return (
     <span className="ib-fl-chips" data-holdings="">
       {holdings.map((h) => (
-        <span key={h.kind} className={`ib-fl-chip${h.kind === 'open' ? ' ib-fl-open' : h.kind === 'picks' ? ' ib-fl-pick' : ''}`} data-holding={h.kind}>
+        <span key={h.kind} className={`ib-fl-chip${h.kind === 'open' || h.kind === 'todo' ? ' ib-fl-open' : h.kind === 'picks' ? ' ib-fl-pick' : ''}`} data-holding={h.kind}>
           {h.kind === 'answered' || h.kind === 'delivered' ? <Icon name="check" size={14} /> : null}
           {h.kind === 'files' ? <Icon name="clip" size={14} /> : null}
           {h.kind === 'annotations' ? <Icon name="doc" size={14} /> : null}
@@ -954,7 +954,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   // A reply the person sends during this visit is a look at everything before
   // it (the list's rule), so what it answers stops being new at once.
   const boundary = useMemo(
-    () => (opened === null ? null : Math.max(opened, ...thread.messages.filter(isPersonReply).map((m) => m.seq ?? 0))),
+    () => (opened === null ? null : Math.max(opened, ...thread.messages.filter(isPersonLook).map((m) => m.seq ?? 0))),
     [opened, thread.messages],
   );
   const fresh = useMemo(() => newSinceLook(thread.messages, boundary), [thread.messages, boundary]);

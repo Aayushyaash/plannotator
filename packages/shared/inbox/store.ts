@@ -77,6 +77,7 @@ import {
   type InboxThreadNaming,
   inboxThreadNameKey,
   isInboxNote,
+  isInboxActionReport,
   inboxAgentName,
   INBOX_HOST_NAMES,
   INBOX_TAGS_MAX,
@@ -1101,7 +1102,8 @@ export class InboxStore {
       if (message.author.kind === "agent") lastAgent = message;
       // The person's reply is a look; the Inbox's own notes (Mark read's
       // set-aside note, a late Undo's reopened note) are not.
-      if (message.author.kind === "person" && !isInboxNote(message)) lastPersonSeq = seqOf(message);
+      // A to-do's report (written by the Inbox after the Undo window) is not a look either.
+      if (message.author.kind === "person" && !isInboxNote(message) && !isInboxActionReport(message)) lastPersonSeq = seqOf(message);
       if (message.author.kind === "agent") lastAgentAt = message.created_at;
       if (waitingSince === null || (askingStates && message.author.kind === "agent")) {
         const questions = this.questionsOf(message.id);
@@ -1197,7 +1199,9 @@ export class InboxStore {
       ...(root.started_by_person && root.to ? { addressee: { host: root.to.host, session: root.to.session } } : {}),
       ...(participants.length > 1 ? { participants } : {}),
     };
-    const section = inboxSectionOf(facts);
+    // A to-do's report that lands after agent news the person has not looked at: the row shows the news
+    // (New), not Sent; `sent` stays on the row for its delivery tick.
+    const section = inboxSectionOf(isInboxActionReport(lastReal) && unseen > 0 ? { ...facts, sent: null } : facts);
     // In New only for the person's own unsent words or comments: not bold.
     const draftOnly = section === "new" && unseen === 0 && !facts.answered_not_sent && inboxHasUnsent(unsent);
     return { ...facts, section, unread: inboxRowUnread(section, draftOnly) };
@@ -1780,7 +1784,6 @@ export class InboxStore {
     return note && this.ackNoteLive(note) ? note : null;
   }
 
-  /** Acks not settled yet (still inside their Undo window, or a stop interrupted it). */
   /**
    * The person's Done or Can't do it on a to-do (approval
    * "inbox-next-actions"), or its Undo (`outcome: null`). Recorded at once;
@@ -1823,8 +1826,12 @@ export class InboxStore {
   }
 
   /**
-   * The to-dos the person marked whose Undo window (`afterMs`) has passed,
-   * not sent yet, grouped by the message that asked (in log order).
+   * The to-dos the person marked and that are not sent yet, grouped by the
+   * message that asked (in log order), for each message whose marked to-dos
+   * are ALL past their Undo window (`afterMs`): two Done clicks seconds apart
+   * on one message go together in one reply, once the later one's window
+   * passed. A message the archive closed waits (archive holds a pending Done
+   * back; Unarchive sends it).
    */
   private actionsDue(afterMs: number): { message: InboxMessage; records: InboxQuestionRecord[] }[] {
     const now = this.now().getTime();
@@ -1832,14 +1839,16 @@ export class InboxStore {
     for (const record of this.questions.values()) {
       if (record.kind !== "action" || record.action_result?.by !== "person") continue;
       if (inboxQuestionState(record, false) !== "picked") continue;
-      if (Date.parse(record.action_result.at) + afterMs > now) continue;
-      const message = this.messages.get(record.message_id);
-      if (!message || this.closedByArchive(message)) continue;
       byMessage.set(record.message_id, [...(byMessage.get(record.message_id) ?? []), record]);
     }
-    return [...byMessage]
-      .map(([id, records]) => ({ message: this.messages.get(id)!, records }))
-      .sort((a, b) => (this.messageSeq.get(a.message.id) ?? 0) - (this.messageSeq.get(b.message.id) ?? 0));
+    const out: { message: InboxMessage; records: InboxQuestionRecord[] }[] = [];
+    for (const [id, records] of byMessage) {
+      const message = this.messages.get(id);
+      if (!message || this.closedByArchive(message)) continue;
+      if (records.some((r) => Date.parse(r.action_result!.at) + afterMs > now)) continue;
+      out.push({ message, records });
+    }
+    return out.sort((a, b) => (this.messageSeq.get(a.message.id) ?? 0) - (this.messageSeq.get(b.message.id) ?? 0));
   }
 
   /** How many marked to-dos wait for their Undo window to pass (the server's timer). */
@@ -1891,6 +1900,7 @@ export class InboxStore {
     return out;
   }
 
+  /** Acks not settled yet (still inside their Undo window, or a stop interrupted it). */
   acksPending(): number {
     let count = 0;
     for (const message of this.messages.values()) if (message.ack && message.ack.settled_seq == null) count++;
@@ -1975,7 +1985,7 @@ export class InboxStore {
       const message = this.messages.get(id);
       if (message?.author.kind === "agent") {
         if (throughSeq === undefined || seq <= throughSeq) latestAgent = Math.max(latestAgent, seq);
-      } else if (message && !isInboxNote(message)) seen = Math.max(seen, seq);
+      } else if (message && !isInboxNote(message) && !isInboxActionReport(message)) seen = Math.max(seen, seq);
     }
     if (latestAgent > seen) {
       const at = this.stamp();
@@ -2270,8 +2280,8 @@ export class InboxStore {
     const actions = parseInboxActionBlocks(body);
     // Checked before anything is written: one id that names no open question
     // of this thread refuses the whole send.
-    const superseding = this.planSupersede(threadId, id, supersedes, [...parsed, ...actions]);
-    const doneIds = this.planDone(threadId, done, superseding);
+    const superseding = this.planSupersede(threadId, id, supersedes, parsed, actions);
+    const doneIds = this.planDone(threadId, done, superseding, input.author);
     const agentSubject = subjectCheck.subject;
     const message: InboxMessage = {
       id,
@@ -2438,7 +2448,12 @@ export class InboxStore {
    * refused with `invalid_done`, listing that thread's open to-dos. One this
    * message also supersedes stays superseded.
    */
-  private planDone(threadId: string | null, done: readonly string[], superseding: ReadonlyMap<string, InboxSupersededBy>): string[] {
+  private planDone(
+    threadId: string | null,
+    done: readonly string[],
+    superseding: ReadonlyMap<string, InboxSupersededBy>,
+    author: Extract<InboxAuthor, { kind: "agent" }>,
+  ): string[] {
     if (done.length === 0) return [];
     const out: string[] = [];
     const problems: string[] = [];
@@ -2457,15 +2472,28 @@ export class InboxStore {
         problems.push(`${ref} is in another thread (${message.thread_id}): send with reply_to ${target.message_id} to mark it done there.`);
         continue;
       }
+      // Only the session that wrote a to-do marks it done (another agent's to-do is not yours to close).
+      if ((message.author.session ?? null) !== (author.session ?? null) || (message.author.host ?? null) !== (author.host ?? null)) {
+        problems.push(`${ref}: that to-do is another session's; only the session that wrote a to-do marks it done.`);
+        continue;
+      }
       const records = this.questionRecords(message.id).filter((r) => r.kind === "action" && (target.key === null || r.key === target.key));
       if (records.length === 0) {
         problems.push(target.key === null ? `${ref}: that message has no to-do.` : `${ref}: message ${target.message_id} has no to-do ${target.key}.`);
         continue;
       }
       const resolved = this.closedByArchive(message);
-      const open = records.filter((r) => isInboxQuestionSupersedable(inboxQuestionState(r, resolved)));
+      // Open only: one the person already marked (Done or Can't do it, inside its Undo window) is theirs, and goes as they said.
+      const open = records.filter((r) => inboxQuestionState(r, resolved) === "open");
       if (open.length === 0) {
-        problems.push(target.key === null ? `${ref}: that message has no open to-do.` : `${ref} is not open (it is ${inboxQuestionState(records[0]!, resolved)}).`);
+        const state = inboxQuestionState(records[0]!, resolved);
+        problems.push(
+          target.key === null
+            ? `${ref}: that message has no open to-do.`
+            : state === "picked"
+              ? `${ref}: the person already marked it; their answer reaches you in a few seconds.`
+              : `${ref} is not open (it is ${state}).`,
+        );
         continue;
       }
       for (const record of open) if (!superseding.has(record.id) && !out.includes(record.id)) out.push(record.id);
@@ -2536,21 +2564,39 @@ export class InboxStore {
     messageId: string,
     supersedes: readonly string[],
     parsed: readonly { key: string; replaces: string[] }[],
+    /**
+     * The new message's to-dos (`:::action`). A question is replaced only by a
+     * question and a to-do only by a to-do: `supersedes` names the new
+     * message's only question (or only to-do) as the replacement of an old
+     * one of the same kind, and a block's `Replaces:` line reaches only
+     * records of its own kind.
+     */
+    actions: readonly { key: string; replaces: string[] }[] = [],
   ): Map<string, InboxSupersededBy> {
     const plan = new Map<string, InboxSupersededBy>();
-    const only = parsed.length === 1 ? parsed[0]!.key : null;
-    const requests: { ref: string; by: InboxSupersededBy; where: string }[] = [
-      ...supersedes.map((ref) => ({ ref, by: { message_id: messageId, key: only }, where: "supersedes" })),
+    const onlyQuestion = parsed.length === 1 ? parsed[0]!.key : null;
+    const onlyAction = actions.length === 1 ? actions[0]!.key : null;
+    type Family = "question" | "action" | null;
+    const requests: { ref: string; by: InboxSupersededBy; where: string; family: Family }[] = [
+      ...supersedes.map((ref) => ({ ref, by: { message_id: messageId, key: null }, where: "supersedes", family: null as Family })),
       ...parsed.flatMap((question) =>
-        question.replaces.map((ref) => ({ ref, by: { message_id: messageId, key: question.key }, where: "Replaces:" })),
+        question.replaces.map((ref) => ({ ref, by: { message_id: messageId, key: question.key }, where: "Replaces:", family: "question" as Family })),
+      ),
+      ...actions.flatMap((action) =>
+        action.replaces.map((ref) => ({ ref, by: { message_id: messageId, key: action.key }, where: "Replaces:", family: "action" as Family })),
       ),
     ];
+    const familyOf = (record: InboxQuestionRecord): "question" | "action" => (record.kind === "action" ? "action" : "question");
+    // `supersedes`: the new message's only block of the old record's kind replaces it, else "No longer applies".
+    const byFor = (request: { by: InboxSupersededBy; family: Family }, record: InboxQuestionRecord): InboxSupersededBy =>
+      request.family === null ? { message_id: messageId, key: familyOf(record) === "action" ? onlyAction : onlyQuestion } : request.by;
     if (requests.length === 0) return plan;
     const problems: string[] = [];
     // Which new block's Replaces: line claimed each old question: two blocks
     // cannot both replace one question.
     const claimedBy = new Map<string, string>();
-    for (const { ref, by, where } of requests) {
+    for (const request of requests) {
+      const { ref, by, where, family } = request;
       const target = parseInboxSupersedeRef(ref);
       if (!target) {
         problems.push(`${where} "${ref}" is not an id: write <message id>/<key> (read_thread gives the keys) or <message id>.`);
@@ -2567,9 +2613,16 @@ export class InboxStore {
         );
         continue;
       }
-      const records = this.questionRecords(message.id).filter((r) => target.key === null || r.key === target.key);
+      const records = this.questionRecords(message.id).filter(
+        (r) => (target.key === null || r.key === target.key) && (family === null || familyOf(r) === family),
+      );
       if (target.key !== null && records.length === 0) {
-        problems.push(`${where} ${ref}: message ${target.message_id} has no question ${target.key}.`);
+        const other = this.questionRecords(message.id).some((r) => r.key === target.key);
+        problems.push(
+          other
+            ? `${where} ${ref}: a ${family === "action" ? "to-do" : "question"} replaces only a ${family === "action" ? "to-do" : "question"}; use supersedes to withdraw it.`
+            : `${where} ${ref}: message ${target.message_id} has no question ${target.key}.`,
+        );
         continue;
       }
       const resolved = this.closedByArchive(message);
@@ -2591,7 +2644,10 @@ export class InboxStore {
         }
         for (const record of open) claimedBy.set(record.id, by.key);
       }
-      for (const record of open) if (!plan.has(record.id) || by.key !== null) plan.set(record.id, by);
+      for (const record of open) {
+        const replacement = byFor(request, record);
+        if (!plan.has(record.id) || replacement.key !== null) plan.set(record.id, replacement);
+      }
     }
     if (problems.length > 0) {
       const open = this.openQuestionsOf(threadId);

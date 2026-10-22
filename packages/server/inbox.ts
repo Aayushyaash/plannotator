@@ -2214,6 +2214,11 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
             const result = unarchiveProject(store, projectId, undo);
             // Unarchived: a Mark read's set-aside note an archive held back is due again (as for the single Unarchive).
             for (const id of undo.resolved) if (result.done.includes(id)) scheduleSetAside(id);
+            // A to-do's Done an archive held back is sent once the thread is open again.
+            if (result.done.length > 0) {
+              settleActions();
+              if (store.actionsPending() > 0) scheduleActionSettle();
+            }
             answer = { project: folder(), threads: rows(result.done), skipped: result.skipped };
           }
         }
@@ -2323,7 +2328,12 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
             }
             const thread = store.resolveThread(messageId, body.resolved !== false);
             // Unarchived: a Mark read's set-aside note an archive held back is due again.
-            if (body.resolved === false) scheduleSetAside(thread.thread_id);
+            if (body.resolved === false) {
+              scheduleSetAside(thread.thread_id);
+              // A to-do's Done an archive held back (archived inside its Undo window) is sent now, or when its window passes.
+              settleActions();
+              if (store.actionsPending() > 0) scheduleActionSettle();
+            }
             return json({ thread });
           }
         }

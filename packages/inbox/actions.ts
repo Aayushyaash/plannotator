@@ -50,9 +50,10 @@ export function splitThreadActions(thread: InboxThread): InboxThread {
 }
 
 /**
- * Which record a `:::action` block of the body draws: matched by the block's
- * opening line (the Viewer's block and the core reader split the body the same
- * way), else by its key.
+ * Which record a `:::action` block of the body draws: the block's opening
+ * line (the Viewer's block and the core reader split the body the same way,
+ * frontmatter off) names the parsed to-do, and its key names the record.
+ * Null when no parsed to-do opens on that line or no record has its key.
  */
 export function actionForBlock(
   body: string,

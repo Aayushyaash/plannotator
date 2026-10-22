@@ -80,6 +80,13 @@ async function actionOf(server: InboxServer, threadId: string, messageId: string
   return model.thread.messages.find((m) => m.id === messageId)!.questions!.find((q) => q.kind === "action")!;
 }
 
+async function setupClientFor(server: InboxServer) {
+  const client = new Client({ name: "inbox-todo-reader", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`)));
+  clients.push(client);
+  return { client };
+}
+
 async function poll(server: InboxServer) {
   const response = await fetch(url(server, INBOX_BRIDGE_POLL_PATH), {
     method: "POST",
@@ -99,6 +106,11 @@ describe("an agent sends a to-do", () => {
     expect(sent.actions).toEqual([{ key: expect.stringMatching(/^a-[0-9a-f]{8}$/), prompt: "Approve the production deploy on Vercel" }]);
     const row = await rowOf(server, sent.thread_id);
     expect(row).toMatchObject({ section: "stopped", unread: true, questions: { open: 1, actions: 1, stopped: true } });
+    // read_thread's text numbers it A1 and says "to do", never Q1.
+    const { client } = (await setupClientFor(server));
+    const read = (await client.callTool({ name: "read_thread", arguments: { thread_id: sent.thread_id } })) as { content: { text: string }[] };
+    expect(read.content[0]!.text).toContain(`${sent.message_id}/${sent.actions![0]!.key} (A1) to do: Approve the production deploy on Vercel`);
+    expect(read.content[0]!.text).not.toContain("(Q1)");
     const action = await actionOf(server, sent.thread_id, sent.message_id);
     expect(action).toMatchObject({
       kind: "action",
@@ -179,6 +191,39 @@ describe("the person's Done", () => {
     expect((await mark(server, sent.message_id, "a-00000000", { outcome: "done" })).status).toBe(404);
     expect((await mark(server, sent.message_id, key, { outcome: "maybe" })).status).toBe(422);
     expect((await actionOf(server, sent.thread_id, sent.message_id)).state).toBe("open");
+  });
+});
+
+describe("archive holds a pending Done back; Unarchive sends it", () => {
+  test("the thread's Archive then Unarchive", async () => {
+    const { server, sent } = await setup();
+    const key = sent.actions![0]!.key;
+    expect((await mark(server, sent.message_id, key, { outcome: "done" })).status).toBe(200);
+    expect((await post(server, `/api/inbox/messages/${sent.message_id}/resolve`, { serverSession: server.serverSession, resolved: true })).status).toBe(200);
+    await sleep(DELAY + 250);
+    expect(await poll(server)).toEqual([]);
+    expect((await post(server, `/api/inbox/messages/${sent.message_id}/resolve`, { serverSession: server.serverSession, resolved: false })).status).toBe(200);
+    await sleep(100);
+    const commands = await poll(server);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]!.body.startsWith("Did 1 action.")).toBe(true);
+    expect((await actionOf(server, sent.thread_id, sent.message_id)).state).toBe("sent");
+  });
+
+  test("the project's Archive all then its Undo", async () => {
+    const { server, sent } = await setup();
+    const key = sent.actions![0]!.key;
+    expect((await mark(server, sent.message_id, key, { outcome: "done" })).status).toBe(200);
+    const row = await rowOf(server, sent.thread_id);
+    const archived = await post(server, `/api/inbox/projects/${row.project.id}/resolve`, { serverSession: server.serverSession, resolved: true, batch_id: "b1" });
+    expect(archived.status).toBe(200);
+    const batch = ((await archived.json()) as { batch: { resolved: string[]; read: string[] } }).batch;
+    await sleep(DELAY + 250);
+    expect(await poll(server)).toEqual([]);
+    const undo = await post(server, `/api/inbox/projects/${row.project.id}/resolve`, { serverSession: server.serverSession, resolved: false, threads: batch });
+    expect(undo.status).toBe(200);
+    await sleep(100);
+    expect(await poll(server)).toHaveLength(1);
   });
 });
 

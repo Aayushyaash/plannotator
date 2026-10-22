@@ -18,7 +18,7 @@
 
 import { useEffect, useRef } from 'react';
 import type { InboxMessageWire } from '@plannotator/core/inbox-types';
-import { isPersonReply } from './folding';
+import { isPersonLook } from './folding';
 import { pageInFront } from './sound';
 
 /** How long the first lines must stay on screen. */
@@ -108,7 +108,7 @@ export function latestAgentSeq(thread: { messages: readonly InboxMessageWire[] }
 export function unseenArrivals(messages: readonly InboxMessageWire[], through: number | null): InboxMessageWire[] {
   if (through === null) return [];
   let floor = through;
-  for (const message of messages) if (isPersonReply(message) && typeof message.seq === 'number') floor = Math.max(floor, message.seq);
+  for (const message of messages) if (isPersonLook(message) && typeof message.seq === 'number') floor = Math.max(floor, message.seq);
   return messages.filter((m) => m.author.kind === 'agent' && typeof m.seq === 'number' && m.seq > floor);
 }
 

@@ -22,7 +22,7 @@
  *   Stopped: <why> / Holds up: <a>; <b>  (as for questions, with the same
  *                                         negative-word guard)
  *   Watching: <what the agent watches>   (it will notice it done by itself)
- *   Replaces: <message id>/<key> …       (only when every token is an id)
+ *   Replaces: <message id>/<a-key> …     (only when every token is a to-do's id)
  *
  * This grammar is the Inbox's only: Plannotator's question grammar (and so
  * plan review) is unchanged. The block is found with core's directive scanner
@@ -75,7 +75,8 @@ export interface ParsedInboxAction {
 }
 
 const LABEL_RE = /^(where|run|stopped|holds up|watching|replaces)\s*:\s*(.*)$/i;
-const ID_TOKEN = String.raw`msg_[0-9A-HJKMNP-TV-Z]{26}(?:/(?:q|a)-[0-9a-f]{8}(?:-\d{1,3})?)?\.?`;
+// A to-do replaces only a to-do: `<message id>/a-…`, or `<message id>` (its to-dos).
+const ID_TOKEN = String.raw`msg_[0-9A-HJKMNP-TV-Z]{26}(?:/a-[0-9a-f]{8}(?:-\d{1,3})?)?\.?`;
 const REPLACES_VALUE_RE = new RegExp(String.raw`^(${ID_TOKEN}(?:[\s,;]+${ID_TOKEN})*)[\s,;]*$`);
 
 /** The first line, plain: a heading mark, a list marker and emphasis around the whole line dropped. */
@@ -353,4 +354,4 @@ export const INBOX_ACTION_GUIDE = [
 
 /** send_message's (and submit_guide's) `done`, as an agent reads it. */
 export const INBOX_DONE_DESCRIPTION =
-  "Your own to-dos (`:::action` blocks) in this thread that you saw done yourself, e.g. the deployment you were watching is Ready: \"<message id>/<key>\" for one (the key starts with a-; read_thread gives it) or \"<message id>\" for every open to-do of that message. The card then says you saw it done, and nothing is sent to the person. Only to-dos still open in the thread this message lands in (use reply_to); otherwise nothing is sent and the refusal, invalid_done, lists the thread's open to-dos. Never mark done what you did not see happen.";
+  "Your own to-dos (`:::action` blocks) in this thread that you saw done yourself, e.g. the deployment you were watching is Ready: \"<message id>/<key>\" for one (the key starts with a-; read_thread gives it) or \"<message id>\" for every open to-do of that message. The card then says you saw it done, and nothing is sent to the person. Only your own to-dos that are still open (not one the person already marked) in the thread this message lands in (use reply_to); otherwise nothing is sent and the refusal, invalid_done, lists the thread's open to-dos. Never mark done what you did not see happen.";

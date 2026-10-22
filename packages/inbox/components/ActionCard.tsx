@@ -2,12 +2,14 @@
  * A to-do's card in its message (approval "inbox-next-actions", direction "In
  * the thread"): what the agent needs the person to go and do, why, where (an
  * Open button for a link, a command to copy), what the agent watches, and
- * Done / Can't do it… / Add note. Done and Can't do it go to the agent at once,
- * with a 10 s Undo (as 👍 Looks good): nothing is sent inside the window.
+ * Done / Can't do it… / Add note. Done and Can't do it are recorded at once and
+ * go to the agent after a 10 s Undo window (as 👍 Looks good): nothing is sent
+ * inside the window.
  */
 
 import { useEffect, useId, useRef, useState } from 'react';
 import type { InboxQuestion } from '@plannotator/core/inbox-types';
+import { INBOX_ACTION_NOTE_MAX } from '@plannotator/core/inbox-actions';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import { actionCardState, type ActionCardState } from '../actions';
 import { clockTime } from '../format';
@@ -191,6 +193,7 @@ export function ActionCard({ action, number, total, agent, readOnly = false, onM
             className="ib-todo-note"
             value={text}
             rows={2}
+            maxLength={INBOX_ACTION_NOTE_MAX}
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'Escape') {
@@ -234,7 +237,7 @@ export function ActionCard({ action, number, total, agent, readOnly = false, onM
           <button type="button" className="ib-btn ib-ghost" data-action-note="" disabled={busy} onClick={() => setComposing('note')}>
             Add note
           </button>
-          <span className="ib-todo-hint">Done tells {agent} right away</span>
+          <span className="ib-todo-hint" data-action-hint="">Done goes to {agent} after 10 s</span>
         </div>
       ))}
     </div>
