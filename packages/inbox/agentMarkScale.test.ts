@@ -7,7 +7,8 @@
  * width, height and corner from it.
  *
  * What this catches: a mark sized in px again (a new 22 or 36), a scale step
- * the ruling does not have, and a step whose corner drifts from the ruling.
+ * the ruling does not have, a step whose corner drifts from the ruling, and
+ * a box whose width and corner come from different steps.
  */
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
@@ -52,4 +53,18 @@ test('every rule that sizes an agent mark, or the glyph in one, takes it from th
     }
   }
   expect(offenders).toEqual([]);
+});
+
+test('a mark takes its width, height and corner from one step (a 24 box never gets the 30 corner)', () => {
+  const mixed: string[] = [];
+  for (const { selector, body } of rules(CODE)) {
+    if (!MARK.test(selector)) continue;
+    const steps = new Set<string>();
+    for (const m of body.matchAll(/(?:^|;)\s*(width|height|border-radius)\s*:\s*var\(--ib-mark-(\d+)(-[rg])?\)/g)) {
+      // A glyph's size (-g) is the step of the tile it sits in; a box is sized by -N and cornered by -N-r.
+      if (m[3] !== '-g') steps.add(m[2]!);
+    }
+    if (steps.size > 1) mixed.push(`${selector}: ${[...steps].join(' and ')}`);
+  }
+  expect(mixed).toEqual([]);
 });

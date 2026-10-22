@@ -396,7 +396,7 @@ button.ib-mut { border-radius: 6px; }
    popovers portaled out of .pn-inbox; .pn-inbox computes them again with its Soft switches. */
 :root, .pn-inbox {
   --ib-mark-16: 16px; --ib-mark-16-r: 5px; --ib-mark-16-g: 10px;
-  --ib-mark-20: 20px; --ib-mark-20-r: 6px; --ib-mark-20-g: 12px;
+  --ib-mark-20: 20px; --ib-mark-20-r: 6px; --ib-mark-20-g: 13px;
   --ib-mark-24: 24px; --ib-mark-24-r: 6px; --ib-mark-24-g: 14px;
   --ib-mark-30: 30px; --ib-mark-30-r: var(--ib-r9-s, 8px); --ib-mark-30-g: 17px;
   --ib-mark-44: 44px; --ib-mark-44-r: 10px; --ib-mark-44-g: 24px;
@@ -975,6 +975,7 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 .ib-ctabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 16px; }
 .ib-ctab { display: inline-flex; align-items: center; height: 30px; padding: 0 11px; border-radius: 7px; font-size: var(--ib-fs-13-5, 13.5px); font-weight: 500; color: var(--muted-foreground); }
 .ib-ctab[aria-selected="true"] { background: var(--muted); color: var(--foreground); }
+/* A harness tab's icon (the Connect picker), like the Settings nav's: not an agent mark of the q12 scale. */
 .ib-tglyph { width: 14px; height: 14px; flex: none; margin-right: 6px; }
 .pn-inbox svg.ib-tglyph { stroke: var(--muted-foreground); fill: none; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
 .pn-inbox .ib-ctab[aria-selected="true"] svg.ib-tglyph { stroke: var(--foreground); }
