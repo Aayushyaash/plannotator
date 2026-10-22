@@ -15,6 +15,8 @@ import {
   type AgentToolSetting,
 } from '../utils/agentToolSetting';
 import { loadDiffFont } from '../utils/diffFonts';
+import { isFontInstalled } from '../utils/fontDetect';
+import { MAX_FONT_FAMILY_LENGTH, monoFontStack, normalizeCssFontSize, normalizeFontFamilyName } from '../utils/cssFontFamily';
 import { TaterSpritePullup } from './TaterSpritePullup';
 import { getIdentity, regenerateIdentity, setCustomIdentity, isIdentityEditable } from '../utils/identity';
 import { GitUser } from '../icons/GitUser';
@@ -101,6 +103,12 @@ interface SettingsProps {
    * true; a host that omits it keeps the pre-parity annotate tab set.
    */
   annotateParity?: boolean;
+  /**
+   * Hide General's "Enter saves a comment" row (#1934). Default false: the
+   * row shows. A host that drives the `enterSavesComment` setting itself, or
+   * never wants it offered, passes true.
+   */
+  hideEnterSavesComment?: boolean;
   onUIPreferencesChange?: (prefs: UIPreferences) => void;
   /** Claude Code's permission mode was changed here (plan review). The host
    *  keeps its own copy in step, since its Approve sends the mode and its
@@ -563,6 +571,19 @@ const GitTab: React.FC<{ sinceBaseUnavailable?: boolean }> = ({ sinceBaseUnavail
   );
 };
 
+/** Sentinel for the "Custom…" select option — never persisted as a font name. */
+const CUSTOM_FONT_SENTINEL = '__custom__';
+
+function isBuiltInFont(value: string): boolean {
+  return DIFF_FONT_OPTIONS.some((opt) => opt.value === value);
+}
+
+/** Inline style rendering UI chrome in the chosen font (quoted and escaped: free text). */
+function fontPreviewStyle(family: string): React.CSSProperties | undefined {
+  const stack = monoFontStack(family);
+  return stack ? { fontFamily: stack } : undefined;
+}
+
 const ReviewDisplayTab: React.FC<{ isCompactTouchLayout?: boolean }> = ({ isCompactTouchLayout = false }) => {
   const diffStyle = useConfigValue('diffStyle');
   const diffOverflow = useConfigValue('diffOverflow');
@@ -579,10 +600,68 @@ const ReviewDisplayTab: React.FC<{ isCompactTouchLayout?: boolean }> = ({ isComp
   const tokenHoverTrigger = useConfigValue('tokenHoverTrigger');
   const tokenHoverDelay = useConfigValue('tokenHoverDelay');
 
+  // Custom font: progressive disclosure. customFontMode keeps the input open
+  // while the user picks "Custom…" or has a non-built-in font saved.
+  const [customFontMode, setCustomFontMode] = useState(
+    () => !!diffFontFamily && !isBuiltInFont(diffFontFamily),
+  );
+  const [customFontDraft, setCustomFontDraft] = useState(
+    () => (diffFontFamily && !isBuiltInFont(diffFontFamily) ? diffFontFamily : ''),
+  );
+  const customFontSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // Pending debounced value. Non-null means "typed but not yet saved" — it is
+  // flushed (not discarded) on unmount, and cancelled when a built-in is
+  // picked so a stale timer can't overwrite the new selection.
+  const pendingFontSave = useRef<string | null>(null);
+  const customActive = customFontMode || (!!diffFontFamily && !isBuiltInFont(diffFontFamily));
+  // Width-measurement check — deterministic per machine, no permissions.
+  const customFontInstalled = useMemo(
+    () => (normalizeFontFamilyName(customFontDraft) ? isFontInstalled(customFontDraft) : null),
+    [customFontDraft],
+  );
+
   // Load font for the preview swatch
   useEffect(() => {
     if (diffFontFamily) loadDiffFont(diffFontFamily);
   }, [diffFontFamily]);
+
+  // Adopt external changes (late server hydration, edits from elsewhere) into
+  // the draft — but never clobber typing that hasn't been saved yet.
+  useEffect(() => {
+    if (pendingFontSave.current !== null) return;
+    if (diffFontFamily && !isBuiltInFont(diffFontFamily) && diffFontFamily !== normalizeFontFamilyName(customFontDraft)) {
+      setCustomFontDraft(diffFontFamily);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [diffFontFamily]);
+
+  const cancelPendingFontSave = () => {
+    clearTimeout(customFontSaveTimer.current);
+    pendingFontSave.current = null;
+  };
+
+  // Flush a pending save on unmount so closing the panel mid-debounce
+  // doesn't lose the typed font.
+  useEffect(() => () => {
+    clearTimeout(customFontSaveTimer.current);
+    if (pendingFontSave.current !== null) {
+      configStore.set('diffFontFamily', pendingFontSave.current);
+    }
+  }, []);
+
+  const handleCustomFontInput = (value: string) => {
+    setCustomFontDraft(value);
+    // Debounce the save — configStore.set writes the cookie and POSTs
+    // /api/config; per-keystroke writes would spam both.
+    clearTimeout(customFontSaveTimer.current);
+    pendingFontSave.current = normalizeFontFamilyName(value);
+    customFontSaveTimer.current = setTimeout(() => {
+      if (pendingFontSave.current !== null) {
+        configStore.set('diffFontFamily', pendingFontSave.current);
+        pendingFontSave.current = null;
+      }
+    }, 400);
+  };
 
   return (
     <>
@@ -643,19 +722,56 @@ const ReviewDisplayTab: React.FC<{ isCompactTouchLayout?: boolean }> = ({ isComp
           <div className="text-xs text-muted-foreground">Font family for diff code lines</div>
         </div>
         <select
-          value={diffFontFamily}
-          onChange={(e) => configStore.set('diffFontFamily', e.target.value)}
+          value={customActive ? CUSTOM_FONT_SENTINEL : diffFontFamily}
+          onChange={(e) => {
+            if (e.target.value === CUSTOM_FONT_SENTINEL) {
+              setCustomFontMode(true);
+            } else {
+              // Cancel any in-flight debounced custom save so a stale timer
+              // can't overwrite this selection.
+              cancelPendingFontSave();
+              setCustomFontMode(false);
+              setCustomFontDraft('');
+              configStore.set('diffFontFamily', e.target.value);
+            }
+          }}
           className="w-full px-3 py-1.5 text-sm rounded-md bg-muted/50 border border-border text-foreground"
-          style={diffFontFamily ? { fontFamily: `'${diffFontFamily}', monospace` } : undefined}
+          style={diffFontFamily && !customActive ? fontPreviewStyle(diffFontFamily) : undefined}
         >
           {DIFF_FONT_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
+          <option value={CUSTOM_FONT_SENTINEL}>Custom…</option>
         </select>
+        {customActive && (
+          <div className="space-y-1">
+            <input
+              type="text"
+              value={customFontDraft}
+              onChange={(e) => handleCustomFontInput(e.target.value)}
+              placeholder="Font name as installed, e.g. Iosevka"
+              aria-label="Custom code font name"
+              maxLength={MAX_FONT_FAMILY_LENGTH}
+              autoFocus={!customFontDraft}
+              spellCheck={false}
+              className="w-full px-3 py-1.5 text-sm rounded-md bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-ring"
+              style={fontPreviewStyle(customFontDraft)}
+            />
+            <div className="text-[11px]" aria-live="polite">
+              {!normalizeFontFamilyName(customFontDraft) ? (
+                <span className="text-muted-foreground">Any font installed on this machine works — type its family name.</span>
+              ) : customFontInstalled === true ? (
+                <span className="text-success">✓ Found on this machine</span>
+              ) : customFontInstalled === false ? (
+                <span className="text-warning">Not found — diffs will fall back to monospace</span>
+              ) : null}
+            </div>
+          </div>
+        )}
         {diffFontFamily && (
           <div
             className="text-xs text-muted-foreground px-1 py-1 rounded bg-muted/30 font-mono"
-            style={{ fontFamily: `'${diffFontFamily}', monospace` }}
+            style={fontPreviewStyle(diffFontFamily)}
           >
             Preview: const x = fn(42);
           </div>
@@ -672,7 +788,7 @@ const ReviewDisplayTab: React.FC<{ isCompactTouchLayout?: boolean }> = ({ isComp
             <div className="text-xs text-muted-foreground">Font size for diff code lines</div>
           </div>
           <div className="text-xs tabular-nums text-muted-foreground min-w-[4ch] text-right">
-            {diffFontSize || 'Auto'}
+            {normalizeCssFontSize(diffFontSize) || 'Auto'}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -1011,7 +1127,7 @@ const CommentsTab: React.FC = () => {
   );
 };
 
-export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', annotateParity = false, onUIPreferencesChange, onPermissionModeChange, externalOpen, onExternalClose, aiProviders = [], gitUser, autoUpdateSetting, updateCheckSetting, agentToolSetting, onAgentToolChange, sinceBaseUnavailable, isCompactTouchLayout = false, onDetectObsidianVaults, agentTerminalAvailable = false, webmcpAvailable = false }) => {
+export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', annotateParity = false, onUIPreferencesChange, onPermissionModeChange, externalOpen, onExternalClose, aiProviders = [], gitUser, autoUpdateSetting, updateCheckSetting, agentToolSetting, onAgentToolChange, sinceBaseUnavailable, isCompactTouchLayout = false, onDetectObsidianVaults, agentTerminalAvailable = false, webmcpAvailable = false, hideEnterSavesComment = false }) => {
   const webmcpTools = useWebMcpToolsEnabled();
   const autoUpdate = useConfigValue('autoUpdate');
   const updateChecksOn = updateCheckSetting ? updateCheckSetting.on : true;
@@ -1045,6 +1161,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
   const gridEnabled = useConfigValue('gridEnabled');
   const diagramShadow = useConfigValue('diagramShadow');
   const vimModeEnabled = useConfigValue('vimModeEnabled');
+  const enterSavesComment = useConfigValue('enterSavesComment');
   const vimHudEnabled = useConfigValue('vimHudEnabled');
   const vimHudKeyPanelEnabled = useConfigValue('vimHudKeyPanelEnabled');
   const agentTerminalSide = useConfigValue('agentTerminalSide');
@@ -1451,6 +1568,22 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
                         )}
                       </div>
                     </div>
+
+                    {/* Enter saves a comment (#1934): opt-in, cookie-only.
+                        Governs every comment composer; never the decision keys. */}
+                    {!hideEnterSavesComment && (
+                      <>
+                        <div className="border-t border-border" />
+                        <div data-enter-saves-comment-setting="true">
+                          <ToggleSwitch
+                            checked={enterSavesComment}
+                            onChange={(v) => configStore.set('enterSavesComment', v)}
+                            label="Enter saves a comment"
+                            description={`Shift+Enter adds a new line. ${modKeyWord}+Enter still saves.`}
+                          />
+                        </div>
+                      </>
+                    )}
 
                     {/* Update notices: on by default. Writes updateCheck to
                         ~/.plannotator/config.json; off makes no request to GitHub. */}

@@ -36,7 +36,7 @@
 
 import { homedir } from "node:os";
 import { basename } from "node:path";
-import { INBOX_TAGS_MAX, type InboxHostSessions, type InboxOpenSession, type InboxProject, type InboxSessionOutdated, type InboxTag, type InboxToolHostId } from "@plannotator/core/inbox-types";
+import { INBOX_AUTO_SEND_AFTER_MS, INBOX_TAGS_MAX, type InboxHostSessions, type InboxOpenSession, type InboxProject, type InboxSessionOutdated, type InboxTag, type InboxToolHostId } from "@plannotator/core/inbox-types";
 import { checkServerSession, INBOX_SERVER_SESSION_MISMATCH_ERROR, serverSessionMismatchBody } from "@plannotator/core/server-session";
 import { INBOX_SEND_NOW_POLL_FIELD, INBOX_SESSION_LIVE_MS, INBOX_TAGS_POLL_FIELD } from "@plannotator/shared/inbox/connection";
 import { InboxError } from "@plannotator/shared/inbox/schema";
@@ -79,6 +79,27 @@ export interface InboxRecipientConnection {
   engine: string | null;
   /** The command that starts the same session again in its folder (`cd <folder> && claude --resume <id>`); null when unknown. Additive. */
   restart_command: string | null;
+  /**
+   * How long a reply waits on this busy session before it goes into the
+   * running turn by itself, where `send_now` (`INBOX_AUTO_SEND_AFTER_MS`;
+   * approval "inbox-busy-agent-reply"). Absent from an older Inbox, which
+   * never does. Additive.
+   */
+  auto_send_after_ms: number;
+  /**
+   * The items waiting on this session, by id: since when it waits on the
+   * busy session (`since`, the "Undelivered N min"), and since when it may go
+   * in by itself (`auto_since`: the first time the session was seen busy with
+   * Send now possible; null until then). Kept in memory: the session going
+   * away or an Inbox restart starts the clock again. Additive.
+   */
+  waits: Record<string, { since: string; auto_since: string | null }>;
+}
+
+/** The server's clock for one item waiting on a busy session (ms). */
+interface WaitClock {
+  since: number;
+  autoSince: number | null;
 }
 
 interface SeenSession {
@@ -91,6 +112,8 @@ interface SeenSession {
   holding: number;
   busy: boolean | null;
   idleSince: number | null;
+  /** The last time it was seen idle (busy false); null when never. Decides whether an automatic mark went into a turn. */
+  idleAt?: number | null;
   /** Its poll said it can deliver into a running turn (`send_now`). */
   sendNow: boolean;
   /** Its poll said it understands a reply it was tagged in (`tags`): only then can it be tagged. */
@@ -154,9 +177,12 @@ export function createInboxLiveSessions(options: {
   displayFolder?: (path: string) => string;
   /** The command that restarts a session as itself, in its folder (shown); null for a host without one. */
   restartCommandOf?: (host: string, folder: string, session: string) => string | null;
+  /** How long a reply waits on a busy session before it goes in by itself. Default `INBOX_AUTO_SEND_AFTER_MS`. */
+  autoSendAfterMs?: number;
 }) {
   const { store, serverSession } = options;
   const now = options.now ?? Date.now;
+  const autoSendAfterMs = options.autoSendAfterMs ?? INBOX_AUTO_SEND_AFTER_MS;
   const startedAt = now();
   const sessions = new Map<string, SeenSession>();
   /**
@@ -228,8 +254,70 @@ export function createInboxLiveSessions(options: {
       entry.idleSince = null;
     } else {
       entry.idleSince = entry.busy === false && entry.idleSince !== null ? entry.idleSince : (finiteMs(body.idle_since) ?? at);
+      entry.idleAt = at;
       setDeliveryFlags(entry, false, entry.sendNow);
     }
+  };
+
+  /**
+   * The clocks of the items waiting on each session (approval
+   * "inbox-busy-agent-reply"): an item's wait starts the first time its
+   * session is seen busy while the item waits for it, and its clock toward
+   * going in by itself the first time that session is also seen able to take
+   * it mid-turn (`send_now`). Never from `created_at`: a reply left for a
+   * session that ended, or moved to another session, starts its wait when
+   * that session is busy. A delivered or moved item leaves its session's
+   * clocks; a session that stops being live loses them all. In memory only,
+   * so a restart starts every clock again (never shorter).
+   */
+  const waits = new Map<string, Map<string, WaitClock>>();
+  const trackWaitsOf = (session: string, entry: SeenSession | undefined, t: number) => {
+    let clocks = waits.get(session);
+    if (!entry || !isLive(entry)) {
+      waits.delete(session);
+      return;
+    }
+    if (entry.busy !== true && !clocks) return;
+    const pending = store.pendingReplies(session, { tags: entry.tags });
+    if (clocks) {
+      const ids = new Set(pending.map((item) => item.id));
+      for (const id of [...clocks.keys()]) if (!ids.has(id)) clocks.delete(id);
+    }
+    if (entry.busy === true) {
+      for (const item of pending) {
+        clocks ??= new Map();
+        const clock = clocks.get(item.id) ?? { since: t, autoSince: null };
+        if (clock.autoSince === null && entry.sendNow) clock.autoSince = t;
+        clocks.set(item.id, clock);
+      }
+    }
+    if (clocks && clocks.size > 0) waits.set(session, clocks);
+    else waits.delete(session);
+  };
+  /** Look at every session's waiting items now (the server's sweep, every few seconds). */
+  const trackWaits = () => {
+    const t = now();
+    for (const session of [...waits.keys()]) if (!sessions.has(session)) waits.delete(session);
+    for (const [session, entry] of sessions) trackWaitsOf(session, entry, t);
+  };
+  /** The clock of an item waiting on `session` (ms), or null. */
+  const waitClockOf = (session: string, itemId: string): WaitClock | null => waits.get(session)?.get(itemId) ?? null;
+  /** The same, as the rows read it (ISO). */
+  const waitOf = (session: string, itemId: string): { since: string; autoSince: string | null } | null => {
+    const clock = waitClockOf(session, itemId);
+    return clock ? { since: iso(clock.since), autoSince: clock.autoSince === null ? null : iso(clock.autoSince) } : null;
+  };
+  /**
+   * Whether an item the Inbox marked to go in by itself at `markedAt` went
+   * into a running turn when its session took it: false when the session was
+   * seen idle after the mark (its own Ask question held the turn, so it went
+   * in when the turn ended).
+   */
+  const deliveredIntoTurn = (session: string, markedAt: string | null | undefined): boolean | undefined => {
+    const entry = sessions.get(session);
+    const marked = markedAt ? Date.parse(markedAt) : NaN;
+    if (!entry || !Number.isFinite(marked)) return undefined;
+    return !(typeof entry.idleAt === "number" && entry.idleAt >= marked);
   };
 
   /** A poll arrived: the session is live, and says where it works. Returns the call to make when the poll answers. */
@@ -266,6 +354,7 @@ export function createInboxLiveSessions(options: {
     entry.holding += 1;
     applyState(entry, body, at);
     sessions.set(session, entry);
+    trackWaitsOf(session, entry, at);
     return () => {
       entry.holding = Math.max(0, entry.holding - 1);
       entry.lastSeen = now();
@@ -281,6 +370,7 @@ export function createInboxLiveSessions(options: {
     entry.lastSeen = at;
     applyState(entry, body, at);
     if (typeof body[INBOX_SEND_NOW_POLL_FIELD] === "boolean") setDeliveryFlags(entry, entry.busy, body[INBOX_SEND_NOW_POLL_FIELD] === true);
+    trackWaitsOf(session, entry, at);
   };
 
   const isLive = (entry: SeenSession) => entry.holding > 0 || now() - entry.lastSeen <= INBOX_SESSION_LIVE_MS;
@@ -501,7 +591,27 @@ export function createInboxLiveSessions(options: {
       outdated: outdatedOf(entry),
       engine: entry.engine,
       restart_command: restartCommandOf(session, entry),
+      auto_send_after_ms: autoSendAfterMs,
+      waits: Object.fromEntries(
+        [...(waits.get(session) ?? new Map<string, WaitClock>())].map(([id, clock]) => [
+          id,
+          { since: iso(clock.since), auto_since: clock.autoSince === null ? null : iso(clock.autoSince) },
+        ]),
+      ),
     };
+  };
+
+  /**
+   * The live sessions a reply may go into by itself now: a turn runs and the
+   * connection said it can take an item mid-turn (`send_now`). With `tags`:
+   * whether the connection understands a reply it was only tagged in.
+   */
+  const steerableSessions = (): { session: string; tags: boolean }[] => {
+    const out: { session: string; tags: boolean }[] = [];
+    for (const [session, entry] of sessions) {
+      if (isLive(entry) && entry.busy === true && entry.sendNow) out.push({ session, tags: entry.tags });
+    }
+    return out;
   };
 
   /** The fields a list row's delivery reads (`InboxStore.setDeliveryPresence`): `connectionOf` without its plugin checks. */
@@ -525,7 +635,9 @@ export function createInboxLiveSessions(options: {
     for (const [id, entry] of sessions) {
       const recent = entry.holding > 0 || t - entry.lastSeen <= INBOX_ASKER_GRACE_MS;
       if (!recent) continue;
-      parts.push(`${id}:${isLive(entry) ? 1 : 0}${entry.busy === null ? "n" : entry.busy ? "b" : "i"}${entry.sendNow ? "s" : ""}`);
+      const clocks = waits.get(id);
+      const clocked = clocks ? `w${clocks.size}a${[...clocks.values()].filter((clock) => clock.autoSince !== null).length}` : "";
+      parts.push(`${id}:${isLive(entry) ? 1 : 0}${entry.busy === null ? "n" : entry.busy ? "b" : "i"}${entry.sendNow ? "s" : ""}${clocked}`);
     }
     for (const [id, entry] of mcpSeen) {
       if (entry.holding > 0 || t - entry.lastSeen <= INBOX_ASKER_GRACE_MS) parts.push(`m:${id}`);
@@ -713,6 +825,12 @@ export function createInboxLiveSessions(options: {
     composeTarget,
     connectionOf,
     deliveryConnectionOf,
+    steerableSessions,
+    autoSendAfterMs,
+    trackWaits,
+    waitClockOf,
+    waitOf,
+    deliveredIntoTurn,
     deliverySignature,
     hostSessions,
     restartCount,

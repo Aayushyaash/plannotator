@@ -21,6 +21,8 @@ import type { AgentJobInfo, AgentCapabilities } from '@plannotator/ui/types';
 import type { DiffFile } from '../types';
 import type { AIProviderOption } from '@plannotator/ui/utils/aiProvider';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
+import { useConfigValue } from '@plannotator/ui/config';
+import { isCommentSubmitKey } from '@plannotator/ui/utils/commentSubmitKey';
 import { artifactAnchorLabel, artifactAnnotationQuote } from '../utils/artifactAnnotations';
 
 export type ReviewSidebarTab = 'annotations' | 'ai' | 'agents';
@@ -160,6 +162,7 @@ const GeneralCommentComposer: React.FC<{
 }> = ({ onAdd, open, onOpenChange, text, onTextChange, align, panelWidth, touchTarget }) => {
   const ref = useRef<HTMLDivElement>(null);
   useDismissablePopover({ enabled: open, ref, onDismiss: () => onOpenChange(false) });
+  const enterSavesComment = useConfigValue('enterSavesComment');
 
   const submit = () => {
     const trimmed = text.trim();
@@ -210,6 +213,7 @@ const GeneralCommentComposer: React.FC<{
             onSubmit={submit}
             onCancel={() => onOpenChange(false)}
             placeholder="Add a general comment..."
+            enterSubmits={enterSavesComment}
           />
           <div className="mt-2 flex items-center justify-end gap-2">
             <Button size="xs" data-general-comment-add onClick={submit} title="Add the comment to this review">
@@ -308,6 +312,7 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
   const [generalComposerOpen, setGeneralComposerOpen] = useState(false);
   // Inline editor for an outdated comment's text (the only cards editable here).
   const [editingOutdated, setEditingOutdated] = useState<{ id: string; draft: string } | null>(null);
+  const enterSavesComment = useConfigValue('enterSavesComment');
   const [generalDraft, setGeneralDraft] = useState('');
   // Available panel width for the popover clamp; the overlay presentation is
   // full-screen, where the 100vw class guard applies instead.
@@ -467,7 +472,7 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
               onChange={(e) => setEditingOutdated({ id: annotation.id, draft: e.target.value })}
               onKeyDown={(e) => {
                 if (e.key === 'Escape') { e.preventDefault(); setEditingOutdated(null); }
-                else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveOutdatedEdit(); }
+                else if (isCommentSubmitKey(e, enterSavesComment)) { e.preventDefault(); saveOutdatedEdit(); }
               }}
               className="w-full min-h-[64px] resize-y rounded border border-border bg-background p-2 text-xs leading-relaxed focus:outline-none focus:ring-1 focus:ring-primary/40"
             />

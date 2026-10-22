@@ -2,6 +2,8 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { File, type LineAnnotation } from '@pierre/diffs/react';
 import type { SelectedLineRange as PierreSelectedLineRange, LineEventBaseProps } from '@pierre/diffs';
 import { PopoutDialog } from './PopoutDialog';
+import { isCommentSubmitKey } from '../utils/commentSubmitKey';
+import { useConfigValue } from '../config/useConfig';
 import { useTheme } from './ThemeProvider';
 import { CommentPopover } from './CommentPopover';
 import { ImageThumbnail } from './ImageThumbnail';
@@ -150,6 +152,7 @@ const CodeInlineAnnotation: React.FC<{
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState(annotation.text ?? '');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const enterSavesComment = useConfigValue('enterSavesComment');
 
   useEffect(() => {
     if (!isEditing) setEditText(annotation.text ?? '');
@@ -232,7 +235,7 @@ const CodeInlineAnnotation: React.FC<{
                 e.preventDefault();
                 setIsEditing(false);
                 setEditText(annotation.text ?? '');
-              } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+              } else if (isCommentSubmitKey(e, enterSavesComment)) {
                 e.preventDefault();
                 save();
               }

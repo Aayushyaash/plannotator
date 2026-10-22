@@ -7,6 +7,8 @@ import { InboxApiError, inboxApi } from '../api';
 import { attachmentImageUrl, imageCommentAnnotation, WIDE_IMAGE_RATIO } from '../attachments';
 import { Icon } from '../icons';
 import { Tip } from './Tip';
+import { useConfigValue } from '@plannotator/ui/config';
+import { isCommentSubmitKey } from '@plannotator/ui/utils/commentSubmitKey';
 
 /** A fresh annotation id. */
 function newId(): string {
@@ -57,6 +59,7 @@ export function ImageAttachmentView({
   onSwipe?: (dir: 1 | -1) => void;
 }) {
   const [fit, setFit] = useState<'fit' | 'actual'>(initialFit ?? 'fit');
+  const enterSavesComment = useConfigValue('enterSavesComment');
   // The pane remembers the size per file: told after each change, never from inside a state update.
   const reportedFit = useRef(fit);
   const onFitChangeRef = useRef(onFitChange);
@@ -245,7 +248,7 @@ export function ImageAttachmentView({
             aria-label={`Comment on ${attachment.name}`}
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
+              if (isCommentSubmitKey(event, enterSavesComment)) {
                 event.preventDefault();
                 event.stopPropagation();
                 void submit();

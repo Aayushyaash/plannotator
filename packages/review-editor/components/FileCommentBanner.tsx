@@ -5,6 +5,8 @@ import { CommentMeta } from './CommentMeta';
 import { CommentActions } from './CommentActions';
 import { FileNameChip } from './FileNameChip';
 import { commentCopyText } from '../utils/annotationDisplay';
+import { useConfigValue } from '@plannotator/ui/config';
+import { isCommentSubmitKey } from '@plannotator/ui/utils/commentSubmitKey';
 
 interface FileCommentBannerProps {
   /** File-scoped comments for ONE file (already filtered to scope === 'file'). */
@@ -47,6 +49,7 @@ export const FileCommentCard: React.FC<{
   const [collapsed, setCollapsed] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState(comment.text ?? '');
+  const enterSavesComment = useConfigValue('enterSavesComment');
 
   // Tell the owner to re-measure when our height changes — in the all-files view
   // these cards live in Pierre's custom-header portal, whose height isn't auto-
@@ -121,7 +124,7 @@ export const FileCommentCard: React.FC<{
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Escape') { e.preventDefault(); setIsEditing(false); }
-              else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveEdit(); }
+              else if (isCommentSubmitKey(e, enterSavesComment)) { e.preventDefault(); saveEdit(); }
             }}
             className="w-full min-h-[80px] resize-y rounded border border-border bg-background p-2 text-xs leading-relaxed focus:outline-none focus:ring-1 focus:ring-primary/40"
             placeholder="File comment (markdown supported)…"
