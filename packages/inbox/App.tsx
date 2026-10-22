@@ -30,6 +30,7 @@ import {
   type UpdateDetails,
   type WhatsNewModel,
 } from './api';
+import { discardPreparedInboxEvents, prepareInboxEvents } from './sharedEvents';
 import { addOwnThreads, adoptKeepingOpen, filterSections, heldNotice, markHeldRowArchived, refreshHeldRows, settleOwn, settleThread, showBroughtIn, waitingCount, type OpenThread } from './held';
 import { hasMovingDelivery } from './rowDelivery';
 import {
@@ -837,10 +838,16 @@ function Inbox() {
     let deliveriesTimer: ReturnType<typeof setTimeout> | null = null;
     let draftsTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
+    // Listen to the tabs' shared stream before the first read, so nothing passed on between the read and the subscription is lost (sharedEvents.ts).
+    prepareInboxEvents();
     void (async () => {
       const first = await refreshList(true);
       void refreshSettings();
-      if (cancelled || !first) return;
+      if (cancelled || !first) {
+        // No subscription follows (the effect ended, or the first read failed): close the early channel.
+        discardPreparedInboxEvents();
+        return;
+      }
       // The threads already here: a later line of one of their roots is never a new thread (notify.ts).
       flushNotifications(first);
       unsubscribe = subscribeInboxEvents(first.cursor, {
@@ -886,6 +893,7 @@ function Inbox() {
     })();
     return () => {
       cancelled = true;
+      discardPreparedInboxEvents();
       unsubscribe();
       if (timer) clearTimeout(timer);
       if (deliveriesTimer) clearTimeout(deliveriesTimer);
