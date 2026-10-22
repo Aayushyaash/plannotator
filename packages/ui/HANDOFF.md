@@ -2412,6 +2412,16 @@ The owner's design-system ruling q4 (2026-10-22): the tooltip takes Soft's borde
 
 Plannotator's apps dropped their own timings (plan review and annotate 900 / 200, code review and the guides.show viewer 200 / 100, and the review app's per-trigger 200 to 300 ms) and use the defaults. The Inbox already drew its tooltips this way; its `[data-pn-tooltip]` rule now sets only the shadow (its Soft float, falling back to `--float-shadow`), and its sidebar edge tooltip (`.ib-edge-tip`) uses `--float-shadow` instead of a hard-coded shadow.
 
+## Document text size (#2066; next ui release; additive, no core change)
+
+Settings → Display can show a **Text size** row (13 / 15 / 17 / 19 / 21 px of body text, 15 = today). Everything is inert until a host opts in; a host that does nothing sees no change.
+
+- **`utils/documentTextSize`** (new, import-free): `DOCUMENT_TEXT_SIZE_OPTIONS`, `DEFAULT_DOCUMENT_TEXT_SIZE` (15), `isDocumentTextSize`, `documentTextScale`, and **`applyDocumentTextSize(root, size)`**, which sets `data-doc-text-size` and `--doc-text-scale` (size / 15) on `root`, and removes both at the default.
+- **`hooks/useDocumentTextSize()`** (new): applies the setting to the document element while mounted. Plannotator's plan / annotate app calls it; a host that wants the row to work calls it too.
+- **Setting `documentTextSize`** (`config/settings.ts`, cookie-only `plannotator-document-text-size`, default 15).
+- **`theme.css`**: rules gated on `[data-doc-text-size]` scale the blocks (`[data-block-id]`, `[data-diff-block-index]`, `[data-doc-text]`) inside a document container (`[data-doc-text-root]`: `Viewer`'s article and `PlanDiffViewer`'s), leaving out diagrams and the table / diagram popouts (`[data-popout]`): Tailwind's `--text-*` scale, the size a block root passes down (in the base layer, so a block's own size class wins), the renderers' fixed 12.5–15 px sizes, `pre code.pn-code`, the question context, and the controls beside the text (`ListMarker`'s `[data-list-numeral]` / `[data-list-check]`, `QuestionBlock`'s `[data-question-control]`). Without the attribute nothing applies. `Viewer`'s frontmatter card and `PlanRawDiffView` carry `data-doc-text`.
+- **`Settings`** gains **`showDocumentTextSize?: boolean`** (default false): the row shows only when a host passes true, since it does nothing unless the page applies the setting.
+
 ## The law (guardrails for anyone editing `@plannotator/ui`)
 
 These are enforced socially and, where possible, by CI. They exist because a prior from-scratch reimplementation of this UI broke the app and was reverted.

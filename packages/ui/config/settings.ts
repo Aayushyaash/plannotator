@@ -29,6 +29,11 @@ import {
   type TokenHoverTrigger,
 } from '@plannotator/core/token-hover';
 import { DEFAULT_DIAGRAM_SHADOW, isDiagramShadow } from '../utils/diagramShadow';
+import {
+  DEFAULT_DOCUMENT_TEXT_SIZE,
+  isDocumentTextSize,
+  type DocumentTextSize,
+} from '../utils/documentTextSize';
 import { storage } from '../utils/storage';
 import { generateIdentity } from '../utils/generateIdentity';
 import {
@@ -216,6 +221,24 @@ export const SETTINGS = {
       return isDiagramShadow(parsed) ? parsed : undefined;
     },
     toCookie: (value: number) => storage.setItem('plannotator-diagram-shadow', String(value)),
+    serverKey: undefined, fromServer: undefined, toServer: undefined,
+  },
+
+  /**
+   * The document's body text size in plan review and annotate, in px (#2066;
+   * see `utils/documentTextSize`). Default 15, today's size. Cookie-only, like
+   * the other display knobs; an unknown value reads as the default.
+   */
+  documentTextSize: {
+    defaultValue: DEFAULT_DOCUMENT_TEXT_SIZE as DocumentTextSize,
+    fromCookie: () => {
+      const raw = storage.getItem('plannotator-document-text-size');
+      if (raw === null || raw.trim() === '') return undefined;
+      const parsed = Number(raw);
+      return isDocumentTextSize(parsed) ? parsed : undefined;
+    },
+    toCookie: (value: DocumentTextSize) =>
+      storage.setItem('plannotator-document-text-size', String(value)),
     serverKey: undefined, fromServer: undefined, toServer: undefined,
   },
 
