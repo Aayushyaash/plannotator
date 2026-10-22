@@ -380,6 +380,22 @@ export function trimUrlTail(url: string): string {
   return url;
 }
 
+// Index of the first bare `http(s)://` URL that starts after index 0 and
+// before `end` at a word boundary, or -1. Index 0 is left to the caller's
+// own bare-URL check, which already ran for it.
+function bareUrlStartWithin(text: string, end: number): number {
+  // Only a scheme that starts before `end` counts, so read no further than
+  // `end` plus the longest scheme ("https://" less its first character).
+  const window = text.slice(0, end + 7);
+  const re = /https?:\/\//g;
+  re.lastIndex = 1;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(window)) !== null && m.index < end) {
+    if (!/\w/.test(window[m.index - 1])) return m.index;
+  }
+  return -1;
+}
+
 // Scan a plain-text chunk for bare https?:// URLs and bare code file paths
 // at word boundaries, emitting them as interactive nodes. Surrounding text
 // passes through transformPlainText for emoji shortcodes + smart punctuation.
@@ -1302,6 +1318,19 @@ export const InlineMarkdown: React.FC<{
     // multi-char patterns like emoji shortcodes. Bare URLs are instead
     // detected inline via emitPlainTextWithBareUrls() below.
     const nextSpecial = remaining.slice(1).search(/[\*_`\[!~\\<#@$]/);
+    // A bare URL that starts inside this plain-text chunk would be cut at
+    // the chunk's end, and `_`, `~`, `#`, `@`, `$` and `!` all end a chunk
+    // (`…/w/ws_01…` rendered a link to `…/w/ws`). Stop the chunk where the
+    // URL starts instead, so the bare-URL branch above takes it whole.
+    const chunkEnd = nextSpecial === -1 ? remaining.length : nextSpecial + 1;
+    const urlStart = bareUrlStartWithin(remaining, chunkEnd);
+    if (urlStart !== -1) {
+      const before = remaining.slice(0, urlStart);
+      emitPlainTextWithBareUrls(before, previousChar, parts, () => key++, onOpenCodeFile, validation, imageBaseDir);
+      previousChar = before[before.length - 1] || previousChar;
+      remaining = remaining.slice(urlStart);
+      continue;
+    }
     const plainText = nextSpecial === -1 ? remaining : remaining.slice(0, nextSpecial + 1);
     emitPlainTextWithBareUrls(plainText, previousChar, parts, () => key++, onOpenCodeFile, validation, imageBaseDir);
     previousChar = plainText[plainText.length - 1] || previousChar;
