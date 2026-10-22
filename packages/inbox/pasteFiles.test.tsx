@@ -253,7 +253,12 @@ test.skipIf(!hasDom)('compose: a pasted image makes a tile with a dated name, up
   const el = await renderApp();
   act(() => (el.querySelector('.ib-side [data-open-compose]') as HTMLButtonElement).click());
   const dialog = () => document.querySelector('dialog[data-compose]') as HTMLDialogElement;
-  await until(() => !!dialog()?.querySelector('[data-compose-to="ses-paste"]'), 'To prefilled');
+  // A plain New message opens with To empty: pick the session, as a person does.
+  await until(() => !!dialog()?.querySelector('button[data-compose-to="choose"]:not([data-loading])'), 'To loaded');
+  act(() => (dialog().querySelector('button[data-compose-to]') as HTMLButtonElement).click());
+  await until(() => !!dialog().querySelector('[role="option"][data-compose-session="ses-paste"]'), 'the picker');
+  act(() => (dialog().querySelector('[role="option"][data-compose-session="ses-paste"]') as HTMLElement).click());
+  await until(() => !!dialog()?.querySelector('[data-compose-to="ses-paste"]'), 'To picked');
   const text = dialog().querySelector('textarea') as HTMLTextAreaElement;
 
   expect(paste(text, { text: 'just words' })).toBe(false);

@@ -164,7 +164,13 @@ test('compose: a pasted screenshot attaches with a dated name and rides the Send
   const picture = await screenshotBytes(page, { x: 0, y: 0, width: 760, height: 420 });
   await page.locator('.ib-side [data-open-compose]').click();
   const dialog = page.locator('dialog[data-compose]');
-  await expect(dialog.locator('[data-compose-to="ses-pi"]')).toBeVisible({ timeout: 15_000 });
+  // A plain New message opens with To empty and focus on To: pick the session; focus moves to the message.
+  const to = dialog.locator('.ib-cp-tobtn');
+  await expect(to).toBeFocused();
+  await expect(to).not.toHaveAttribute('data-loading', /.*/, { timeout: 15_000 });
+  await to.click();
+  await dialog.locator('[data-compose-session="ses-pi"]').click();
+  await expect(dialog.locator('[data-compose-to="ses-pi"]')).toBeVisible();
   const text = dialog.getByRole('textbox', { name: 'Message' });
   await expect(text).toBeFocused();
   await text.fill('The list header wraps on a narrow window. This is what I see:');

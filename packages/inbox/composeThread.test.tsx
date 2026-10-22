@@ -180,10 +180,15 @@ test.skipIf(!hasDom)('the To picker keeps its highlight on the same session when
     act(() => picker.render(<ToPicker groups={[{ project: p, current: true, sessions }]} selected={null} home={null} phone={false} onPick={() => {}} onClose={() => {}} />));
   draw([a, b]);
   const highlighted = () => el.querySelector('.ib-cp-opt.ib-hl')?.textContent ?? '';
+  const arrow = () =>
+    act(() => {
+      el.querySelector('input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+    });
+  // Nobody in To: no row highlighted until an arrow key (then the first row).
+  expect(highlighted()).toBe('');
+  arrow();
   expect(highlighted()).toContain('Claude Code');
-  act(() => {
-    el.querySelector('input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
-  });
+  arrow();
   expect(highlighted()).toContain('Pi');
   // The re-read puts Pi first: the highlight stays on Pi, not on row 2.
   draw([b, a]);

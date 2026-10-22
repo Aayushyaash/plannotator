@@ -1,6 +1,7 @@
 /**
- * Compose's rules alone (compose/model.ts). What can regress: To preselecting
- * the wrong session (or one that is not live), the current project not
+ * Compose's rules alone (compose/model.ts). What can regress: To filled by
+ * itself on a plain New message (the wrong agent gets the message), a draft
+ * or "Message <host>" losing its session, the current project not
  * leading the picker, the palette offering an action no words asked for,
  * closing an empty compose asking a question (or a changed one not asking).
  */
@@ -24,7 +25,7 @@ import {
   isDirty,
   namesActionWord,
   pickerRows,
-  preselect,
+  composeOpening,
   statusLine,
   subjectPreview,
 } from './compose/model';
@@ -47,12 +48,25 @@ const PROJECTS: InboxComposeProject[] = [
 ];
 
 describe('To', () => {
-  test('preselects the last session sent to while it is live, else the current project\'s most active, else the most active anywhere; nothing when none is live', () => {
+  test('a plain New message opens with To empty and focus on To; a draft keeps its session (an ended one too), and "Message <host>" names its own; the last session sent to never fills To', () => {
+    expect(composeOpening({})).toEqual({ chosen: null, focus: 'to' });
+    expect(composeOpening({ draft: null, session: null })).toEqual({ chosen: null, focus: 'to' });
+    expect(composeOpening({ session: 'ses-pi2' })).toEqual({ chosen: 'ses-pi2', focus: 'message' });
+    const to = { host: 'pi', session: 'ses-gone', project_root: '/src/billing', project_name: 'billing', started_at: '2026-10-14T09:12:00.000Z' };
+    expect(composeOpening({ draft: { to } })).toEqual({ chosen: 'ses-gone', focus: 'message' });
+    // A draft saved with nobody in To stays that way: it is not filled from a live session either.
+    expect(composeOpening({ draft: { to: null } })).toEqual({ chosen: null, focus: 'to' });
+  });
+
+  test('the picker lists the last session sent to first (its project leading), then the current project; a last session that is gone changes nothing', () => {
     const current = { id: 'prj_p', root: '/src/plannotator' };
-    expect(preselect(PROJECTS, { last: 'ses-pi2', current })?.session).toBe('ses-pi2');
-    expect(preselect(PROJECTS, { last: 'ses-gone', current })?.session).toBe('ses-cc1');
-    expect(preselect(PROJECTS, { last: null, current: null })?.session).toBe('ses-oc');
-    expect(preselect([], { last: 'ses-pi', current })).toBeNull();
+    const sessions = (groups: ReturnType<typeof composeGroups>) => groups.flatMap((g) => g.sessions.map((s) => s.session));
+    expect(sessions(composeGroups(PROJECTS, current, 'ses-pi2'))).toEqual(['ses-pi2', 'ses-cc1', 'ses-pi', 'ses-oc']);
+    // Within its project, the last session leads.
+    expect(sessions(composeGroups(PROJECTS, current, 'ses-pi'))).toEqual(['ses-pi', 'ses-cc1', 'ses-oc', 'ses-pi2']);
+    expect(composeGroups(PROJECTS, current, 'ses-pi')[0]!.current).toBe(true);
+    expect(sessions(composeGroups(PROJECTS, current, 'ses-gone'))).toEqual(sessions(composeGroups(PROJECTS, current)));
+    expect(composeGroups([], current, 'ses-pi')).toEqual([]);
   });
 
   test('the picker puts the current project first, marked; the filter matches host, project and last subject', () => {

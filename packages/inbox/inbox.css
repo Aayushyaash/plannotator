@@ -3001,6 +3001,7 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
   .ib-cp-bar h2 { flex: 1; text-align: center; margin: 0; font-size: var(--ib-fs-17, 17px); font-weight: 650; }
   .pn-inbox .ib-cp-barb { min-width: 44px; height: 44px; padding: 0 10px; border: 0; background: none; color: var(--primary); font-size: var(--ib-fs-16-in, 16px); }
   .pn-inbox .ib-cp-barb.ib-strong { font-weight: 650; }
+  .pn-inbox .ib-cp-barb.ib-dis { opacity: 0.5; }
   .ib-cp-to { min-height: 56px; }
   .pn-inbox .ib-cp-tobtn { height: 44px; font-size: var(--ib-fs-16-in, 16px); }
   .ib-cp-tod { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
