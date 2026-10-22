@@ -329,7 +329,7 @@ test('the sent reply shows one line per agent (Lines): delivered, queued with it
   await expect(lines.nth(0)).toHaveAttribute('data-delivery', 'delivered');
   await expect(lines.nth(0)).toContainText(/^Delivered to Claude Code, /);
   await expect(lines.nth(1)).toHaveAttribute('data-delivery', 'queued');
-  await expect(lines.nth(1)).toContainText('Queued · Pi is working; it gets this when its turn ends.');
+  await expect(lines.nth(1)).toContainText(/Undelivered(?: \d+ min)? · Pi is working · goes in by itself in /);
   await expect(lines.nth(1).locator('[data-send-now]')).toBeVisible();
   await expect(lines.nth(2)).toContainText('Saved for Codex. It sees it the next time it reads this thread.');
   await expect(page.locator('[data-tagged-names]')).toHaveText(' · tagged Pi, Codex');

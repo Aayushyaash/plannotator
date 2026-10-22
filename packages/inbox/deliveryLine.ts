@@ -14,7 +14,10 @@
  */
 
 import {
+  inboxAutoSendInMinutes,
   inboxDeliveryState,
+  wholeMinutes,
+  type InboxDeliverNowBy,
   inboxEngineTooOldForSendNow,
   inboxLoadedPredatesSendNow,
   type InboxDeliveryReason,
@@ -33,6 +36,30 @@ export interface RecipientConnection {
   engine?: string | null;
   /** `cd <folder> && claude --resume <id>`, when the Inbox knows the folder. Absent from an older Inbox. */
   restart_command?: string | null;
+  /** How long a reply waits on this busy session before it goes in by itself. Absent from an older Inbox (never). */
+  auto_send_after_ms?: number;
+  /**
+   * The server's clocks for the items waiting on this session, by id: since
+   * when each waits on the busy session, and since when it may go in by
+   * itself (null: not yet). Absent from an older Inbox.
+   */
+  waits?: Record<string, { since: string; auto_since: string | null }>;
+}
+
+/** The wait inputs of `deliveryLine` for one item: the server's clock while it waits, its own record after the mark. */
+export function waitInputs(
+  connection: RecipientConnection | null | undefined,
+  itemId: string,
+  item: { wait_started_at?: string | null; deliver_now_by?: InboxDeliverNowBy | null; deliver_now_at?: string | null; into_turn?: boolean | null },
+): Pick<DeliveryLineInput, 'waitingSince' | 'autoSince' | 'nowBy' | 'nowAt' | 'intoTurn'> {
+  const clock = connection?.waits?.[itemId];
+  return {
+    waitingSince: clock?.since ?? item.wait_started_at ?? null,
+    autoSince: clock?.auto_since ?? null,
+    nowBy: item.deliver_now_by ?? null,
+    nowAt: item.deliver_now_at ?? null,
+    intoTurn: item.into_turn ?? null,
+  };
 }
 
 /**
@@ -80,6 +107,43 @@ export interface DeliveryLine {
   ended?: boolean;
   /** Offer Send now: the session works and its connection can take the reply mid-turn. */
   sendNow?: boolean;
+  /**
+   * It waits on a busy session (approval "inbox-busy-agent-reply"): since
+   * when, whether it can go in now (`steerable`), and when it goes in by
+   * itself (null: it will not). The band under the reply draws it with its
+   * own minute clock (`undeliveredWords`).
+   */
+  wait?: { since: string; steerable: boolean; autoSendAt: string | null };
+  /** It went into the turn by itself after this many minutes ("went into its turn by itself after 5 min"). */
+  autoAfterMin?: number;
+  /** Marked to go in by itself, but it went in when the turn ended (the session's own Ask question held it). */
+  turnEnded?: boolean;
+}
+
+/** The parts of the "Undelivered" band at `now`: "Undelivered 3 min", and what happens next. */
+export interface UndeliveredWords {
+  /** "Undelivered 3 min" (whole minutes; "Undelivered" under one). */
+  label: string;
+  /** "goes in by itself in 2 min" / "in under a minute", or "it gets this when its turn ends". */
+  next: string;
+  /** It goes in by itself (the countdown shows). */
+  auto: boolean;
+}
+
+/** "Undelivered 3 min": whole minutes, never seconds. */
+export function undeliveredLabel(since: string, now: number): string {
+  const minutes = wholeMinutes(since, now);
+  return minutes < 1 ? 'Undelivered' : `Undelivered ${minutes} min`;
+}
+
+export function undeliveredWords(wait: NonNullable<DeliveryLine['wait']>, now: number): UndeliveredWords {
+  const label = undeliveredLabel(wait.since, now);
+  if (wait.autoSendAt) {
+    const left = inboxAutoSendInMinutes(wait.autoSendAt, now);
+    const next = left === null ? 'goes in by itself now' : left === 0 ? 'goes in by itself in under a minute' : `goes in by itself in ${left} min`;
+    return { label, next, auto: true };
+  }
+  return { label, next: 'it gets this when its turn ends', auto: false };
 }
 
 export interface DeliveryLineInput {
@@ -103,6 +167,19 @@ export interface DeliveryLineInput {
   askerEnded?: { name: string } | null;
   /** A message addressed to a session that stopped before it took it (compose). */
   undelivered?: { host: string } | null;
+  /** When it began to wait on the busy session (the server's clock): the line says how long. */
+  waitingSince?: string | null;
+  /** When the clock toward going in by itself started (the server's); null: it does not go in by itself yet. */
+  autoSince?: string | null;
+  /** Delivered after the Inbox's own mark: whether it went into the running turn (`delivery.into_turn`). */
+  intoTurn?: boolean | null;
+  /** Override the connection's wait before it goes in by itself (null: never, e.g. a 👍 note while they wait for the turn). */
+  autoSendAfterMs?: number | null;
+  /** Who asked for it to go now (`deliver_now_by`), and when (`deliver_now_at`). */
+  nowBy?: InboxDeliverNowBy | null;
+  nowAt?: string | null;
+  /** `now`: the clock the words are written at (default `Date.now()`). */
+  now?: number;
 }
 
 export function deliveryLine(input: DeliveryLineInput): DeliveryLine {
@@ -115,6 +192,12 @@ export function deliveryLine(input: DeliveryLineInput): DeliveryLine {
     wakes: input.wakes,
     sendingNow: input.sendingNow,
     connection: input.connection,
+    waitingSince: input.waitingSince ?? null,
+    autoSince: input.autoSince ?? null,
+    intoTurn: input.intoTurn ?? null,
+    nowBy: input.nowBy ?? null,
+    nowAt: input.nowAt ?? null,
+    autoSendAfterMs: input.autoSendAfterMs !== undefined ? input.autoSendAfterMs : (input.connection?.auto_send_after_ms ?? null),
   });
   const text = deliveryText(decision.reason, {
     name,
@@ -122,24 +205,47 @@ export function deliveryLine(input: DeliveryLineInput): DeliveryLine {
     time: input.time,
     undeliveredHost: input.undelivered?.host ?? name,
     endedName: input.askerEnded?.name ?? name,
+    wait: decision.wait,
+    autoAfterMin: decision.autoAfterMin,
+    turnEnded: decision.turnEnded,
+    now: input.now,
   });
   return {
     state: decision.state,
     text,
     ...(decision.reason === 'ended' ? { ended: true } : {}),
     ...(decision.reason === 'working' ? { sendNow: decision.sendNow } : {}),
+    ...(decision.wait ? { wait: decision.wait } : {}),
+    ...(decision.autoAfterMin !== undefined && decision.reason === 'delivered' ? { autoAfterMin: decision.autoAfterMin } : {}),
+    ...(decision.turnEnded ? { turnEnded: true } : {}),
   };
 }
 
 /** The words for each case of the rule: the thread's line, and the list row's tooltip. */
 export function deliveryText(
   reason: InboxDeliveryReason,
-  words: { name: string; at: string | null; time: (iso: string) => string; undeliveredHost: string; endedName: string },
+  words: {
+    name: string;
+    at: string | null;
+    time: (iso: string) => string;
+    undeliveredHost: string;
+    endedName: string;
+    /** It waits on a busy session (approval "inbox-busy-agent-reply"): "Undelivered 3 min · …". */
+    wait?: DeliveryLine['wait'];
+    /** It went into the turn by itself after this many minutes. */
+    autoAfterMin?: number;
+    /** Marked to go in by itself, it went in when the turn ended instead. */
+    turnEnded?: boolean;
+    now?: number;
+  },
 ): string {
   const { name } = words;
   switch (reason) {
-    case 'delivered':
-      return words.at ? `Delivered to ${name}, ${words.time(words.at)}` : `Delivered to ${name}`;
+    case 'delivered': {
+      const base = words.at ? `Delivered to ${name}, ${words.time(words.at)}` : `Delivered to ${name}`;
+      if (words.autoAfterMin !== undefined) return `${base} · ${autoAfterText(words.autoAfterMin)}`;
+      return words.turnEnded ? `${base} · ${TURN_ENDED_TEXT}` : base;
+    }
     case 'undelivered':
       return `Not delivered. That ${words.undeliveredHost} session stopped before it took this. If it is resumed, it still gets it.`;
     case 'ended':
@@ -148,8 +254,11 @@ export function deliveryText(
       return `Saved for ${name}. It sees it when it next reads this thread.`;
     case 'sending_now':
       return `Sending to ${name} now…`;
-    case 'working':
-      return `Queued · ${name} is working; it gets this when its turn ends.`;
+    case 'working': {
+      if (!words.wait) return `Queued · ${name} is working; it gets this when its turn ends.`;
+      const parts = undeliveredWords(words.wait, words.now ?? Date.now());
+      return `${parts.label} · ${name} is working · ${parts.next}`;
+    }
     case 'idle':
       return `Sending to ${name}…`;
     case 'away':
@@ -173,4 +282,12 @@ export function sentRowLine(name: string, wakes: boolean | undefined): string {
 export function reaskRowLine(name: string, checkedAt: string | null, wakes: boolean | undefined): string {
   if (checkedAt) return `Asked ${name} to re-ask; waiting for its message.`;
   return wakes === true ? `Re-ask queued for ${name}; it gets this as its next turn.` : `Re-ask saved for ${name}. It sees it when it next reads this thread.`;
+}
+
+/** An item the Inbox marked to go in by itself that waited for the turn to end (its own Ask question held it). */
+export const TURN_ENDED_TEXT = 'went in when its turn ended';
+
+/** "went into its turn by itself after 5 min". */
+export function autoAfterText(minutes: number): string {
+  return `went into its turn by itself after ${minutes} min`;
 }

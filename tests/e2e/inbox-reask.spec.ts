@@ -219,7 +219,7 @@ test('Re-ask: the note waits Queued with Send now, the row is Sent, the agent ge
   const note = pane.locator('[data-reask-note]');
   await expect(note.locator('.ib-reask-l')).toHaveText('You asked Claude Code to ask the 3 open questions again, together in one message. They stay open here until it does.');
   await expect(reask).toHaveCount(0);
-  await expect(pane.locator('[data-delivery="queued"]')).toContainText('Queued · Claude Code is working; it gets this when its turn ends.');
+  await expect(pane.locator('[data-delivery="queued"]')).toContainText(/Undelivered(?: \d+ min)? · Claude Code is working · goes in by itself in /);
   await expect(pane.locator('[data-send-now]')).toBeVisible();
   await expect(pane.getByText(/^Asked again \d{1,2}:\d{2} [AP]M$/).first()).toBeVisible();
   expect(await sectionOf(world.threadId)).toBe('sent');

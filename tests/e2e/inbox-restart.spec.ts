@@ -234,7 +234,7 @@ test('a working Claude Code on an older plugin: the line under the reply leads w
   await page.keyboard.press('ControlOrMeta+Enter');
 
   const line = pane.locator('[data-delivery]');
-  await expect(line).toContainText('Queued · Claude Code is working; it gets this when its turn ends.');
+  await expect(line).toContainText(/Undelivered(?: \d+ min)? · Claude Code is working · it gets this when its turn ends/);
   const note = line.locator('[data-restart-note]');
   const lead = note.locator('[data-reload-lead="restart"]');
   await expect(lead.locator('code')).toHaveText('/reload-plugins');
