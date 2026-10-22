@@ -423,7 +423,7 @@ function JobCard({
             e.stopPropagation();
             onKill();
           }}
-          className="absolute top-1.5 right-1.5 rounded p-1 text-muted-foreground opacity-0 transition-all hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+          className="absolute top-1.5 right-1.5 rounded p-1 text-muted-foreground opacity-0 transition-all hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100"
           title="Kill agent"
         >
           <X size={12} />

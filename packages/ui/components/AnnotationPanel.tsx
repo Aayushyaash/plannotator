@@ -1103,7 +1103,7 @@ const AnnotationCard: React.FC<{
           </div>
         )}
         {!readOnly && (
-          <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100">
+          <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">
             {onEdit && annotation.type !== AnnotationType.DELETION && !isEditing && (
               <HostTitle title="Edit annotation" name>
                 <button
@@ -1257,7 +1257,7 @@ const CodeAnnotationCard: React.FC<{
         <span className="text-[11px] font-medium text-primary">Code</span>
         <CardByline author={annotation.author} isMe={isMe} timestamp={annotation.createdAt} />
         {!readOnly && (
-          <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 [@media(hover:none)]:opacity-100">
+          <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">
             {onEdit && !isEditing && (
               <HostTitle title="Edit annotation" name>
                 <button

@@ -150,6 +150,7 @@ export const FileCommentCard: React.FC<{
           onEdit={() => { setDraft(comment.text ?? ''); setIsEditing(true); setCollapsed(false); }}
           copyText={comment.text ? commentCopyText(comment) : undefined}
           onDelete={() => onDelete(comment.id)}
+          selected={isSelected}
         />
       )}
     </div>
