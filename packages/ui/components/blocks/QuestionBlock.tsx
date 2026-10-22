@@ -669,6 +669,7 @@ export const QuestionBlock: React.FC<QuestionBlockProps> = ({
                     checked={checked}
                     onChange={(e) => pick(choice.label, e.target.checked)}
                     className="mt-[3px] h-[15px] w-[15px] shrink-0 cursor-pointer accent-primary disabled:cursor-default"
+                    data-question-control=""
                     disabled={readOnly}
                   />
                   <span className="min-w-0 flex-1 select-text text-[13.5px] leading-[1.45] text-foreground" data-question-part="choice">
@@ -686,6 +687,7 @@ export const QuestionBlock: React.FC<QuestionBlockProps> = ({
               <div className="flex items-center gap-2.5 rounded-[7px] px-[9px] py-[5px]">
                 <span
                   aria-hidden="true"
+                  data-question-control=""
                   className={cx(
                     'annotation-exclude select-none grid h-[15px] w-[15px] shrink-0 place-items-center border-[1.5px] text-[11px] leading-none',
                     question.kind === 'multi' ? 'rounded-[3px]' : 'rounded-full',
