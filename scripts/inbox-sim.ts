@@ -81,6 +81,8 @@ export class SimAgent {
     attachments?: string[];
     /** Earlier questions of the thread this message supersedes: `<message id>` or `<message id>/<key>`. */
     supersedes?: string[];
+    /** Its own action items (`:::action`) of the thread it saw done: `<message id>/<key>` or `<message id>`. */
+    done?: string[];
   }, options: { wakes?: boolean } = {}): Promise<Structured> {
     // `wakes`: send as a connection whose session the person's reply wakes
     // would (the mod, Pi, OpenCode 2), so the Inbox may call it ended later.

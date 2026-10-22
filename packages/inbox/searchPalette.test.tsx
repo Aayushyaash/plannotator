@@ -523,3 +523,29 @@ test.skipIf(!hasDom)('the subject chip is left out only when the first line is, 
   // A name always shows.
   expect(rowThreadChip(message('Keep the rate limit?', 'Keep the rate limit?', 'relay'))).toEqual({ text: 'relay', kind: 'name', subject: 'Keep the rate limit?' });
 });
+
+test.skipIf(!hasDom)('an action item hit (key a-…) is labelled "Action item", a question hit "Question"', async () => {
+  respond = async (call) =>
+    call.url.searchParams.get('q')
+      ? answer({
+          q: 'vercel',
+          terms: ['vercel'],
+          totals: totals({ threads: 0, messages: 2 }),
+          groups: {
+            threads: [],
+            messages: [
+              messageRow('msg_a', 'msg_t3', 'Approve the deploy on Vercel', { key: 'a-4f2c19e0', replaced: false }),
+              messageRow('msg_b', 'msg_t3', 'Which Vercel team?', { key: 'q-abc', replaced: false }),
+            ],
+          },
+          recent: null,
+        })
+      : answer({});
+  await render();
+  await type('vercel');
+  await waitFor(() => options().length === 2);
+  const chips = options().map((o) => [...o.querySelectorAll('.ib-sp-chip')].map((c) => c.textContent));
+  expect(chips[0]).toContain('Action item');
+  expect(chips[0]).not.toContain('Question');
+  expect(chips[1]).toContain('Question');
+});

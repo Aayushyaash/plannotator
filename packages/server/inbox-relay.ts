@@ -511,8 +511,8 @@ export function createInboxRelay(context: InboxRelayContext) {
     const questions = store.questionsOf(messageId);
     const supersedes = store.supersededBy(messageId).length > 0;
     if (questions.length === 0 && !message.guide && !supersedes) return;
-    // Only an open question is ever offered for a lock-screen answer.
-    const open = questions.filter((q) => q.state === "open");
+    // Only an open question is ever offered for a lock-screen answer (an action item, `kind: "action"`, pushes like one but has no lock-screen Done).
+    const open = questions.filter((q) => q.state === "open" && q.kind !== "action");
     const only = open.length === 1 ? open[0]! : null;
     const summary: PushPlaintext = {
       v: 1,

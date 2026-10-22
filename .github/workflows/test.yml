@@ -175,6 +175,7 @@ jobs:
           packages/inbox/pasteFiles.test.tsx
           packages/inbox/markRead.test.tsx
           packages/inbox/ack.test.tsx
+          packages/inbox/actionCard.test.tsx
           packages/inbox/wordsOnlyTwoAsks.test.tsx
           packages/inbox/replyDrafts.test.tsx
           packages/inbox/skipNote.test.tsx

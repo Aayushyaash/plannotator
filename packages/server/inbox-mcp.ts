@@ -16,6 +16,7 @@ import { isAbsolute } from "node:path";
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import { QUESTION_AUTHORING_GUIDE } from "@plannotator/core/question-block";
+import { INBOX_ACTION_EXAMPLE, INBOX_ACTION_GUIDE, INBOX_DONE_DESCRIPTION } from "@plannotator/core/inbox-actions";
 import { checkInboxSubject, INBOX_CARD_ACTION_ON, inboxAgentName, INBOX_NAME_THIS_THREAD_HINT, INBOX_SECTIONS, isInboxNote, INBOX_THREAD_NAME_MAX, type InboxGuideRef, type InboxSectionId, type InboxLine, type InboxMessage, type InboxProject } from "@plannotator/core/inbox-types";
 import { INBOX_WAKES_META_KEY, inboxTaggedLine } from "@plannotator/shared/inbox/connection";
 import { inboxBodyForAgent } from "@plannotator/shared/inbox/uploads";
@@ -120,6 +121,11 @@ export const SEND_BODY_DESCRIPTION = [
   `- \`Holds up: <work>; <work>\` names the work that waits on the answer while you go on: listed under "${sectionLabel("holding")}" (a \`Stopped:\` line wins). A \`none\` entry holds nothing up.`,
   "",
   INBOX_STOP_EXAMPLE,
+  "",
+  // Action items (approval "inbox-next-actions"): when to write one, and when not.
+  INBOX_ACTION_GUIDE,
+  "",
+  INBOX_ACTION_EXAMPLE,
 ].join("\n");
 
 const AGENT_SESSION_DESCRIPTION =
@@ -143,6 +149,7 @@ export const SEND_ROUTING_FIELDS = {
     .array(z.string())
     .optional()
     .describe(SUPERSEDES_DESCRIPTION),
+  done: z.array(z.string()).optional().describe(INBOX_DONE_DESCRIPTION),
   idempotency_key: z.string().optional().describe("Any unique string; sending again with the same key answers the first message instead of posting twice."),
   agent_session: z.string().optional().describe(AGENT_SESSION_DESCRIPTION),
   agent_name: z.string().optional().describe("How the person sees you, e.g. \"Claude Code\"."),
@@ -320,7 +327,12 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string, calle
     : `The person replied in thread ${reply.thread_id}${subject ? ` (${subject})` : ""}:`;
   const url = threadUrl(base, reply.thread_id);
   // The facts the structured content holds, in words, so the text is complete.
-  const numbered = (id: string) => new Map([...store.questionsOf(id)].sort((a, b) => a.position - b.position).map((q, i) => [q.key, i + 1]));
+  // Questions Q1, Q2…; action items (`kind: "action"`) numbered on their own, A1, A2…
+  const numbered = (id: string) => {
+    const all = store.questionsOf(id);
+    const rank = (list: typeof all) => [...list].sort((a, b) => a.position - b.position).map((q, i) => [q.key, i + 1] as const);
+    return new Map([...rank(all.filter((q) => q.kind !== "action")), ...rank(all.filter((q) => q.kind === "action"))]);
+  };
   const facts = [
     `reply ${reply.id}`,
     reply.reply_to ? `to ${reply.reply_to}` : null,
@@ -329,7 +341,16 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string, calle
       const own = questions.filter((q) => q.message_id === id);
       if (own.length === 0) return null;
       const numbers = numbered(id);
-      return `questions of ${id}: ${own.map((q) => questionWords({ key: q.key, q: numbers.get(q.key) ?? 1, state: q.state }, false, false)).join("; ")}`;
+      // An action item's result in short ("done", "can't do it", "you saw it done"), as read_thread says it;
+      // the label names action items only when there is one, so a question-only trailer is unchanged.
+      const records = new Map(store.questionsOf(id).map((q) => [q.key, q]));
+      const short = (key: string): string | undefined => {
+        const result = records.get(key)?.action_result;
+        if (!key.startsWith("a-") || !result) return undefined;
+        return result.by === "agent" ? "you saw it done" : result.outcome === "cant" ? "can't do it" : "done";
+      };
+      const label = own.some((q) => q.key.startsWith("a-")) ? "questions and action items" : "questions";
+      return `${label} of ${id}: ${own.map((q) => questionWords({ key: q.key, q: numbers.get(q.key) ?? 1, state: q.state, ...(short(q.key) ? { result: short(q.key) } : {}) }, false, false)).join("; ")}`;
     }),
     `cursor ${cursor}`,
     url,
@@ -395,6 +416,8 @@ export type AgentSendInput = {
   attachments?: string[];
   /** Earlier questions of the thread this message supersedes (`<message id>` or `<message id>/<key>`). */
   supersedes?: string[];
+  /** Its own action items of the thread the agent saw done (`<message id>/<key>`, or `<message id>`). */
+  done?: string[];
   agent_session?: string;
   agent_name?: string;
   agent_host?: string;
@@ -571,7 +594,7 @@ export async function sendAgentMessage(
   input: AgentSendInput,
   guide?: InboxGuideRef,
   wakes = false,
-): Promise<{ structured: Record<string, unknown>; replayed: boolean; questions: number; attachments: number; superseded: number; imagesNotShown: ImageNotShown[]; naming: InboxSendResult["naming"] | null }> {
+): Promise<{ structured: Record<string, unknown>; replayed: boolean; questions: number; attachments: number; superseded: number; actions: number; done: number; imagesNotShown: ImageNotShown[]; naming: InboxSendResult["naming"] | null }> {
   const { store } = context;
   refuseIdShapedThread(input.thread, input.reply_to);
   refuseBadSubject(input.subject);
@@ -615,6 +638,7 @@ export async function sendAgentMessage(
       guide: guide ?? null,
       base_path: basePath,
       supersedes: input.supersedes ?? null,
+      done: input.done ?? null,
       ...(wakes ? { wakes: true } : {}),
     });
   } catch (error) {
@@ -626,12 +650,17 @@ export async function sendAgentMessage(
   else await captured?.commit();
   const message = result.message;
   const landed = store.project(message.project_id)!;
-  const questions = (message.questions ?? []).map((q) => ({ key: q.key, kind: q.kind, prompt: q.prompt }));
+  const questions = (message.questions ?? []).filter((q) => q.kind !== "action").map((q) => ({ key: q.key, kind: q.kind, prompt: q.prompt }));
+  // Action items (`:::action`): their keys, so the agent can mark one done later.
+  const actions = (message.questions ?? []).filter((q) => q.kind === "action").map((q) => ({ key: q.key, prompt: q.prompt }));
   const superseded = store.supersededBy(message.id);
+  const markedDone = result.done ?? [];
   const notShown = imagesNotShown(input.body, captured?.failures ?? []);
   return {
     imagesNotShown: notShown,
     superseded: superseded.length,
+    actions: actions.length,
+    done: markedDone.length,
     replayed: result.replayed,
     naming: result.naming ?? null,
     questions: questions.length,
@@ -644,9 +673,12 @@ export async function sendAgentMessage(
       thread_name: store.message(message.thread_id)?.thread_name ?? null,
       project: { id: landed.id, name: landed.name, root: landed.root },
       questions,
+      ...(actions.length > 0 ? { actions } : {}),
       attachments: (message.attachments ?? []).map((a) => ({ id: a.id, name: a.name, kind: a.kind, path: a.path })),
       /** The earlier questions this message superseded (`<message id>/<key>`). */
       superseded,
+      /** The action items this message marked done (`done`). */
+      ...(markedDone.length > 0 ? { done: markedDone } : {}),
       replayed: result.replayed,
       cursor: store.messageCursor(message.id) ?? store.cursor(),
       url: threadUrl(context.baseUrl(), message.thread_id),
@@ -660,6 +692,21 @@ export async function sendAgentMessage(
       ...(notShown.length > IMAGES_NOT_SHOWN_MAX ? { images_not_shown_more: notShown.length - IMAGES_NOT_SHOWN_MAX } : {}),
     },
   };
+}
+
+/**
+ * ", superseding 1 earlier question", ", superseding 1 earlier action item", or
+ * ", superseding 2 earlier questions and 1 action item", from the superseded ids
+ * (`<message id>/<key>`; an action item's key starts with `a-`). "" for none.
+ */
+export function supersededWords(ids: readonly string[]): string {
+  const todos = ids.filter((id) => /\/a-[0-9a-f]/.test(id)).length;
+  const questions = ids.length - todos;
+  const parts = [
+    questions > 0 ? `${questions} earlier question${questions === 1 ? "" : "s"}` : "",
+    todos > 0 ? `${todos}${questions > 0 ? "" : " earlier"} action item${todos === 1 ? "" : "s"}` : "",
+  ].filter(Boolean);
+  return parts.length > 0 ? `, superseding ${parts.join(" and ")}` : "";
 }
 
 /** send_message's (and submit_guide's) one line about naming a thread the person started, or "". */
@@ -813,7 +860,9 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
         const asked =
           (sent.questions > 0 ? ` asking ${sent.questions} question${sent.questions === 1 ? "" : "s"}` : "") +
           (sent.attachments > 0 ? ` with ${sent.attachments} attachment${sent.attachments === 1 ? "" : "s"}` : "") +
-          (sent.superseded > 0 ? `, superseding ${sent.superseded} earlier question${sent.superseded === 1 ? "" : "s"}` : "");
+          (sent.actions > 0 ? `${sent.questions > 0 ? " and" : " with"} ${sent.actions} action item${sent.actions === 1 ? "" : "s"}` : "") +
+          supersededWords(sent.structured.superseded as string[]) +
+          (sent.done > 0 ? `, marking ${sent.done} action item${sent.done === 1 ? "" : "s"} done` : "");
         return ok(
           `${sent.replayed ? "Already sent" : "Sent"} to the Plannotator Inbox${asked} (thread ${sent.structured.thread_id}, ${sent.structured.url}).${namingLine(sent.naming)} ${callerWakes(ctx) ? INBOX_REPLY_ARRIVES_TEXT : "Call wait_for_reply with this thread_id for the answer, or go on and read_thread later."}${imagesNotShownText(sent.imagesNotShown)}`,
           sent.structured,

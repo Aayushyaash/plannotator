@@ -351,6 +351,10 @@ const hash8 = (value: string): string => {
   return (h >>> 0).toString(16).padStart(8, '0');
 };
 
+/** The same FNV-1a hash the question keys use, for a host's own block keys
+ *  (the Plannotator Inbox's `:::action`, `a-` + 8 hex). */
+export const blockKeyHash8 = (value: string): string => hash8(value);
+
 /** `q-` + hash8(kind + "\n" + normalized prompt). Stable across plan versions
  *  while the prompt is unchanged and independent of block ids; a reworded
  *  prompt is a new question. */
@@ -813,6 +817,48 @@ export const findQuestionBlocks = (
   markdown: string,
   options: { frontmatter?: boolean } = {},
 ): QuestionBlockLocation[] => {
+  const dedupe = questionKeyDeduper();
+  const out: QuestionBlockLocation[] = [];
+  for (const directive of findDirectiveBlocks(markdown, options)) {
+    if (!isQuestionDirectiveKind(directive.directiveKind)) continue;
+    const parsed = parseQuestionBlock(directive.directiveKind, directive.inner);
+    if (!parsed) continue;
+    out.push({
+      key: dedupe(parsed.key),
+      directiveKind: directive.directiveKind,
+      startLine: directive.startLine,
+      endLine: directive.endLine,
+      text: directive.text,
+    });
+  }
+  return out;
+};
+
+/** One top-level `:::kind` directive of a markdown document (see `findDirectiveBlocks`). */
+export interface DirectiveBlockLocation {
+  /** The directive's kind, lower-cased (`:::Action` → `action`). */
+  directiveKind: string;
+  /** 1-based line of the opening `:::kind`. */
+  startLine: number;
+  /** 1-based line of the closing `:::`, or the document's last line when the block is never closed. */
+  endLine: number;
+  /** The lines between the opener and the closer, with link references resolved, joined with `\n`. */
+  inner: string;
+  /** The exact source text of lines `startLine`..`endLine`, joined with `\n`. */
+  text: string;
+}
+
+/**
+ * Every top-level directive of a markdown document, of any kind, in document
+ * order, found exactly as `findQuestionBlocks` finds question blocks (the
+ * block splitter's code fences, display math, directives and raw HTML blocks
+ * hide a `:::` opener). For a host with directives of its own (the
+ * Plannotator Inbox's `:::action`): it adds no grammar to plan review.
+ */
+export const findDirectiveBlocks = (
+  markdown: string,
+  options: { frontmatter?: boolean } = {},
+): DirectiveBlockLocation[] => {
   if (typeof markdown !== 'string') return [];
   const { content, contentStartLine } = options.frontmatter === false
     ? { content: markdown, contentStartLine: 1 }
@@ -820,8 +866,7 @@ export const findQuestionBlocks = (
   const source = markdown.split('\n');
   const lines = resolveReferenceLinks(content).split('\n');
   const closeCache = new Map<string, TagCloseIndex>();
-  const dedupe = questionKeyDeduper();
-  const out: QuestionBlockLocation[] = [];
+  const out: DirectiveBlockLocation[] = [];
 
   // The block splitter's multi-line constructs, in its order. Every other
   // construct it knows (headings, rules, list items, quotes, tables,
@@ -847,21 +892,15 @@ export const findQuestionBlocks = (
     const directiveOpen = trimmed.match(DIRECTIVE_OPEN_RE);
     if (directiveOpen) {
       const close = directiveCloseIndex(lines, i);
-      const kind = directiveOpen[1].toLowerCase();
-      if (isQuestionDirectiveKind(kind)) {
-        const parsed = parseQuestionBlock(kind, lines.slice(i + 1, close).join('\n'));
-        if (parsed) {
-          const startLine = i + contentStartLine;
-          const endLine = Math.min(close, lines.length - 1) + contentStartLine;
-          out.push({
-            key: dedupe(parsed.key),
-            directiveKind: kind,
-            startLine,
-            endLine,
-            text: source.slice(startLine - 1, endLine).join('\n'),
-          });
-        }
-      }
+      const startLine = i + contentStartLine;
+      const endLine = Math.min(close, lines.length - 1) + contentStartLine;
+      out.push({
+        directiveKind: directiveOpen[1].toLowerCase(),
+        startLine,
+        endLine,
+        inner: lines.slice(i + 1, close).join('\n'),
+        text: source.slice(startLine - 1, endLine).join('\n'),
+      });
       i = close;
       continue;
     }

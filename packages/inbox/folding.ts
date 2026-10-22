@@ -6,7 +6,7 @@
  * (components/Thread.tsx) draws what these decide.
  */
 
-import { isInboxNote, type InboxMessageWire, type InboxQuestion, type InboxThread } from '@plannotator/core/inbox-types';
+import { isInboxActionReport, isInboxNote, type InboxMessageWire, type InboxQuestion, type InboxThread } from '@plannotator/core/inbox-types';
 import { QUESTION_ANSWERS_HEADING, type QuestionAnswer } from '@plannotator/core/question-block';
 import { INBOX_STILL_OPEN_LINE, sliceText } from '@plannotator/core/inbox-questions';
 import { withoutInboxSkillsBlock } from '@plannotator/core/skill-reference-block';
@@ -23,7 +23,7 @@ import { withoutInboxSkillsBlock } from '@plannotator/core/skill-reference-block
 export function lookBoundary(thread: InboxThread): number | null {
   if (thread.messages.length === 0 || thread.messages.some((m) => typeof m.seq !== 'number')) return null;
   let seen = thread.messages[0]!.person_seen_seq ?? 0;
-  for (const message of thread.messages) if (isPersonReply(message)) seen = Math.max(seen, message.seq!);
+  for (const message of thread.messages) if (isPersonLook(message)) seen = Math.max(seen, message.seq!);
   return seen;
 }
 
@@ -36,6 +36,15 @@ export function lastNonNote(messages: readonly InboxMessageWire[]): InboxMessage
 /** The person's own message (a reply or a New message), never one of the Inbox's notes. */
 export function isPersonReply(message: InboxMessageWire): boolean {
   return message.author.kind === 'person' && !isInboxNote(message);
+}
+
+/**
+ * The person's own message that counts as a look: a reply or a New message,
+ * never the Inbox's notes nor an action item's report (the Inbox writes it seconds
+ * after the click, so agent news that landed meanwhile stays new).
+ */
+export function isPersonLook(message: InboxMessageWire): boolean {
+  return isPersonReply(message) && !isInboxActionReport(message);
 }
 
 /** The agent messages after the boundary: new since the person's last look. */
@@ -177,7 +186,21 @@ export function foldSnippet(message: InboxMessageWire, messages: readonly InboxM
   if (message.author.kind === 'person') {
     // A Re-ask note: what the person did, not the instructions the agent got.
     const reasked = message.reask?.length ?? 0;
-    if (reasked > 0) return { kind: 'words', text: reasked === 1 ? 'Asked to re-ask the open question' : `Asked to re-ask ${reasked} open questions in one message` };
+    if (reasked > 0) {
+      // Action items it asked about too (ids `<message id>/a-…`, owner, #2059).
+      const actions = (message.reask ?? []).filter((id) => /\/a-[0-9a-f]/.test(id)).length;
+      if (actions > 0) {
+        const questions = reasked - actions;
+        const what =
+          questions === 0
+            ? actions === 1
+              ? 'the open action item'
+              : `${actions} open action items`
+            : `${questions} open question${questions === 1 ? '' : 's'} and ${actions} action item${actions === 1 ? '' : 's'}`;
+        return { kind: 'words', text: `Asked to re-ask ${what}${reasked > 1 ? ' in one message' : ''}` };
+      }
+      return { kind: 'words', text: reasked === 1 ? 'Asked to re-ask the open question' : `Asked to re-ask ${reasked} open questions in one message` };
+    }
     const words = firstWords(replyWords(message.body));
     if (words) return { kind: 'words', text: words };
     const sent = messages.flatMap((m) => (m.questions ?? []).filter((q) => q.sent_reply_id === message.id && q.answer !== null));
@@ -193,6 +216,9 @@ export function foldSnippet(message: InboxMessageWire, messages: readonly InboxM
   }
   const words = firstWords(message.body);
   if (!words && questions.length > 0) return { kind: 'words', text: plainPrompt(questions[0]!.prompt) };
+  // A message that is only an action item: its line ("Action item: Approve the deploy").
+  const todo = (message.actions ?? []).find((a) => a.state !== 'superseded');
+  if (!words && todo) return { kind: 'words', text: `Action item: ${plainPrompt(todo.prompt)}` };
   return { kind: 'words', text: words };
 }
 
@@ -268,7 +294,7 @@ export function firstWords(markdown: string, max = 240): string {
 
 /** One thing a message holds, for its folded line. */
 export interface Holding {
-  kind: 'picks' | 'open' | 'answered' | 'files' | 'annotations' | 'guide' | 'delivered';
+  kind: 'picks' | 'open' | 'todo' | 'answered' | 'files' | 'annotations' | 'guide' | 'delivered';
   /** What the line shows. */
   text: string;
   /** What a screen reader hears. */
@@ -294,6 +320,9 @@ export function holdingsOf(message: InboxMessageWire, options: { delivered: bool
   if (picks > 0) out.push({ kind: 'picks', text: `${plural(picks, 'pick')} in your draft`, say: `${plural(picks, 'pick')} in your draft`, count: picks });
   if (open > 0) out.push({ kind: 'open', text: `${open} open ${open === 1 ? 'question' : 'questions'}`, say: `${open} open ${open === 1 ? 'question' : 'questions'}`, count: open });
   if (sent > 0 && open === 0 && picks === 0) out.push({ kind: 'answered', text: `${sent} answered`, say: `${plural(sent, 'question')} answered`, count: sent });
+  // Action items (approval "inbox-next-actions"): the ones still waiting on the person.
+  const todos = (message.actions ?? []).filter((a) => a.state === 'open').length;
+  if (todos > 0) out.push({ kind: 'todo', text: `${todos} action item${todos === 1 ? '' : 's'}`, say: `${todos} open action item${todos === 1 ? '' : 's'}`, count: todos });
   const files = message.attachments?.length ?? 0;
   if (files > 0) out.push({ kind: 'files', text: String(files), say: plural(files, 'attachment'), count: files });
   if (message.author.kind === 'person' && (message.sent_annotations ?? 0) > 0) {

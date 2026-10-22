@@ -97,6 +97,7 @@ import {
   INBOX_BRIDGE_EVENT_PATH,
   INBOX_BRIDGE_POLL_MAX_MS,
   INBOX_BRIDGE_POLL_PATH,
+  inboxReaskItemsOf,
   INBOX_MAX_REQUEST_BYTES,
   INBOX_SEND_NOW_POLL_FIELD,
   INBOX_TAGS_POLL_FIELD,
@@ -381,6 +382,10 @@ const ERROR_STATUS: Record<string, number> = {
   ack_after_reply: 409,
   question_open: 409,
   idempotency_key_reused: 409,
+  // Action items (approval "inbox-next-actions"): a Done already sent (no Undo), an action item no longer open, an agent's `done` that names no open action item.
+  action_already_sent: 409,
+  action_closed: 409,
+  invalid_done: 422,
   // The project menu: a batch_id already answered another project or action.
   batch_id_reused: 409,
   config_not_saved: 500,
@@ -622,6 +627,22 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     const timer = setTimeout(() => {
       setAsideTimers.delete(timer);
       settleAcks();
+    }, setAsideDelayMs + 50);
+    (timer as { unref?: () => void }).unref?.();
+    setAsideTimers.add(timer);
+  };
+  // Action items (approval "inbox-next-actions"): the person's Done or Can't do it goes to the agent once the same Undo window has passed.
+  const settleActions = () => {
+    try {
+      store.settleActions(setAsideDelayMs);
+    } catch (error) {
+      process.stderr.write(`Inbox: an action item's Done was not sent: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+  };
+  const scheduleActionSettle = () => {
+    const timer = setTimeout(() => {
+      setAsideTimers.delete(timer);
+      settleActions();
     }, setAsideDelayMs + 50);
     (timer as { unref?: () => void }).unref?.();
     setAsideTimers.add(timer);
@@ -1603,6 +1624,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       ...(reply.ack_of ? { ack_of: reply.ack_of } : {}),
       // The person's Re-ask (approval "inbox-reask"): the wake takes INBOX_REASK_INSTRUCTION.
       ...((reply.reask?.length ?? 0) > 0 ? { reask: true } : {}),
+      // What the note lists (#2059): the wake names action items only when it lists some.
+      ...(inboxReaskItemsOf(reply.reask) ? { reask_items: inboxReaskItemsOf(reply.reask) } : {}),
     };
   };
 
@@ -2224,6 +2247,19 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         return json(result);
       }
 
+      // An action item (approval "inbox-next-actions"): the person's Done (with an
+      // optional note) or Can't do it (with a reason), sent to the agent once
+      // the Undo window passes; `{ outcome: null }` is the Undo.
+      const actionMatch = /^\/api\/inbox\/messages\/([A-Za-z0-9_]+)\/actions\/(a-[0-9a-f]{8}(?:-\d{1,3})?)$/.exec(path);
+      if (actionMatch) {
+        if (req.method !== "POST") return json({ error: "Use POST." }, 405);
+        const body = await readBody(req);
+        if (checkServerSession(body, serverSession) === "mismatch") return json(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409);
+        const questions = store.markAction(actionMatch[1]!, actionMatch[2]!, { outcome: body.outcome, note: body.note });
+        if (body.outcome !== null) scheduleActionSettle();
+        return json({ questions });
+      }
+
       // The project menu (design record "inbox-project-menu"): Mark all as
       // read and Archive all on one project, and their Undo. Loops over the
       // single actions (packages/shared/inbox/project-batch.ts); the same
@@ -2281,6 +2317,11 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
             const result = unarchiveProject(store, projectId, undo);
             // Unarchived: a Mark read's set-aside note an archive held back is due again (as for the single Unarchive).
             for (const id of undo.resolved) if (result.done.includes(id)) scheduleSetAside(id);
+            // An action item's Done an archive held back is sent once the thread is open again.
+            if (result.done.length > 0) {
+              settleActions();
+              if (store.actionsPending() > 0) scheduleActionSettle();
+            }
             answer = { project: folder(), threads: rows(result.done), skipped: result.skipped };
           }
         }
@@ -2390,7 +2431,12 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
             }
             const thread = store.resolveThread(messageId, body.resolved !== false);
             // Unarchived: a Mark read's set-aside note an archive held back is due again.
-            if (body.resolved === false) scheduleSetAside(thread.thread_id);
+            if (body.resolved === false) {
+              scheduleSetAside(thread.thread_id);
+              // An action item's Done an archive held back (archived inside its Undo window) is sent now, or when its window passes.
+              settleActions();
+              if (store.actionsPending() > 0) scheduleActionSettle();
+            }
             return json({ thread });
           }
         }
@@ -2565,6 +2611,9 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     // An ack a stop interrupted inside its Undo window.
     settleAcks();
     if (store.acksPending() > 0) scheduleAckSettle();
+    // An action item's Done a stop interrupted inside its Undo window.
+    settleActions();
+    if (store.actionsPending() > 0) scheduleActionSettle();
   }, 0);
 
   let stopped = false;

@@ -36,6 +36,7 @@
     "./html-anchor": "./html-anchor.ts",
     "./inbox-types": "./inbox-types.ts",
     "./inbox-questions": "./inbox-questions.ts",
+    "./inbox-actions": "./inbox-actions.ts",
     "./inbox-search": "./inbox-search.ts",
     "./diagram-anchor": "./diagram-anchor.ts",
     "./open-in-apps": "./open-in-apps.ts",

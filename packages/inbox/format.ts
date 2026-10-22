@@ -75,6 +75,21 @@ export function questionCount(open: number): string {
   return open >= 2 ? `${formatCount(open)} questions` : '';
 }
 
+/**
+ * A row's count of what waits on the person (approval "inbox-next-actions"):
+ * "2 questions" as before, and an action item always named ("1 action item", "1 question,
+ * 2 action items"), since it says why the agent waits before the thread is opened.
+ * `open` counts questions and action items together, as the list's summary does.
+ */
+export function waitCount(open: number, actions = 0): string {
+  const todos = Math.min(Math.max(actions, 0), open);
+  const questions = open - todos;
+  if (todos === 0) return questionCount(questions);
+  const todoWords = `${formatCount(todos)} action item${todos === 1 ? '' : 's'}`;
+  if (questions === 0) return todoWords;
+  return `${formatCount(questions)} question${questions === 1 ? '' : 's'}, ${todoWords}`;
+}
+
 /** "1 thread", "1,284 threads". */
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${formatCount(n)} ${n === 1 ? one : many}`;

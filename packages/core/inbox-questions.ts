@@ -185,11 +185,20 @@ function waitsOf(context: string): { stopped: string | null; holds_up: string[] 
  * it (`set_aside`), else open / picked / sent.
  */
 export function inboxQuestionState(
-  record: Pick<InboxQuestionRecord, "answer" | "revision" | "sent_revision" | "superseded_by" | "set_aside">,
+  record: Pick<InboxQuestionRecord, "answer" | "revision" | "sent_revision" | "superseded_by" | "set_aside"> &
+    Partial<Pick<InboxQuestionRecord, "kind" | "action_result">>,
   threadResolved: boolean,
 ): InboxQuestionState {
   if (record.superseded_by) return "superseded";
+  // An action item the agent saw done itself is closed: nothing waits on the person, nothing is sent.
+  if (record.kind === "action" && record.action_result?.by === "agent") return "closed";
   if (threadResolved || record.set_aside) return "closed";
+  if (record.kind === "action") {
+    // An action item: open until the person's Done or Can't do it, "picked" while its
+    // Undo window runs, "sent" once the reply carrying it is written.
+    if (!record.action_result) return "open";
+    return record.revision > 0 && record.sent_revision === record.revision ? "sent" : "picked";
+  }
   if (record.answer === null) return "open";
   if (record.revision > 0 && record.sent_revision === record.revision) return "sent";
   return "picked";
@@ -225,7 +234,7 @@ export function toInboxQuestion(record: InboxQuestionRecord, threadResolved: boo
     asked_by_agent_id: record.asked_by_agent_id,
     orphaned: false,
     state: inboxQuestionState(record, threadResolved),
-    answer: record.answer === null ? null : canonicalQuestionAnswer({ choices: storedChoices(record) }, record.answer),
+    answer: record.answer === null || record.kind === "action" ? null : canonicalQuestionAnswer({ choices: storedChoices(record) }, record.answer),
     revision: record.revision,
     sent_revision: record.sent_revision,
     picked_by: record.picked_by,
@@ -234,12 +243,19 @@ export function toInboxQuestion(record: InboxQuestionRecord, threadResolved: boo
     message_id: record.message_id,
     superseded_by: record.superseded_by ? { message_id: record.superseded_by.message_id, key: record.superseded_by.key ?? null } : null,
     set_aside_at: record.set_aside?.at ?? null,
+    ...(record.kind === "action"
+      ? {
+          action: record.action ? { ...record.action } : { where: null, where_url: null, run: null, watching: null },
+          action_result: record.action_result ? { ...record.action_result } : null,
+        }
+      : {}),
   };
 }
 
 // ─────────────────────────────── Superseding ───────────────────────────────
 
-const SUPERSEDE_REF_RE = /^(msg_[0-9A-HJKMNP-TV-Z]{26})(?:\/(q-[0-9a-f]{8}(?:-\d{1,3})?))?$/;
+// `q-` a question, `a-` an action item (an Inbox `:::action`).
+const SUPERSEDE_REF_RE = /^(msg_[0-9A-HJKMNP-TV-Z]{26})(?:\/((?:q|a)-[0-9a-f]{8}(?:-\d{1,3})?))?$/;
 
 /**
  * One id an agent supersedes with (send_message's `supersedes`, or a token of
@@ -262,19 +278,22 @@ export function isInboxQuestionSupersedable(state: InboxQuestionState): boolean 
 export function summarizeInboxQuestions(questions: readonly InboxQuestion[]): InboxQuestionSummary {
   let open = 0;
   let picked = 0;
+  let actions = 0;
   let stopped = false;
   const holdsUp: string[] = [];
   let prompt: string | null = null;
   for (const q of questions) {
     if (q.orphaned) continue;
-    if (q.state === "picked") picked += 1;
+    // An action item the person marked is on its way (its Undo window): it waits on nobody's Send.
+    if (q.state === "picked" && q.kind !== "action") picked += 1;
     if (q.state !== "open") continue;
     open += 1;
+    if (q.kind === "action") actions += 1;
     if (q.stopped !== null) stopped = true;
     for (const name of q.holds_up) if (!holdsUp.includes(name)) holdsUp.push(name);
     if (prompt === null) prompt = q.prompt;
   }
-  return { open, picked, stopped, holds_up: holdsUp, prompt };
+  return { open, picked, stopped, holds_up: holdsUp, prompt, actions };
 }
 
 // ─────────────────────────────── Picks ───────────────────────────────
@@ -379,9 +398,14 @@ export function composeInboxReplyBody(input: {
   /** The message the reply answers (`reply_to`), for `messages`. */
   replyTo?: string;
 }): string {
-  const groups: readonly InboxReplyMessageAnswers[] = input.messages ?? [
-    { message_id: input.questions[0]?.message_id ?? input.replyTo ?? "", questions: input.questions, sent: input.sent, earlier: input.earlier },
-  ];
+  // Action items (`kind: "action"`) are reported in their own section ("Actions
+  // you asked for"), never numbered or counted as questions here.
+  const questionsOnly = <T extends { kind: string }>(list: readonly T[]): T[] => list.filter((q) => q.kind !== "action");
+  const groups: readonly InboxReplyMessageAnswers[] = (
+    input.messages ?? [
+      { message_id: input.questions[0]?.message_id ?? input.replyTo ?? "", questions: input.questions, sent: input.sent, earlier: input.earlier },
+    ]
+  ).map((g) => ({ ...g, questions: questionsOnly(g.questions), sent: questionsOnly(g.sent), earlier: questionsOnly(g.earlier) }));
   // The same rule as the answers section's "x of y answered" line
   // (formatQuestionAnswersSection): a pick, Other or text answers; a note
   // alone answers only a settled question; a skip that answers nothing is a
@@ -414,7 +438,7 @@ export function composeInboxReplyBody(input: {
   // The questions this reply leaves open, and says so: the agent must not ask
   // again. A reply that answers and skips nothing keeps its own wording.
   const sentIds = new Set(groups.flatMap((g) => g.sent.map((a) => `${g.message_id}/${a.key}`)));
-  const pool = (input.stillOpen ?? groups.flatMap((g) => g.questions)).filter((q) => !sentIds.has(`${q.message_id ?? ""}/${q.key}`));
+  const pool = questionsOnly(input.stillOpen ?? groups.flatMap((g) => g.questions)).filter((q) => !sentIds.has(`${q.message_id ?? ""}/${q.key}`));
   const stillOpen = sentGroups.length === 0 ? inboxStillOpenLine(pool) : inboxOtherStillOpenLine(pool);
   return [sentence, words, stillOpen, section].filter((part) => part !== "").join("\n\n");
 }
@@ -445,7 +469,8 @@ function answersSection(group: InboxReplyMessageAnswers, headingLevel: 2 | 3): s
  * own id, the `reply_to` of the agent's new message.
  */
 export function composeInboxReaskBody(input: {
-  reask: readonly Pick<InboxQuestionRecord, "id" | "prompt">[];
+  /** The open questions and action items (`kind: "action"`, approval "inbox-next-actions") asked again. */
+  reask: readonly (Pick<InboxQuestionRecord, "id" | "prompt"> & { kind?: string })[];
   answered: readonly { record: Pick<InboxQuestionRecord, "id" | "prompt" | "parsed">; answer: QuestionAnswer }[];
   noteId: string;
   /**
@@ -456,7 +481,20 @@ export function composeInboxReaskBody(input: {
   askedBy?: string | null;
 }): string {
   const n = input.reask.length;
-  const whose = input.askedBy ? `the ${n === 1 ? "open question" : `${n} open questions`} ${input.askedBy} asked` : `your ${n === 1 ? "open question" : `${n} open questions`}`;
+  const actions = input.reask.filter((r) => r.kind === "action").length;
+  const questions = n - actions;
+  // Questions alone keep their words; with action items the note names both.
+  const items =
+    actions === 0
+      ? n === 1
+        ? "open question"
+        : `${n} open questions`
+      : questions === 0
+        ? actions === 1
+          ? "open action item"
+          : `${actions} open action items`
+        : `${questions} open question${questions === 1 ? "" : "s"} and ${actions} open action item${actions === 1 ? "" : "s"}`;
+  const whose = input.askedBy ? `the ${items} ${input.askedBy} asked` : `your ${items}`;
   const lines = [
     n === 1
       ? `Please ask ${whose} in this thread again, in one new message, so the person can answer it in one place.`
@@ -469,12 +507,17 @@ export function composeInboxReaskBody(input: {
   lines.push(
     "",
     "Still open:",
-    ...input.reask.map((q) => `- ${q.id}: ${q.prompt.replace(/\s+/g, " ").trim()}`),
+    ...input.reask.map((q) => `- ${q.id}: ${q.kind === "action" ? "(action item) " : ""}${q.prompt.replace(/\s+/g, " ").trim()}`),
     "",
     `Check ${n === 1 ? "it" : "each one"} against where the work is now:`,
-    "- Still needed: ask it again with the context the person needs today (what changed since you asked, your recommendation), and put a `Replaces: <id>` line in its question block.",
+    actions === 0
+      ? "- Still needed: ask it again with the context the person needs today (what changed since you asked, your recommendation), and put a `Replaces: <id>` line in its question block."
+      : "- Still needed: ask it again with the context the person needs today (what changed since you asked, your recommendation), and put a `Replaces: <id>` line in its block (a question in a question block, an action item in a `:::action` block).",
     "- No longer needed: leave it out, put its id in `supersedes`, and say in one line why.",
-    `Send one message (send_message) with reply_to ${input.noteId}. Until every id above is replaced or in \`supersedes\`, the old ${n === 1 ? "question stays" : "questions stay"} open for the person.`,
+    ...(actions > 0 ? ["- An action item you saw done yourself: put its id in `done`."] : []),
+    actions === 0
+      ? `Send one message (send_message) with reply_to ${input.noteId}. Until every id above is replaced or in \`supersedes\`, the old ${n === 1 ? "question stays" : "questions stay"} open for the person.`
+      : `Send one message (send_message) with reply_to ${input.noteId}. Until every id above is replaced, in \`supersedes\` or in \`done\`, the old ${n === 1 ? "one stays" : "ones stay"} open for the person.`,
   );
   if (input.answered.length > 0) {
     let section = `## ${QUESTION_ANSWERS_HEADING}\n\n`;
@@ -549,7 +592,7 @@ function replySentence(answered: number, skipped: number): string {
  * the person", the card "Skipped · <time>"), or a Mark read's for a question
  * it closed.
  */
-export function inboxSkipAnswer(record: Pick<InboxQuestionRecord, "key" | "kind" | "prompt">, options: { byReply: boolean }): QuestionAnswer {
+export function inboxSkipAnswer(record: { key: string; kind: QuestionKind; prompt: string }, options: { byReply: boolean }): QuestionAnswer {
   return {
     v: 1,
     key: record.key,
@@ -561,6 +604,16 @@ export function inboxSkipAnswer(record: Pick<InboxQuestionRecord, "key" | "kind"
   };
 }
 
+/** Questions as `- Q1. <prompt>`, then action items as `- A1. <what to do>` (each numbered as its card). */
+function numberedLines(records: readonly (Pick<InboxQuestionRecord, "position" | "prompt"> & { kind?: string })[]): string[] {
+  const line = (prefix: string) => (q: Pick<InboxQuestionRecord, "position" | "prompt">) => `- ${prefix}${q.position + 1}. ${q.prompt.replace(/\s+/g, " ").trim()}`;
+  const byPosition = (a: { position: number }, b: { position: number }) => a.position - b.position;
+  return [
+    ...records.filter((q) => q.kind !== "action").sort(byPosition).map(line("Q")),
+    ...records.filter((q) => q.kind === "action").sort(byPosition).map(line("A")),
+  ];
+}
+
 /** The first line of a Mark read's note to the asking agent. */
 export const INBOX_SET_ASIDE_HEADING = "Set aside for now; don't wait on these:";
 
@@ -569,10 +622,8 @@ export const INBOX_SET_ASIDE_HEADING = "Set aside for now; don't wait on these:"
  * (approval 2026-10-11: "tells the asking agent once"): the heading, then
  * each question with its card number.
  */
-export function composeInboxSetAsideBody(questions: readonly Pick<InboxQuestionRecord, "position" | "prompt">[]): string {
-  const lines = [...questions]
-    .sort((a, b) => a.position - b.position)
-    .map((q) => `- Q${q.position + 1}. ${q.prompt.replace(/\s+/g, " ").trim()}`);
+export function composeInboxSetAsideBody(questions: readonly (Pick<InboxQuestionRecord, "position" | "prompt"> & { kind?: string })[]): string {
+  const lines = numberedLines(questions);
   return [INBOX_SET_ASIDE_HEADING, "", ...lines, "", "The person closed them unanswered in the Inbox. Ask again if you still need an answer to go on."].join("\n");
 }
 
@@ -584,10 +635,8 @@ export const INBOX_REOPENED_HEADING = "The person reopened these:";
  * not to wait on those questions: they are open again, and wait on the
  * person, so the agent must not go on as if they were set aside.
  */
-export function composeInboxReopenedBody(questions: readonly Pick<InboxQuestionRecord, "position" | "prompt">[]): string {
-  const lines = [...questions]
-    .sort((a, b) => a.position - b.position)
-    .map((q) => `- Q${q.position + 1}. ${q.prompt.replace(/\s+/g, " ").trim()}`);
+export function composeInboxReopenedBody(questions: readonly (Pick<InboxQuestionRecord, "position" | "prompt"> & { kind?: string })[]): string {
+  const lines = numberedLines(questions);
   return [INBOX_REOPENED_HEADING, "", ...lines, "", "They are open again in the Inbox; wait for the person's answer before you rely on them."].join("\n");
 }
 

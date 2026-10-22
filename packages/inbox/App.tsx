@@ -10,6 +10,7 @@
  * Decisions page (`#decisions=…`) opens the list.
  */
 
+import type { ActionMark } from './components/ActionCard';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ThemeProvider } from '@plannotator/ui/components/ThemeProvider';
 import { TooltipProvider } from '@plannotator/ui/components/Tooltip';
@@ -1574,6 +1575,35 @@ function Inbox() {
     });
   };
 
+  /**
+   * An action item's Done or Can't do it (approval "inbox-next-actions"): written at
+   * once, sent to the agent once the 10 s Undo window passes, as 👍 Looks
+   * good. `null` is the Undo. Resolves false when it was refused.
+   */
+  const markAction = async (threadId: string, messageId: string, key: string, mark: ActionMark | null, info: { agent: string; prompt: string }): Promise<boolean> => {
+    try {
+      await inboxApi.markAction(messageId, key, mark);
+    } catch (cause) {
+      showError(cause);
+      await afterWrite();
+      return false;
+    }
+    await afterWrite();
+    if (!mark) {
+      dismissToast();
+      say('Action item moved back. Nothing was sent.');
+      return true;
+    }
+    showToast({
+      icon: mark.outcome === 'done' ? 'check' : 'warn',
+      lead: mark.outcome === 'done' ? 'Done' : "Can't do it",
+      // Short enough for one line at 520 px with Undo and its Z (a toast's words always show whole).
+      detail: `Goes to ${info.agent} in 10 s`,
+      onUndo: () => void markAction(threadId, messageId, key, null, info),
+    });
+    return true;
+  };
+
   /** Archive (the MCP's resolve) or Unarchive, with Undo. */
   const archive = async (threadId: string, rootId: string, next: boolean) => {
     const before = rowOf(threadId);
@@ -2335,6 +2365,7 @@ function Inbox() {
             row={openThreadRow}
             onMarkRead={(read) => void markRead(thread.thread_id, read)}
             onAck={(messageId, on, agent) => void acknowledge(thread.thread_id, messageId, on, agent)}
+            onAction={(messageId, key, mark, info) => markAction(thread.thread_id, messageId, key, mark, info)}
             onArchive={(next) => void archive(thread.thread_id, thread.messages[0]!.id, next)}
             replyRequest={replyFor}
             draftChanged={draftChanged}

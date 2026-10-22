@@ -79,6 +79,12 @@ export interface AgentQuestionRef {
   /** `<message id>/<key>` of the question that replaced it, or `<message id>` when nothing did. */
   superseded_by?: string;
   /**
+   * On an action item (`kind: "action"`, key `a-…`, numbered A1, A2…): what came of
+   * it, in words: `done`, `done, note: "…"`, `can't do it: "…"`, or `you saw
+   * it done` (your own `done`). Absent on a question and while it is open.
+   */
+  result?: string;
+  /**
    * On a one-line message and in `thread.questions`: the prompt, clipped, so
    * an answer ("Yes") says what it answers (the reply's answers section,
    * which named it, is left out of the person's earlier messages).
@@ -290,18 +296,35 @@ export function answerWords(answer: AgentAnswer | undefined): string {
   return parts.join("; ");
 }
 
-/** Each question's number in its message: its rank by position, as the reply's answers section numbers it. */
+/**
+ * Each question's number in its message: its rank by position, as the reply's
+ * answers section numbers it. Action items (`kind: "action"`) are numbered on their
+ * own (A1, A2…), as the reply's "Action items you asked for" numbers them.
+ */
 function numbering(questions: readonly InboxQuestion[]): Map<string, number> {
-  return new Map([...questions].sort((a, b) => a.position - b.position).map((q, i) => [q.key, i + 1]));
+  const rank = (list: readonly InboxQuestion[]) => [...list].sort((a, b) => a.position - b.position).map((q, i) => [q.key, i + 1] as const);
+  return new Map([...rank(questions.filter((q) => q.kind !== "action")), ...rank(questions.filter((q) => q.kind === "action"))]);
+}
+
+/** An action item's result in words, for the agent (`AgentQuestionRef.result`). */
+function actionResultWords(q: InboxQuestion): string | null {
+  const result = q.action_result;
+  if (q.kind !== "action" || !result) return null;
+  if (result.by === "agent") return "you saw it done";
+  const pending = q.state === "picked" ? " (not sent yet: the person can still undo it)" : "";
+  if (result.outcome === "cant") return `can't do it: ${JSON.stringify(result.note ?? "")}${pending}`;
+  return `done${result.note ? `, note: ${JSON.stringify(result.note)}` : ""}${pending}`;
 }
 
 function questionRef(q: InboxQuestion, n: number): AgentQuestionRef {
   const answer = agentAnswer(q.answer);
+  const result = actionResultWords(q);
   return {
     key: q.key,
     q: n,
     state: q.state,
     ...(answer ? { answer } : {}),
+    ...(result ? { result } : {}),
     ...(q.superseded_by ? { superseded_by: q.superseded_by.key ? `${q.superseded_by.message_id}/${q.superseded_by.key}` : q.superseded_by.message_id } : {}),
   };
 }
@@ -317,7 +340,9 @@ export function agentQuestions(questions: readonly InboxQuestion[]): AgentQuesti
  * leaves the answer out (wait_for_reply, whose reply body words it).
  */
 export function questionWords(q: AgentQuestionRef, withPrompt = false, withAnswer = true): string {
-  const head = `Q${q.q} ${q.key}${withPrompt && q.prompt ? ` (${JSON.stringify(q.prompt)})` : ""}`;
+  // An action item (key `a-…`) reads A1, A2…: the reply's "Action items you asked for" numbers it so.
+  const head = `${q.key.startsWith("a-") ? "A" : "Q"}${q.q} ${q.key}${withPrompt && q.prompt ? ` (${JSON.stringify(q.prompt)})` : ""}`;
+  if (q.result) return `${head} ${q.result}`;
   if (q.state === "superseded") return `${head} ${q.superseded_by?.includes("/") ? `replaced by ${q.superseded_by}` : "no longer applies"}`;
   const answer = withAnswer ? answerWords(q.answer) : "";
   if (q.state === "picked") return `${head} picked, not sent${answer ? `: ${answer}` : ""}`;
@@ -690,9 +715,17 @@ export function windowedThreadText(result: ThreadWindowResult, order: readonly s
   } else {
     out.push(`Waiting on the person (${thread.open_questions.length}):`);
     for (const q of thread.open_questions) {
-      const state = q.state === "picked" ? `picked, not sent${q.answer ? `: ${answerWords(q.answer)}` : ""}` : "open";
+      // An action item (key `a-…`): A1, A2…, "action item, open", or what the person marked inside its Undo window.
+      const todo = q.key.startsWith("a-");
+      const state = todo
+        ? q.state === "picked"
+          ? `${q.result ?? "marked"}`
+          : "action item, open"
+        : q.state === "picked"
+          ? `picked, not sent${q.answer ? `: ${answerWords(q.answer)}` : ""}`
+          : "open";
       const choices = q.choices.length > 0 ? ` Choices: ${q.choices.map((c) => clip(c, 200)).join(" | ")}` : "";
-      out.push(`- ${q.message_id}/${q.key} (Q${q.q}) ${state}: ${q.prompt}${choices}`);
+      out.push(`- ${q.message_id}/${q.key} (${todo ? "A" : "Q"}${q.q}) ${state}: ${q.prompt}${choices}`);
     }
   }
   if (thread.questions?.length) {

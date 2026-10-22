@@ -228,7 +228,8 @@ function RowBody({ row, phone, projectName }: { row: InboxSearchRow; phone: bool
             </Tip>
             <MetaLine chip={chip} lead={row.author.kind === 'me' ? 'You' : <bdi dir="auto">{row.author.name}</bdi>} project={projectName} at={searchTime(row.at)} />
           </span>
-          {row.question && <span className="ib-sp-chip">Question</span>}
+          {/* An action item (an Inbox `:::action`, key `a-…`) reads "Action item", not "Question". */}
+          {row.question && <span className="ib-sp-chip">{row.question.key.startsWith('a-') ? 'Action item' : 'Question'}</span>}
           {row.question?.replaced && <span className="ib-sp-chip">Replaced</span>}
           {row.archived && <span className="ib-sp-chip">Archived</span>}
         </>
