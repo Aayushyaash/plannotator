@@ -14,6 +14,7 @@ import {
   documentHeaderName,
   documentTabTitle,
   planHeadingText,
+  scrubbedUrl,
   urlDisplayName,
   type DocumentTitleInput,
 } from './documentTitle';
@@ -107,20 +108,23 @@ describe('last message', () => {
 
 describe('URL and live app', () => {
   test('a URL names its host and path, never the repository', () => {
-    const input = annotate({ sourceFilePath: 'https://docs.stripe.com/refunds/?utm=x#top' });
+    const input = annotate({ sourceFilePath: 'https://docs.stripe.com/refunds/?token=secret#top' });
     expect(documentTabTitle(input)).toBe('docs.stripe.com/refunds · Plannotator');
-    expect(documentHeaderName(input)).toEqual({
-      name: 'docs.stripe.com/refunds',
-      title: 'https://docs.stripe.com/refunds/?utm=x#top',
-    });
+    expect(documentHeaderName(input)).toEqual({ name: 'docs.stripe.com/refunds', title: 'docs.stripe.com/refunds?…' });
+  });
+  test('the tooltip never shows a query, a fragment or credentials', () => {
+    const header = documentHeaderName(annotate({ sourceFilePath: 'https://user:pass@example.com/a/b?token=secret&x=1#frag' }));
+    expect(header).toEqual({ name: 'example.com/a/b', title: 'example.com/a/b?…' });
+    expect(JSON.stringify(header)).not.toMatch(/secret|pass|frag/);
+    expect(scrubbedUrl('https://example.com/a#only-fragment')).toBe('example.com/a');
   });
   test('a site root is the host alone', () => {
     expect(urlDisplayName('https://example.com/')).toBe('example.com');
   });
   test('a live app names its host and port', () => {
-    const input = annotate({ liveAppUrl: 'http://localhost:5173/admin?tab=2' });
+    const input = annotate({ liveAppUrl: 'http://localhost:5173/admin?token=abc' });
     expect(documentTabTitle(input)).toBe('localhost:5173 · Plannotator');
-    expect(documentHeaderName(input)).toEqual({ name: 'localhost:5173', title: 'http://localhost:5173/admin?tab=2' });
+    expect(documentHeaderName(input)).toEqual({ name: 'localhost:5173', title: 'localhost:5173/admin?…' });
   });
 });
 
@@ -172,6 +176,16 @@ describe('planHeadingText', () => {
   test('drops inline markdown and a Plan: prefix', () => {
     expect(planHeadingText('Plan: Add `refunds` to **checkout**')).toBe('Add refunds to checkout');
     expect(planHeadingText('Implementation Plan: [Refunds](https://x.y) v2')).toBe('Refunds v2');
+  });
+  test('strips real HTML only: generics keep their angle brackets', () => {
+    expect(planHeadingText('Return Result<T> from parse')).toBe('Return Result<T> from parse');
+    expect(planHeadingText('Vec<String> and Map<K, V>')).toBe('Vec<String> and Map<K, V>');
+    expect(planHeadingText('Ship <code>refunds</code> <!-- todo --> now')).toBe('Ship refunds now');
+  });
+  test('cuts by character, never inside an emoji or a combined letter', () => {
+    const cut = planHeadingText('👩‍💻'.repeat(100));
+    expect(cut).toBe(`${'👩‍💻'.repeat(79)}…`);
+    expect(planHeadingText('é'.repeat(80))).toBe('é'.repeat(80));
   });
   test('keeps snake_case and a heading that is only "Plan:"', () => {
     expect(planHeadingText('Rename user_id')).toBe('Rename user_id');

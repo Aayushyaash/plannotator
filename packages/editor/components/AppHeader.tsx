@@ -561,7 +561,8 @@ export const CompactPlanNavigatorTrigger = ({
 );
 
 /** "/ notes.md" after the logo: the name cut with an ellipsis when the header
- *  runs short, the full path in the app's tooltip (and to screen readers). */
+ *  runs short, the full path in the app's tooltip (and to screen readers).
+ *  The tooltip wraps a long path rather than running off a narrow window. */
 const HeaderDocumentName: React.FC<{ name: string; title?: string }> = ({ name, title }) => {
   const descriptionId = React.useId();
   const label = (
@@ -579,7 +580,12 @@ const HeaderDocumentName: React.FC<{ name: string; title?: string }> = ({ name, 
       <span className="shrink-0 text-sm text-muted-foreground/60" aria-hidden="true">/</span>
       {title ? (
         <>
-          <Tooltip content={<span className="font-mono">{title}</span>} side="bottom" align="start" delayDuration={400}>
+          <Tooltip
+            content={<span className="block max-w-[min(560px,calc(100vw-2rem))] whitespace-normal font-mono [overflow-wrap:anywhere]">{title}</span>}
+            side="bottom"
+            align="start"
+            delayDuration={400}
+          >
             {label}
           </Tooltip>
           <span id={descriptionId} className="sr-only">{title}</span>

@@ -43,7 +43,7 @@ type Extra = Partial<ReturnType<typeof baseProps>> & {
 };
 
 async function render(extra: Extra) {
-  globalThis.fetch = (async () => new Response('{}', { status: 200 })) as typeof fetch;
+  globalThis.fetch = (async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
   host = document.createElement('div');
   document.body.appendChild(host);
   const { AppHeader } = headerModule!;

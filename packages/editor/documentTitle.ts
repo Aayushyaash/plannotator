@@ -50,6 +50,18 @@ export interface DocumentHeaderName {
 const URL_PATTERN = /^https?:\/\//i;
 const HEADING_MAX = 80;
 
+/** HTML elements a heading may carry inline. Only these are stripped, so
+ *  `Result<T>` or `Vec<String>` keep their angle brackets. */
+const HTML_TAG = /<\/?(?:a|abbr|b|bdi|bdo|br|cite|code|del|dfn|em|i|img|ins|kbd|mark|q|s|samp|small|span|strong|sub|sup|time|u|var|wbr)(?:\s[^<>]*)?\/?>|<!--[\s\S]*?-->/gi;
+
+/** The text's user-perceived characters (grapheme clusters where the engine knows them). */
+function graphemes(text: string): string[] {
+  if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+    return Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), (part) => part.segment);
+  }
+  return Array.from(text);
+}
+
 function openPath(input: DocumentTitleInput): string | null {
   return input.linkedPath || input.sourceFilePath || input.activeFile || null;
 }
@@ -61,8 +73,23 @@ export function urlDisplayName(url: string): string {
     const path = parsed.pathname.replace(/\/+$/, '');
     return `${parsed.host}${path}`;
   } catch {
-    return url.replace(URL_PATTERN, '').replace(/[?#].*$/, '').replace(/\/+$/, '');
+    return url.replace(URL_PATTERN, '').replace(/^[^/?#]*@/, '').replace(/[?#].*$/, '').replace(/\/+$/, '');
   }
+}
+
+/**
+ * A URL as the header's tooltip may show it: host and path, a query reduced to
+ * `?…`, no fragment and no credentials, so a token in the address is never on
+ * screen (the rule Ask AI's element context follows).
+ */
+export function scrubbedUrl(url: string): string {
+  let hasQuery: boolean;
+  try {
+    hasQuery = new URL(url).search.length > 1;
+  } catch {
+    hasQuery = /\?[^#]/.test(url);
+  }
+  return `${urlDisplayName(url)}${hasQuery ? '?…' : ''}`;
 }
 
 function urlHost(url: string): string {
@@ -91,7 +118,7 @@ export function planHeadingText(heading: string): string {
   let text = heading
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/<[^>]+>/g, '')
+    .replace(HTML_TAG, '')
     .replace(/`+/g, '')
     .replace(/(\*\*|__|~~)(.+?)\1/g, '$2')
     .replace(/(^|[^\w*])\*(?!\s)(.+?)\*(?!\w)/g, '$1$2')
@@ -100,7 +127,8 @@ export function planHeadingText(heading: string): string {
     .trim();
   const withoutPrefix = text.replace(/^(implementation\s+)?plan\s*:\s*/i, '');
   if (withoutPrefix) text = withoutPrefix;
-  return text.length > HEADING_MAX ? `${text.slice(0, HEADING_MAX - 1).trimEnd()}…` : text;
+  const chars = graphemes(text);
+  return chars.length > HEADING_MAX ? `${chars.slice(0, HEADING_MAX - 1).join('').trimEnd()}…` : text;
 }
 
 /** What the name sits beside in the tab: the repository, or "Plannotator" outside one. */
@@ -118,14 +146,15 @@ function defaultTabTitle(repo: DocumentTitleRepo | null | undefined): string {
 /** The name the document is known by, with the place it came from. */
 function documentName(input: DocumentTitleInput): { name: string; title?: string; web: boolean } | null {
   if (input.liveAppUrl) {
-    return { name: urlHost(input.liveAppUrl), title: input.liveAppUrl, web: true };
+    return { name: urlHost(input.liveAppUrl), title: scrubbedUrl(input.liveAppUrl), web: true };
   }
   const path = openPath(input);
   if (path) {
     if (input.bundle && input.bundle.index >= 0) {
       return { name: bundleName(path, input.bundle), title: path, web: false };
     }
-    return { name: pathDisplayName(path), title: path, web: URL_PATTERN.test(path) };
+    const web = URL_PATTERN.test(path);
+    return { name: pathDisplayName(path), title: web ? scrubbedUrl(path) : path, web };
   }
   if (input.annotateSource === 'message') return { name: 'Last message', web: false };
   if (input.annotateSource === 'folder' && input.folderPath) {
