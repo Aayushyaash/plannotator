@@ -86,7 +86,7 @@ import { installPasteFollowsField } from './pasteTarget';
 import { installPlainTextPaste } from '@plannotator/ui/utils/pasteInsert';
 import { LIST_MIN_WIDTH, THREAD_BESIDE_FILE_WIDTH, paneGutters, useStack } from './stack';
 import { backTo, pushScreen } from './history';
-import { parseFileView } from './fileView';
+import { parseFileView, sameScreenAnyView } from './fileView';
 import { adoptSavedTheme, inboxThemeSync } from './theme';
 import { adoptSavedTextSize, applyRememberedTextSize } from './textSize';
 import { parseSettingsHash, settingsHash, type SettingsSection } from './settingsRoute';
@@ -2383,8 +2383,29 @@ function Inbox() {
               // A call that names no view keeps the one in the address (the pane names it for a step, a version, a linked page).
               const keepView = file.view === undefined ? (routeRef.current.file?.view ?? null) : file.view;
               const next = { ...routeRef.current, file: { ...file, view: keepView } };
-              // Back through a linked page's stack: the browser's Back when this entry was opened from there.
-              if (options?.back && backTo(hashOf(next))) return;
+              // Back through a linked page's stack: the browser's Back when this entry was opened from there,
+              // whatever view that entry names (the switch replaced only the entry on screen); once it lands,
+              // the view the person is in now replaces the one it named.
+              if (options?.back && backTo(hashOf(next), window.history, sameScreenAnyView)) {
+                const view = next.file.view;
+                if (view) {
+                  // Where the traversal lands (popstate, or only hashchange in some engines), once; a Back that never lands drops it.
+                  const landed = () => {
+                    stop();
+                    const now = readRoute();
+                    if (now.file && now.file.view !== view) writeRoute({ ...now, file: { ...now.file, view } }, { replace: true });
+                  };
+                  const stop = () => {
+                    clearTimeout(timer);
+                    window.removeEventListener('popstate', landed);
+                    window.removeEventListener('hashchange', landed);
+                  };
+                  const timer = setTimeout(stop, 1000);
+                  window.addEventListener('popstate', landed);
+                  window.addEventListener('hashchange', landed);
+                }
+                return;
+              }
               writeRoute(next, options);
             }}
             onOpenGuide={(messageId) => go({ ...route, guide: messageId })}

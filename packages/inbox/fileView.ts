@@ -72,3 +72,20 @@ export function fileViewFor(attachment: Pick<InboxAttachmentState, 'kind' | 'ref
 export function openingView(attachment: Pick<InboxAttachmentState, 'kind' | 'ref'>): FileView {
   return readFileViewChoice() ?? kindDefaultView(attachment);
 }
+
+/**
+ * The same screen, whatever view each hash names: a hash with `view=`
+ * dropped. Back from a linked page compares with this, because the entry it
+ * was opened from still names the view it had then (a press on the switch
+ * replaced only the entry on screen).
+ */
+export function hashWithoutView(hash: string): string {
+  const params = new URLSearchParams(hash.replace(/^#/, ''));
+  params.delete('view');
+  const rest = params.toString();
+  return rest ? `#${rest}` : '';
+}
+
+export function sameScreenAnyView(a: string, b: string): boolean {
+  return hashWithoutView(a) === hashWithoutView(b);
+}

@@ -1384,10 +1384,15 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   /**
    * The person picked a view with a button: it applies now and to every
    * file opened next. A phone or a stacked window has no such button and
-   * saves nothing. When the remembered choice changes, the window's toast
-   * says so once, with Undo (the old choice back, and this file's view).
+   * saves nothing. `next` is the view on screen when the person pressed the
+   * switch's pressed half (it saves the choice, the frame stays). When the
+   * remembered choice changes, the window's toast says so once, with Undo:
+   * the old choice back and, if the press moved this file and it is still
+   * the one open, its old view; another file open by then keeps its frame.
    */
   const pickView = (next: FileView) => {
+    const pickedOn = fileRef.current?.id ?? null;
+    const viewBefore = currentView;
     setFull(next === 'full');
     if (phone || fileStacked) return;
     const before = readFileViewChoice();
@@ -1402,7 +1407,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
       speech: `${lead}, ${detail}.`,
       onUndo: () => {
         writeFileViewChoice(before);
-        setFull(next !== 'full');
+        if (viewBefore !== next && pickedOn !== null && fileRef.current?.id === pickedOn) setFull(viewBefore === 'full');
       },
     });
   };
@@ -1412,8 +1417,11 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   /** Every attachment of the thread in thread order: what the pane steps through. */
   const steps = useMemo(() => attachmentSequence(thread.messages, attachments, inlineImages), [thread.messages, attachments, inlineImages]);
   const openFile = (attachment: Pick<InboxAttachmentState, 'id' | 'kind' | 'ref'>, version: 'current' | 'sent' = 'current', focus: string | null = null, view: FileView | null = null) => {
-    // The remembered choice, else today's rule (fileView.ts); a tile's ⋯ names one for this file alone.
-    onOpenFile({ id: attachment.id, version, focus, view: view ?? openingView(attachment) });
+    // A tile's ⋯ names a view for this file alone. The file already open keeps the view it is in (a comment
+    // card in the reply box, its tile again: a one-off view from the ⋯ stays). Else the remembered choice,
+    // else today's rule (fileView.ts).
+    const kept = file && file.id === attachment.id ? currentView : null;
+    onOpenFile({ id: attachment.id, version, focus, view: view ?? kept ?? openingView(attachment) });
   };
   /** A tile, or a link in a message: the file as it is now, focus in its pane (a typed comment in the open file asks first). */
   const openFromMessage = (attachment: Pick<InboxAttachmentState, 'id' | 'kind' | 'ref'> & { name?: string }, view: FileView | null = null) => {
@@ -3457,6 +3465,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
           if (pick) pickView(full ? 'side' : 'full');
           else setFull(!full);
         }}
+        // The switch's pressed half: the view on screen becomes the choice; the frame stays.
+        onKeepView={() => pickView(currentView)}
         focusId={file!.focus}
         focusRequest={paneFocus}
         fromPerson={thread.messages.find((m) => m.id === openAttachment.message_id)?.author.kind === 'person'}

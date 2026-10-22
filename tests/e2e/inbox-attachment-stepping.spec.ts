@@ -176,6 +176,9 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   };
 });
 
+/** A view pressed in a test is remembered: forgotten after each, so the next opens by today's rule (file-view.ts). */
+test.afterEach(async () => forgetFileViewChoice(world?.page));
+
 test.afterAll(async () => {
   try {
     if (!world) return;
@@ -235,8 +238,6 @@ test('] and › step in thread order, keep the frame, and replace the route; ins
   // Full screen: a step keeps it (and its toolbar), the route is replaced.
   await pane().getByRole('button', { name: 'Full screen' }).click();
   await expect(pane()).toHaveClass(/ib-full/);
-  // The pick is remembered; the address carries this file's view, so the steps below do not need the choice.
-  await forgetFileViewChoice(page);
   const historyBefore = await page.evaluate(() => history.length);
   await page.keyboard.press(']');
   await expectAt(2, 'checkout-flow.html');
@@ -249,7 +250,6 @@ test('] and › step in thread order, keep the frame, and replace the route; ins
   // Beside the thread for the rest: a step keeps that frame too.
   await page.getByRole('button', { name: 'Side by side' }).click();
   await expect(pane()).not.toHaveClass(/ib-full/);
-  await forgetFileViewChoice(page);
 
   // The page's text field keeps [ and ], armed or not.
   // (A click would pin the field while armed: focus it the way Tab would.)

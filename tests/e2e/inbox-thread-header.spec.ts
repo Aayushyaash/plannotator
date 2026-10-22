@@ -123,6 +123,9 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   };
 });
 
+/** A view pressed in a test is remembered: forgotten after each, so the next opens by today's rule (file-view.ts). */
+test.afterEach(async () => forgetFileViewChoice(world?.page));
+
 test.afterAll(async () => {
   try {
     if (!world) return;
@@ -183,11 +186,9 @@ test('a file beside the thread: ‹ Inbox, then Mark read; Archive ends the head
   expect(await headerOrder(pane)).toEqual(['back', 'mark-read', 'expand', 'archive']);
   await view.getByRole('button', { name: 'Full screen' }).click();
   await expect(view).toHaveClass(/ib-full/);
-  await forgetFileViewChoice(page);
   await shot(page, '4-file-full-screen');
   await view.getByRole('button', { name: 'Side by side' }).click();
   await expect(view).not.toHaveClass(/ib-full/);
-  await forgetFileViewChoice(page);
   expect(await headerOrder(pane)).toEqual(['back', 'mark-read', 'expand', 'archive']);
 });
 

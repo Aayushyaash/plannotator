@@ -3764,7 +3764,6 @@ ol.ib-rl-two .ib-rw-cmd { font-weight: 400; margin-top: 6px; }
    and full screen's labelled "Side by side" ───────────────────────────────── */
 .pn-inbox .ib-viewseg { flex: none; }
 .pn-inbox .ib-viewseg .ib-seg-o { height: 26px; padding: 0 10px; font-size: var(--ib-fs-12-5, 12.5px); }
-.pn-inbox .ib-viewseg .ib-seg-o[data-on] { cursor: default; }
 .pn-inbox .ib-viewseg .ib-seg-o:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 .pn-inbox .ib-fvb.ib-fvside { padding: 0 10px 0 8px; gap: 6px; background: var(--muted); color: var(--foreground); font-weight: 550; }
 .pn-inbox .ib-fvb.ib-fvside:hover { background: color-mix(in oklch, var(--muted) 70%, var(--foreground) 12%); }

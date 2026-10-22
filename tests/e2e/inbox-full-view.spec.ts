@@ -147,6 +147,9 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
 });
 
 
+/** A view pressed in a test is remembered: forgotten after each, so the next opens by today's rule (file-view.ts). */
+test.afterEach(async () => forgetFileViewChoice(world?.page));
+
 test.afterAll(async () => {
   try {
     if (!world) return;
@@ -324,14 +327,12 @@ test('⋯ holds Open in and Download; Side by side puts the file beside the thre
   await expect(pane()).not.toHaveClass(/ib-full/);
   await expect(pane().locator('.ib-vhead [data-view-side]')).toBeFocused();
   await expect(page.locator('[data-html-tools-toggle]')).toHaveCount(0);
-  await forgetFileViewChoice(page);
   await shot(page, 'html-beside', ['dark']);
   await pane().locator('.ib-vhead [data-full-screen-toggle]').focus();
   await page.keyboard.press('Enter');
   await expect(pane()).toHaveClass(/ib-full/);
   await expect(dock()).toHaveAttribute('data-bar', 'pinned');
   await expect(bar().locator('[data-full-view-pen]')).toBeFocused();
-  await forgetFileViewChoice(page);
 });
 
 test('the approved states of an HTML page, in light and dark', async () => {
@@ -413,7 +414,6 @@ test('Escape climbs one rung per press (a draft, typed words asked about, the dr
   await pane().locator('.ib-vhead [data-full-screen-toggle]').focus();
   await page.keyboard.press('Enter');
   await expect(pane()).toHaveAttribute('data-full-view', '');
-  await forgetFileViewChoice(page);
   await expect(dock()).toHaveAttribute('data-bar', 'pinned');
   // From the window: tucked, focus on the handle (it was in the toolbar).
   await bar().locator('[data-full-view-pen]').focus();

@@ -29,7 +29,6 @@ import { spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { LiveSessions, seedWorstCase, type WorstCaseWorld } from '../../scripts/inbox-worst-case';
 import { inboxScratch, rememberInboxOf, removeInboxScratch } from './inbox-scratch';
-import { forgetFileViewChoice } from './file-view';
 import { NO_BROWSER } from '../helpers/no-browser';
 
 const repo = resolve(__dirname, '../..');
@@ -445,7 +444,6 @@ for (const width of [944, 1024, 1180, 1280]) {
       // Full screen: the PDF fills the window under its toolbar, which stays whole inside it (row 50); a file
       // that takes no comments has no count in it.
       await page.locator('section.ib-view').getByRole('button', { name: 'Full screen' }).click();
-      await forgetFileViewChoice(page);
       await page.waitForTimeout(300);
       expect(await shapes(page)).toEqual([]);
       await expect(page.locator('section.ib-view [data-full-view-comments]')).toHaveCount(0);

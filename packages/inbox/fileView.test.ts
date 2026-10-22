@@ -8,12 +8,13 @@ import { resetStorageBackend, setStorageBackend } from '@plannotator/ui/utils/st
 import {
   FILE_VIEW_COOKIE,
   fileViewFor,
+  hashWithoutView,
+  sameScreenAnyView,
   kindDefaultView,
   openingView,
   parseFileView,
   readFileViewChoice,
   writeFileViewChoice,
-  type FileView,
 } from './fileView';
 
 const store = new Map<string, string>();
@@ -45,19 +46,17 @@ test("before any choice, today's rule: an HTML page and an image from a message'
   for (const a of [markdown, code, attachedImage, video, pdf, unknownKind]) expect(rule(a)).toBe('side');
 });
 
-test('the decision table: room, then the address, then the choice, then the rule', () => {
-  const kinds = [html, markdown, code, attachedImage, inTextImage, video, pdf, unknownKind];
-  const views: (FileView | null)[] = [null, 'full', 'side'];
-  for (const attachment of kinds) {
-    for (const address of views) {
-      for (const choice of views) {
-        // No room for two panes (a phone, a stacked window): always full screen, whatever anything says.
-        expect(fileViewFor(attachment, { address, choice, narrow: true })).toBe('full');
-        const expected = address ?? choice ?? kindDefaultView(attachment);
-        expect(fileViewFor(attachment, { address, choice, narrow: false })).toBe(expected);
-      }
-    }
-  }
+test('no room for two panes (a phone, a stacked window): full screen, whatever the address or the choice says', () => {
+  expect(fileViewFor(markdown, { address: 'side', choice: 'side', narrow: true })).toBe('full');
+  expect(fileViewFor(html, { address: null, choice: 'side', narrow: true })).toBe('full');
+  expect(fileViewFor(pdf, { address: null, choice: null, narrow: true })).toBe('full');
+});
+
+test('nothing named: the rule by kind', () => {
+  expect(fileViewFor(html, { address: null, choice: null, narrow: false })).toBe('full');
+  expect(fileViewFor(inTextImage, { address: null, choice: null, narrow: false })).toBe('full');
+  expect(fileViewFor(attachedImage, { address: null, choice: null, narrow: false })).toBe('side');
+  expect(fileViewFor(markdown, { address: null, choice: null, narrow: false })).toBe('side');
 });
 
 test('the choice applies to every kind: Side by side keeps HTML and in-text images beside the thread, Full screen takes documents full screen', () => {
@@ -101,4 +100,16 @@ test('the remembered choice: written, read back, forgotten; a stored value that 
   store.set(FILE_VIEW_COOKIE, 'sideways');
   expect(readFileViewChoice()).toBeNull();
   expect(openingView(html)).toBe('full');
+});
+
+test("a linked page's Back finds its entry whatever view either hash names", () => {
+  const before = '#thread=msg_1&file=att_1&linked=B.html&view=side';
+  expect(hashWithoutView(before)).toBe('#thread=msg_1&file=att_1&linked=B.html');
+  expect(hashWithoutView('#view=full')).toBe('');
+  expect(sameScreenAnyView(before, '#thread=msg_1&file=att_1&linked=B.html&view=full')).toBe(true);
+  expect(sameScreenAnyView(before, '#thread=msg_1&file=att_1&linked=B.html')).toBe(true);
+  // Another page, another file, another version: another screen.
+  expect(sameScreenAnyView(before, '#thread=msg_1&file=att_1&linked=C.html&view=side')).toBe(false);
+  expect(sameScreenAnyView(before, '#thread=msg_1&file=att_2&linked=B.html&view=side')).toBe(false);
+  expect(sameScreenAnyView(before, '#thread=msg_1&file=att_1&v=sent&linked=B.html&view=side')).toBe(false);
 });

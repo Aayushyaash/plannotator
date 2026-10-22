@@ -20,7 +20,6 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
-import { forgetFileViewChoice } from './file-view';
 import { NO_BROWSER } from '../helpers/no-browser';
 
 const repo = resolve(__dirname, '../..');
@@ -95,15 +94,14 @@ test('a link to an attached file opens it beside the thread; an unattached one i
     // HTML opens full screen (approval "inbox-one-fullscreen"): Side by side puts it beside the thread, with its header.
     await expect(pane).toHaveAttribute('data-full-view', '');
     await page.getByRole('button', { name: 'Side by side' }).click();
-    await forgetFileViewChoice(page);
-    // Close it, then Enter on the focused link opens it again (full screen again).
+    await expect(pane).not.toHaveAttribute('data-full-view', '');
+    // Close it, then Enter on the focused link opens it again: side by side, the view just chosen.
     await page.getByRole('button', { name: 'Close mock.html' }).click();
     await expect(pane).toHaveCount(0);
     await mock.focus();
     await page.keyboard.press('Enter');
-    await expect(page.locator('[data-attachment-pane]')).toHaveAttribute('data-full-view', '');
-    await page.getByRole('button', { name: 'Side by side' }).click();
-    await forgetFileViewChoice(page);
+    await expect(page.locator('[data-attachment-pane]')).toBeVisible();
+    await expect(page.locator('[data-attachment-pane]')).not.toHaveAttribute('data-full-view', '');
     await page.getByRole('button', { name: 'Close mock.html' }).click();
 
     // Not attached: inert text with its reason, never requested.

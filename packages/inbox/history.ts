@@ -37,12 +37,13 @@ if (typeof window !== 'undefined') window.addEventListener('popstate', settle);
  * Leave for `hash`: the browser's Back when this entry was opened from
  * exactly there (returns true), otherwise nothing, and the caller opens it
  * as a new entry (returns false). While a Back is on its way, returns true
- * and does nothing.
+ * and does nothing. `same` decides what "exactly there" means (default: the
+ * same hash; a linked page's Back ignores the file's view, fileView.ts).
  */
-export function backTo(hash: string, history: HistoryLike = window.history): boolean {
+export function backTo(hash: string, history: HistoryLike = window.history, same: (from: string, hash: string) => boolean = (a, b) => a === b): boolean {
   if (pending !== null) return true;
   const state = history.state as { ibFrom?: unknown } | null;
-  if (!state || state.ibFrom !== hash) return false;
+  if (!state || typeof state.ibFrom !== 'string' || !same(state.ibFrom, hash)) return false;
   pending = setTimeout(settle, 1000);
   history.back();
   return true;

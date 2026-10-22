@@ -85,6 +85,9 @@ test.beforeAll(async ({ browser }) => {
   page = await context.newPage();
 });
 
+/** A view pressed in a test is remembered in the shared context: forgotten after each (file-view.ts). */
+test.afterEach(async () => forgetFileViewChoice(context));
+
 test.afterAll(async () => {
   try {
     await claude?.close().catch(() => {});
@@ -287,8 +290,6 @@ test('a file full screen over the thread: the reply box hidden under it takes no
     await p.locator('section.ib-pane .ib-atts [data-attachment-id]').first().click();
     await p.getByRole('button', { name: 'Full screen' }).click();
     await expect(p.locator('.ib-view.ib-full')).toBeVisible();
-    // The pick is remembered in the context's cookies: forget it, so the next test's file opens beside the thread again.
-    await forgetFileViewChoice(p);
     await p.locator('.ib-view.ib-full').getByText('Retry with the same key').click();
     await dictate(p, 'Not into the hidden box. ');
     await p.waitForTimeout(300);
@@ -306,8 +307,6 @@ test('a full-screen file: its own comment box (portaled outside the file) takes 
     await p.locator('section.ib-pane .ib-atts [data-attachment-id]').first().click();
     await p.getByRole('button', { name: 'Full screen' }).click();
     await expect(p.locator('.ib-view.ib-full')).toBeVisible();
-    // The pick is remembered in the context's cookies: forget it, so the next test's file opens beside the thread again.
-    await forgetFileViewChoice(p);
     await p.getByRole('button', { name: /Global comment/ }).first().click();
     const comment = p.getByPlaceholder(/comment/i).last();
     await expect(comment).toBeFocused();

@@ -31,7 +31,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
-import { forgetFileViewChoice } from './file-view';
 import { NO_BROWSER } from '../helpers/no-browser';
 
 const repo = resolve(__dirname, '../..');
@@ -276,8 +275,6 @@ test('Inbox: the attached document never paints over the toolstrip, beside the t
           if (layout.full) {
             await page.getByRole('button', { name: 'Full screen' }).click();
             await expect(page.locator('.ib-view.ib-full')).toBeVisible();
-            // The toast the pick raises would cover the bottom of the window: gone, with the choice.
-            await forgetFileViewChoice(page);
             // The comments drawer open beside the page, so the centred document reaches under the toolstrip.
             await page.locator('[data-full-view-comments]').click();
             await expect(page.locator('.ib-view.ib-drawer')).toBeVisible();

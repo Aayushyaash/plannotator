@@ -87,3 +87,21 @@ describe('the history stack', () => {
     expect(h.entries.length).toBe(1);
   });
 });
+
+test('with a comparison that ignores the view, a Back finds the entry it was opened from after the view changed on screen', async () => {
+  const { sameScreenAnyView } = await import('./fileView');
+  const h = fakeHistory();
+  const page = '#thread=msg_1&file=att_1&view=side';
+  pushScreen('#thread=msg_1&file=att_1&linked=B.html&view=side', page, '/x', h);
+  // The default comparison: the page now named in the full-screen view is another hash, so no Back.
+  expect(backTo('#thread=msg_1&file=att_1&view=full', h)).toBe(false);
+  expect(h.backs).toBe(0);
+  // Ignoring the view: the browser's Back, once.
+  expect(backTo('#thread=msg_1&file=att_1&view=full', h, sameScreenAnyView)).toBe(true);
+  expect(h.backs).toBe(1);
+  h.land();
+  expect(h.index).toBe(0);
+  // Another page is still another screen.
+  pushScreen('#thread=msg_1&file=att_1&linked=B.html&view=side', page, '/x', h);
+  expect(backTo('#thread=msg_1&file=att_2&view=side', h, sameScreenAnyView)).toBe(false);
+});

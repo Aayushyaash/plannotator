@@ -153,6 +153,8 @@ export interface AttachmentPaneProps {
   fullLocked?: boolean;
   /** `pick`: the person chose with a button (remembered); Escape's last rung is not a pick. */
   onToggleFull: (pick: boolean) => void;
+  /** The view switch's pressed half: the view on screen becomes the remembered one; the frame stays. */
+  onKeepView?: () => void;
   /** An annotation to select when the file opens (from the chip's list). */
   focusId: string | null;
   readOnly: boolean;
@@ -1389,8 +1391,8 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
           {!props.fullLocked && (
             // The view's two parts (fileView.ts), the one shown pressed. This header shows only while the file is side by side.
             <div className="ib-seg ib-viewseg" role="group" aria-label="View" data-view-switch="">
-              <Tip content="Side by side: the file beside the thread">
-                <button type="button" className="ib-seg-o" aria-pressed="true" data-on="" aria-label={folded ? 'Side by side' : undefined} data-view-side="">
+              <Tip content="Side by side: files open beside the thread until you choose again">
+                <button type="button" className="ib-seg-o" aria-pressed="true" data-on="" onClick={() => props.onKeepView?.()} aria-label={folded ? 'Side by side' : undefined} data-view-side="">
                   <Icon name="sideBySide" size={14} />
                   {!folded && 'Side by side'}
                 </button>

@@ -243,6 +243,9 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   };
 });
 
+/** A view pressed in a test is remembered: forgotten after each, so the next opens by today's rule (file-view.ts). */
+test.afterEach(async () => forgetFileViewChoice(world?.page));
+
 test.afterAll(async () => {
   try {
     if (!world) return;
@@ -415,7 +418,6 @@ test('a selection comment on the plan is saved and listed in the reply box chip'
   await shot('2.3-full-screen-annotation-mode');
   await pane.getByRole('button', { name: 'Side by side' }).click();
   await expect(pane).not.toHaveClass(/ib-full/);
-  await forgetFileViewChoice(page);
 
   // The chip inside the reply box lists each annotation with its file, quote and comment.
   await page.getByRole('button', { name: 'Reply', exact: true }).click();
@@ -495,7 +497,6 @@ test('the HTML prototype opens full screen: its image and frame load from its fo
 
   await pane.getByRole('button', { name: 'Side by side' }).click();
   await expect(pane).not.toHaveClass(/ib-full/);
-  await forgetFileViewChoice(page);
   await pane.getByRole('button', { name: 'Close admin-view.html' }).click();
   await expect(pane).toHaveCount(0);
   expect(page.url()).not.toContain('file=');
@@ -592,7 +593,6 @@ test("the reply box's chips wrap inside it beside a file, stacked and on a phone
   const pane = page.locator(`[data-attachment-pane="${world.attachments.html}"]`);
   await pane.getByRole('button', { name: 'Side by side' }).click();
   await expect(pane).not.toHaveClass(/ib-full/);
-  await forgetFileViewChoice(page);
   // The 440 px thread column beside the file.
   await expect(page.locator('section.ib-pane .ib-rfoot [data-annotations-chip]')).toHaveText('3 annotations');
   expect(await replyChipProblems(page)).toEqual([]);
@@ -663,7 +663,6 @@ test('leaving full screen keeps the file beside the thread with ‹ Inbox leadin
   await expect(pane).not.toHaveClass(/ib-full/);
   // Focus on the header switch's Side by side, now pressed; the way back is in view at the top left, ahead of Mark read; Archive ends the header.
   await expect(pane.getByRole('button', { name: 'Side by side' })).toBeFocused();
-  await forgetFileViewChoice(page);
   await expect(back).toBeVisible();
   await expect(back).toHaveAccessibleName('Back to Inbox');
   await expect(back).toHaveText('Inbox');

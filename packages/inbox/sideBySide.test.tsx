@@ -52,7 +52,7 @@ function loopback(path: string, method = 'GET', body?: string): Promise<{ status
   });
 }
 
-const TESTS = 6;
+const TESTS = 8;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -166,7 +166,8 @@ async function close() {
 }
 
 
-const choice = () => document.cookie.split('; ').find((c) => c.startsWith(`${VIEW_COOKIE}=`))?.slice(VIEW_COOKIE.length + 1) ?? null;
+/** The remembered view (a removed cookie can linger empty here: that is none). */
+const choice = () => document.cookie.split('; ').find((c) => c.startsWith(`${VIEW_COOKIE}=`))?.slice(VIEW_COOKIE.length + 1) || null;
 const addressView = () => new URLSearchParams(window.location.hash.slice(1)).get('view');
 const toast = () => host!.querySelector<HTMLElement>('.ib-toast');
 const liveSaid = () => [...host!.querySelectorAll<HTMLElement>('[data-inbox-live]')].map((n) => n.textContent ?? '').join(' ');
@@ -186,7 +187,7 @@ async function tileMenu(name: string): Promise<HTMLElement> {
 }
 const openAsItems = (menu: HTMLElement) => [...menu.querySelectorAll<HTMLElement>('[data-open-as]')].map((i) => `${i.getAttribute('data-open-as')}:${i.textContent?.trim()}`);
 
-test.skipIf(!hasDom)('the header switch: Side by side pressed, Full screen saves the choice with the toast; Undo forgets it and puts the file back', async () => {
+test.skipIf(!hasDom)('the header switch: a press on its pressed half saves side by side, the frame unchanged; again, no toast; Full screen saves full screen; Undo puts the old choice and the view back', async () => {
   const el = await renderThread();
   await openTile('plan.md');
   expect(inFullScreen()).toBe(false);
@@ -198,33 +199,60 @@ test.skipIf(!hasDom)('the header switch: Side by side pressed, Full screen saves
   expect(sideButton()!.textContent).toBe('Side by side');
   expect(fullButton()!.textContent).toBe('Full screen');
 
+  // The pressed half: side by side becomes the choice, with the toast; the file stays where it is.
+  await act(async () => sideButton()!.click());
+  await until(() => toast() !== null, 'the side-by-side toast');
+  expect(choice()).toBe('side');
+  expect(inFullScreen()).toBe(false);
+  expect(addressView()).toBe('side');
+  expect(toast()!.querySelector('.ib-tlead')!.textContent).toBe('Files open side by side now');
+  expect(toast()!.querySelector('.ib-tdetail')!.textContent).toBe('until you choose Full screen');
+  await act(async () => toast()!.querySelector<HTMLButtonElement>('[data-toast-dismiss]')!.click());
+  await until(() => toast() === null, 'the toast gone');
+
+  // Picking the view already remembered says nothing a second time.
+  await act(async () => sideButton()!.click());
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 200));
+  });
+  expect(toast()).toBeNull();
+  expect(choice()).toBe('side');
+
+  // Full screen: the choice, the toast, and the live region.
   await act(async () => fullButton()!.click());
   await until(inFullScreen, 'full screen');
   expect(choice()).toBe('full');
   expect(addressView()).toBe('full');
-  await until(() => toast() !== null, 'the toast');
+  await until(() => toast() !== null, 'the full-screen toast');
   expect(toast()!.querySelector('.ib-tlead')!.textContent).toBe('Files open full screen now');
   expect(toast()!.querySelector('.ib-tdetail')!.textContent).toBe('until you choose Side by side');
   await until(() => liveSaid().includes('Files open full screen now, until you choose Side by side.'), 'the toast said in the live region');
 
-  // Undo: no choice again, and the file back beside the thread.
+  // Undo: side by side remembered again, and this file back beside the thread.
   await act(async () => toast()!.querySelector<HTMLButtonElement>('[data-toast-undo]')!.click());
   await until(() => !inFullScreen(), 'beside the thread again');
-  expect(choice()).toBeNull();
+  expect(choice()).toBe('side');
   expect(addressView()).toBe('side');
+});
 
-  // Picking the view already remembered says nothing a second time.
+test.skipIf(!hasDom)('Undo after another file opened puts back only the choice: the file open by then keeps its frame', async () => {
+  await renderThread();
+  await openTile('plan.md');
   await act(async () => fullButton()!.click());
   await until(inFullScreen, 'full screen');
-  await until(() => toast() !== null, 'the toast again');
-  await act(async () => toast()!.querySelector<HTMLButtonElement>('[data-toast-dismiss]')!.click());
-  await until(() => toast() === null, 'the toast gone');
-  await act(async () => el.querySelector<HTMLButtonElement>('[data-full-view-exit="exit"]')!.click());
-  await until(() => !inFullScreen(), 'side by side');
-  expect(choice()).toBe('side');
-  await until(() => toast() !== null, 'the side-by-side toast');
-  expect(toast()!.querySelector('.ib-tlead')!.textContent).toBe('Files open side by side now');
-  expect(toast()!.querySelector('.ib-tdetail')!.textContent).toBe('until you choose Full screen');
+  expect(choice()).toBe('full');
+  await until(() => toast() !== null, 'the toast');
+  // Another file, opened by the new choice: full screen.
+  await openTile('shot.png');
+  await until(inFullScreen, 'the image full screen');
+  await act(async () => toast()!.querySelector<HTMLButtonElement>('[data-toast-undo]')!.click());
+  expect(choice()).toBeNull();
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 200));
+  });
+  expect(view()?.getAttribute('data-attachment-pane')).toBe(world.openIn.ids['shot.png']!);
+  expect(inFullScreen()).toBe(true);
+  expect(addressView()).toBe('full');
 });
 
 test.skipIf(!hasDom)("Side by side, once chosen, opens every kind beside the thread, HTML included; Full screen, once chosen, takes a document full screen", async () => {
@@ -252,8 +280,47 @@ test.skipIf(!hasDom)("Escape's last rung puts the file beside the thread without
   expect(choice()).toBeNull();
   expect(toast()).toBeNull();
   expect(document.activeElement === sideButton()).toBe(true);
-  // The address carries it, so a reload keeps it beside; the next HTML file still follows today's rule.
+  // The address carries it, so a reload keeps it beside.
   expect(addressView()).toBe('side');
+  // Nothing was saved, so the page opened again follows today's rule: full screen.
+  await close();
+  await until(() => view() === null, 'closed');
+  await openTile('page.html');
+  await until(inFullScreen, 'the page full screen by the rule');
+  expect(choice()).toBeNull();
+});
+
+test.skipIf(!hasDom)("a comment card in the reply box opens its file in the view it is in: a one-off view from a tile's ⋯ stays", async () => {
+  // A comment waiting on plan.md (seeded through the Inbox's own route).
+  const saved = await loopback(
+    '/api/inbox/annotations',
+    'POST',
+    JSON.stringify({
+      attachment_id: world.openIn.ids['plan.md'],
+      version: 'current',
+      annotation: { id: 'ann-sbs-1', blockId: 'block-0', startOffset: 0, endOffset: 4, type: 'COMMENT', text: 'Is this the order?', originalText: 'Plan', createdA: Date.now() },
+    }),
+  );
+  expect(saved.status).toBe(200);
+  document.cookie = `${VIEW_COOKIE}=side; path=/`;
+  const el = await renderThread();
+  // plan.md full screen for this once, from its tile's ⋯.
+  const menu = await tileMenu('plan.md');
+  await act(async () => menu.querySelector<HTMLElement>('[data-open-as="full"]')!.click());
+  await until(() => view()?.getAttribute('data-attachment-pane') === world.openIn.ids['plan.md'], 'plan.md open');
+  await until(inFullScreen, 'full screen for this file');
+  // The reply box (its foot reads "Edit draft" while a comment waits), its chip, then the comment's card.
+  const opener = () => [...el.querySelectorAll<HTMLButtonElement>('.ib-pfoot button')].find((b) => ['Reply', 'Edit draft'].includes(b.textContent?.trim() ?? ''));
+  await until(() => opener() !== undefined, 'the reply box button');
+  await act(async () => opener()!.click());
+  await until(() => el.querySelector('[data-annotations-chip]') !== null, 'the annotations chip');
+  await act(async () => el.querySelector<HTMLButtonElement>('[data-annotations-chip]')!.click());
+  await until(() => document.querySelector('[data-annotation-row="ann-sbs-1"] .ib-af') !== null, 'the comment card');
+  await act(async () => document.querySelector<HTMLButtonElement>('[data-annotation-row="ann-sbs-1"] .ib-af')!.click());
+  await until(() => new URLSearchParams(window.location.hash.slice(1)).get('at') === 'ann-sbs-1', 'the comment shown');
+  expect(inFullScreen()).toBe(true);
+  expect(addressView()).toBe('full');
+  expect(choice()).toBe('side');
 });
 
 test.skipIf(!hasDom)("a tile's ⋯ opens that file side by side or full screen and never changes the choice; a download has no such items", async () => {
