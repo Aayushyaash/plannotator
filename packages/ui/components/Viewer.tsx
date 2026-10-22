@@ -308,7 +308,7 @@ export interface ViewerProps {
   renderQuestionBelowPrompt?: (question: IndexedQuestion) => React.ReactNode;
   /** A host's own drawing of a directive block that is not a question (ui
    *  seam for a host's own directives, such as the Plannotator Inbox's
-   *  `:::action` to-do card). Called per `:::kind` block; a returned node is
+   *  `:::action` action item card). Called per `:::kind` block; a returned node is
    *  drawn in place of the block's callout, inside a wrapper carrying the
    *  block's `data-block-id`; `undefined` keeps the callout. Absent: every
    *  such block draws as today. */

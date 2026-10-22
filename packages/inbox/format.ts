@@ -77,15 +77,15 @@ export function questionCount(open: number): string {
 
 /**
  * A row's count of what waits on the person (approval "inbox-next-actions"):
- * "2 questions" as before, and a to-do always named ("1 to do", "1 question,
- * 1 to do"), since it says why the agent waits before the thread is opened.
- * `open` counts questions and to-dos together, as the list's summary does.
+ * "2 questions" as before, and an action item always named ("1 action item", "1 question,
+ * 2 action items"), since it says why the agent waits before the thread is opened.
+ * `open` counts questions and action items together, as the list's summary does.
  */
 export function waitCount(open: number, actions = 0): string {
   const todos = Math.min(Math.max(actions, 0), open);
   const questions = open - todos;
   if (todos === 0) return questionCount(questions);
-  const todoWords = `${formatCount(todos)} to do`;
+  const todoWords = `${formatCount(todos)} action item${todos === 1 ? '' : 's'}`;
   if (questions === 0) return todoWords;
   return `${formatCount(questions)} question${questions === 1 ? '' : 's'}, ${todoWords}`;
 }

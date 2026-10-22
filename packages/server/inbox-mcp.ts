@@ -122,7 +122,7 @@ export const SEND_BODY_DESCRIPTION = [
   "",
   INBOX_STOP_EXAMPLE,
   "",
-  // To-dos (approval "inbox-next-actions"): when to write one, and when not.
+  // Action items (approval "inbox-next-actions"): when to write one, and when not.
   INBOX_ACTION_GUIDE,
   "",
   INBOX_ACTION_EXAMPLE,
@@ -327,7 +327,7 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string, calle
     : `The person replied in thread ${reply.thread_id}${subject ? ` (${subject})` : ""}:`;
   const url = threadUrl(base, reply.thread_id);
   // The facts the structured content holds, in words, so the text is complete.
-  // Questions Q1, Q2…; to-dos (`kind: "action"`) numbered on their own, A1, A2…
+  // Questions Q1, Q2…; action items (`kind: "action"`) numbered on their own, A1, A2…
   const numbered = (id: string) => {
     const all = store.questionsOf(id);
     const rank = (list: typeof all) => [...list].sort((a, b) => a.position - b.position).map((q, i) => [q.key, i + 1] as const);
@@ -407,7 +407,7 @@ export type AgentSendInput = {
   attachments?: string[];
   /** Earlier questions of the thread this message supersedes (`<message id>` or `<message id>/<key>`). */
   supersedes?: string[];
-  /** Its own to-dos of the thread the agent saw done (`<message id>/<key>`, or `<message id>`). */
+  /** Its own action items of the thread the agent saw done (`<message id>/<key>`, or `<message id>`). */
   done?: string[];
   agent_session?: string;
   agent_name?: string;
@@ -642,7 +642,7 @@ export async function sendAgentMessage(
   const message = result.message;
   const landed = store.project(message.project_id)!;
   const questions = (message.questions ?? []).filter((q) => q.kind !== "action").map((q) => ({ key: q.key, kind: q.kind, prompt: q.prompt }));
-  // To-dos (`:::action`): their keys, so the agent can mark one done later.
+  // Action items (`:::action`): their keys, so the agent can mark one done later.
   const actions = (message.questions ?? []).filter((q) => q.kind === "action").map((q) => ({ key: q.key, prompt: q.prompt }));
   const superseded = store.supersededBy(message.id);
   const markedDone = result.done ?? [];
@@ -668,7 +668,7 @@ export async function sendAgentMessage(
       attachments: (message.attachments ?? []).map((a) => ({ id: a.id, name: a.name, kind: a.kind, path: a.path })),
       /** The earlier questions this message superseded (`<message id>/<key>`). */
       superseded,
-      /** The to-dos this message marked done (`done`). */
+      /** The action items this message marked done (`done`). */
       ...(markedDone.length > 0 ? { done: markedDone } : {}),
       replayed: result.replayed,
       cursor: store.messageCursor(message.id) ?? store.cursor(),
@@ -686,16 +686,16 @@ export async function sendAgentMessage(
 }
 
 /**
- * ", superseding 1 earlier question", ", superseding 1 earlier to-do", or
- * ", superseding 2 earlier questions and 1 to-do", from the superseded ids
- * (`<message id>/<key>`; a to-do's key starts with `a-`). "" for none.
+ * ", superseding 1 earlier question", ", superseding 1 earlier action item", or
+ * ", superseding 2 earlier questions and 1 action item", from the superseded ids
+ * (`<message id>/<key>`; an action item's key starts with `a-`). "" for none.
  */
 export function supersededWords(ids: readonly string[]): string {
   const todos = ids.filter((id) => /\/a-[0-9a-f]/.test(id)).length;
   const questions = ids.length - todos;
   const parts = [
     questions > 0 ? `${questions} earlier question${questions === 1 ? "" : "s"}` : "",
-    todos > 0 ? `${todos}${questions > 0 ? "" : " earlier"} to-do${todos === 1 ? "" : "s"}` : "",
+    todos > 0 ? `${todos}${questions > 0 ? "" : " earlier"} action item${todos === 1 ? "" : "s"}` : "",
   ].filter(Boolean);
   return parts.length > 0 ? `, superseding ${parts.join(" and ")}` : "";
 }
@@ -851,9 +851,9 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
         const asked =
           (sent.questions > 0 ? ` asking ${sent.questions} question${sent.questions === 1 ? "" : "s"}` : "") +
           (sent.attachments > 0 ? ` with ${sent.attachments} attachment${sent.attachments === 1 ? "" : "s"}` : "") +
-          (sent.actions > 0 ? `${sent.questions > 0 ? " and" : " with"} ${sent.actions} to-do${sent.actions === 1 ? "" : "s"}` : "") +
+          (sent.actions > 0 ? `${sent.questions > 0 ? " and" : " with"} ${sent.actions} action item${sent.actions === 1 ? "" : "s"}` : "") +
           supersededWords(sent.structured.superseded as string[]) +
-          (sent.done > 0 ? `, marking ${sent.done} to-do${sent.done === 1 ? "" : "s"} done` : "");
+          (sent.done > 0 ? `, marking ${sent.done} action item${sent.done === 1 ? "" : "s"} done` : "");
         return ok(
           `${sent.replayed ? "Already sent" : "Sent"} to the Plannotator Inbox${asked} (thread ${sent.structured.thread_id}, ${sent.structured.url}).${namingLine(sent.naming)} ${callerWakes(ctx) ? INBOX_REPLY_ARRIVES_TEXT : "Call wait_for_reply with this thread_id for the answer, or go on and read_thread later."}${imagesNotShownText(sent.imagesNotShown)}`,
           sent.structured,

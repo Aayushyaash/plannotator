@@ -101,6 +101,36 @@ const base = () => [agent(M1, BODY1, '2026-10-20T10:42:00.000Z'), agent(M2, BODY
 const openIds = (messages: InboxMessageWire[]) => messages.flatMap((m) => (m.questions ?? []).filter((q) => q.state === 'open').map((q) => `${q.message_id}/${q.key}`));
 
 describe('the rules (reask.ts)', () => {
+  test('open action items (in `actions`) are asked again with the questions; one the person marked is left out', () => {
+    const todo = (key: string, state: InboxQuestion['state'], marked = false): InboxQuestion =>
+      ({
+        ...questionsOf(M3, block('x'))[0]!,
+        key,
+        kind: 'action',
+        prompt: `Do ${key}`,
+        choices: [],
+        state,
+        message_id: M3,
+        action: { where: null, where_url: null, run: null, watching: null },
+        action_result: marked ? { outcome: 'done', note: null, at: '2026-10-20T10:50:00.000Z', by: 'person' } : null,
+      }) as InboxQuestion;
+    // One question and one open action item: offered, and the tooltip names both.
+    const msgs = [agent(M1, `One.\n\n${block('Backfill ledger first?')}`, '2026-10-20T10:42:00.000Z'), agent(M3, 'Approve it.', '2026-10-20T10:46:00.000Z', A, { actions: [todo('a-00000001', 'open'), todo('a-00000002', 'picked', true)] })];
+    const [t] = reaskTargets(msgs);
+    expect(t).toMatchObject({ kind: 'reask', open: 2, actions: 1, picked: 0 });
+    expect(t!.message.id).toBe(M3);
+    expect(reaskOffered([t!], msgs)).toBe(true);
+    expect(reaskTooltip([t!])).toBe(
+      'Ask Claude Code to ask the 1 open question and 1 action item again, together in one message with fresh context. Those that no longer apply are closed; until then they stay open here.',
+    );
+    // A marked action item waits on nobody: alone with one question, nothing to offer.
+    const marked = [agent(M1, `One.\n\n${block('Backfill ledger first?')}`, '2026-10-20T10:42:00.000Z'), agent(M3, 'Approve it.', '2026-10-20T10:46:00.000Z', A, { actions: [todo('a-00000002', 'picked', true)] })];
+    expect(reaskOffered(reaskTargets(marked), marked)).toBe(false);
+    // The note's line names the action items it asked about.
+    expect(reaskNoteSentence('Claude Code', 2, 0, 1)).toBe('You asked Claude Code to ask the 1 open question and 1 action item again, together in one message. They stay open here until it does.');
+    expect(reaskNoteSentence('Pi', 1, 0, 1)).toBe('You asked Pi to ask the open action item again. It stays open here until it does.');
+  });
+
   test('one target per session, at its latest message with a question waiting; offered for two or more', () => {
     const one = reaskTargets(base());
     expect(one).toHaveLength(1);

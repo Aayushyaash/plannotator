@@ -40,7 +40,7 @@ export function isPersonReply(message: InboxMessageWire): boolean {
 
 /**
  * The person's own message that counts as a look: a reply or a New message,
- * never the Inbox's notes nor a to-do's report (the Inbox writes it seconds
+ * never the Inbox's notes nor an action item's report (the Inbox writes it seconds
  * after the click, so agent news that landed meanwhile stays new).
  */
 export function isPersonLook(message: InboxMessageWire): boolean {
@@ -186,7 +186,21 @@ export function foldSnippet(message: InboxMessageWire, messages: readonly InboxM
   if (message.author.kind === 'person') {
     // A Re-ask note: what the person did, not the instructions the agent got.
     const reasked = message.reask?.length ?? 0;
-    if (reasked > 0) return { kind: 'words', text: reasked === 1 ? 'Asked to re-ask the open question' : `Asked to re-ask ${reasked} open questions in one message` };
+    if (reasked > 0) {
+      // Action items it asked about too (ids `<message id>/a-…`, owner, #2059).
+      const actions = (message.reask ?? []).filter((id) => /\/a-[0-9a-f]/.test(id)).length;
+      if (actions > 0) {
+        const questions = reasked - actions;
+        const what =
+          questions === 0
+            ? actions === 1
+              ? 'the open action item'
+              : `${actions} open action items`
+            : `${questions} open question${questions === 1 ? '' : 's'} and ${actions} action item${actions === 1 ? '' : 's'}`;
+        return { kind: 'words', text: `Asked to re-ask ${what}${reasked > 1 ? ' in one message' : ''}` };
+      }
+      return { kind: 'words', text: reasked === 1 ? 'Asked to re-ask the open question' : `Asked to re-ask ${reasked} open questions in one message` };
+    }
     const words = firstWords(replyWords(message.body));
     if (words) return { kind: 'words', text: words };
     const sent = messages.flatMap((m) => (m.questions ?? []).filter((q) => q.sent_reply_id === message.id && q.answer !== null));
@@ -202,9 +216,9 @@ export function foldSnippet(message: InboxMessageWire, messages: readonly InboxM
   }
   const words = firstWords(message.body);
   if (!words && questions.length > 0) return { kind: 'words', text: plainPrompt(questions[0]!.prompt) };
-  // A message that is only a to-do: its line ("To do: Approve the deploy").
+  // A message that is only an action item: its line ("Action item: Approve the deploy").
   const todo = (message.actions ?? []).find((a) => a.state !== 'superseded');
-  if (!words && todo) return { kind: 'words', text: `To do: ${plainPrompt(todo.prompt)}` };
+  if (!words && todo) return { kind: 'words', text: `Action item: ${plainPrompt(todo.prompt)}` };
   return { kind: 'words', text: words };
 }
 
@@ -306,9 +320,9 @@ export function holdingsOf(message: InboxMessageWire, options: { delivered: bool
   if (picks > 0) out.push({ kind: 'picks', text: `${plural(picks, 'pick')} in your draft`, say: `${plural(picks, 'pick')} in your draft`, count: picks });
   if (open > 0) out.push({ kind: 'open', text: `${open} open ${open === 1 ? 'question' : 'questions'}`, say: `${open} open ${open === 1 ? 'question' : 'questions'}`, count: open });
   if (sent > 0 && open === 0 && picks === 0) out.push({ kind: 'answered', text: `${sent} answered`, say: `${plural(sent, 'question')} answered`, count: sent });
-  // To-dos (approval "inbox-next-actions"): the ones still waiting on the person.
+  // Action items (approval "inbox-next-actions"): the ones still waiting on the person.
   const todos = (message.actions ?? []).filter((a) => a.state === 'open').length;
-  if (todos > 0) out.push({ kind: 'todo', text: `${todos} to do`, say: `${todos} to do`, count: todos });
+  if (todos > 0) out.push({ kind: 'todo', text: `${todos} action item${todos === 1 ? '' : 's'}`, say: `${todos} open action item${todos === 1 ? '' : 's'}`, count: todos });
   const files = message.attachments?.length ?? 0;
   if (files > 0) out.push({ kind: 'files', text: String(files), say: plural(files, 'attachment'), count: files });
   if (message.author.kind === 'person' && (message.sent_annotations ?? 0) > 0) {

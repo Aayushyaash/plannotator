@@ -1568,7 +1568,7 @@ function Inbox() {
   };
 
   /**
-   * A to-do's Done or Can't do it (approval "inbox-next-actions"): written at
+   * An action item's Done or Can't do it (approval "inbox-next-actions"): written at
    * once, sent to the agent once the 10 s Undo window passes, as 👍 Looks
    * good. `null` is the Undo. Resolves false when it was refused.
    */
@@ -1583,7 +1583,7 @@ function Inbox() {
     await afterWrite();
     if (!mark) {
       dismissToast();
-      say('To-do moved back. Nothing was sent.');
+      say('Action item moved back. Nothing was sent.');
       return true;
     }
     showToast({

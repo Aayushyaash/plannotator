@@ -1,10 +1,10 @@
 /**
- * The To do card (approval "inbox-next-actions", direction "In the thread")
+ * The Action item card (approval "inbox-next-actions", direction "In the thread")
  * and the row's count, as the window draws them. Failures to catch: the card
  * not replacing the `:::action` callout in its message (the Viewer seam); an
  * Open button for a link that is not http(s); Can't do it sent without its
  * reason; Done not offering Undo while its window runs; a closed card still
- * offering Done; the row not saying "1 to do"; a to-do reaching the picks or
+ * offering Done; the row not saying "1 action item"; an action item reaching the picks or
  * the Send (the api split).
  *
  * DOM-gated: runs under DOM_TESTS=1 (happy-dom), from the test.yml DOM list.
@@ -95,13 +95,13 @@ async function settle() {
 
 const click = (el: Element) => act(() => (el as HTMLElement).click());
 
-test.skipIf(!hasDom)('an open to-do: what to do, why, Open for its link, what the agent watches, Done / Can\'t do it… / Add note', async () => {
+test.skipIf(!hasDom)('an open action item: what to do, why, Open for its link, what the agent watches, Done / Can\'t do it… / Add note', async () => {
   const marks: unknown[] = [];
   const el = mount(<ActionCard action={todo()} number={1} total={1} agent="Claude Code" onMark={async (mark) => (marks.push(mark), true)} />);
   const card = el.querySelector('[data-action-card]')!;
   expect(card.getAttribute('role')).toBe('group');
-  expect(card.getAttribute('aria-label')).toBe('To do: Approve the production deploy on Vercel');
-  expect(card.textContent).toContain('To do · something only you can do');
+  expect(card.getAttribute('aria-label')).toBe('Action item: Approve the production deploy on Vercel');
+  expect(card.textContent).toContain('Action item · something only you can do');
   expect(card.querySelector('.ib-badge')!.textContent).toBe('Stopped');
   expect(card.querySelector('h3')!.textContent).toBe('Approve the production deploy on Vercel');
   const open = card.querySelector<HTMLAnchorElement>('[data-action-open]')!;
@@ -133,7 +133,7 @@ test.skipIf(!hasDom)('a run command is copied, not opened; a link that is not ht
   expect(run.querySelector('.ib-todo-cmd')!.textContent).toBe('npm login');
   expect(run.querySelector('[data-action-copy]')).not.toBeNull();
   expect(run.querySelector('[data-action-open]')).toBeNull();
-  expect(run.textContent).toContain('To do 1 of 2');
+  expect(run.textContent).toContain('Action item 1 of 2');
 });
 
 test.skipIf(!hasDom)('after Done: Undo while the window runs; then the settled line, and no Done any more', async () => {
@@ -200,10 +200,10 @@ test.skipIf(!hasDom)("the card takes the `:::action` block's place in its messag
   expect(el.textContent).not.toContain('Where: https://vercel.com');
 });
 
-test.skipIf(!hasDom)('the row says "1 to do", or "1 question, 1 to do", as plain text', () => {
-  expect(waitCount(1, 1)).toBe('1 to do');
-  expect(waitCount(2, 1)).toBe('1 question, 1 to do');
-  expect(waitCount(3, 1)).toBe('2 questions, 1 to do');
+test.skipIf(!hasDom)('the row says "1 action item", or "1 question, 1 action item", as plain text', () => {
+  expect(waitCount(1, 1)).toBe('1 action item');
+  expect(waitCount(2, 1)).toBe('1 question, 1 action item');
+  expect(waitCount(3, 1)).toBe('2 questions, 1 action item');
   expect(waitCount(2, 0)).toBe('2 questions');
   expect(waitCount(1, 0)).toBe('');
   const row = (id: string, open: number, actions: number): InboxListRow => ({
@@ -235,6 +235,6 @@ test.skipIf(!hasDom)('the row says "1 to do", or "1 question, 1 to do", as plain
     </SidebarProvider>,
   );
   const count = (id: string) => el.querySelector(`[data-thread-id="${id}"] .ib-c`)?.textContent;
-  expect(count('msg_a')).toBe('1 to do');
-  expect(count('msg_b')).toBe('1 question, 1 to do');
+  expect(count('msg_a')).toBe('1 action item');
+  expect(count('msg_b')).toBe('1 question, 1 action item');
 });

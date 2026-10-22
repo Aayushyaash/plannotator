@@ -29,8 +29,10 @@ export interface ReaskTarget {
   host: string | null;
   /** "Claude Code": the agent as the thread names it. */
   name: string;
-  /** Open questions with no pick: asked again. */
+  /** Open questions with no pick, and open action items: asked again. */
   open: number;
+  /** How many of `open` are action items. */
+  actions: number;
   /** Picked and not sent: they go with the note (or the plain reply) as answers. */
   picked: number;
   /**
@@ -43,6 +45,15 @@ export interface ReaskTarget {
 }
 
 const isReaskNote = (m: InboxMessageWire): boolean => m.author.kind === 'person' && (m.reask?.length ?? 0) > 0;
+
+/**
+ * What a Re-ask can ask about in a message: its questions and its action
+ * items (the window keeps those in `actions`; owner, #2059: Re-ask includes
+ * open action items). An action item the person marked (Done or Can't do it,
+ * inside its Undo window) reads "picked" but waits on nobody: it is left out.
+ */
+const itemsOf = (m: InboxMessageWire): InboxQuestion[] => [...(m.questions ?? []), ...(m.actions ?? [])];
+const isWaiting = (q: InboxQuestion) => q.state === 'open' || (q.state === 'picked' && q.kind !== 'action');
 
 /**
  * The sessions a Re-ask would go to now. A session is left out while a note
@@ -73,7 +84,7 @@ export function reaskTargets(messages: readonly InboxMessageWire[], live: (messa
   // question's own `message_id`, so a question record without one (or a stale
   // one) can never point a rule at a message that is not there.
   const openIds = new Set(
-    messages.flatMap((m) => (m.author.kind === 'agent' && live(m) ? (m.questions ?? []).filter((q) => q.state === 'open').map((q) => `${m.id}/${q.key}`) : [])),
+    messages.flatMap((m) => (m.author.kind === 'agent' && live(m) ? itemsOf(m).filter((q) => q.state === 'open').map((q) => `${m.id}/${q.key}`) : [])),
   );
   const targets: ReaskTarget[] = [];
   for (const group of groups.values()) {
@@ -93,13 +104,13 @@ export function reaskTargets(messages: readonly InboxMessageWire[], live: (messa
     // (open, or picked and not sent), in thread order. Every rule below reads
     // these messages, not the questions' `message_id`, so the message a rule
     // names is always one of the session's own.
-    const isWaiting = (q: InboxQuestion) => q.state === 'open' || q.state === 'picked';
-    const holders = group.filter((m) => (m.questions ?? []).some(isWaiting));
+    const holders = group.filter((m) => itemsOf(m).some(isWaiting));
     const target = holders.at(-1);
     if (!target) continue;
-    const waiting = holders.flatMap((m) => (m.questions ?? []).filter(isWaiting));
+    const waiting = holders.flatMap((m) => itemsOf(m).filter(isWaiting));
     const open = waiting.filter((q) => q.state === 'open').length;
-    const base = { message: target, session: own.session, host: own.host, name: agentName(first.author), open, picked: waiting.length - open };
+    const actions = waiting.filter((q) => q.state === 'open' && q.kind === 'action').length;
+    const base = { message: target, session: own.session, host: own.host, name: agentName(first.author), open, actions, picked: waiting.length - open };
     if (open === 0) {
       // Only picks: one plain reply carries them all (owner's rule: picks go, never stranded).
       const questions = holders.flatMap((m) =>
@@ -128,7 +139,7 @@ export function reaskTargets(messages: readonly InboxMessageWire[], live: (messa
  */
 export function reaskOffered(targets: readonly ReaskTarget[], messages?: readonly InboxMessageWire[]): boolean {
   const waiting = messages
-    ? messages.reduce((n, m) => n + (m.author.kind === 'agent' ? (m.questions ?? []).filter((q) => q.state === 'open' || q.state === 'picked').length : 0), 0)
+    ? messages.reduce((n, m) => n + (m.author.kind === 'agent' ? itemsOf(m).filter(isWaiting).length : 0), 0)
     : targets.reduce((n, t) => n + t.open + t.picked, 0);
   return waiting >= 2 && targets.some((t) => t.kind === 'reask' && t.open > 0);
 }
@@ -141,11 +152,28 @@ export function reaskWho(targets: readonly ReaskTarget[]): string {
   return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
 }
 
+/**
+ * "the open question", "the 3 open questions", "the open action item", "the 2
+ * open questions and 1 action item": what a Re-ask asks about.
+ */
+export function reaskItems(open: number, actions: number): string {
+  const questions = open - actions;
+  if (actions === 0) return open === 1 ? 'the open question' : `the ${open} open questions`;
+  if (questions === 0) return actions === 1 ? 'the open action item' : `the ${actions} open action items`;
+  return `the ${plural(questions, 'open question')} and ${plural(actions, 'action item')}`;
+}
+
 /** The button's tooltip: what pressing it does. */
 export function reaskTooltip(targets: readonly ReaskTarget[]): string {
   const open = targets.reduce((n, t) => n + t.open, 0);
+  const actions = targets.reduce((n, t) => n + (t.actions ?? 0), 0);
   const picks = targets.reduce((n, t) => n + t.picked, 0);
   const several = targets.filter((t) => t.kind === 'reask').length > 1;
+  if (actions > 0) {
+    const items = reaskItems(open, actions).replace(/^the /, several ? 'their ' : 'the ');
+    const pickWords = picks > 0 ? ` Your ${plural(picks, 'pick')} ${picks === 1 ? 'is' : 'are'} sent too.` : '';
+    return `Ask ${reaskWho(targets)} to ask ${items} again, ${several ? 'each together in one message' : 'together in one message'} with fresh context. Those that no longer apply are closed; until then they stay open here.${pickWords}`;
+  }
   const what =
     open === 1
       ? `the open question again${several ? '' : ', with fresh context'}`
@@ -154,8 +182,16 @@ export function reaskTooltip(targets: readonly ReaskTarget[]): string {
   return `Ask ${reaskWho(targets)} to ask ${what}. Questions that no longer apply are closed; until then they stay open here.${pickWords}`;
 }
 
-/** The note's line in the thread. `picks`: answers that went with it. */
-export function reaskNoteSentence(agent: string, asked: number, picks: number): string {
+/** The note's line in the thread. `picks`: answers that went with it; `actions`: how many of `asked` are action items. */
+export function reaskNoteSentence(agent: string, asked: number, picks: number, actions = 0): string {
+  if (actions > 0) {
+    const items = reaskItems(asked, actions);
+    const line =
+      asked === 1
+        ? `You asked ${agent} to ask ${items} again. It stays open here until it does.`
+        : `You asked ${agent} to ask ${items} again, together in one message. They stay open here until it does.`;
+    return picks > 0 ? `${line} Your ${plural(picks, 'pick')} went with it.` : line;
+  }
   const head =
     asked === 1
       ? `You asked ${agent} to ask the open question again. It stays open here until it does.`

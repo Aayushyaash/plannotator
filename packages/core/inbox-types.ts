@@ -242,7 +242,7 @@ export function isInboxNote(message: {
 }
 
 /**
- * The reply the Inbox writes for the person's Done / Can't do it on a to-do
+ * The reply the Inbox writes for the person's Done / Can't do it on an action item
  * (`action_report`, approval "inbox-next-actions"), once its Undo window
  * passed. It is the person's reply for delivery (Sent, the wake, Send now),
  * but not a look: it is written by the Inbox seconds after the click, so an
@@ -439,14 +439,14 @@ export interface InboxMessage {
    */
   supersedes?: string[];
   /**
-   * On an agent's message: the to-dos it said it saw done (send_message's
-   * `done`, as sent: `<message id>` for every open to-do of that message, or
-   * `<message id>/<key>` for one). The to-do records carry the result
+   * On an agent's message: the action items it said it saw done (send_message's
+   * `done`, as sent: `<message id>` for every open action item of that message, or
+   * `<message id>/<key>` for one). The action item records carry the result
    * (`action_result` with `by: "agent"`). Absent otherwise and on older records.
    */
   done?: string[];
   /**
-   * On a person's reply that reports to-dos (Done, Can't do it): the to-dos
+   * On a person's reply that reports action items (Done, Can't do it): the action items
    * it reports (`<message id>/<key>`), sent once the Undo window passed.
    * Absent on every other message.
    */
@@ -776,16 +776,16 @@ export interface InboxQuestionRecord {
   key: string;
   /**
    * The block's place among the message's blocks of its kind: questions are
-   * numbered Q1, Q2… and to-dos (`kind: "action"`) A1, A2… separately.
+   * numbered Q1, Q2… and action items (`kind: "action"`) A1, A2… separately.
    */
   position: number;
   /**
-   * The question's kind, or `"action"` for a to-do (an Inbox-only `:::action`
+   * The question's kind, or `"action"` for an action item (an Inbox-only `:::action`
    * block: something only the person can go and do). Read it through
    * `readInboxQuestionKind`: a kind a reader does not know is not answerable.
    */
   kind: InboxQuestionKind;
-  /** The question's prompt, or a to-do's first line (what to do). */
+  /** The question's prompt, or an action item's first line (what to do). */
   prompt: string;
   parsed: InboxQuestionFacts;
   stopped: string | null;
@@ -812,23 +812,23 @@ export interface InboxQuestionRecord {
    */
   set_aside?: InboxQuestionSetAside | null;
   /**
-   * On a to-do (`kind: "action"`): where to do it, the command to run, and
+   * On an action item (`kind: "action"`): where to do it, the command to run, and
    * what the agent watches for. Absent on a question and on older records.
    */
   action?: InboxActionFacts | null;
   /**
-   * On a to-do: what came of it. The person's Done or Can't do it (`by:
+   * On an action item: what came of it. The person's Done or Can't do it (`by:
    * "person"`), sent to the agent once the Undo window passes (then
    * `sent_revision === revision` and `sent_reply_id` names the reply), or
    * the agent's own `done` (`by: "agent"`: it saw it happen; nothing is
-   * sent). Null while the to-do is open, and after an Undo.
+   * sent). Null while the action item is open, and after an Undo.
    */
   action_result?: InboxActionResult | null;
 }
 
 /**
  * A question's kind as the Inbox stores it: Plannotator's question kinds,
- * plus `"action"` for a to-do (approval "inbox-next-actions").
+ * plus `"action"` for an action item (approval "inbox-next-actions").
  */
 export type InboxQuestionKind = QuestionKind | "action";
 
@@ -844,12 +844,12 @@ export function readInboxQuestionKind(value: unknown): InboxQuestionKind | "unkn
   return typeof value === "string" && (INBOX_QUESTION_KINDS as readonly string[]).includes(value) ? (value as InboxQuestionKind) : "unknown";
 }
 
-/** A to-do: a question record of kind `"action"`. */
+/** An action item: a question record of kind `"action"`. */
 export function isInboxAction(question: { kind: unknown }): boolean {
   return readInboxQuestionKind(question.kind) === "action";
 }
 
-/** What a to-do's block says besides what to do and why (`InboxQuestionRecord.action`). */
+/** What an action item's block says besides what to do and why (`InboxQuestionRecord.action`). */
 export interface InboxActionFacts {
   /** `Where:` in words (a place, or the link's name), or null. */
   where: string | null;
@@ -861,7 +861,7 @@ export interface InboxActionFacts {
   watching: string | null;
 }
 
-/** What came of a to-do (`InboxQuestionRecord.action_result`). */
+/** What came of an action item (`InboxQuestionRecord.action_result`). */
 export interface InboxActionResult {
   outcome: "done" | "cant";
   /** The person's note with Done, or the reason with Can't do it; null for none. */
@@ -902,7 +902,7 @@ export type InboxQuestionState = "open" | "picked" | "sent" | "closed" | "supers
 export interface InboxQuestion {
   key: string;
   position: number;
-  /** `"action"` for a to-do; read it with `readInboxQuestionKind` (fail-closed). */
+  /** `"action"` for an action item; read it with `readInboxQuestionKind` (fail-closed). */
   kind: InboxQuestionKind;
   prompt: string;
   context: string | null;
@@ -928,33 +928,33 @@ export interface InboxQuestion {
    * answer a skip), or null. Absent from an older Inbox.
    */
   set_aside_at?: string | null;
-  /** On a to-do (`kind: "action"`): where, run and watching. Absent on a question and from an older Inbox. */
+  /** On an action item (`kind: "action"`): where, run and watching. Absent on a question and from an older Inbox. */
   action?: InboxActionFacts | null;
-  /** On a to-do: what came of it, or null while open. Absent on a question and from an older Inbox. */
+  /** On an action item: what came of it, or null while open. Absent on a question and from an older Inbox. */
   action_result?: InboxActionResult | null;
 }
 
 /** Workspaces' `NotificationQuestionSummary`: a row's questions, summed. */
 export interface InboxQuestionSummary {
-  /** Open questions and to-dos together: a to-do counts like a question for every list rule. */
+  /** Open questions and action items together: an action item counts like a question for every list rule. */
   open: number;
   picked: number;
   stopped: boolean;
   holds_up: string[];
   prompt: string | null;
-  /** How many of `open` are to-dos (`kind: "action"`): the row reads "1 to do". Absent from an older Inbox. */
+  /** How many of `open` are action items (`kind: "action"`): the row reads "1 action item". Absent from an older Inbox. */
   actions?: number;
 }
 
 export interface InboxMessageWire extends InboxMessage {
   /**
    * Omitted when the message asks no question (the Workspaces rule). The
-   * server lists the message's to-dos (`kind: "action"`) here too, after its
+   * server lists the message's action items (`kind: "action"`) here too, after its
    * questions; a reader that does not know `"action"` must not answer them.
    */
   questions?: InboxQuestion[];
   /**
-   * Never sent by the server: the Inbox window moves a message's to-dos here
+   * Never sent by the server: the Inbox window moves a message's action items here
    * out of `questions` when it reads a thread (packages/inbox/actions.ts), so
    * nothing that picks and sends answers ever meets one.
    */
@@ -1545,11 +1545,13 @@ export type InboxToolCostHost = "pi" | "opencode";
  * entry in Pi's request shape (that computation gives 7,325 for the entry Pi
  * measured at 7,328); the Pi and OpenCode cost tests hold it to 5%. While the
  * card action is held back (INBOX_CARD_ACTION_ON false), the size without it.
- * To-dos (approval "inbox-next-actions") then added the `:::action`
+ * Action items (approval "inbox-next-actions") then added the `:::action`
  * paragraph to `body` and the `done` field: +861 bytes and +221 tokens with
  * o200k_base on the generated entry in Pi's request shape (7,362 → 8,223
  * bytes, 1,744 → 1,965 tokens), so 8,189 bytes (1,953 tokens) without the
  * card action and 9,364 (2,268) with it, estimated, not re-measured on Pi.
+ * Renaming "to-do" to "action item" (owner, #2059) moved the entry by 5 bytes
+ * (8,228; 1,962 tokens): the stated cost stands.
  */
 const INBOX_TOOL_COST_NOW = INBOX_CARD_ACTION_ON ? { bytes: 9364, tokens: 2700 } : { bytes: 8189, tokens: 2300 };
 export const INBOX_TOOL_COST: Readonly<Record<InboxToolCostHost, { bytes: number; tokens: number }>> = {

@@ -250,7 +250,7 @@ export function MessageBody({
   renderReplacedCard?: (key: string, number: number) => React.ReactNode | undefined;
   /** The "Replaces …" line under a question's prompt, or null. */
   renderReplacesLine?: (key: string) => React.ReactNode;
-  /** A `:::action` block's To do card (approval "inbox-next-actions"), or undefined to keep the block as text. */
+  /** A `:::action` block's Action item card (approval "inbox-next-actions"), or undefined to keep the block as text. */
   renderAction?: (block: { startLine: number; content: string }) => React.ReactNode | undefined;
   /**
    * Comments on the text (an agent's message that can still be answered;
@@ -431,7 +431,7 @@ export function MessageBody({
     (question: IndexedQuestion) => replacesRef.current?.(question.question.key) ?? null,
     [message.questions],
   );
-  // To-dos: the To do card in place of a `:::action` block's callout. A new identity when they change, so a card redraws.
+  // Action items: the Action item card in place of a `:::action` block's callout. A new identity when they change, so a card redraws.
   const actionRef = useRef(renderAction);
   actionRef.current = renderAction;
   const directiveBlock = useCallback(
@@ -623,7 +623,7 @@ export interface ThreadPaneProps {
    */
   onAck?: (messageId: string, on: boolean, agent: string) => void;
   /**
-   * A to-do's Done or Can't do it (`mark`), or its Undo (`null`), approval
+   * An action item's Done or Can't do it (`mark`), or its Undo (`null`), approval
    * "inbox-next-actions": the window writes it and shows the toast with
    * Undo. Resolves false when it was refused. Absent: the pane writes it
    * itself and reads the thread again.
@@ -849,14 +849,14 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   // message, offered only while no question in the thread waits on the person
   // (open or picked) and the thread is not archived.
   const ackTarget = agentMessages.at(-1) ?? null;
-  // A to-do counts like a question here (approval "inbox-next-actions"): the store refuses a 👍 while one waits.
+  // An action item counts like a question here (approval "inbox-next-actions"): the store refuses a 👍 while one waits.
   const questionWaits = agentMessages.some((m) => [...(m.questions ?? []), ...(m.actions ?? [])].some((q) => q.state === 'open' || q.state === 'picked'));
   // Nor once the person wrote back after it (their reply is the answer; its Sent / Delivered line stays).
   const personWroteLast = lastNonNote(thread.messages)?.author.kind === 'person';
   const ackOffered = onAck !== undefined && ackTarget !== null && !archived && !questionWaits && !personWroteLast;
   const ackOn = ackTarget?.ack != null;
 
-  // To-dos: Done / Can't do it / Undo, through the window (its toast and Undo) or, without it, straight to the server.
+  // Action items: Done / Can't do it / Undo, through the window (its toast and Undo) or, without it, straight to the server.
   const markAction = async (messageId: string, key: string, mark: ActionMark | null, agent: string, prompt: string): Promise<boolean> => {
     if (onAction) return onAction(messageId, key, mark, { agent, prompt });
     try {

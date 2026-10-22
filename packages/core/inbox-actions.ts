@@ -1,5 +1,5 @@
 /**
- * Plannotator Inbox: to-dos an agent needs the person to go do (approval
+ * Plannotator Inbox: action items an agent needs the person to go do (approval
  * "inbox-next-actions", 2026-10-21, direction "In the thread").
  *
  * An agent writes a `:::action` block in a message body when it is stopped
@@ -22,7 +22,7 @@
  *   Stopped: <why> / Holds up: <a>; <b>  (as for questions, with the same
  *                                         negative-word guard)
  *   Watching: <what the agent watches>   (it will notice it done by itself)
- *   Replaces: <message id>/<a-key> …     (only when every token is a to-do's id)
+ *   Replaces: <message id>/<a-key> …     (only when every token is an action item's id)
  *
  * This grammar is the Inbox's only: Plannotator's question grammar (and so
  * plan review) is unchanged. The block is found with core's directive scanner
@@ -43,21 +43,21 @@ import type { InboxActionFacts, InboxActionResult, InboxQuestionRecord } from ".
 /** The directive an agent writes: `:::action`. */
 export const INBOX_ACTION_DIRECTIVE = "action";
 
-/** What the window calls it ("To do · something only you can do"). */
-export const INBOX_ACTION_LABEL = "To do";
+/** What the window calls it ("Action item · something only you can do"). */
+export const INBOX_ACTION_LABEL = "Action item";
 
-/** `a-` + hash8 of the normalized first line: a reworded to-do is a new to-do. */
+/** `a-` + hash8 of the normalized first line: a reworded action item is a new action item. */
 export function inboxActionKey(prompt: string): string {
   return `a-${blockKeyHash8(`action\n${normalizeQuestionText(prompt)}`)}`;
 }
 
-/** A to-do's key, `-2`, `-3`… for repeats in one message included. */
+/** An action item's key, `-2`, `-3`… for repeats in one message included. */
 export const INBOX_ACTION_KEY_RE = /^a-[0-9a-f]{8}(?:-\d{1,3})?$/;
 
 /** One `:::action` block of a message body, in block order. */
 export interface ParsedInboxAction {
   key: string;
-  /** Its place among the message's to-dos (A1 is 0). */
+  /** Its place among the message's action items (A1 is 0). */
   position: number;
   /** What to do: the block's first non-empty line, plain. */
   prompt: string;
@@ -75,7 +75,7 @@ export interface ParsedInboxAction {
 }
 
 const LABEL_RE = /^(where|run|stopped|holds up|watching|replaces)\s*:\s*(.*)$/i;
-// A to-do replaces only a to-do: `<message id>/a-…`, or `<message id>` (its to-dos).
+// An action item replaces only an action item: `<message id>/a-…`, or `<message id>` (its action items).
 const ID_TOKEN = String.raw`msg_[0-9A-HJKMNP-TV-Z]{26}(?:/a-[0-9a-f]{8}(?:-\d{1,3})?)?\.?`;
 const REPLACES_VALUE_RE = new RegExp(String.raw`^(${ID_TOKEN}(?:[\s,;]+${ID_TOKEN})*)[\s,;]*$`);
 
@@ -267,8 +267,8 @@ const actionsWord = (n: number): string => `${n} action${n === 1 ? "" : "s"}`;
 /**
  * The reply a Done or Can't do it sends: "Did 1 action." (or "Couldn't do 1
  * action.", "Did 1 action, couldn't do 1."), then the section listing each
- * to-do it reports, A-numbered as the card, with "Done, 3:12 PM." and the
- * note, or "Can't do it: <reason>". `all` is the message's to-dos, for the
+ * action item it reports, A-numbered as the card, with "Done, 3:12 PM." and the
+ * note, or "Can't do it: <reason>". `all` is the message's action items, for the
  * "x of y done" line (an agent's own `done` counts as done).
  */
 export function composeInboxActionsReply(input: {
@@ -300,7 +300,7 @@ export function composeInboxActionsReply(input: {
   return [sentence, `## ${INBOX_ACTIONS_HEADING}`, `${doneAll} of ${total} done.`, ...items].join("\n\n");
 }
 
-/** The card's words for a to-do's result ("Done 3:12 PM", "Can't do it: …", "Claude Code saw it done"). */
+/** The card's words for an action item's result ("Done 3:12 PM", "Can't do it: …", "Claude Code saw it done"). */
 export function inboxActionResultLine(result: InboxActionResult, agent: string, timeZone?: string): string {
   const time = inboxActionTime(result.at, timeZone);
   if (result.by === "agent") return `${agent} saw it done, ${time}`;
@@ -314,7 +314,7 @@ const DONE_REF_RE = /^(msg_[0-9A-HJKMNP-TV-Z]{26})(?:\/(a-[0-9a-f]{8}(?:-\d{1,3}
 
 /**
  * One id an agent marks done with (send_message's `done`): `<message id>`
- * (every open to-do of that message) or `<message id>/<key>` (one). Null when
+ * (every open action item of that message) or `<message id>/<key>` (one). Null when
  * it is neither.
  */
 export function parseInboxDoneRef(value: unknown): { message_id: string; key: string | null } | null {
@@ -348,10 +348,10 @@ export const INBOX_ACTION_EXAMPLE = [
  * the agent guide. Never in QUESTION_AUTHORING_GUIDE: plan review shares it.
  */
 export const INBOX_ACTION_GUIDE = [
-  "A to-do, only for a true blocker: something the person must go and do outside this conversation before you can go on, that you cannot do yourself (approve a deploy, sign in, touch a security key, click something in another app, merge a pull request you cannot merge). Write it as an Inbox-only `:::action` block: the first line is what to do, as an order; then why, in a line or two. Optional lines: `Where: <url or place>` (a URL becomes an Open button), `Run: <command>` (a command to copy), `Stopped:` / `Holds up:` as for questions, and `Watching: <what you watch>` when you will notice it done by yourself (then pass its id in `done`).",
-  "Never use it for a decision or a question (ask a :::question), for anything you can do yourself, or as a to-do list or a status update: one block per real blocker, and most messages need none. The person marks it Done or Can't do it (with a reason); that comes back in their reply under \"Actions you asked for\".",
+  "An action item, only for a true blocker: something the person must go and do outside this conversation before you can go on, that you cannot do yourself (approve a deploy, sign in, touch a security key, click something in another app, merge a pull request you cannot merge). Write it as an Inbox-only `:::action` block: the first line is what to do, as an order; then why, in a line or two. Optional lines: `Where: <url or place>` (a URL becomes an Open button), `Run: <command>` (a command to copy), `Stopped:` / `Holds up:` as for questions, and `Watching: <what you watch>` when you will notice it done by yourself (then pass its id in `done`).",
+  "Never use it for a decision or a question (ask a :::question), for anything you can do yourself, or as a checklist or a status update: one block per real blocker, and most messages need none. The person marks it Done or Can't do it (with a reason); that comes back in their reply under \"Actions you asked for\".",
 ].join("\n");
 
 /** send_message's (and submit_guide's) `done`, as an agent reads it. */
 export const INBOX_DONE_DESCRIPTION =
-  "Your own to-dos (`:::action` blocks) in this thread that you saw done yourself, e.g. the deployment you were watching is Ready: \"<message id>/<key>\" for one (the key starts with a-; read_thread gives it) or \"<message id>\" for every open to-do of that message. The card then says you saw it done, and nothing is sent to the person. Only your own to-dos that are still open (not one the person already marked) in the thread this message lands in (use reply_to); otherwise nothing is sent and the refusal, invalid_done, lists the thread's open to-dos. Never mark done what you did not see happen.";
+  "Your own action items (`:::action` blocks) in this thread that you saw done yourself, e.g. the deployment you were watching is Ready: \"<message id>/<key>\" for one (the key starts with a-; read_thread gives it) or \"<message id>\" for every open action item of that message. The card then says you saw it done, and nothing is sent to the person. Only your own action items that are still open (not one the person already marked) in the thread this message lands in (use reply_to); otherwise nothing is sent and the refusal, invalid_done, lists the thread's open action items. Never mark done what you did not see happen.";

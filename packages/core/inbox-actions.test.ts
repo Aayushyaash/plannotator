@@ -1,6 +1,6 @@
 /**
  * The Inbox's `:::action` blocks (approval "inbox-next-actions"). Failures to
- * catch: a to-do's grammar leaking into plan review's question grammar; a
+ * catch: an action item's grammar leaking into plan review's question grammar; a
  * `Stopped: no` or `Holds up: none` read as a stop; a `javascript:` Where
  * becoming a button; a code fence hiding no block; keys that move when the why
  * changes; the reply the agent gets drifting from the brief.
@@ -34,7 +34,7 @@ const BODY = [
 ].join("\n");
 
 describe("parseInboxActionBlocks", () => {
-  test("the first line is the to-do, labelled lines are read, the rest is the why", () => {
+  test("the first line is the action item, labelled lines are read, the rest is the why", () => {
     const [deploy, npm] = parseInboxActionBlocks(BODY);
     expect(deploy).toMatchObject({
       key: inboxActionKey("Approve the production deploy on Vercel"),
@@ -52,13 +52,13 @@ describe("parseInboxActionBlocks", () => {
       startLine: 3,
       line: 4,
     });
-    // A Run: line before the order is still a label; the negative-word guard holds for to-dos too.
+    // A Run: line before the order is still a label; the negative-word guard holds for action items too.
     expect(npm).toMatchObject({ prompt: "Sign in to npm in your terminal", position: 1, why: "The publish failed with E401.", stopped: null, holds_up: ["the 4.2 publish"] });
     expect(npm!.action.run).toBe("npm login");
     expect(deploy!.key).toMatch(/^a-[0-9a-f]{8}$/);
   });
 
-  test("the key follows the first line only: the why may change, a reworded to-do is a new one; repeats get -2", () => {
+  test("the key follows the first line only: the why may change, a reworded action item is a new one; repeats get -2", () => {
     const a = parseInboxActionBlocks(":::action\nTouch your YubiKey\nfor the signing step\n:::")[0]!;
     const b = parseInboxActionBlocks(":::action\n**Touch your yubikey.**\nanother why\n:::")[0]!;
     expect(b.key).toBe(a.key);
@@ -67,7 +67,7 @@ describe("parseInboxActionBlocks", () => {
     expect(parseInboxActionBlocks(":::action\nTouch your YubiKey again\n:::")[0]!.key).not.toBe(a.key);
   });
 
-  test("a block in a code fence, an empty block, or one with only labels is no to-do", () => {
+  test("a block in a code fence, an empty block, or one with only labels is no action item", () => {
     expect(parseInboxActionBlocks("```\n:::action\nApprove it\n:::\n```")).toEqual([]);
     expect(parseInboxActionBlocks(":::action\n:::")).toEqual([]);
     expect(parseInboxActionBlocks(":::action\nWhere: https://x.test\n:::")).toEqual([]);
@@ -88,7 +88,7 @@ describe("parseInboxActionBlocks", () => {
     const [block] = parseInboxActionBlocks(`:::action\nApprove the deploy\nReplaces: ${id}\n:::`);
     expect(block!.replaces).toEqual([id]);
     expect(block!.why).toBeNull();
-    // A to-do replaces only a to-do: a question's id on its Replaces: line is prose.
+    // An action item replaces only an action item: a question's id on its Replaces: line is prose.
     const [questionId] = parseInboxActionBlocks(":::action\nApprove the deploy\nReplaces: msg_01M5F3B7KD2WQ9XN4C8VJTR6YE/q-4f2c19e0\n:::");
     expect(questionId!.replaces).toEqual([]);
     const [prose] = parseInboxActionBlocks(":::action\nApprove the deploy\nReplaces: the manual promote step\n:::");
@@ -134,7 +134,7 @@ const record = (over: Partial<InboxQuestionRecord>): InboxQuestionRecord => ({
   ...over,
 });
 
-describe("a to-do's state", () => {
+describe("an action item's state", () => {
   test("open, then picked inside the Undo window, then sent; the agent's own done closes it", () => {
     expect(inboxQuestionState(record({}), false)).toBe("open");
     const marked = record({ revision: 1, action_result: { outcome: "done", note: null, at: "2026-10-21T15:12:00.000Z", by: "person" } });
@@ -143,7 +143,7 @@ describe("a to-do's state", () => {
     expect(inboxQuestionState(record({ revision: 1, action_result: { outcome: "done", note: null, at: "x", by: "agent", message_id: "m" } }), false)).toBe("closed");
   });
 
-  test("the row counts an open to-do like a question, and says how many are to-dos; one in its Undo window waits on nobody", () => {
+  test("the row counts an open action item like a question, and says how many are action items; one in its Undo window waits on nobody", () => {
     const wire = (r: InboxQuestionRecord, state: InboxQuestion["state"]) => ({ ...r, state, orphaned: false, kind: r.kind }) as unknown as InboxQuestion;
     const summary = summarizeInboxQuestions([
       wire(record({ stopped: "release 4.2" }), "open"),
@@ -189,19 +189,19 @@ describe("what the agent gets", () => {
     expect(body.indexOf("### A1.")).toBeLessThan(body.indexOf("### A2."));
   });
 
-  test("a reply's question sections never count or number a to-do", () => {
+  test("a reply's question sections never count or number an action item", () => {
     const question = record({ kind: "single", key: "q-11111111", prompt: "Ship on Friday?", parsed: { context: null, choices: [{ label: "Yes", description: null, recommended: false, settled: false }], aliases: [null], recommendation: null, suggested_text: null, line: 2 } });
     const body = composeInboxReplyBody({ questions: [], sent: [], earlier: [], words: "Thanks.", stillOpen: [question, record({})] });
     expect(body).toBe("Thanks.\n\nNo question answered yet; it is still open. Don't re-ask it; the person will answer in the Inbox.");
   });
 
-  test("Mark read's note lists to-dos as A1 after the questions", () => {
+  test("Mark read's note lists action items as A1 after the questions", () => {
     expect(composeInboxSetAsideBody([record({ position: 0 }), { ...record({ kind: "single", position: 0 }), prompt: "Ship on Friday?" }])).toContain("- Q1. Ship on Friday?\n- A1. Approve the production deploy on Vercel");
   });
 });
 
 describe("ids", () => {
-  test("done takes a to-do's id; supersedes takes a question's or a to-do's", () => {
+  test("done takes an action item's id; supersedes takes a question's or an action item's", () => {
     expect(parseInboxDoneRef("msg_01M5F3B7KD2WQ9XN4C8VJTR6YE/a-4f2c19e0")).toEqual({ message_id: "msg_01M5F3B7KD2WQ9XN4C8VJTR6YE", key: "a-4f2c19e0" });
     expect(parseInboxDoneRef("msg_01M5F3B7KD2WQ9XN4C8VJTR6YE")).toEqual({ message_id: "msg_01M5F3B7KD2WQ9XN4C8VJTR6YE", key: null });
     expect(parseInboxDoneRef("msg_01M5F3B7KD2WQ9XN4C8VJTR6YE/q-4f2c19e0")).toBeNull();

@@ -3670,7 +3670,7 @@ ol.ib-rl-two .ib-rw-cmd { font-weight: 400; margin-top: 6px; }
 .ib-reask-d summary:hover { color: var(--foreground); }
 .ib-reask-d pre { margin: 8px 0 0; padding: 10px 12px; border-radius: 8px; background: color-mix(in oklch, var(--muted) 60%, transparent); font-family: var(--font-mono); font-size: var(--ib-fs-12, 12px); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--foreground); }
 
-/* ── To-dos (approval "inbox-next-actions", direction "In the thread"): an agent's `:::action` block drawn
+/* ── Action items (approval "inbox-next-actions", direction "In the thread"): an agent's `:::action` block drawn
    as a card in its message. Raised like a question card, never outlined; its badges are the list's. ── */
 .pn-inbox .ib-todo { margin: 8px 0 6px; border-radius: var(--ib-lr-xl, 12px); background: var(--ib-raise); padding: 14px 16px 12px; }
 .pn-inbox .ib-todo-eye { display: flex; align-items: center; gap: 7px; font-size: var(--ib-fs-13, 13px); color: var(--muted-foreground); }

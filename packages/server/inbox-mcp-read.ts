@@ -79,7 +79,7 @@ export interface AgentQuestionRef {
   /** `<message id>/<key>` of the question that replaced it, or `<message id>` when nothing did. */
   superseded_by?: string;
   /**
-   * On a to-do (`kind: "action"`, key `a-…`, numbered A1, A2…): what came of
+   * On an action item (`kind: "action"`, key `a-…`, numbered A1, A2…): what came of
    * it, in words: `done`, `done, note: "…"`, `can't do it: "…"`, or `you saw
    * it done` (your own `done`). Absent on a question and while it is open.
    */
@@ -298,7 +298,7 @@ export function answerWords(answer: AgentAnswer | undefined): string {
 
 /**
  * Each question's number in its message: its rank by position, as the reply's
- * answers section numbers it. To-dos (`kind: "action"`) are numbered on their
+ * answers section numbers it. Action items (`kind: "action"`) are numbered on their
  * own (A1, A2…), as the reply's "Actions you asked for" numbers them.
  */
 function numbering(questions: readonly InboxQuestion[]): Map<string, number> {
@@ -306,7 +306,7 @@ function numbering(questions: readonly InboxQuestion[]): Map<string, number> {
   return new Map([...rank(questions.filter((q) => q.kind !== "action")), ...rank(questions.filter((q) => q.kind === "action"))]);
 }
 
-/** A to-do's result in words, for the agent (`AgentQuestionRef.result`). */
+/** An action item's result in words, for the agent (`AgentQuestionRef.result`). */
 function actionResultWords(q: InboxQuestion): string | null {
   const result = q.action_result;
   if (q.kind !== "action" || !result) return null;
@@ -340,7 +340,7 @@ export function agentQuestions(questions: readonly InboxQuestion[]): AgentQuesti
  * leaves the answer out (wait_for_reply, whose reply body words it).
  */
 export function questionWords(q: AgentQuestionRef, withPrompt = false, withAnswer = true): string {
-  // A to-do (key `a-…`) reads A1, A2…: the reply's "Actions you asked for" numbers it so.
+  // An action item (key `a-…`) reads A1, A2…: the reply's "Actions you asked for" numbers it so.
   const head = `${q.key.startsWith("a-") ? "A" : "Q"}${q.q} ${q.key}${withPrompt && q.prompt ? ` (${JSON.stringify(q.prompt)})` : ""}`;
   if (q.result) return `${head} ${q.result}`;
   if (q.state === "superseded") return `${head} ${q.superseded_by?.includes("/") ? `replaced by ${q.superseded_by}` : "no longer applies"}`;
@@ -715,12 +715,12 @@ export function windowedThreadText(result: ThreadWindowResult, order: readonly s
   } else {
     out.push(`Waiting on the person (${thread.open_questions.length}):`);
     for (const q of thread.open_questions) {
-      // A to-do (key `a-…`): A1, A2…, "to do", or what the person marked inside its Undo window.
+      // An action item (key `a-…`): A1, A2…, "action item, open", or what the person marked inside its Undo window.
       const todo = q.key.startsWith("a-");
       const state = todo
         ? q.state === "picked"
           ? `${q.result ?? "marked"}`
-          : "to do"
+          : "action item, open"
         : q.state === "picked"
           ? `picked, not sent${q.answer ? `: ${answerWords(q.answer)}` : ""}`
           : "open";

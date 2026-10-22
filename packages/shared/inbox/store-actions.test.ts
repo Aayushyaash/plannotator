@@ -1,10 +1,10 @@
 /**
- * To-dos (approval "inbox-next-actions"): the store's rules, on a real store in
+ * Action items (approval "inbox-next-actions"): the store's rules, on a real store in
  * a temp dir on a clock the test moves. Failures to catch: a Done sent inside
- * its Undo window, or sent twice; an Undo after it went; a to-do read as a
+ * its Undo window, or sent twice; an Undo after it went; an action item read as a
  * question by picks, skips or the reply's sections; Mark read leaving one open
  * or closing one already on its way; the agent's `done` reaching another
- * thread, a question, or a to-do no longer open; a replay that changes any of
+ * thread, a question, or an action item no longer open; a replay that changes any of
  * it.
  */
 import { afterEach, describe, expect, test } from "bun:test";
@@ -64,8 +64,8 @@ function setup(dir?: string) {
 const rowOf = (store: InboxStore, threadId: string) => store.listRows().find((r) => r.thread_id === threadId)!;
 const actionOf = (store: InboxStore, messageId: string): InboxQuestion => store.questionsOf(messageId).find((q) => q.kind === "action")!;
 
-describe("a :::action block becomes a to-do record", () => {
-  test("kept as a question record of kind action, numbered on its own; the thread is Stopped on you and its row counts a to-do", () => {
+describe("a :::action block becomes an action item record", () => {
+  test("kept as a question record of kind action, numbered on its own; the thread is Stopped on you and its row counts an action item", () => {
     const { store, asked, action, question } = setup();
     expect(action).toMatchObject({
       key: inboxActionKey("Approve the production deploy on Vercel"),
@@ -81,11 +81,11 @@ describe("a :::action block becomes a to-do record", () => {
     const row = rowOf(store, asked.thread_id);
     expect(row.section).toBe("stopped");
     expect(row.questions).toMatchObject({ open: 2, actions: 1, stopped: true });
-    // The question's own subject: the first question's prompt, never the to-do (only a to-do and words: the first line).
+    // The question's own subject: the first question's prompt, never the action item (only an action item and words: the first line).
     expect(row.subject).toBe("Announce it in #releases?");
   });
 
-  test("a message of a to-do alone sits in Stopped on you by its Stopped: line, and its subject is the body's first line", () => {
+  test("a message of an action item alone sits in Stopped on you by its Stopped: line, and its subject is the body's first line", () => {
     const { store, project } = open();
     const p = store.ensureProject({ name: "web", root: "/work/web2" });
     void project;
@@ -140,10 +140,10 @@ describe("Done and Can't do it", () => {
     );
   });
 
-  test("a to-do is never a question: picks, Sends and skips that name it are refused, and a reply's sections leave it out", () => {
+  test("an action item is never a question: picks, Sends and skips that name it are refused, and a reply's sections leave it out", () => {
     const { store, asked, action, question } = setup();
-    expect(() => store.savePicks(asked.id, [{ key: action.key, revision: 0, answer: { v: 1, key: action.key, kind: "single", prompt: action.prompt, selected: [] } as never }])).toThrow(/is a to-do/);
-    expect(() => store.sendReply(asked.id, { idempotency_key: "k1", words: "", skip: [action.key] })).toThrow(/is a to-do/);
+    expect(() => store.savePicks(asked.id, [{ key: action.key, revision: 0, answer: { v: 1, key: action.key, kind: "single", prompt: action.prompt, selected: [] } as never }])).toThrow(/is an action item/);
+    expect(() => store.sendReply(asked.id, { idempotency_key: "k1", words: "", skip: [action.key] })).toThrow(/is an action item/);
     expect(() => store.markAction(asked.id, question.key, { outcome: "done" })).toThrow(/is a question/);
     const { reply } = store.sendReply(asked.id, { idempotency_key: "k2", words: "Looking now." });
     expect(reply.body).toBe("Looking now.\n\nNo question answered yet; it is still open. Don't re-ask it; the person will answer in the Inbox.");
@@ -204,7 +204,7 @@ describe("review fixes", () => {
     expect(replies[0]!.action_report).toHaveLength(2);
   });
 
-  test("supersedes: one question and one to-do in the new message, the old question is Replaced by the question; a to-do never replaces a question", () => {
+  test("supersedes: one question and one action item in the new message, the old question is Replaced by the question; an action item never replaces a question", () => {
     const { store, project, asked, question } = setup();
     const next = store.sendMessage({
       project_id: project.id,
@@ -226,7 +226,7 @@ describe("review fixes", () => {
     }).message;
     void lone;
     expect(second.store.questionsOf(second.asked.id).find((q) => q.key === second.question.key)!.superseded_by).toEqual({ message_id: lone.id, key: null });
-    // A to-do's own Replaces: line reaches only a to-do.
+    // An action item's own Replaces: line reaches only an action item.
     const replacesQuestion = () =>
       second.store.sendMessage({
         project_id: second.project.id,
@@ -238,7 +238,7 @@ describe("review fixes", () => {
     expect(second.store.questionsOf(second.asked.id).find((q) => q.kind === "action")!.superseded_by).toEqual({ message_id: by.id, key: expect.stringMatching(/^a-/) });
   });
 
-  test("supersedes never takes a to-do the person marked inside its Undo window: refused by its id, left out of a message-wide id; their answer still goes", () => {
+  test("supersedes never takes an action item the person marked inside its Undo window: refused by its id, left out of a message-wide id; their answer still goes", () => {
     const { store, clock, project, asked, action, question } = setup();
     store.markAction(asked.id, action.key, { outcome: "done", note: "Approved." });
     const before = store.cursor();
@@ -246,7 +246,7 @@ describe("review fixes", () => {
       store.sendMessage({ project_id: project.id, author: AGENT, reply_to: asked.id, body: "Never mind the deploy.", supersedes: [`${asked.id}/${action.key}`] }),
     ).toThrow(/the person already marked it; their answer reaches you in a few seconds/);
     expect(store.cursor()).toBe(before);
-    // A message-wide id supersedes the open question and leaves the marked to-do alone.
+    // A message-wide id supersedes the open question and leaves the marked action item alone.
     store.sendMessage({ project_id: project.id, author: AGENT, reply_to: asked.id, body: "Dropping the announcement question.", supersedes: [asked.id] });
     expect(store.questionsOf(asked.id).find((q) => q.key === question.key)!.state).toBe("superseded");
     expect(actionOf(store, asked.id)).toMatchObject({ state: "picked", superseded_by: null });
@@ -270,21 +270,46 @@ describe("review fixes", () => {
 });
 
 describe("Re-ask", () => {
-  test("asks for the open questions only: a to-do waits on its card, and with only a to-do open there is nothing to re-ask", () => {
+  test("asks for the open questions and open action items together; the note says so and tells how to close an action item", () => {
     const { store, asked, action, question } = setup();
     const { reply } = store.sendReask(asked.id, { idempotency_key: "r1" });
-    expect(reply.reask).toEqual([`${asked.id}/${question.key}`]);
-    expect(reply.body).not.toContain(action.prompt);
+    expect([...reply.reask!].sort()).toEqual([`${asked.id}/${action.key}`, `${asked.id}/${question.key}`].sort());
+    expect(reply.body.split("\n")[0]).toBe("Please ask your 1 open question and 1 open action item in this thread again, together in one new message, so the person can answer them in one place.");
+    expect(reply.body).toContain(`- ${asked.id}/${action.key}: (action item) ${action.prompt}`);
+    expect(reply.body).toContain("an action item in a `:::action` block");
+    expect(reply.body).toContain("- An action item you saw done yourself: put its id in `done`.");
+    expect(reply.body).toContain("Until every id above is replaced, in `supersedes` or in `done`, the old ones stay open for the person.");
+    // While the note waits, the row sits in Sent (rule 2a covers the action item too).
+    expect(rowOf(store, asked.thread_id)).toMatchObject({ section: "sent", reask_pending: true });
+  });
+
+  test("a message with only an action item can be re-asked; one the person marked inside its Undo window is not asked again", () => {
     const { store: other, project } = open();
     const p = other.ensureProject({ name: "web", root: "/work/solo" });
     void project;
-    const m = other.sendMessage({ project_id: p.id, author: AGENT, body: ":::action\nTouch your YubiKey\n:::" }).message;
-    expect(() => other.sendReask(m.id, { idempotency_key: "r1" })).toThrow(/No open question/);
+    const m = other.sendMessage({ project_id: p.id, author: AGENT, body: ":::action\nTouch your YubiKey\n:::\n\n:::action\nSign in to npm\n:::" }).message;
+    const [a1, a2] = other.questionsOf(m.id);
+    other.markAction(m.id, a1!.key, { outcome: "done" });
+    const { reply } = other.sendReask(m.id, { idempotency_key: "r1" });
+    expect(reply.reask).toEqual([`${m.id}/${a2!.key}`]);
+    expect(reply.body.split("\n")[0]).toBe("Please ask your open action item in this thread again, in one new message, so the person can answer it in one place.");
+    other.markAction(m.id, a2!.key, { outcome: "done" });
+    expect(() => other.sendReask(m.id, { idempotency_key: "r2" })).toThrow(/No open question/);
+  });
+
+  test("a question-only note keeps its words byte for byte", () => {
+    const { store: other, project } = open();
+    const p = other.ensureProject({ name: "web", root: "/work/q" });
+    void project;
+    const m = other.sendMessage({ project_id: p.id, author: AGENT, body: ":::question\nShip it?\n\n- [ ] Yes\n- [ ] No\n:::" }).message;
+    const { reply } = other.sendReask(m.id, { idempotency_key: "r1" });
+    expect(reply.body).not.toContain("action item");
+    expect(reply.body).toContain("put a `Replaces: <id>` line in its question block.");
   });
 });
 
 describe("Mark read", () => {
-  test("sets an open to-do aside like a question, the note lists it as A1, and Undo opens it again", () => {
+  test("sets an open action item aside like a question, the note lists it as A1, and Undo opens it again", () => {
     const { store, clock, asked } = setup();
     store.markRead(asked.thread_id, true);
     expect(actionOf(store, asked.id)).toMatchObject({ state: "closed", action_result: null });
@@ -297,7 +322,7 @@ describe("Mark read", () => {
     expect(actionOf(store, asked.id).state).toBe("open");
   });
 
-  test("leaves a to-do already marked Done (its Undo window running) on its way", () => {
+  test("leaves an action item already marked Done (its Undo window running) on its way", () => {
     const { store, clock, asked, action } = setup();
     store.markAction(asked.id, action.key, { outcome: "done" });
     store.markRead(asked.thread_id, true);
@@ -307,7 +332,7 @@ describe("Mark read", () => {
   });
 });
 
-describe("the agent marks its own to-do done", () => {
+describe("the agent marks its own action item done", () => {
   test("done closes it as seen by the agent, nothing is sent", () => {
     const { store, clock, project, asked, action } = setup();
     const ref = `${asked.id}/${action.key}`;
@@ -320,7 +345,7 @@ describe("the agent marks its own to-do done", () => {
     expect(store.pendingReplies("ses_a")).toEqual([]);
   });
 
-  test("never overrides the person: a to-do they marked (inside its Undo window) is refused, and their Done still goes", () => {
+  test("never overrides the person: an action item they marked (inside its Undo window) is refused, and their Done still goes", () => {
     const { store, clock, project, asked, action } = setup();
     store.markAction(asked.id, action.key, { outcome: "cant", note: "No access." });
     const ref = `${asked.id}/${action.key}`;
@@ -330,22 +355,22 @@ describe("the agent marks its own to-do done", () => {
     expect(reply!.body).toContain("Can't do it: No access.");
   });
 
-  test("only the session that wrote a to-do marks it done", () => {
+  test("only the session that wrote an action item marks it done", () => {
     const { store, project, asked, action } = setup();
     const other = { ...AGENT, session: "ses_other" };
     expect(() => store.sendMessage({ project_id: project.id, author: other, body: "Ready.", reply_to: asked.id, done: [`${asked.id}/${action.key}`] })).toThrow(/another session's/);
     expect(actionOf(store, asked.id).state).toBe("open");
   });
 
-  test("refuses another thread, a question, an unknown id and a to-do no longer open, writing nothing", () => {
+  test("refuses another thread, a question, an unknown id and an action item no longer open, writing nothing", () => {
     const { store, project, asked, action, question } = setup();
     const other = store.sendMessage({ project_id: project.id, author: { ...AGENT, session: "ses_b" }, body: "elsewhere", thread: "other" }).message;
     const before = store.cursor();
     const attempt = (done: string[], replyTo = asked.id) => () => store.sendMessage({ project_id: project.id, author: AGENT, body: "x", reply_to: replyTo, done });
-    expect(attempt([`${asked.id}/${question.key}`])).toThrow(/not a to-do's id/);
-    expect(attempt([`${asked.id}/a-00000000`])).toThrow(/has no to-do/);
+    expect(attempt([`${asked.id}/${question.key}`])).toThrow(/not an action item's id/);
+    expect(attempt([`${asked.id}/a-00000000`])).toThrow(/has no action item/);
     expect(attempt([`${asked.id}/${action.key}`], other.id)).toThrow(/another thread/);
-    expect(attempt(["nonsense"])).toThrow(/invalid_done|not a to-do's id/);
+    expect(attempt(["nonsense"])).toThrow(/invalid_done|not an action item's id/);
     expect(store.cursor()).toBe(before);
     store.sendMessage({ project_id: project.id, author: AGENT, body: "Ready.", reply_to: asked.id, done: [`${asked.id}/${action.key}`] });
     expect(attempt([`${asked.id}/${action.key}`])).toThrow(/not open/);
@@ -366,7 +391,7 @@ describe("the agent marks its own to-do done", () => {
 });
 
 describe("a replay from disk", () => {
-  test("reads every to-do state back the same, a Done inside its window included", () => {
+  test("reads every action item state back the same, a Done inside its window included", () => {
     const first = setup();
     const { store, clock, asked, action, project } = first;
     store.markAction(asked.id, action.key, { outcome: "done", note: "ok" });

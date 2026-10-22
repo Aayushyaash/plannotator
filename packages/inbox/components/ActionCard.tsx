@@ -1,5 +1,5 @@
 /**
- * A to-do's card in its message (approval "inbox-next-actions", direction "In
+ * An action item's card in its message (approval "inbox-next-actions", direction "In
  * the thread"): what the agent needs the person to go and do, why, where (an
  * Open button for a link, a command to copy), what the agent watches, and
  * Done / Can't do it… / Add note. Done and Can't do it are recorded at once and
@@ -22,7 +22,7 @@ export interface ActionMark {
 
 export interface ActionCardProps {
   action: InboxQuestion;
-  /** "To do 2 of 3" when the message has several. */
+  /** "Action item 2 of 3" when the message has several. */
   number: number;
   total: number;
   /** The agent that asked, as the person sees it ("Claude Code"). */
@@ -119,7 +119,7 @@ export function ActionCard({ action, number, total, agent, readOnly = false, onM
     if (state === 'cant' && result) return <span>You can't do it: “{result.note ?? ''}” Sent to {agent}.</span>;
     if (state === 'seen' && result) return <span>{agent} saw it done, {when}.</span>;
     if (state === 'set-aside') return <span>Set aside when you marked the thread read. {agent} was told not to wait.</span>;
-    if (state === 'replaced') return <span>{agent} replaced this to-do.</span>;
+    if (state === 'replaced') return <span>{agent} replaced this action item.</span>;
     if (state === 'archived') return <span>Closed when the thread was archived.</span>;
     return null;
   })();
@@ -131,14 +131,14 @@ export function ActionCard({ action, number, total, agent, readOnly = false, onM
     <div
       className="ib-todo"
       role="group"
-      aria-label={`To do: ${action.prompt}`}
+      aria-label={`Action item: ${action.prompt}`}
       data-action-card={action.key}
       data-action-state={state}
     >
       <div className="ib-todo-eye">
         <Icon name="todo" />
         <span>
-          To do{total > 1 ? ` ${number} of ${total}` : ''} · something only you can do
+          Action item{total > 1 ? ` ${number} of ${total}` : ''} · something only you can do
         </span>
         {pill && <span className={pill.className}>{pill.label}</span>}
       </div>

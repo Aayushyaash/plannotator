@@ -1,5 +1,5 @@
 /**
- * To-dos (approval "inbox-next-actions") through the Inbox's real doors: an
+ * Action items (approval "inbox-next-actions") through the Inbox's real doors: an
  * agent sends a `:::action` block over the official MCP client, the person's
  * Done / Can't do it / Undo go through `POST /api/inbox/messages/:id/actions/:key`
  * on a running Inbox (temp data dir, loopback, the Undo window shortened), and
@@ -99,17 +99,17 @@ async function poll(server: InboxServer) {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-describe("an agent sends a to-do", () => {
-  test("send_message says it carries a to-do and gives its key; the thread is Stopped on you; the wire marks it kind action", async () => {
+describe("an agent sends an action item", () => {
+  test("send_message says it carries an action item and gives its key; the thread is Stopped on you; the wire marks it kind action", async () => {
     const { server, sent, text } = await setup();
-    expect(text).toContain("Sent to the Plannotator Inbox with 1 to-do");
+    expect(text).toContain("Sent to the Plannotator Inbox with 1 action item");
     expect(sent.actions).toEqual([{ key: expect.stringMatching(/^a-[0-9a-f]{8}$/), prompt: "Approve the production deploy on Vercel" }]);
     const row = await rowOf(server, sent.thread_id);
     expect(row).toMatchObject({ section: "stopped", unread: true, questions: { open: 1, actions: 1, stopped: true } });
-    // read_thread's text numbers it A1 and says "to do", never Q1.
+    // read_thread's text numbers it A1 and says "action item", never Q1.
     const { client } = (await setupClientFor(server));
     const read = (await client.callTool({ name: "read_thread", arguments: { thread_id: sent.thread_id } })) as { content: { text: string }[] };
-    expect(read.content[0]!.text).toContain(`${sent.message_id}/${sent.actions![0]!.key} (A1) to do: Approve the production deploy on Vercel`);
+    expect(read.content[0]!.text).toContain(`${sent.message_id}/${sent.actions![0]!.key} (A1) action item, open: Approve the production deploy on Vercel`);
     expect(read.content[0]!.text).not.toContain("(Q1)");
     const action = await actionOf(server, sent.thread_id, sent.message_id);
     expect(action).toMatchObject({
@@ -156,7 +156,7 @@ describe("the person's Done", () => {
       structuredContent: { status: string; reply: { body: string } };
     };
     expect(replied.structuredContent).toMatchObject({ status: "replied", reply: { body } });
-    // The to-do reads A1 in the facts line, not Q1.
+    // The action item reads A1 in the facts line, not Q1.
     expect(replied.content[0]!.text).toMatch(/A1 a-[0-9a-f]{8} sent/);
     expect((await actionOf(server, sent.thread_id, sent.message_id)).state).toBe("sent");
     expect((await rowOf(server, sent.thread_id)).section).not.toBe("stopped");
@@ -227,24 +227,24 @@ describe("archive holds a pending Done back; Unarchive sends it", () => {
   });
 });
 
-describe("supersedes on a to-do", () => {
-  test("the result names a superseded to-do as a to-do, not a question", async () => {
+describe("supersedes on an action item", () => {
+  test("the result names a superseded action item as an action item, not a question", async () => {
     const { send, sent } = await setup();
     const replaced = await send({ body: "The deploy was promoted by CI; no need.", reply_to: sent.message_id, supersedes: [`${sent.message_id}/${sent.actions![0]!.key}`] });
-    expect(replaced.content[0]!.text).toContain(", superseding 1 earlier to-do (");
+    expect(replaced.content[0]!.text).toContain(", superseding 1 earlier action item (");
     expect(replaced.content[0]!.text).not.toContain("earlier question");
   });
 });
 
-describe("the agent marks its own to-do done", () => {
+describe("the agent marks its own action item done", () => {
   test("done is recorded, the card reads it, nothing is sent; invalid ids refuse the whole send with invalid_done", async () => {
     const { server, send, sent } = await setup();
     const id = `${sent.message_id}/${sent.actions![0]!.key}`;
     const bad = await send({ body: "Ready.", reply_to: sent.message_id, done: [`${sent.message_id}/a-00000000`] });
     expect(bad.isError).toBe(true);
-    expect(bad.content[0]!.text).toMatch(/^invalid_done: done: .*has no to-do a-00000000.*Open to-dos in this thread: /);
-    const ok = await send({ body: "The deployment is Ready, so I marked the to-do done.", reply_to: sent.message_id, done: [id] });
-    expect(ok.content[0]!.text).toContain("marking 1 to-do done");
+    expect(bad.content[0]!.text).toMatch(/^invalid_done: done: .*has no action item a-00000000.*Open action items in this thread: /);
+    const ok = await send({ body: "The deployment is Ready, so I marked the action item done.", reply_to: sent.message_id, done: [id] });
+    expect(ok.content[0]!.text).toContain("marking 1 action item done");
     expect(ok.structuredContent.done).toEqual([id]);
     expect(await actionOf(server, sent.thread_id, sent.message_id)).toMatchObject({ state: "closed", action_result: { outcome: "done", by: "agent", message_id: ok.structuredContent.message_id } });
     await sleep(DELAY + 250);

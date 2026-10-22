@@ -1,19 +1,19 @@
 /**
- * To-dos an agent needs the person to go do (approval "inbox-next-actions",
+ * Action items an agent needs the person to go do (approval "inbox-next-actions",
  * 2026-10-21, direction "In the thread"), proved in a real browser against the
  * compiled binary, with an agent writing through `plannotator inbox mcp`
  * (scripts/inbox-sim.ts):
  *
  *  - an agent's `:::action` block with `Stopped:` puts its thread under
- *    Stopped on you, and the row reads "1 to do" ("1 question, 1 to do" beside
+ *    Stopped on you, and the row reads "1 action item" ("1 question, 1 action item" beside
  *    a question): no new section, page or strip;
- *  - the thread draws the To do card in place of the block: what to do, why,
+ *  - the thread draws the Action item card in place of the block: what to do, why,
  *    Open for its link, what the agent watches, Done / Can't do it… / Add note;
  *  - Done: the toast with Undo, the card's Undo while the window runs, then
  *    the agent's wait_for_reply returns the reply with "Actions you asked for"
  *    and the card reads Sent;
  *  - Can't do it asks for the reason, which the agent gets word for word;
- *  - the agent marks its own to-do done (`done`): the card reads "Claude Code
+ *  - the agent marks its own action item done (`done`): the card reads "Claude Code
  *    saw it done" and nothing is sent;
  *  - light and dark, desktop and a phone (WebKit, iPhone 15: 44 px buttons).
  *
@@ -152,32 +152,32 @@ test.afterAll(async () => {
   }
 });
 
-test('the list: no new section; the to-do sits in Stopped on you and its row says "1 to do"', async () => {
+test('the list: no new section; the action item sits in Stopped on you and its row says "1 action item"', async () => {
   const { page, threads } = world;
   await page.goto(world.url);
   const stopped = page.locator('section[aria-label="Stopped on you"], .ib-group').filter({ hasText: 'Stopped on you' }).first();
   await expect(stopped).toContainText('Approve the production deploy on Vercel');
-  await expect(row(page, threads.vercel)).toContainText('1 to do');
-  await expect(row(page, threads.npm)).toContainText('1 question, 1 to do');
-  // No "To do" section band, page or strip.
-  await expect(page.getByText('To do', { exact: true })).toHaveCount(0);
+  await expect(row(page, threads.vercel)).toContainText('1 action item');
+  await expect(row(page, threads.npm)).toContainText('1 question, 1 action item');
+  // No "Action item" section band, page or strip.
+  await expect(page.getByText('Action item', { exact: true })).toHaveCount(0);
   await shot(page, '01-list');
 });
 
-test('the thread draws the To do card in place of the block', async () => {
+test('the thread draws the Action item card in place of the block', async () => {
   const { page, threads } = world;
   await page.goto(`${world.url}#thread=${threads.vercel}`);
   const card = page.locator('section.ib-pane [data-action-card]');
   await expect(card).toBeVisible();
-  await expect(card).toHaveAttribute('aria-label', 'To do: Approve the production deploy on Vercel');
-  await expect(card).toContainText('To do · something only you can do');
+  await expect(card).toHaveAttribute('aria-label', 'Action item: Approve the production deploy on Vercel');
+  await expect(card).toContainText('Action item · something only you can do');
   await expect(card.locator('.ib-badge')).toHaveText('Stopped');
   await expect(card.locator('[data-action-open]')).toHaveAttribute('href', 'https://vercel.com/acme/web/deployments/dpl_8Hk2mQ');
   await expect(card.locator('[data-action-watching]')).toHaveText('Claude Code is watching: the deployment; I go on by myself once it is Ready');
   await expect(card.locator('[data-action-hint]')).toHaveText('Done goes to Claude Code after 10 s');
   // The block's own lines are not drawn beside the card.
   await expect(page.locator('section.ib-pane')).not.toContainText('Where: [Vercel]');
-  // 👍 Looks good waits while the to-do does.
+  // 👍 Looks good waits while the action item does.
   await expect(page.locator('section.ib-pane [data-ack]')).toHaveCount(0);
   await shot(page, '02-thread-open');
   await page.goto(`${world.url}#thread=${threads.npm}`);
@@ -226,7 +226,7 @@ test("Can't do it: the reason, word for word", async () => {
   await shot(page, '07-cant-sent');
 });
 
-test('the agent marks its own to-do done: the card says so, nothing is sent', async () => {
+test('the agent marks its own action item done: the card says so, nothing is sent', async () => {
   const { page, threads, claude } = world;
   await page.goto(`${world.url}#thread=${threads.merge}`);
   const card = page.locator('section.ib-pane [data-action-card]');
@@ -234,7 +234,7 @@ test('the agent marks its own to-do done: the card says so, nothing is sent', as
   const sent = await claude.send({
     project_path: world.root,
     reply_to: threads.mergeMessage,
-    body: 'The PR is merged, so I marked the to-do done. Running the release smoke tests now.',
+    body: 'The PR is merged, so I marked the action item done. Running the release smoke tests now.',
     done: [`${threads.mergeMessage}/${threads.mergeKey}`],
   });
   expect(sent.done).toEqual([`${threads.mergeMessage}/${threads.mergeKey}`]);

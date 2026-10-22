@@ -165,6 +165,38 @@ describe("Re-ask reaches the agent", () => {
   });
 });
 
+describe("Re-ask with action items (owner, #2059)", () => {
+  test("the note lists the open action item with the questions; the agent asks it again with a Replaces: line in a :::action block and marks another done", async () => {
+    const { server, client, project } = await setup();
+    const first = await send(client, project, "ses-a", {
+      body: `Two things.\n\n${block("Backfill ledger first?")}\n\n:::action\nApprove the ledger migration in Stripe\nWhere: https://dashboard.stripe.com/migrations\n:::\n\n:::action\nRotate the webhook secret\n:::`,
+    });
+    const before = await thread(server, first.thread_id);
+    const items = before.messages[0]!.questions!;
+    const [todo1, todo2] = items.filter((q) => q.kind === "action");
+    // The person marks one Done: inside its Undo window it is not open, so not asked again.
+    expect((await post(server, `/api/inbox/messages/${first.message_id}/actions/${todo2!.key}`, { serverSession: server.serverSession, outcome: "done" })).status).toBe(200);
+    const response = await reask(server, first.message_id, { idempotency_key: "k1" });
+    expect(response.status).toBe(200);
+    const note = ((await response.json()) as { reply: { id: string; reask: string[]; body: string } }).reply;
+    const question = items.find((q) => q.kind !== "action")!;
+    expect([...note.reask].sort()).toEqual([`${first.message_id}/${question.key}`, `${first.message_id}/${todo1!.key}`].sort());
+    expect(note.body.split("\n")[0]).toBe("Please ask your 1 open question and 1 open action item in this thread again, together in one new message, so the person can answer them in one place.");
+    expect((await row(server, first.thread_id)).reask_pending).toBe(true);
+    // The agent asks the question and the action item again.
+    const answer = await send(client, project, "ses-a", {
+      reply_to: note.id,
+      body: `Asked again.\n\n${block("Backfill ledger first?", [`Replaces: ${first.message_id}/${question.key}`, ""])}\n\n:::action\nApprove the ledger migration in Stripe\nIt is still pending in the dashboard.\nReplaces: ${first.message_id}/${todo1!.key}\n:::`,
+    });
+    const after = await thread(server, first.thread_id);
+    const old = after.messages.find((m) => m.id === first.message_id)!.questions!;
+    expect(old.find((q) => q.key === todo1!.key)).toMatchObject({ state: "superseded", superseded_by: { message_id: answer.message_id, key: expect.stringMatching(/^a-/) } });
+    expect(old.find((q) => q.key === question.key)!.state).toBe("superseded");
+    expect(old.find((q) => q.key === todo2!.key)!.state).toBe("picked");
+    expect((await row(server, first.thread_id)).reask_pending).toBe(false);
+  });
+});
+
 describe("Re-ask to another session (the asker ended)", () => {
   test("the note names whose questions they are, and the wake says the questions are another session's", async () => {
     const { server, client, project } = await setup();

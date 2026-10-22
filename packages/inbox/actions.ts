@@ -1,7 +1,7 @@
 /**
- * To-dos in the Inbox window (approval "inbox-next-actions", direction "In the
+ * Action items in the Inbox window (approval "inbox-next-actions", direction "In the
  * thread"): an agent's `:::action` block is a card in its message, and
- * nothing else. The server keeps each to-do as a question record of kind
+ * nothing else. The server keeps each action item as a question record of kind
  * "action" and lists it in the message's `questions`; the window moves them
  * to `actions` as it reads a thread, so the picks, the Send, Re-ask and the
  * reply box never meet one.
@@ -15,7 +15,7 @@ import {
 } from '@plannotator/core/inbox-types';
 import { parseInboxActionBlocks } from '@plannotator/core/inbox-actions';
 
-/** A question the window may answer: a kind it knows that is not a to-do (fail-closed: an unknown kind is neither). */
+/** A question the window may answer: a kind it knows that is not an action item (fail-closed: an unknown kind is neither). */
 export function isAnswerableQuestion(question: Pick<InboxQuestion, 'kind'>): boolean {
   const kind = readInboxQuestionKind(question.kind);
   return kind !== 'action' && kind !== 'unknown';
@@ -25,12 +25,12 @@ export function isActionRecord(question: Pick<InboxQuestion, 'kind'>): boolean {
   return readInboxQuestionKind(question.kind) === 'action';
 }
 
-/** A message's questions without its to-dos (and without kinds this window does not know). */
+/** A message's questions without its action items (and without kinds this window does not know). */
 export function questionsOnly(questions: readonly InboxQuestion[] | undefined): InboxQuestion[] {
   return (questions ?? []).filter(isAnswerableQuestion);
 }
 
-/** One message with its to-dos moved out of `questions` into `actions`. */
+/** One message with its action items moved out of `questions` into `actions`. */
 export function splitMessageActions(message: InboxMessageWire): InboxMessageWire {
   const all = message.questions;
   if (!all || !all.some((q) => !isAnswerableQuestion(q))) return message;
@@ -52,8 +52,8 @@ export function splitThreadActions(thread: InboxThread): InboxThread {
 /**
  * Which record a `:::action` block of the body draws: the block's opening
  * line (the Viewer's block and the core reader split the body the same way,
- * frontmatter off) names the parsed to-do, and its key names the record.
- * Null when no parsed to-do opens on that line or no record has its key.
+ * frontmatter off) names the parsed action item, and its key names the record.
+ * Null when no parsed action item opens on that line or no record has its key.
  */
 export function actionForBlock(
   body: string,
@@ -67,7 +67,7 @@ export function actionForBlock(
   return null;
 }
 
-/** What a to-do's card says it is, for its badge. */
+/** What an action item's card says it is, for its badge. */
 export type ActionCardState = 'open' | 'pending' | 'done' | 'cant' | 'seen' | 'set-aside' | 'archived' | 'replaced';
 
 export function actionCardState(action: InboxQuestion): ActionCardState {

@@ -381,7 +381,7 @@ const ERROR_STATUS: Record<string, number> = {
   ack_after_reply: 409,
   question_open: 409,
   idempotency_key_reused: 409,
-  // To-dos (approval "inbox-next-actions"): a Done already sent (no Undo), a to-do no longer open, an agent's `done` that names no open to-do.
+  // Action items (approval "inbox-next-actions"): a Done already sent (no Undo), an action item no longer open, an agent's `done` that names no open action item.
   action_already_sent: 409,
   action_closed: 409,
   invalid_done: 422,
@@ -630,12 +630,12 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     (timer as { unref?: () => void }).unref?.();
     setAsideTimers.add(timer);
   };
-  // To-dos (approval "inbox-next-actions"): the person's Done or Can't do it goes to the agent once the same Undo window has passed.
+  // Action items (approval "inbox-next-actions"): the person's Done or Can't do it goes to the agent once the same Undo window has passed.
   const settleActions = () => {
     try {
       store.settleActions(setAsideDelayMs);
     } catch (error) {
-      process.stderr.write(`Inbox: a to-do's Done was not sent: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.stderr.write(`Inbox: an action item's Done was not sent: ${error instanceof Error ? error.message : String(error)}\n`);
     }
   };
   const scheduleActionSettle = () => {
@@ -2207,7 +2207,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         return json(result);
       }
 
-      // A to-do (approval "inbox-next-actions"): the person's Done (with an
+      // An action item (approval "inbox-next-actions"): the person's Done (with an
       // optional note) or Can't do it (with a reason), sent to the agent once
       // the Undo window passes; `{ outcome: null }` is the Undo.
       const actionMatch = /^\/api\/inbox\/messages\/([A-Za-z0-9_]+)\/actions\/(a-[0-9a-f]{8}(?:-\d{1,3})?)$/.exec(path);
@@ -2277,7 +2277,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
             const result = unarchiveProject(store, projectId, undo);
             // Unarchived: a Mark read's set-aside note an archive held back is due again (as for the single Unarchive).
             for (const id of undo.resolved) if (result.done.includes(id)) scheduleSetAside(id);
-            // A to-do's Done an archive held back is sent once the thread is open again.
+            // An action item's Done an archive held back is sent once the thread is open again.
             if (result.done.length > 0) {
               settleActions();
               if (store.actionsPending() > 0) scheduleActionSettle();
@@ -2393,7 +2393,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
             // Unarchived: a Mark read's set-aside note an archive held back is due again.
             if (body.resolved === false) {
               scheduleSetAside(thread.thread_id);
-              // A to-do's Done an archive held back (archived inside its Undo window) is sent now, or when its window passes.
+              // An action item's Done an archive held back (archived inside its Undo window) is sent now, or when its window passes.
               settleActions();
               if (store.actionsPending() > 0) scheduleActionSettle();
             }
@@ -2562,7 +2562,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     // An ack a stop interrupted inside its Undo window.
     settleAcks();
     if (store.acksPending() > 0) scheduleAckSettle();
-    // A to-do's Done a stop interrupted inside its Undo window.
+    // An action item's Done a stop interrupted inside its Undo window.
     settleActions();
     if (store.actionsPending() > 0) scheduleActionSettle();
   }, 0);

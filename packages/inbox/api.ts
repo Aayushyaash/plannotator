@@ -557,7 +557,7 @@ export const inboxApi = {
     return get<ArchivedModel>(`/api/inbox/threads/archived${qs ? `?${qs}` : ''}`);
   },
   /** One thread; with `timeoutMs`, a read with no answer by then fails (InboxReadTimeout) instead of waiting for good. */
-  // A thread's to-dos move out of `questions` into `actions` here (actions.ts), so nothing that picks or sends answers meets one.
+  // A thread's action items move out of `questions` into `actions` here (actions.ts), so nothing that picks or sends answers meets one.
   thread: (threadId: string, timeoutMs?: number) =>
     (timeoutMs === undefined
       ? get<ThreadModel>(`/api/inbox/threads/${encodeURIComponent(threadId)}`)
@@ -597,9 +597,9 @@ export const inboxApi = {
       questions: [{ key, revision, answer }],
     }).then((result) => ({ ...result, questions: questionsOnly(result.questions) })),
   /**
-   * A to-do's Done (with an optional note) or Can't do it (with the reason),
+   * An action item's Done (with an optional note) or Can't do it (with the reason),
    * or its Undo (`null`): sent to the agent once the Undo window passes.
-   * Answers the message's to-dos.
+   * Answers the message's action items.
    */
   markAction: (messageId: string, key: string, mark: { outcome: 'done' | 'cant'; note?: string | null } | null) =>
     post<{ questions: InboxQuestion[] }>(

@@ -190,11 +190,11 @@ export function inboxQuestionState(
   threadResolved: boolean,
 ): InboxQuestionState {
   if (record.superseded_by) return "superseded";
-  // A to-do the agent saw done itself is closed: nothing waits on the person, nothing is sent.
+  // An action item the agent saw done itself is closed: nothing waits on the person, nothing is sent.
   if (record.kind === "action" && record.action_result?.by === "agent") return "closed";
   if (threadResolved || record.set_aside) return "closed";
   if (record.kind === "action") {
-    // A to-do: open until the person's Done or Can't do it, "picked" while its
+    // An action item: open until the person's Done or Can't do it, "picked" while its
     // Undo window runs, "sent" once the reply carrying it is written.
     if (!record.action_result) return "open";
     return record.revision > 0 && record.sent_revision === record.revision ? "sent" : "picked";
@@ -254,7 +254,7 @@ export function toInboxQuestion(record: InboxQuestionRecord, threadResolved: boo
 
 // ─────────────────────────────── Superseding ───────────────────────────────
 
-// `q-` a question, `a-` a to-do (an Inbox `:::action`).
+// `q-` a question, `a-` an action item (an Inbox `:::action`).
 const SUPERSEDE_REF_RE = /^(msg_[0-9A-HJKMNP-TV-Z]{26})(?:\/((?:q|a)-[0-9a-f]{8}(?:-\d{1,3})?))?$/;
 
 /**
@@ -284,7 +284,7 @@ export function summarizeInboxQuestions(questions: readonly InboxQuestion[]): In
   let prompt: string | null = null;
   for (const q of questions) {
     if (q.orphaned) continue;
-    // A to-do the person marked is on its way (its Undo window): it waits on nobody's Send.
+    // An action item the person marked is on its way (its Undo window): it waits on nobody's Send.
     if (q.state === "picked" && q.kind !== "action") picked += 1;
     if (q.state !== "open") continue;
     open += 1;
@@ -398,7 +398,7 @@ export function composeInboxReplyBody(input: {
   /** The message the reply answers (`reply_to`), for `messages`. */
   replyTo?: string;
 }): string {
-  // To-dos (`kind: "action"`) are reported in their own section ("Actions
+  // Action items (`kind: "action"`) are reported in their own section ("Actions
   // you asked for"), never numbered or counted as questions here.
   const questionsOnly = <T extends { kind: string }>(list: readonly T[]): T[] => list.filter((q) => q.kind !== "action");
   const groups: readonly InboxReplyMessageAnswers[] = (
@@ -469,7 +469,8 @@ function answersSection(group: InboxReplyMessageAnswers, headingLevel: 2 | 3): s
  * own id, the `reply_to` of the agent's new message.
  */
 export function composeInboxReaskBody(input: {
-  reask: readonly Pick<InboxQuestionRecord, "id" | "prompt">[];
+  /** The open questions and action items (`kind: "action"`, approval "inbox-next-actions") asked again. */
+  reask: readonly (Pick<InboxQuestionRecord, "id" | "prompt"> & { kind?: string })[];
   answered: readonly { record: Pick<InboxQuestionRecord, "id" | "prompt" | "parsed">; answer: QuestionAnswer }[];
   noteId: string;
   /**
@@ -480,7 +481,20 @@ export function composeInboxReaskBody(input: {
   askedBy?: string | null;
 }): string {
   const n = input.reask.length;
-  const whose = input.askedBy ? `the ${n === 1 ? "open question" : `${n} open questions`} ${input.askedBy} asked` : `your ${n === 1 ? "open question" : `${n} open questions`}`;
+  const actions = input.reask.filter((r) => r.kind === "action").length;
+  const questions = n - actions;
+  // Questions alone keep their words; with action items the note names both.
+  const items =
+    actions === 0
+      ? n === 1
+        ? "open question"
+        : `${n} open questions`
+      : questions === 0
+        ? actions === 1
+          ? "open action item"
+          : `${actions} open action items`
+        : `${questions} open question${questions === 1 ? "" : "s"} and ${actions} open action item${actions === 1 ? "" : "s"}`;
+  const whose = input.askedBy ? `the ${items} ${input.askedBy} asked` : `your ${items}`;
   const lines = [
     n === 1
       ? `Please ask ${whose} in this thread again, in one new message, so the person can answer it in one place.`
@@ -493,12 +507,17 @@ export function composeInboxReaskBody(input: {
   lines.push(
     "",
     "Still open:",
-    ...input.reask.map((q) => `- ${q.id}: ${q.prompt.replace(/\s+/g, " ").trim()}`),
+    ...input.reask.map((q) => `- ${q.id}: ${q.kind === "action" ? "(action item) " : ""}${q.prompt.replace(/\s+/g, " ").trim()}`),
     "",
     `Check ${n === 1 ? "it" : "each one"} against where the work is now:`,
-    "- Still needed: ask it again with the context the person needs today (what changed since you asked, your recommendation), and put a `Replaces: <id>` line in its question block.",
+    actions === 0
+      ? "- Still needed: ask it again with the context the person needs today (what changed since you asked, your recommendation), and put a `Replaces: <id>` line in its question block."
+      : "- Still needed: ask it again with the context the person needs today (what changed since you asked, your recommendation), and put a `Replaces: <id>` line in its block (a question in a question block, an action item in a `:::action` block).",
     "- No longer needed: leave it out, put its id in `supersedes`, and say in one line why.",
-    `Send one message (send_message) with reply_to ${input.noteId}. Until every id above is replaced or in \`supersedes\`, the old ${n === 1 ? "question stays" : "questions stay"} open for the person.`,
+    ...(actions > 0 ? ["- An action item you saw done yourself: put its id in `done`."] : []),
+    actions === 0
+      ? `Send one message (send_message) with reply_to ${input.noteId}. Until every id above is replaced or in \`supersedes\`, the old ${n === 1 ? "question stays" : "questions stay"} open for the person.`
+      : `Send one message (send_message) with reply_to ${input.noteId}. Until every id above is replaced, in \`supersedes\` or in \`done\`, the old ${n === 1 ? "one stays" : "ones stay"} open for the person.`,
   );
   if (input.answered.length > 0) {
     let section = `## ${QUESTION_ANSWERS_HEADING}\n\n`;
@@ -585,7 +604,7 @@ export function inboxSkipAnswer(record: { key: string; kind: QuestionKind; promp
   };
 }
 
-/** Questions as `- Q1. <prompt>`, then to-dos as `- A1. <what to do>` (each numbered as its card). */
+/** Questions as `- Q1. <prompt>`, then action items as `- A1. <what to do>` (each numbered as its card). */
 function numberedLines(records: readonly (Pick<InboxQuestionRecord, "position" | "prompt"> & { kind?: string })[]): string[] {
   const line = (prefix: string) => (q: Pick<InboxQuestionRecord, "position" | "prompt">) => `- ${prefix}${q.position + 1}. ${q.prompt.replace(/\s+/g, " ").trim()}`;
   const byPosition = (a: { position: number }, b: { position: number }) => a.position - b.position;

@@ -92,7 +92,7 @@ const bodyArb = fc.oneof(
     ([prompt, labels]) => [":::question", prompt, "", ...labels.map((l) => `- [ ] ${l}`), ":::"].join("\n"),
   ),
   promptArb.map((prompt) => [":::question-text", prompt, ":::"].join("\n")),
-  // A to-do (approval "inbox-next-actions"), stopped or not, beside a question or alone.
+  // An action item (approval "inbox-next-actions"), stopped or not, beside a question or alone.
   fc.tuple(promptArb, fc.boolean()).map(([prompt, stopped]) => [":::action", prompt.replace(/\?$/, ""), "The why.", ...(stopped ? ["Stopped: it waits on you"] : []), ":::"].join("\n")),
   fc.tuple(promptArb, promptArb).map(([todo, ask]) => [":::action", todo.replace(/\?$/, ""), ":::", "", ":::question-text", ask, ":::"].join("\n")),
 );
@@ -133,8 +133,8 @@ type Op =
   | { op: "reask"; target: number; key: string }
   // The Board (approval "inbox-board"): an agent's card call, or the person's move, on a card linked to a thread.
   | { op: "card"; target: number; card: CardOp }
-  // A to-do (approval "inbox-next-actions"): the person's Done, Can't do it or Undo on the target's first to-do;
-  // `settle` is the Undo window passing; `agentDone` the agent's own `done` for the target's to-dos.
+  // An action item (approval "inbox-next-actions"): the person's Done, Can't do it or Undo on the target's first action item;
+  // `settle` is the Undo window passing; `agentDone` the agent's own `done` for the target's action items.
   | { op: "todo"; target: number; outcome: "done" | "cant" | "undo" }
   | { op: "settle" }
   | { op: "agentDone"; target: number };
@@ -267,7 +267,7 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
       }
       case "pick": {
         if (!target) return "noop";
-        // The window never picks a to-do (it is marked on its card).
+        // The window never picks an action item (it is marked on its card).
         const questions = store.questionsOf(target).filter((q) => q.kind !== "action");
         const question = questions[(op.question ?? 0) % Math.max(1, questions.length)];
         if (!question) return "noop";
@@ -297,7 +297,7 @@ function run(store: InboxStore, op: Op, messageIds: string[]): Outcome {
                 )
                 .map((m) => m.id)
             : [];
-        // The window never sends a to-do with a Send (it is marked on its card).
+        // The window never sends an action item with a Send (it is marked on its card).
         const picked = [target, ...others].flatMap((id) =>
           store
             .questionsOf(id)
@@ -1036,7 +1036,7 @@ type ModelAnswer = null | "pick" | "skip";
 
 interface ModelQuestion {
   id: string;
-  /** A to-do (approval "inbox-next-actions"): counts like a question, never picked or skipped by a Send. */
+  /** An action item (approval "inbox-next-actions"): counts like a question, never picked or skipped by a Send. */
   action: boolean;
   stopped: boolean;
   holds: boolean;
@@ -1563,8 +1563,8 @@ class ThreadStateModel {
         const group = thread.messages.filter(
           (m) => m.author === "agent" && (session !== null ? m.session === session : m === message) && !this.closedByArchive(thread, m),
         );
-        // A to-do is not asked again: it waits on its card.
-        const questions = group.flatMap((m) => m.questions).filter((q) => !q.action);
+        // Open action items are asked again with the questions (owner, #2059).
+        const questions = group.flatMap((m) => m.questions);
         const asked = questions.filter((q) => this.recordState(q) === "open");
         if (asked.length === 0) return "refused:nothing_to_reask";
         // Picks not sent go with the note.
