@@ -201,7 +201,8 @@ async function pointer(stage: HTMLElement, type: string, id: number, x: number, 
 }
 
 describe.if(hasDom)('ImageLightbox: zoom (#2067)', () => {
-  const zoomText = (host: HTMLElement) => host.querySelector('[data-lightbox-zoom]')?.textContent ?? null;
+  // A screen reader hears "Zoom 50%"; the number is what is drawn.
+  const zoomText = (host: HTMLElement) => host.querySelector('[data-lightbox-zoom]')?.textContent?.replace(/^Zoom /, '') ?? null;
   const fitButton = (host: HTMLElement) => host.querySelector<HTMLButtonElement>('[data-lightbox-fit]')!;
 
   test('opens at Fit; Ctrl/⌘ + wheel (and a pinch) zooms about the pointer, and the header says how far', async () => {
@@ -304,7 +305,7 @@ describe.if(hasDom)('ImageLightbox: zoom (#2067)', () => {
     expect(view(img).scale).toBeCloseTo(1, 5);
   });
 
-  test('the single image overlay zooms too; a tap beside the image closes it, on the image it does not', async () => {
+  test('the single image overlay zooms too; a tap beside the image closes it from the click after it, on the image it does not', async () => {
     let closed = 0;
     const host = await mount(() => { closed += 1; });
     const { stage, img } = await loadImage(host, 400, 300);
@@ -312,11 +313,123 @@ describe.if(hasDom)('ImageLightbox: zoom (#2067)', () => {
     expect(view(img).scale).toBe(1);
     await pointer(stage, 'pointerdown', 1, 500, 300);
     await pointer(stage, 'pointerup', 1, 500, 300);
+    await act(async () => { img.click(); });
     expect(closed).toBe(0);
     await wheel(stage, -100, { ctrlKey: true });
     expect(view(img).scale).toBeGreaterThan(1);
+    // The pointerup alone does not close: the overlay must still be there for
+    // the click a touch synthesizes, or that click lands on the page beneath.
     await pointer(stage, 'pointerdown', 2, 5, 5);
     await pointer(stage, 'pointerup', 2, 5, 5);
+    expect(closed).toBe(0);
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    await act(async () => { stage.dispatchEvent(click); });
     expect(closed).toBe(1);
+    expect(click.defaultPrevented).toBe(true);
+  });
+
+  test('a drag that starts beside the image, a cancelled press, or a click with no tap before it never closes', async () => {
+    let closed = 0;
+    const host = await mount(() => { closed += 1; });
+    const { stage } = await loadImage(host, 400, 300);
+    await pointer(stage, 'pointerdown', 1, 5, 5);
+    await pointer(stage, 'pointermove', 1, 60, 40);
+    await pointer(stage, 'pointerup', 1, 60, 40);
+    await act(async () => { stage.click(); });
+    await pointer(stage, 'pointerdown', 2, 5, 5, 'touch');
+    await pointer(stage, 'pointercancel', 2, 5, 5, 'touch');
+    await act(async () => { stage.click(); });
+    expect(closed).toBe(0);
+  });
+
+  test('the focused stage scrolls with the browser\'s scroll keys; ← → still step; nothing reaches the page', async () => {
+    const host = await mountStepping(IMAGES[0]!.src, () => {});
+    const { stage, img } = await loadImage(host, 2000, 4000);
+    expect(stage.tabIndex).toBe(0);
+    expect(stage.getAttribute('aria-label')).toBe('Image: a.png');
+    await act(async () => fitButton(host).click());
+    stage.focus();
+    const seen = behindTheLightbox();
+    const down = press('ArrowDown');
+    expect(down.defaultPrevented).toBe(true);
+    expect(view(img)).toEqual({ x: 0, y: -40, scale: 1 });
+    await act(async () => { press('PageDown'); });
+    expect(view(img).y).toBe(-40 - 600 * 0.875);
+    await act(async () => { press(' ', { shiftKey: true }); });
+    expect(view(img).y).toBe(-40);
+    await act(async () => { press('End'); });
+    expect(view(img).y).toBe(-3400);
+    await act(async () => { press('Home'); });
+    expect(view(img).y).toBe(0);
+    await act(async () => { press(' '); });
+    expect(view(img).y).toBe(-525);
+    expect(seen).toEqual([]);
+    // ← → are still stepping.
+    await act(async () => { press('ArrowRight'); });
+    expect(host.querySelector('[data-lightbox-count]')!.textContent).toBe('2 of 3');
+  });
+
+  test('the single overlay\'s focused stage takes ← → as sideways scrolling', async () => {
+    const host = await mount(() => {});
+    const { stage, img } = await loadImage(host, 3000, 300);
+    await wheel(stage, -100, { ctrlKey: true });
+    const before = view(img);
+    stage.focus();
+    await act(async () => { press('ArrowRight'); });
+    expect(view(img).x).toBeCloseTo(before.x - 40, 5);
+  });
+
+  test('Safari\'s gesture events (a trackpad pinch) zoom the image and never the page', async () => {
+    const host = await mountStepping(IMAGES[0]!.src, () => {});
+    const { stage, img } = await loadImage(host);
+    const gesture = (type: string, scale: number) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.assign(event, { scale, clientX: 500, clientY: 300 });
+      return event;
+    };
+    const start = gesture('gesturestart', 1);
+    await act(async () => { stage.dispatchEvent(start); });
+    const change = gesture('gesturechange', 2);
+    await act(async () => { stage.dispatchEvent(change); });
+    await act(async () => { stage.dispatchEvent(gesture('gestureend', 2)); });
+    expect(start.defaultPrevented).toBe(true);
+    expect(change.defaultPrevented).toBe(true);
+    expect(view(img).scale).toBeCloseTo(1, 5);
+    // Over the header, too, the page does not zoom.
+    const header = host.querySelector('[data-lightbox-count]')!;
+    const overHeader = gesture('gesturechange', 3);
+    await act(async () => { header.dispatchEvent(overHeader); });
+    expect(overHeader.defaultPrevented).toBe(true);
+    expect(view(img).scale).toBeCloseTo(1, 5);
+  });
+
+  test('Ctrl + wheel over the header or the buttons never zooms the page; a plain wheel there is left alone', async () => {
+    const host = await mountStepping(IMAGES[0]!.src, () => {});
+    await loadImage(host);
+    const next = host.querySelector('[data-lightbox-next]')!;
+    const ctrl = wheelEvent(-100, { ctrlKey: true });
+    await act(async () => { next.dispatchEvent(ctrl); });
+    expect(ctrl.defaultPrevented).toBe(true);
+    const plain = wheelEvent(-100);
+    await act(async () => { next.dispatchEvent(plain); });
+    expect(plain.defaultPrevented).toBe(false);
+  });
+
+  test('stepping to an image with the same src still starts at Fit and shows its scale', async () => {
+    const same = [IMAGES[0]!, { ...IMAGES[0]!, section: 'Again' }];
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const { ImageLightbox } = lightboxModule!;
+    await act(async () => { root.render(<ImageLightbox src={same[0]!.src} alt="" images={same} onClose={() => {}} />); });
+    cleanups.push(() => root.unmount());
+    const first = await loadImage(host);
+    await wheel(first.stage, -100, { ctrlKey: true });
+    await act(async () => { press('ArrowRight'); });
+    expect(host.querySelector('[data-lightbox-count]')!.textContent).toBe('2 of 2');
+    expect(zoomText(host)).toBeNull();
+    const second = await loadImage(host);
+    expect(view(second.img).scale).toBe(0.5);
+    expect(zoomText(host)).toBe('50%');
   });
 });

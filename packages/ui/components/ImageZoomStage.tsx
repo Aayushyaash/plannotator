@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import {
   actualViewport,
   atFit,
@@ -23,6 +23,33 @@ import {
 
 /** Fit (the whole image), Actual size (its own pixels), or anything a gesture left. */
 export type ZoomMode = 'fit' | 'actual' | 'zoom';
+
+/** What the host's capture-phase key handler reaches the stage through. */
+export interface ImageZoomStageHandle {
+  /** The focusable stage, to tell whether a key was aimed at it. */
+  element: HTMLDivElement | null;
+  /**
+   * The browser's own scroll keys while the stage has focus (it stood in for
+   * an overflow-auto scroller): ↑ ↓, Page Up / Page Down, Home / End, Space
+   * and Shift+Space; ← → too when `arrowsSideways`. Answers whether the key
+   * was one of them (the host then prevents its default).
+   */
+  scrollKey(key: string, shiftKey: boolean, arrowsSideways: boolean): boolean;
+}
+
+/** One arrow key's travel, as a browser scrolls a page by a line. */
+export const KEY_SCROLL_PX = 40;
+/** Page Up / Page Down / Space: most of the stage, as a browser pages. */
+export const KEY_PAGE_SHARE = 0.875;
+/** A synthesized click this long after the tap that asked for it still closes. */
+const CLICK_AFTER_TAP_MS = 800;
+
+/** Safari's GestureEvent (trackpad pinch on macOS, two fingers on iOS). */
+interface GestureLike extends Event {
+  scale: number;
+  clientX: number;
+  clientY: number;
+}
 
 interface StageBox extends ZoomSize {
   left: number;
@@ -59,6 +86,13 @@ function prefersReducedMotion(): boolean {
  * - Double click (or double tap) on the image zooms to twice the Fit scale
  *   about that point, and back to Fit.
  * - Limits: Fit (never above 1) to 800%.
+ * - Safari's gesture events (its trackpad pinch) zoom too, and are prevented.
+ * - The stage takes focus (it replaced an overflow-auto scroller) and pans
+ *   with the browser's scroll keys through `scrollKey`, which the host's
+ *   capture-phase key handler calls.
+ * - A tap beside the image calls `onBackgroundTap` from the click that
+ *   follows it, so the overlay is still there to take a touch's synthesized
+ *   click instead of the page beneath.
  *
  * `mode` is the host's (its Fit / Actual size control); a gesture reports
  * `zoom` (or `fit` when it lands back on the Fit scale) through
@@ -67,7 +101,7 @@ function prefersReducedMotion(): boolean {
  * ease over 180 ms unless the reader prefers reduced motion; gestures never
  * animate.
  */
-export const ImageZoomStage: React.FC<{
+export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
   src: string;
   alt: string;
   mode: ZoomMode;
@@ -84,7 +118,9 @@ export const ImageZoomStage: React.FC<{
   /** The image's corner radius at Actual size; kept constant on screen at every scale. */
   radius?: number;
   stageAttributes?: Record<string, string>;
-}> = ({ src, alt, mode, onModeChange, onScaleChange, inset, onBackgroundTap, className, imageClassName, radius = 6, stageAttributes }) => {
+  /** The stage's accessible name (it takes focus, as a scroller would). */
+  label: string;
+}>(function ImageZoomStage({ src, alt, mode, onModeChange, onScaleChange, inset, onBackgroundTap, className, imageClassName, radius = 6, stageAttributes, label }, ref) {
   const stageRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const [dims, setDims] = useState<ZoomSize | null>(null);
@@ -106,6 +142,11 @@ export const ImageZoomStage: React.FC<{
   const pinch = useRef<{ dist: number; midX: number; midY: number } | null>(null);
   const lastTap = useRef<{ t: number; x: number; y: number } | null>(null);
   const latch = useRef<{ kind: 'zoom' | 'pan'; until: number } | null>(null);
+  // A background tap closes from the click that follows it, never from the
+  // pointerup: closing on pointerup unmounted the overlay before a touch's
+  // synthesized click, which then landed on whatever lay underneath.
+  const closeArmed = useRef(0);
+  const safariGesture = useRef<{ scale: number } | null>(null);
 
   const measure = useCallback((): StageBox | null => {
     const stage = stageRef.current;
@@ -186,6 +227,7 @@ export const ImageZoomStage: React.FC<{
       measure();
       if (!ready()) return;
       if (modeRef.current === 'fit' || !viewRef.current) applyMode('fit', false);
+      else if (modeRef.current === 'zoom') gesture(clampViewport(viewRef.current, dimsRef.current!, boxRef.current!, limits()));
       else apply(clampViewport(viewRef.current, dimsRef.current!, boxRef.current!, limits()));
     });
     observer.observe(stage);
@@ -212,7 +254,7 @@ export const ImageZoomStage: React.FC<{
       const py = Number.isFinite(event.clientY) ? event.clientY - box.top : box.height / 2;
       if (event.ctrlKey || event.metaKey) {
         latch.current = null;
-        if (Math.abs(dy) < 0.1) return;
+        if (Math.abs(dy) < 0.1 || safariGesture.current) return;
         gesture(zoomAt(viewRef.current, wheelZoomFactor(dy), px, py, image, box, limits()));
         return;
       }
@@ -230,6 +272,76 @@ export const ImageZoomStage: React.FC<{
     return () => stage.removeEventListener('wheel', onWheel);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [measure]);
+
+  // Safari sends a trackpad pinch (and, on iOS, two fingers) as gesture
+  // events, not Ctrl + wheel, and zooms the page with them unless they are
+  // prevented. On iOS the same fingers also arrive as pointers, which the
+  // pinch below already follows, so a gesture then only prevents the page zoom.
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const onStart = (event: Event) => {
+      event.preventDefault();
+      measure();
+      safariGesture.current = { scale: 1 };
+    };
+    const onChange = (event: Event) => {
+      event.preventDefault();
+      const g = event as GestureLike;
+      const last = safariGesture.current ?? { scale: 1 };
+      const scale = Number.isFinite(g.scale) && g.scale > 0 ? g.scale : last.scale;
+      safariGesture.current = { scale };
+      if (pointers.current.size >= 2 || !ready() || !viewRef.current) return;
+      const box = boxRef.current!;
+      const px = Number.isFinite(g.clientX) ? g.clientX - box.left : box.width / 2;
+      const py = Number.isFinite(g.clientY) ? g.clientY - box.top : box.height / 2;
+      gesture(zoomAt(viewRef.current, scale / last.scale, px, py, dimsRef.current!, box, limits()));
+    };
+    const onEnd = (event: Event) => {
+      event.preventDefault();
+      safariGesture.current = null;
+    };
+    stage.addEventListener('gesturestart', onStart, { passive: false });
+    stage.addEventListener('gesturechange', onChange, { passive: false });
+    stage.addEventListener('gestureend', onEnd, { passive: false });
+    return () => {
+      stage.removeEventListener('gesturestart', onStart);
+      stage.removeEventListener('gesturechange', onChange);
+      stage.removeEventListener('gestureend', onEnd);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [measure]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      get element() {
+        return stageRef.current;
+      },
+      scrollKey(key: string, shiftKey: boolean, arrowsSideways: boolean) {
+        let dx = 0;
+        let dy = 0;
+        const page = (boxRef.current?.height ?? 0) * KEY_PAGE_SHARE;
+        switch (key) {
+          case 'ArrowUp': dy = KEY_SCROLL_PX; break;
+          case 'ArrowDown': dy = -KEY_SCROLL_PX; break;
+          case 'ArrowLeft': if (!arrowsSideways) return false; dx = KEY_SCROLL_PX; break;
+          case 'ArrowRight': if (!arrowsSideways) return false; dx = -KEY_SCROLL_PX; break;
+          case 'PageUp': dy = page; break;
+          case 'PageDown': dy = -page; break;
+          case ' ': dy = shiftKey ? page : -page; break;
+          case 'Home': dy = Number.MAX_SAFE_INTEGER; break;
+          case 'End': dy = -Number.MAX_SAFE_INTEGER; break;
+          default: return false;
+        }
+        measure();
+        if (ready() && viewRef.current) gesture(panBy(viewRef.current, dx, dy, dimsRef.current!, boxRef.current!, limits()));
+        return true;
+      },
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [measure],
+  );
 
   const toggleZoomAt = (px: number, py: number) => {
     if (!ready() || !viewRef.current) return;
@@ -255,7 +367,7 @@ export const ImageZoomStage: React.FC<{
     const image = dimsRef.current;
     if (!box || !view || !image) {
       lastTap.current = null;
-      callbacks.current.onBackgroundTap?.();
+      closeArmed.current = Date.now();
       return;
     }
     const px = clientX - box.left;
@@ -263,7 +375,7 @@ export const ImageZoomStage: React.FC<{
     const onImage = px >= view.x && px <= view.x + image.width * view.scale && py >= view.y && py <= view.y + image.height * view.scale;
     if (!onImage) {
       lastTap.current = null;
-      callbacks.current.onBackgroundTap?.();
+      closeArmed.current = Date.now();
       return;
     }
     const now = Date.now();
@@ -282,6 +394,7 @@ export const ImageZoomStage: React.FC<{
   };
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    closeArmed.current = 0;
     if (event.pointerType === 'mouse' && event.button !== 0) return;
     measure();
     pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -360,12 +473,26 @@ export const ImageZoomStage: React.FC<{
     if (!cancelled && !p.moved) tap(event.clientX, event.clientY);
   };
 
+  const onClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const armed = closeArmed.current;
+    closeArmed.current = 0;
+    if (!armed || Date.now() - armed > CLICK_AFTER_TAP_MS || !callbacks.current.onBackgroundTap) return;
+    // The overlay goes away with this click, so nothing beneath receives it.
+    event.preventDefault();
+    event.stopPropagation();
+    callbacks.current.onBackgroundTap();
+  };
+
   const cursor = panning ? 'grabbing' : overflowing ? 'grab' : onBackgroundTap ? 'zoom-out' : 'default';
   return (
     <div
       ref={stageRef}
-      className={`touch-none select-none overflow-hidden ${className ?? 'relative'}`}
+      className={`touch-none select-none overflow-hidden outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring ${className ?? 'relative'}`}
       style={{ cursor }}
+      tabIndex={0}
+      role="group"
+      aria-label={label}
+      onClick={onClick}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={(e) => endPointer(e, false)}
@@ -393,7 +520,8 @@ export const ImageZoomStage: React.FC<{
           height: dims ? `${dims.height}px` : undefined,
           transformOrigin: '0 0',
           opacity: dims ? 1 : 0,
-          cursor: overflowing ? undefined : 'zoom-in',
+          // Beside the image a click closes (zoom-out); on it, a click does nothing.
+          cursor: onBackgroundTap && !overflowing ? 'default' : undefined,
         }}
         data-lightbox-image=""
       />
@@ -404,4 +532,4 @@ export const ImageZoomStage: React.FC<{
       )}
     </div>
   );
-};
+});

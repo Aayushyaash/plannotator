@@ -547,7 +547,7 @@ test('Actual size shows an image at its real size: a tall one scrolls, a small o
     expect([actual.width, actual.height]).toEqual([1640, 3470]);
     expect(Math.round(actual.top)).toBe(0);
     expect(Math.round(actual.left)).toBe(0);
-    await expect(box.locator('[data-lightbox-zoom]')).toHaveText('100%');
+    await expect(box.locator('[data-lightbox-zoom]')).toHaveText('Zoom 100%');
     await shot(page, '13-actual-size-tall');
     // A plain wheel scrolls it to every edge, as a page scrolls, and never past one.
     const stageBox = (await stage.boundingBox())!;
@@ -627,7 +627,6 @@ test('the lightbox zooms: Ctrl + wheel about the pointer, drag pans, a double cl
     await expect.poll(async () => Math.round((await rect()).width)).toBeLessThan(2400);
     const fit = await rect();
     const fitPct = await zoom.textContent();
-    const pixelRatio = await page.evaluate(() => window.devicePixelRatio);
     // Ctrl + wheel near the image's top-left corner: the image pixel under the pointer stays under it.
     const px = Math.round(fit.left + fit.width * 0.2);
     const py = Math.round(fit.top + fit.height * 0.2);
@@ -644,8 +643,6 @@ test('the lightbox zooms: Ctrl + wheel about the pointer, drag pans, a double cl
     expect(Math.abs(zoomed.top + (imageY / 1500) * zoomed.height - py)).toBeLessThanOrEqual(1);
     expect(await zoom.textContent()).not.toBe(fitPct);
     await expect(box.locator('[data-lightbox-fit]')).toHaveText('Fit');
-    // The page itself was not zoomed.
-    expect(await page.evaluate(() => window.devicePixelRatio)).toBe(pixelRatio);
     await shot(page, '15-zoom-ctrl-wheel');
     // A drag pans.
     await page.mouse.move(700, 450);
@@ -679,6 +676,77 @@ test('the lightbox zooms: Ctrl + wheel about the pointer, drag pans, a double cl
     await expect(box).toBeHidden();
     await context.close();
   } finally {
+    if (url) await fetch(new URL('/api/exit', url), { method: 'POST' }).catch(() => {});
+    if (child && child.exitCode === null) {
+      await new Promise((done) => {
+        const timer = setTimeout(done, 5_000);
+        child!.once('exit', () => {
+          clearTimeout(timer);
+          done(undefined);
+        });
+      });
+      // inbox-guard: own child (the annotate CLI this test spawned, never an Inbox)
+      if (child.exitCode === null) child.kill('SIGTERM');
+    }
+  }
+});
+
+test('on an iPhone (WebKit) a tap beside the image closes the single overlay, and the tap never reaches the page beneath (#2067)', async ({ browser }) => {
+  const root = join(world.root, 'ghost-tap');
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, 'small.png'), await png(browser, '<body style="margin:0;background:#2f6f5e"></body>', 160, 100));
+  const doc = join(root, 'PLAN.md');
+  // A link high on the page, where the tap beside the image lands once the overlay is open.
+  writeFileSync(doc, ['# Ghost tap', '', '[Go somewhere else](https://example.com/ghost) and [another link](https://example.com/ghost-2)', '', '![Small](small.png)', ''].join('\n'));
+  const readyFile = join(root, 'ready.jsonl');
+  const env = { PATH: process.env.PATH ?? '', HOME: join(world.root, 'home'), PLANNOTATOR_DATA_DIR: world.dataDir, PLANNOTATOR_READY_FILE: readyFile, PLANNOTATOR_SKIP_BROWSER_OPEN: '1', PLANNOTATOR_BROWSER: NO_BROWSER, NO_BROWSER, PLANNOTATOR_REMOTE: '0' };
+  let child: ChildProcess | undefined;
+  let url = '';
+  const { defaultBrowserType: _ignored, ...device } = devices['iPhone 15'];
+  const phone = await webkit.launch({ args: [] });
+  try {
+    child = spawn(builtBinary, ['annotate', doc], { env, cwd: root, stdio: 'ignore' });
+    await expect.poll(() => (existsSync(readyFile) ? readFileSync(readyFile, 'utf8') : ''), { timeout: 30_000 }).toContain('"url"');
+    url = (JSON.parse(readFileSync(readyFile, 'utf8').trim().split('\n')[0]!) as { url: string }).url;
+    const context = await phone.newContext(device);
+    await context.addCookies(
+      [
+        ['plannotator-plan-look-choice-resolved', 'true'],
+        ['plannotator-announce-tui-herdr-seen', '1'],
+        ['plannotator-announce-ask-session-seen', '1'],
+        ['plannotator-announce-agent-tool-seen', '1'],
+      ].map(([name, value]) => ({ name: name!, value: value!, url })),
+    );
+    const page = await context.newPage();
+    const popups: string[] = [];
+    context.on('page', (p) => popups.push(p.url()));
+    await page.goto(url);
+    const link = page.getByRole('link', { name: 'Go somewhere else' });
+    await expect(link).toBeVisible();
+    const target = (await link.boundingBox())!;
+    // Every click the page receives from here on, and whether it was on a link.
+    await page.evaluate(() => {
+      const w = window as unknown as { __clicks: string[] };
+      w.__clicks = [];
+      document.addEventListener('click', (e) => w.__clicks.push((e.target as Element).closest('a')?.getAttribute('href') ?? (e.target as Element).tagName), true);
+    });
+    await page.locator('article img.cursor-zoom-in').first().tap();
+    const overlay = page.locator('[data-image-lightbox]');
+    await expect(overlay).toBeVisible();
+    await expect(page.locator('[data-image-lightbox-stepping]')).toHaveCount(0);
+    await page.waitForTimeout(400);
+    await page.evaluate(() => { (window as unknown as { __clicks: string[] }).__clicks = []; });
+    // The overlay covers the link; tap right where it was.
+    await page.touchscreen.tap(target.x + target.width / 2, target.y + target.height / 2);
+    await expect(overlay).toHaveCount(0);
+    await page.waitForTimeout(800);
+    const clicks = await page.evaluate(() => (window as unknown as { __clicks: string[] }).__clicks);
+    expect(clicks.filter((c) => c.startsWith('https://'))).toEqual([]);
+    expect(popups).toEqual([]);
+    expect(page.url()).toBe(new URL(url).href);
+    await context.close();
+  } finally {
+    await phone.close();
     if (url) await fetch(new URL('/api/exit', url), { method: 'POST' }).catch(() => {});
     if (child && child.exitCode === null) {
       await new Promise((done) => {

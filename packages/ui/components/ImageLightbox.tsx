@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ImagePeek, type ImagePeekHandle, type ImagePeekRow } from './ImagePeek';
-import { ImageZoomStage, type ZoomMode } from './ImageZoomStage';
+import { ImageZoomStage, type ImageZoomStageHandle, type ZoomMode } from './ImageZoomStage';
 
 /** One image of a document, for the lightbox's stepping (`images`). */
 export interface LightboxImage {
@@ -82,7 +82,8 @@ const ICON = { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke
  * screen and zooms one that fits, drag (or one finger) pans, two fingers
  * pinch, a double click toggles Fit and 2×, Fit to 800%. The stepping header
  * shows the scale beside Fit / Actual size, which resets it. No keys were
- * added; stepping to another image starts at Fit.
+ * added: the focused stage takes the browser's own scroll keys, as the
+ * scroller it replaced did. Stepping to another image starts at Fit.
  */
 export const ImageLightbox: React.FC<{
   src: string;
@@ -102,6 +103,7 @@ export const ImageLightbox: React.FC<{
   const [endNote, setEndNote] = useState<string | null>(null);
   const [announced, setAnnounced] = useState('');
   const peekRef = useRef<ImagePeekHandle>(null);
+  const stageRef = useRef<ImageZoomStageHandle>(null);
   const pillRef = useRef<HTMLButtonElement>(null);
   const endTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const current = stepping ? images![index]! : { src, alt, section: null };
@@ -129,6 +131,8 @@ export const ImageLightbox: React.FC<{
   };
   const stepRef = useRef(step);
   stepRef.current = step;
+  const steppingRef = useRef(stepping);
+  steppingRef.current = stepping;
   const peekOpenRef = useRef(peekOpen);
   peekOpenRef.current = peekOpen;
 
@@ -158,6 +162,13 @@ export const ImageLightbox: React.FC<{
         return;
       }
       if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+      // The focused stage takes the browser's scroll keys, as the scroller it
+      // replaced did; ← → stay stepping when there is more than one image.
+      const stage = stageRef.current;
+      if (stage?.element && e.target === stage.element && stage.scrollKey(e.key, e.shiftKey, !steppingRef.current)) {
+        e.preventDefault();
+        return;
+      }
       if (e.key === 'ArrowRight' || e.key === ']') {
         e.preventDefault();
         stepRef.current(1);
@@ -175,6 +186,24 @@ export const ImageLightbox: React.FC<{
       if (previous && previous.isConnected) previous.focus({ preventScroll: true });
     };
   }, []);
+
+  // Ctrl + wheel (a pinch in Chrome and Firefox) and Safari's gesture events
+  // anywhere over the lightbox, the header and buttons included, must not
+  // zoom the page behind it. The stage zooms the image from its own listeners.
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) e.preventDefault();
+    };
+    const onGesture = (e: Event) => e.preventDefault();
+    overlay.addEventListener('wheel', onWheel, { passive: false });
+    for (const type of ['gesturestart', 'gesturechange', 'gestureend']) overlay.addEventListener(type, onGesture, { passive: false });
+    return () => {
+      overlay.removeEventListener('wheel', onWheel);
+      for (const type of ['gesturestart', 'gesturechange', 'gestureend']) overlay.removeEventListener(type, onGesture);
+    };
+  }, [stepping]);
 
   const rows = useMemo<ImagePeekRow[]>(() => {
     if (!stepping) return [];
@@ -203,9 +232,11 @@ export const ImageLightbox: React.FC<{
         className="fixed inset-0 z-[200] bg-black/80 text-white backdrop-blur-sm outline-none"
       >
         <ImageZoomStage
+          ref={stageRef}
           key={src}
           src={src}
           alt={alt}
+          label={alt ? `Image: ${alt}` : 'Image'}
           mode={zoomMode}
           onModeChange={setZoomMode}
           inset={{ x: 0.9, y: 0.85 }}
@@ -249,6 +280,7 @@ export const ImageLightbox: React.FC<{
         <span className="flex-1" />
         {scale !== null && (
           <span className="text-[13px] tabular-nums text-muted-foreground" data-lightbox-zoom="">
+            <span className="sr-only">Zoom </span>
             {Math.round(scale * 100)}%
           </span>
         )}
@@ -274,9 +306,11 @@ export const ImageLightbox: React.FC<{
           </svg>
         </button>
         <ImageZoomStage
-          key={current.src}
+          ref={stageRef}
+          key={`${index}:${current.src}`}
           src={current.src}
           alt={current.alt}
+          label={`Image: ${name}`}
           mode={zoomMode}
           onModeChange={setZoomMode}
           onScaleChange={setScale}
