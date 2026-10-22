@@ -69,6 +69,7 @@ import { actionForBlock } from '../actions';
 import { splitInboxSkillsBlock } from '@plannotator/core/skill-reference-block';
 import { Tip } from './Tip';
 import { OpenQuestionsButton } from './OpenQuestions';
+import { laidOutChildren, pillHitsButtons } from '../footFit';
 import { openQuestionsShown, placeOf, threadOpenQuestions, type OpenQuestionPlace } from '../openQuestions';
 import { selectionToolbarShowing } from '../selectionToolbar';
 import { replyKeysToRenew, routeSendAnnotations, sendTargetAnswerIds, sendTargetsOf, type SendTarget, type SentContents } from '../sendTargets';
@@ -2571,8 +2572,34 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   ) : null;
 
   // While new messages are below the view: a pill that goes to them.
+  // On a phone the pill sits over the middle of the foot's row; when a button lies under that middle, above the foot.
+  const footRowRef = useRef<HTMLDivElement>(null);
+  const [pillAbove, setPillAbove] = useState(false);
+  const pillOnRow = showNew && phone && !waiting && !draftKept;
+  const placePill = useCallback(() => {
+    const row = footRowRef.current;
+    const pill = row?.querySelector<HTMLElement>('.ib-npill');
+    const buttons = row?.querySelector('[data-foot-buttons]');
+    if (!row || !pill || !buttons) return;
+    const box = row.getBoundingClientRect();
+    if (box.width <= 0) return;
+    const size = pill.getBoundingClientRect();
+    const hits = pillHitsButtons(box, size, laidOutChildren(buttons).map((el) => el.getBoundingClientRect()));
+    setPillAbove((current) => (current === hits ? current : hits));
+  }, []);
+  // Every render (a button came or went, the count changed) and whenever the row resizes.
+  useLayoutEffect(() => {
+    if (pillOnRow) placePill();
+  });
+  useEffect(() => {
+    const row = footRowRef.current;
+    if (!pillOnRow || !row || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => placePill());
+    observer.observe(row);
+    return () => observer.disconnect();
+  }, [pillOnRow, placePill]);
   const newPill = (
-    <div className="ib-npill-wrap">
+    <div className="ib-npill-wrap" data-above={phone && pillAbove ? '' : undefined}>
       <button
         type="button"
         className="ib-npill"
@@ -3385,7 +3412,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
           {/* Buttons on the left in today's order, the draft status and the skip chip at the right end (approval
               "thread-foot-status-right", option A). Too narrow for one line, the status takes its own line ABOVE the
               buttons (wrap-reverse; one item per line aligns to the start), so it never wraps between them. */}
-          <div className="ib-acts ib-footrow" data-foot-row="">
+          <div className="ib-acts ib-footrow" data-foot-row="" ref={footRowRef}>
             <div className="ib-footbtns" data-foot-buttons="">
               {(waiting || draftKept) && (
                 <button type="button" className="ib-btn ib-pri" ref={sendRef} onClick={() => void send()} disabled={sending} aria-describedby={footStatusIds}>
@@ -3398,6 +3425,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                 className="ib-btn"
                 onClick={() => openBox()}
                 data-edit-draft={waiting || draftKept ? '' : undefined}
+                data-reply-button=""
                 aria-describedby={waiting || draftKept ? footStatusIds : undefined}
               >
                 <Icon name={waiting || draftKept ? 'pen' : 'reply'} size={15} />
@@ -3455,7 +3483,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             )}
             {/* A phone has no room to float the pill over the messages (it sat on a sender's row): it sits in this
                 row's empty middle, laid over it, so the foot and the thread's view keep their size and Reply stays put.
-                With Send waiting (picks or kept words) the row has no empty middle, and no pill. */}
+                When a button sits under that middle (Reply, Re-ask and the open questions), it floats just above the
+                foot instead, never over a button. With Send waiting (picks or kept words), no pill. */}
             {showNew && phone && !waiting && !draftKept && newPill}
           </div>
           </>

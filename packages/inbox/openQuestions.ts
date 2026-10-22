@@ -66,7 +66,7 @@ export function threadOpenQuestions(
 /**
  * Whether the button is shown. Two or more open questions: always. One:
  * only where it adds something, i.e. when its card may be out of sight: its
- * message is folded (or hidden in the middle fold), or the thread is long
+ * message is folded (or hidden in the middle fold), or the thread is
  * long (`OPEN_QUESTIONS_LONG_THREAD` messages or more, where a card scrolls
  * off and the fold starts folding).
  * One open question in a short, unfolded thread sits on screen with the

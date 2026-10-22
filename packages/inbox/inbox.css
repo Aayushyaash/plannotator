@@ -2679,6 +2679,8 @@ details.ib-wn-skipped[open] > summary { margin-bottom: 6px; }
   .ib-pfoot .ib-acts:has(> .ib-npill-wrap) { position: relative; }
   .ib-pfoot .ib-acts > .ib-npill-wrap { position: absolute; left: 50%; top: 50%; bottom: auto; height: auto; transform: translate(-50%, -50%); }
   .pn-inbox .ib-pfoot .ib-npill, .pn-inbox .ib-pfoot .ib-npill[data-off] { transform: none; height: 36px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18); }
+  /* A button under the row's middle (Reply, Re-ask and the open questions): the pill floats just above the foot (Thread.tsx placePill). */
+  .ib-pfoot .ib-acts > .ib-npill-wrap[data-above] { top: auto; bottom: calc(100% + 18px); transform: translateX(-50%); }
   /* Settings → Archived: Unarchive stays on its row; the subject takes up to two lines. */
   .ib-srow.ib-arcrow { flex-wrap: nowrap; align-items: flex-start; }
   .ib-arcrow > .ib-mk { margin-top: 3px; }
@@ -3841,6 +3843,10 @@ ol.ib-rl-two .ib-rw-cmd { font-weight: 400; margin-top: 6px; }
 /* Open questions in one thread (approval "inbox-thread-open-questions", option A): the "N open questions"
    button in the foot's button row and the short list it opens; on a phone the list is a bottom sheet. */
 .pn-inbox .ib-oq-btn { gap: 6px; }
+/* The foot's buttons on one line (footFit.ts): before the label gives way to a shorter one, the row tries it tightened. */
+.pn-inbox .ib-footbtns:has(> [data-fit-tight]) { gap: 6px; }
+.pn-inbox .ib-footbtns:has(> [data-fit-tight]) .ib-btn { padding-left: 10px; padding-right: 10px; gap: 5px; }
+.pn-inbox .ib-oq-btn[data-fit-tight] .ib-oq-chev { display: none; }
 .pn-inbox .ib-oq-btn[aria-expanded="true"] { background: color-mix(in srgb, var(--primary) 11%, var(--card)); color: var(--primary); }
 .ib-oq-chev { display: inline-grid; place-items: center; transition: transform 140ms ease-out; transform: rotate(180deg); }
 .ib-oq-btn[aria-expanded="true"] .ib-oq-chev { transform: none; }

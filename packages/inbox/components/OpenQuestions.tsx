@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Menu } from '@base-ui/react/menu';
 import { whenTime } from '../format';
 import { Icon } from '../icons';
@@ -12,12 +12,13 @@ import {
   type OpenQuestionPlace,
 } from '../openQuestions';
 import { pickWords } from './ReplacedQuestion';
+import { fitFootRow, footFitCandidates, laidOutChildren, openQuestionsFormText, type FootFit, type OpenQuestionsLabelForm } from '../footFit';
 
 export interface OpenQuestionsButtonProps {
   questions: readonly OpenQuestion[];
   /** Replaced questions left out of the list: the heading's line names them. */
   replaced: number;
-  /** A phone: the button reads "5 open", the list is a bottom sheet with 44 px targets. */
+  /** A phone: the button reads "5 open" at most, the list is a bottom sheet with 44 px targets. */
   phone: boolean;
   /** Where each card sits now, measured when the list opens. */
   measure: () => ReadonlyMap<string, OpenQuestionPlace>;
@@ -34,6 +35,11 @@ export interface OpenQuestionsButtonProps {
  * Home/End, type-ahead; Escape and Tab close, focus back to the button) and
  * `aria-haspopup` / `aria-expanded` on the button. On a phone the list is a
  * sheet from the bottom edge, as the project menu's. No keyboard shortcut.
+ *
+ * The label takes the longest form that keeps the foot's buttons on one line
+ * ("5 open questions", "5 open", "5"; footFit.ts), trying each on the row's
+ * usual spacing and then a tighter one; a phone never takes the long form.
+ * The name always holds the whole count.
  */
 export function OpenQuestionsButton({ questions, replaced, phone, measure, onPick }: OpenQuestionsButtonProps) {
   const [open, setOpen] = useState(false);
@@ -45,6 +51,69 @@ export function OpenQuestionsButton({ questions, replaced, phone, measure, onPic
   const [portal, setPortal] = useState<HTMLElement | null>(null);
   useLayoutEffect(() => setPortal(trigger.current?.closest<HTMLElement>('.pn-inbox') ?? null), []);
   const n = questions.length;
+  const max: OpenQuestionsLabelForm = phone ? 'short' : 'full';
+  const [fitted, setFitted] = useState<FootFit>({ form: max, tight: false });
+  const words = useRef<HTMLSpanElement>(null);
+  /** What the last fit was made for: the row's width, the other buttons' words, the count. */
+  const fittedFor = useRef('');
+  /**
+   * The longest form that keeps the row's buttons on one line, tried on the page itself (footFit.ts). Only
+   * when the row's width, the buttons beside it or the count changed since the last fit.
+   */
+  const fit = useCallback(
+    (force = false) => {
+      const button = trigger.current;
+      const text = words.current?.firstChild;
+      const buttons = button?.parentElement;
+      const row = buttons?.parentElement;
+      if (!button || !text || !buttons || !row) return;
+      const others = laidOutChildren(buttons)
+        .filter((el) => el !== button)
+        .map((el) => el.textContent ?? '')
+        .join('|');
+      const key = `${row.getBoundingClientRect().width}|${n}|${max}|${others}`;
+      if (!force && key === fittedFor.current) return;
+      fittedFor.current = key;
+      const apply = ({ form, tight }: FootFit) => {
+        text.nodeValue = openQuestionsFormText(n, form);
+        button.setAttribute('data-label-form', form);
+        button.toggleAttribute('data-fit-tight', tight);
+      };
+      const next = fitFootRow(buttons, footFitCandidates(max), apply) ?? { form: max, tight: false };
+      // The page now shows `next` (or the longest form, where there is no layout): React draws the same.
+      apply(next);
+      setFitted((current) => (current.form === next.form && current.tight === next.tight ? current : next));
+    },
+    [n, max],
+  );
+  // Every render: a button beside it may have come or gone (Send, 👍) with no resize.
+  useLayoutEffect(() => fit());
+  useEffect(() => {
+    const row = trigger.current?.parentElement?.parentElement;
+    if (!row || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => fit());
+    observer.observe(row);
+    // Words measured in a fallback font fit differently once the real one loads.
+    void document.fonts?.ready.then(() => fit(true));
+    return () => observer.disconnect();
+  }, [fit]);
+  const form = fitted.form;
+  // The button can go while its list is open (the last open questions were answered elsewhere): focus would
+  // fall to the page with the list, so it goes to the foot's Reply (or Edit draft) instead.
+  const openRef = useRef(false);
+  openRef.current = open;
+  useEffect(() => {
+    const row = trigger.current?.parentElement ?? null;
+    return () => {
+      if (!openRef.current || !row) return;
+      setTimeout(() => {
+        const active = document.activeElement;
+        if (active && active !== document.body) return;
+        if (!row.isConnected) return;
+        row.querySelector<HTMLElement>('[data-reply-button]')?.focus();
+      }, 0);
+    };
+  }, []);
   const label = openQuestionsLabel(n);
   const heading = openQuestionsHeading(n);
   const sub = openQuestionsSub(questions, replaced);
@@ -65,14 +134,13 @@ export function OpenQuestionsButton({ questions, replaced, phone, measure, onPic
         ref={trigger}
         className="ib-btn ib-oq-btn"
         data-open-questions=""
-        // A phone reads "5 open": the name keeps the whole count.
-        aria-label={phone ? label : undefined}
+        // A shorter form ("5 open", "5"): the name keeps the whole count.
+        aria-label={form === 'full' ? undefined : label}
+        data-label-form={form}
+        data-fit-tight={fitted.tight ? '' : undefined}
       >
         <Icon name="question" size={15} />
-        <span>
-          {n}
-          {phone ? ' open' : n === 1 ? ' open question' : ' open questions'}
-        </span>
+        <span ref={words}>{openQuestionsFormText(n, form)}</span>
         <span className="ib-oq-chev" aria-hidden="true">
           <Icon name="chevU" size={13} />
         </span>

@@ -5,7 +5,9 @@
  * replaced questions and action items left out), when the button shows, the
  * list's heading, rows, states and places, choosing a row unfolding its
  * message and ringing the card, Escape putting focus back on the button, the
- * phone's bottom sheet, and no button when nothing is open.
+ * phone's bottom sheet, no button when nothing is open, the label forms and
+ * the pill's place that keep the foot on one line (footFit.ts), and focus
+ * landing on Reply when the button goes while its list is open.
  *
  * The pure rules (openQuestions.ts) run everywhere; the window's parts are
  * DOM-gated: they run under DOM_TESTS=1 (happy-dom), from the test.yml DOM list.
@@ -17,6 +19,7 @@ import { parseInboxQuestionBlocks } from '@plannotator/core/inbox-questions';
 import type { InboxAuthor, InboxMessageWire, InboxProject, InboxQuestion, InboxThread } from '@plannotator/core/inbox-types';
 import type { QuestionAnswer } from '@plannotator/core/question-block';
 import { openQuestionsShown, openQuestionsSub, openQuestionState, placeOf, threadOpenQuestions } from './openQuestions';
+import { footFitCandidates, onOneLine, openQuestionsFormText, pillHitsButtons } from './footFit';
 
 const hasDom = typeof document !== 'undefined';
 const { ThreadPane } = (hasDom ? await import('./components/Thread') : {}) as typeof import('./components/Thread');
@@ -146,6 +149,39 @@ describe('the rules (openQuestions.ts)', () => {
   });
 });
 
+describe('fitting the foot on one line (footFit.ts)', () => {
+  test('the forms read "6 open questions", "6 open", "6"', () => {
+    expect(openQuestionsFormText(6, 'full')).toBe('6 open questions');
+    expect(openQuestionsFormText(1, 'full')).toBe('1 open question');
+    expect(openQuestionsFormText(6, 'short')).toBe('6 open');
+    expect(openQuestionsFormText(12, 'count')).toBe('12');
+  });
+
+  test('each form is tried on the usual spacing, then tightened, longest first; a phone starts at "6 open"', () => {
+    const order = (max: Parameters<typeof footFitCandidates>[0]) => footFitCandidates(max).map((f) => `${f.form}${f.tight ? '+tight' : ''}`);
+    expect(order('full')).toEqual(['full', 'full+tight', 'short', 'short+tight', 'count', 'count+tight']);
+    expect(order('short')).toEqual(['short', 'short+tight', 'count', 'count+tight']);
+  });
+
+  test('one line: every top within a pixel of the first', () => {
+    expect(onOneLine([846, 846.4, 845.6])).toBe(true);
+    expect(onOneLine([553, 553, 605])).toBe(false);
+  });
+
+  test('the pill lies over a button only when one sits under the middle of the row', () => {
+    const row = { left: 0, right: 388, top: 0, bottom: 44 };
+    const pill = { width: 90, height: 36 };
+    const at = (left: number, right: number) => ({ left, right, top: 0, bottom: 44 });
+    // Reply alone: the middle is free.
+    expect(pillHitsButtons(row, pill, [at(0, 110)])).toBe(false);
+    // Reply, Re-ask and "2 open": Re-ask sits under the middle.
+    expect(pillHitsButtons(row, pill, [at(0, 110), at(118, 230), at(238, 360)])).toBe(true);
+    // Right to left, mirrored: the same.
+    expect(pillHitsButtons(row, pill, [at(278, 388)])).toBe(false);
+    expect(pillHitsButtons(row, pill, [at(160, 270)])).toBe(true);
+  });
+});
+
 // ── The window ──
 
 let root: Root | null = null;
@@ -193,23 +229,27 @@ async function render(t: InboxThread, options: { phone?: boolean } = {}) {
   document.body.appendChild(host);
   act(() => {
     root = createRoot(host!);
-    root.render(
-      <ThreadPane
-        thread={t}
-        sent={null}
-        lookSeq={6}
-        phone={options.phone === true}
-        onQuestions={() => {}}
-        onChanged={async () => {}}
-        onClose={() => {}}
-        file={null}
-        onOpenFile={() => {}}
-        onOpenGuide={() => {}}
-      />,
-    );
+    root.render(pane(t, options));
   });
   await settle();
   return host;
+}
+
+function pane(t: InboxThread, options: { phone?: boolean } = {}) {
+  return (
+    <ThreadPane
+      thread={t}
+      sent={null}
+      lookSeq={6}
+      phone={options.phone === true}
+      onQuestions={() => {}}
+      onChanged={async () => {}}
+      onClose={() => {}}
+      file={null}
+      onOpenFile={() => {}}
+      onOpenGuide={() => {}}
+    />
+  );
 }
 
 const button = () => document.querySelector<HTMLButtonElement>('[data-open-questions]');
@@ -332,4 +372,17 @@ test.skipIf(!hasDom)('no button when nothing is open', async () => {
 test.skipIf(!hasDom)('one open question in a short, unfolded thread: no button', async () => {
   await render(thread([agent(1, `One call.\n\n${block('Ship it?')}`, 1, () => ({}), { person_seen_seq: 0 })]));
   expect(button()).toBeNull();
+});
+
+test.skipIf(!hasDom)("the button going while its list is open puts focus on the foot's Reply, never the page", async () => {
+  const el = await render(thread(sample()));
+  await openList();
+  await act(async () => rows()[0]!.focus());
+  // Every open question answered elsewhere: the button (and its list) goes.
+  const answered = sample().map((m) => (m.questions ? { ...m, questions: m.questions.map((q) => (q.state === 'superseded' ? q : { ...q, state: 'sent' as const })) } : m));
+  await act(async () => root!.render(pane(thread(answered))));
+  await settle();
+  expect(button()).toBeNull();
+  expect(list()).toBeNull();
+  await until(() => document.activeElement === el.querySelector('[data-reply-button]'), 'focus on Reply');
 });

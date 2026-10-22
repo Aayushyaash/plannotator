@@ -10,7 +10,9 @@
  * messages fold. The "N open questions" button sits after Re-ask, its list
  * names each question's state and place, and choosing a folded one opens its
  * message and rings its card. Then the list as a bottom sheet on a phone
- * (WebKit, iPhone 15).
+ * (WebKit, iPhone 15). Then the foot's buttons on one row with a pick waiting
+ * (beside a file at 1100, 1280 and 1440, and on phones), and the "N new" pill
+ * on a phone never lying over a foot button.
  *
  * Build the binary first (see inbox.spec.ts), then `bun run test:e2e:inbox`.
  * PNGs (desktop 1440 and a phone, light and dark) land in
@@ -19,7 +21,7 @@
 
 import { devices, expect, test, webkit, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
@@ -41,6 +43,7 @@ interface World {
   errors: string[];
   threadId: string;
   ids: string[];
+  billing: string;
 }
 
 let world: World;
@@ -56,6 +59,41 @@ async function shot(page: Page, name: string): Promise<void> {
     await page.screenshot({ path: join(proofDir, `${name}-${scheme}.png`) });
   }
   await page.emulateMedia({ colorScheme: 'light', reducedMotion: 'no-preference' });
+}
+
+/**
+ * Every button in the foot's row shares one line, inside the foot: the open questions button never drops to a
+ * row of its own (review of PR #2091).
+ */
+async function expectOneRow(page: Page): Promise<void> {
+  const buttons = page.locator('section.ib-pane .ib-pfoot [data-foot-buttons]');
+  await expect(buttons.locator('[data-open-questions]')).toBeVisible();
+  // Polled: a file opening springs the pane's width, and the row is fitted again on each frame of it.
+  await expect(async () => {
+    const { boxes, rowRight } = await buttons.evaluate((row) => ({
+      boxes: [...row.children]
+        .filter((el) => getComputedStyle(el).display !== 'none')
+        .map((el) => {
+          const r = el.getBoundingClientRect();
+          return { text: (el.textContent ?? '').trim(), top: Math.round(r.top), right: r.right };
+        }),
+      rowRight: row.parentElement!.getBoundingClientRect().right,
+    }));
+    expect(boxes.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(boxes.map((b) => b.top)).size, JSON.stringify(boxes)).toBe(1);
+    for (const b of boxes) expect(b.right, JSON.stringify({ boxes, rowRight })).toBeLessThanOrEqual(rowRight + 0.5);
+  }).toPass({ timeout: 5000 });
+}
+
+type Box = { x: number; y: number; width: number; height: number };
+const intersects = (a: Box, b: Box) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+async function attachmentId(): Promise<string> {
+  const res = await fetch(`http://127.0.0.1:${registry().port}/api/inbox/threads/${world.threadId}/attachments`);
+  const body = (await res.json()) as { attachments: { id: string; name: string }[] };
+  const att = body.attachments.find((a) => a.name === 'runbook.md');
+  expect(att, JSON.stringify(body)).toBeTruthy();
+  return att!.id;
 }
 
 test.describe.configure({ mode: 'serial' });
@@ -90,7 +128,7 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
     `The worker runs end to end in staging.\n\n${q('Ship the retry worker behind a flag?', ['Yes', 'No'], ['Holds up: the retry worker; the admin page'])}`,
   ];
   for (const body of more) ids.push((await claude.send({ project_path: billing, reply_to: first.message_id as string, body }, { wakes: true })).message_id as string);
-  world = { dataDir, url, claude, context, page, errors, threadId, ids };
+  world = { dataDir, url, claude, context, page, errors, threadId, ids, billing };
   // The one-time notification line is not what these shots are about.
   await fetch(`http://127.0.0.1:${registry().port}/api/inbox/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notifications: { dismissed: true } }) });
 
@@ -106,7 +144,9 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   // The agent replaces the logging question and asks one more.
   const replaced = await claude.send({ project_path: billing, reply_to: first.message_id as string, supersedes: [ids[4]!], body: `On logging: every attempt at info is noisy.\n\n${q('Log retries at info, or at debug with a daily summary at info?', ['Info', 'Debug, with a daily summary at info'])}` }, { wakes: true });
   ids.push(replaced.message_id as string);
-  ids.push((await claude.send({ project_path: billing, reply_to: first.message_id as string, body: `Draft PR is up.\n\n${text('Anything the on-call runbook should say about the retry worker?')}` }, { wakes: true })).message_id as string);
+  // The runbook draft rides along, so the thread can show a file beside it.
+  writeFileSync(join(billing, 'runbook.md'), '# Retry worker runbook\n\nWhat on-call does when charges pile up in the retry queue.\n');
+  ids.push((await claude.send({ project_path: billing, reply_to: first.message_id as string, attachments: ['runbook.md'], body: `Draft PR is up.\n\n${text('Anything the on-call runbook should say about the retry worker?')}` }, { wakes: true })).message_id as string);
 });
 
 test.afterAll(async () => {
@@ -179,7 +219,7 @@ test('desktop: the button sits after Re-ask, its list names state and place, and
   expect(world.errors).toEqual([]);
 });
 
-test('phone (WebKit, iPhone 15): "6 open", and the list is a bottom sheet with 44 px targets', async () => {
+test('phone (WebKit, iPhone 15) with a pick waiting: the buttons on one row, and the list is a bottom sheet with 44 px targets', async () => {
   let own: Browser | null = null;
   try {
     own = await webkit.launch({ args: [] });
@@ -188,9 +228,12 @@ test('phone (WebKit, iPhone 15): "6 open", and the list is a bottom sheet with 4
       const page = await context.newPage();
       await page.goto(`${world.url}#thread=${world.threadId}`);
       const button = page.locator('.ib-pfoot [data-open-questions]');
-      await expect(button).toHaveText('6 open');
+      // A pick waits: Send, Edit draft, Re-ask and this button share one row, so the label is as short as it must be.
+      await expect(page.locator('.ib-pfoot [data-foot-status] [data-draft-foot]')).toContainText('1 pick');
+      await expect(button).toHaveText(/^6( open)?$/);
       await expect(button).toHaveAttribute('aria-label', '6 open questions');
       expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      await expectOneRow(page);
       await button.click();
       const list = page.locator('[data-open-questions-list]');
       await expect(list).toBeVisible();
@@ -210,5 +253,86 @@ test('phone (WebKit, iPhone 15): "6 open", and the list is a bottom sheet with 4
     }
   } finally {
     await own?.close();
+  }
+});
+
+test('beside a file (the 440 px thread column) with a pick waiting: every foot button on one row', async () => {
+  const { page } = world;
+  const att = await attachmentId();
+  for (const width of [1100, 1280, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${world.url}#thread=${world.threadId}&file=${att}`);
+    const pane = page.locator('section.ib-pane');
+    await expect(pane).toHaveClass(/ib-withfile/);
+    await expect(pane.locator('.ib-pfoot [data-foot-status] [data-draft-foot]')).toContainText('1 pick');
+    const button = pane.locator('.ib-pfoot [data-open-questions]');
+    await expect(button).toHaveAttribute('aria-label', '6 open questions');
+    await expect(button).toHaveText(/^6( open)?$/);
+    await expectOneRow(page);
+    if (width === 1280) {
+      await page.mouse.move(10, 10);
+      await shot(page, 'fix-desktop-file-1280');
+    }
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // Without a file the full words come back.
+  await page.goto(`${world.url}#thread=${world.threadId}`);
+  await expect(page.locator('section.ib-pane .ib-pfoot [data-open-questions]')).toHaveText('6 open questions');
+  expect(world.errors).toEqual([]);
+});
+
+test('phone (Chromium, Pixel 7) with a pick waiting: every foot button on one row', async ({ browser }: { browser: Browser }) => {
+  const context = await browser.newContext({ ...devices['Pixel 7'], colorScheme: 'light', reducedMotion: 'reduce' });
+  try {
+    const page = await context.newPage();
+    await page.goto(`${world.url}#thread=${world.threadId}`);
+    await expect(page.locator('.ib-pfoot [data-foot-status] [data-draft-foot]')).toContainText('1 pick');
+    await expect(page.locator('.ib-pfoot [data-open-questions]')).toHaveAttribute('aria-label', '6 open questions');
+    await expectOneRow(page);
+    await shot(page, 'fix-phone-412-pick');
+  } finally {
+    await context.close();
+  }
+});
+
+test('phone (Chromium, Pixel 7): the "N new" pill never lies over a foot button', async ({ browser }: { browser: Browser }) => {
+  // A thread the person never looked at: every message is new, and it opens at the top with the rest below.
+  const long = (n: number) =>
+    Array.from({ length: 8 }, (_, i) => `Step ${n}.${i + 1}: the retry worker reads the charge, checks the idempotency key and writes the attempt row before it calls Stripe.`).join('\n\n');
+  const send = (body: string, extra: { subject?: string; thread?: string; reply_to?: string }) => world.claude.send({ project_path: world.billing, body, ...extra }, { wakes: true });
+  const first = await send(`${long(1)}\n\n${q('Which region goes first?', ['us-east', 'eu-west'])}`, { subject: 'Refund worker rollout', thread: 'refund-rollout' });
+  const reply_to = first.message_id as string;
+  await send(`${long(2)}\n\n${q('Page on-call for refund failures?', ['Yes', 'No'])}`, { reply_to });
+  await send(long(3), { reply_to });
+  await send(long(4), { reply_to });
+  const context = await browser.newContext({ ...devices['Pixel 7'], colorScheme: 'light', reducedMotion: 'reduce' });
+  try {
+    const page = await context.newPage();
+    await page.goto(`${world.url}#thread=${first.thread_id as string}`);
+    const foot = page.locator('.ib-pfoot');
+    // Reply, Re-ask and "2 open": no empty middle in the row.
+    await expect(foot.locator('[data-open-questions]')).toHaveAttribute('aria-label', '2 open questions');
+    await expect(foot.getByRole('button', { name: 'Re-ask', exact: true })).toBeVisible();
+    const pill = page.locator('[data-new-pill]');
+    await expect(pill).not.toHaveAttribute('data-off', '');
+    await expect(pill).toBeVisible();
+    await expectOneRow(page);
+    const pillBox = (await pill.boundingBox())!;
+    const viewport = page.viewportSize()!;
+    expect(pillBox.y).toBeGreaterThanOrEqual(0);
+    expect(pillBox.y + pillBox.height).toBeLessThanOrEqual(viewport.height);
+    for (const b of await foot.locator('[data-foot-buttons] button').all()) {
+      const box = (await b.boundingBox())!;
+      expect(intersects(pillBox, box), `pill ${JSON.stringify(pillBox)} over ${(await b.textContent())?.trim()} ${JSON.stringify(box)}`).toBe(false);
+    }
+    await shot(page, 'fix-phone-412-pill');
+    // The pill still works: it takes the person down to the new messages.
+    const scrolled = () => page.locator('.ib-pbody').evaluate((el) => el.scrollTop);
+    const before = await scrolled();
+    await pill.click();
+    await expect.poll(scrolled).toBeGreaterThan(before);
+    expect(world.errors).toEqual([]);
+  } finally {
+    await context.close();
   }
 });
