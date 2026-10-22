@@ -225,11 +225,17 @@ async function checkStepListAbove(page: Page, label: string): Promise<void> {
  */
 async function closeSidebarPeek(page: Page): Promise<void> {
   const peek = page.locator('[data-sidebar-peek][data-visible]');
-  if ((await peek.count()) > 0) {
-    await page.mouse.move(60, 450);
-    await page.mouse.move(700, 450);
-  }
-  await expect(peek, 'the sidebar peek is closed before the strip is probed').toHaveCount(0);
+  // Park the pointer away from the edge first, then outlast the peek's 600 ms rest, so a peek that was about to
+  // open has opened (or never will) before it is checked; then enter and leave it until it is gone.
+  await page.mouse.move(700, 450);
+  await page.waitForTimeout(800);
+  await expect(async () => {
+    if ((await peek.count()) > 0) {
+      await page.mouse.move(60, 450);
+      await page.mouse.move(700, 450);
+    }
+    await expect(peek).toHaveCount(0, { timeout: 1000 });
+  }, 'the sidebar peek is closed before the strip is probed').toPass({ timeout: 10_000 });
 }
 
 test.describe.configure({ mode: 'serial' });
