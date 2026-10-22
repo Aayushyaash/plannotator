@@ -247,7 +247,7 @@ export function checkInboxActionResult(
 // ─────────────────────────────── What the agent gets ───────────────────────────────
 
 /** The section the reply carries (approval "inbox-next-actions", brief). */
-export const INBOX_ACTIONS_HEADING = "Actions you asked for";
+export const INBOX_ACTIONS_HEADING = "Action items you asked for";
 
 /** "3:12 PM" in the computer's own time (the person's clock). */
 export function inboxActionTime(at: string, timeZone?: string): string {
@@ -274,6 +274,8 @@ const actionsWord = (n: number): string => `${n} action item${n === 1 ? "" : "s"
 export function composeInboxActionsReply(input: {
   reported: readonly Pick<InboxQuestionRecord, "key" | "position" | "prompt" | "action_result">[];
   all: readonly Pick<InboxQuestionRecord, "key" | "position" | "action_result" | "superseded_by" | "sent_revision" | "revision">[];
+  /** That message's questions and action items still waiting on the person, for the last line (#2059). */
+  stillOpen?: readonly InboxStillOpenItem[];
   timeZone?: string;
 }): string {
   const reported = [...input.reported].filter((r) => r.action_result).sort((a, b) => a.position - b.position);
@@ -297,7 +299,33 @@ export function composeInboxActionsReply(input: {
     if (result.outcome === "cant") return `${head}\nCan't do it: ${(result.note ?? "").trim()}`;
     return [head, `Done, ${inboxActionTime(result.at, input.timeZone)}.`, ...(result.note ? [`Note: ${result.note.trim()}`] : [])].join("\n");
   });
-  return [sentence, `## ${INBOX_ACTIONS_HEADING}`, `${doneAll} of ${total} done.`, ...items].join("\n\n");
+  const open = inboxActionsStillOpenLine(input.stillOpen ?? []);
+  return [sentence, `## ${INBOX_ACTIONS_HEADING}`, `${doneAll} of ${total} done.`, ...items, ...(open ? [open] : [])].join("\n\n");
+}
+
+/** A question (Q1…) or action item (A1…) of the message a report answers that still waits on the person. */
+export interface InboxStillOpenItem {
+  kind: "question" | "action";
+  /** 0-based, as the record's `position`: Q1 / A1 is 0. */
+  position: number;
+  prompt: string;
+}
+
+/**
+ * The report's last line when some of that message's questions or action
+ * items still wait on the person (#2059), like the reply's still-open line:
+ * "Still open: A2. Approve the 2FA prompt for the npm org — the person will
+ * do it in the Inbox; don't ask again." Empty when nothing is open.
+ */
+export function inboxActionsStillOpenLine(items: readonly InboxStillOpenItem[]): string {
+  if (items.length === 0) return "";
+  const sorted = [...items].sort((a, b) => (a.kind === b.kind ? a.position - b.position : a.kind === "question" ? -1 : 1));
+  const names = sorted.map((i) => `${i.kind === "action" ? "A" : "Q"}${i.position + 1}. ${i.prompt.replace(/\s+/g, " ").trim()}`);
+  const one = items.length === 1;
+  const actions = items.some((i) => i.kind === "action");
+  const questions = items.some((i) => i.kind === "question");
+  const verb = actions && questions ? "answer or do" : actions ? "do" : "answer";
+  return `Still open: ${names.join("; ")} — the person will ${verb} ${one ? "it" : "them"} in the Inbox; don't ask again.`;
 }
 
 /** The card's words for an action item's result ("Done 3:12 PM", "Can't do it: …", "Claude Code saw it done"). */
@@ -349,7 +377,7 @@ export const INBOX_ACTION_EXAMPLE = [
  */
 export const INBOX_ACTION_GUIDE = [
   "An action item, only for a true blocker: something the person must go and do outside this conversation before you can go on, that you cannot do yourself (approve a deploy, sign in, touch a security key, click something in another app, merge a pull request you cannot merge). Write it as an Inbox-only `:::action` block: the first line is what to do, as an order; then why, in a line or two. Optional lines: `Where: <url or place>` (a URL becomes an Open button), `Run: <command>` (a command to copy), `Stopped:` / `Holds up:` as for questions, and `Watching: <what you watch>` when you will notice it done by yourself (then pass its id in `done`).",
-  "Never use it for a decision or a question (ask a :::question), for anything you can do yourself, or as a checklist or a status update: one block per real blocker, and most messages need none. The person marks it Done or Can't do it (with a reason); that comes back in their reply under \"Actions you asked for\".",
+  "Never use it for a decision or a question (ask a :::question), for anything you can do yourself, or as a checklist or a status update: one block per real blocker, and most messages need none. The person marks it Done or Can't do it (with a reason); that comes back in their reply under \"Action items you asked for\".",
 ].join("\n");
 
 /** send_message's (and submit_guide's) `done`, as an agent reads it. */

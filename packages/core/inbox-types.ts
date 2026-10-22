@@ -1551,7 +1551,8 @@ export type InboxToolCostHost = "pi" | "opencode";
  * bytes, 1,744 → 1,965 tokens), so 8,189 bytes (1,953 tokens) without the
  * card action and 9,364 (2,268) with it, estimated, not re-measured on Pi.
  * Renaming "to-do" to "action item" (owner, #2059) moved the entry by 5 bytes
- * (8,228; 1,962 tokens): the stated cost stands.
+ * (8,228; 1,962 tokens), and "Action items you asked for" by 5 more (8,233;
+ * 1,963 tokens): the stated cost stands.
  */
 const INBOX_TOOL_COST_NOW = INBOX_CARD_ACTION_ON ? { bytes: 9364, tokens: 2700 } : { bytes: 8189, tokens: 2300 };
 export const INBOX_TOOL_COST: Readonly<Record<InboxToolCostHost, { bytes: number; tokens: number }>> = {

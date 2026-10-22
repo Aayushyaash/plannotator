@@ -10,7 +10,7 @@
  *  - the thread draws the Action item card in place of the block: what to do, why,
  *    Open for its link, what the agent watches, Done / Can't do it… / Add note;
  *  - Done: the toast with Undo, the card's Undo while the window runs, then
- *    the agent's wait_for_reply returns the reply with "Actions you asked for"
+ *    the agent's wait_for_reply returns the reply with "Action items you asked for"
  *    and the card reads Sent;
  *  - Can't do it asks for the reason, which the agent gets word for word;
  *  - the agent marks its own action item done (`done`): the card reads "Claude Code
@@ -188,7 +188,7 @@ test('the thread draws the Action item card in place of the block', async () => 
   await shot(page, '03-thread-run-and-question');
 });
 
-test('Done: the toast and the card offer Undo; then the agent gets the reply with "Actions you asked for" and the card reads Sent', async () => {
+test('Done: the toast and the card offer Undo; then the agent gets the reply with "Action items you asked for" and the card reads Sent', async () => {
   const { page, threads, claude } = world;
   await page.goto(`${world.url}#thread=${threads.vercel}`);
   const card = page.locator('section.ib-pane [data-action-card]');
@@ -203,7 +203,7 @@ test('Done: the toast and the card offer Undo; then the agent gets the reply wit
   const answer = await claude.waitForReply(threads.vercel, 40);
   expect(answer.status).toBe('replied');
   const body = (answer.reply as { body: string }).body;
-  expect(body.startsWith('Did 1 action item.\n\n## Actions you asked for\n\n1 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nDone, ')).toBe(true);
+  expect(body.startsWith('Did 1 action item.\n\n## Action items you asked for\n\n1 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nDone, ')).toBe(true);
   expect(body.endsWith('\nNote: Approved. I also fixed the preview env var while I was there.')).toBe(true);
   await expect(card).toHaveAttribute('data-action-state', 'done', { timeout: 20_000 });
   await expect(card.locator('[data-action-settled]')).toContainText('Sent to Claude Code.');

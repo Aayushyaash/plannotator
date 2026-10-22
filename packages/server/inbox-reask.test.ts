@@ -16,6 +16,7 @@ import {
   INBOX_BRIDGE_POLL_PATH,
   INBOX_REASK_INSTRUCTION,
   INBOX_WAKE_INSTRUCTION,
+  inboxReaskInstruction,
   inboxReaskRedirectedLine,
   inboxRedirectedLine,
   inboxWakeText,
@@ -214,6 +215,66 @@ describe("Re-ask to another session (the asker ended)", () => {
     expect(lines[1]).toBe(INBOX_REASK_INSTRUCTION);
     expect(lines[2]).toBe(inboxReaskRedirectedLine("Claude Code", note.id));
     expect(lines[2]).not.toBe(inboxRedirectedLine("Claude Code", note.id));
+  });
+});
+
+describe("Re-ask with action items to another session (#2059 review 3)", () => {
+  test("the wake names what the note lists, and the session it went to may mark the listed action items done", async () => {
+    const { server, client, project } = await setup();
+    const first = await send(client, project, "ses-a", {
+      body: `Two things.\n\n${block("Backfill ledger first?")}\n\n:::action\nApprove the ledger migration in Stripe\n:::`,
+    });
+    const items = (await thread(server, first.thread_id)).messages[0]!.questions!;
+    const action = items.find((q) => q.kind === "action")!;
+    const ref = `${first.message_id}/${action.key}`;
+    await bridge(server, INBOX_BRIDGE_POLL_PATH, { session: "ses-c", host: "claude-code", project_path: project, waitMs: 0 });
+    const sent = await reask(server, first.message_id, { idempotency_key: "k1", to: { host: "claude-code", session: "ses-c" } });
+    expect(sent.status).toBe(200);
+    const note = ((await sent.json()) as { reply: { id: string } }).reply;
+    const polled = await bridge(server, INBOX_BRIDGE_POLL_PATH, { session: "ses-c", host: "claude-code", project_path: project, waitMs: 0 });
+    const [command] = parseInboxBridgeCommands(await polled.text());
+    expect(command).toMatchObject({ id: note.id, reask: true, reask_items: "both", redirected_from: "Claude Code" });
+    const lines = inboxWakeText(command!).split("\n");
+    expect(lines[1]).toBe(inboxReaskInstruction("both"));
+    expect(lines[1]).toContain("for the open questions and action items in this thread");
+    expect(lines[2]).toBe(inboxReaskRedirectedLine("Claude Code", note.id, "both"));
+    expect(lines[2]!.startsWith("These questions and action items were asked by another Claude Code session")).toBe(true);
+    // A third session is not the note's: its `done` is refused, and nothing is written.
+    const refused = await client.callTool({
+      name: "send_message",
+      arguments: { project_path: project, agent_session: "ses-x", agent_host: "claude-code", reply_to: note.id, body: "Ready.", done: [ref] },
+    });
+    expect(refused.isError).toBe(true);
+    // The session the note went to marks it done, and drops the question with supersedes, in one message.
+    await send(client, project, "ses-c", {
+      reply_to: note.id,
+      body: "The migration is approved (I saw it in the dashboard); the backfill question no longer applies.",
+      done: [ref],
+      supersedes: [`${first.message_id}/${items.find((q) => q.kind !== "action")!.key}`],
+    });
+    const after = (await thread(server, first.thread_id)).messages[0]!.questions!;
+    expect(after.find((q) => q.key === action.key)).toMatchObject({ state: "closed", action_result: { outcome: "done", by: "agent" } });
+  });
+
+  test("a note listing only action items: the wake says action items, never questions", async () => {
+    const { server, client, project } = await setup();
+    const first = await send(client, project, "ses-a", { body: ":::action\nTouch your YubiKey\n:::" });
+    const sent = await reask(server, first.message_id, { idempotency_key: "k1" });
+    const note = ((await sent.json()) as { reply: { id: string } }).reply;
+    const polled = await bridge(server, INBOX_BRIDGE_POLL_PATH, { session: "ses-a", host: "claude-code", project_path: project, waitMs: 0 });
+    const command = parseInboxBridgeCommands(await polled.text()).find((c) => c.id === note.id)!;
+    expect(command).toMatchObject({ reask: true, reask_items: "actions" });
+    expect(inboxWakeText(command).split("\n")[1]).toBe(
+      "The person asked, from the Plannotator Inbox, for the open action items in this thread to be asked again, together in one new message. The action items and what to do with each follow. Answer in the same thread: plannotator_inbox send_message with reply_to set to the id in parentheses on the line above.",
+    );
+  });
+
+  test("nothing left: the refusal names action items too", async () => {
+    const { server, client, project } = await setup();
+    const first = await send(client, project, "ses-a", { body: "Just an update." });
+    const refused = await reask(server, first.message_id, { idempotency_key: "k1" });
+    expect(refused.status).toBe(409);
+    expect(((await refused.json()) as { error: string }).error).toBe("No open question or action item is left to ask again.");
   });
 });
 

@@ -109,8 +109,9 @@ describe("Done and Can't do it", () => {
     const [reply] = store.settleActions(UNDO_MS);
     expect(reply).toBeDefined();
     expect(reply!).toMatchObject({ author: { kind: "person" }, reply_to: asked.id, action_report: [`${asked.id}/${action.key}`] });
-    expect(reply!.body.startsWith("Did 1 action item.\n\n## Actions you asked for\n\n1 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nDone, ")).toBe(true);
-    expect(reply!.body.endsWith("\nNote: Approved.")).toBe(true);
+    expect(reply!.body.startsWith("Did 1 action item.\n\n## Action items you asked for\n\n1 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nDone, ")).toBe(true);
+    // The question of the same message still waits on the person: the last line names it.
+    expect(reply!.body.endsWith("\nNote: Approved.\n\nStill open: Q1. Announce it in #releases? — the person will answer it in the Inbox; don't ask again.")).toBe(true);
     expect(reply!.body).not.toContain(INBOX_ACTIONS_HEADING.toUpperCase());
     expect(actionOf(store, asked.id)).toMatchObject({ state: "sent", sent_reply_id: reply!.id });
     // The reply machinery hands it to the asking session, once.
@@ -136,7 +137,7 @@ describe("Done and Can't do it", () => {
     clock.now += UNDO_MS;
     const [reply] = store.settleActions(UNDO_MS);
     expect(reply!.body).toBe(
-      "Couldn't do 1 action item.\n\n## Actions you asked for\n\n0 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nCan't do it: I'm not in the acme team; ask Dana.",
+      "Couldn't do 1 action item.\n\n## Action items you asked for\n\n0 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nCan't do it: I'm not in the acme team; ask Dana.\n\nStill open: Q1. Announce it in #releases? — the person will answer it in the Inbox; don't ask again.",
     );
   });
 
@@ -360,6 +361,34 @@ describe("the agent marks its own action item done", () => {
     const other = { ...AGENT, session: "ses_other" };
     expect(() => store.sendMessage({ project_id: project.id, author: other, body: "Ready.", reply_to: asked.id, done: [`${asked.id}/${action.key}`] })).toThrow(/another session's/);
     expect(actionOf(store, asked.id).state).toBe("open");
+  });
+
+  test("a Re-ask redirected to another session (the asker ended) lets that session mark the listed action items done", () => {
+    const { store, project, asked, action } = setup();
+    const other = { ...AGENT, session: "ses_other" };
+    const ref = `${asked.id}/${action.key}`;
+    // Before any note it is not theirs.
+    expect(() => store.sendMessage({ project_id: project.id, author: other, body: "Ready.", reply_to: asked.id, done: [ref] })).toThrow(/another session's/);
+    const { reply } = store.sendReask(asked.id, { idempotency_key: "r1", to: { host: "claude-code", session: "ses_other" } });
+    expect(reply.reask).toContain(ref);
+    // A third session is still refused: the note went to ses_other only.
+    expect(() =>
+      store.sendMessage({ project_id: project.id, author: { ...AGENT, session: "ses_third" }, body: "Ready.", reply_to: reply.id, done: [ref] }),
+    ).toThrow(/another session's/);
+    // The message-wide id takes only what the note lists (the action item; the question is not an action item anyway).
+    const result = store.sendMessage({ project_id: project.id, author: other, body: "The deployment is Ready.", reply_to: reply.id, done: [asked.id] });
+    expect(result.done).toEqual([ref]);
+    expect(actionOf(store, asked.id)).toMatchObject({ state: "closed", action_result: { outcome: "done", by: "agent" } });
+  });
+
+  test("a redirected note stops granting `done` once that session wrote after it", () => {
+    const { store, project, asked, action } = setup();
+    const other = { ...AGENT, session: "ses_other" };
+    const { reply } = store.sendReask(asked.id, { idempotency_key: "r1", to: { host: "claude-code", session: "ses_other" } });
+    store.sendMessage({ project_id: project.id, author: other, body: "Looking into it.", reply_to: reply.id });
+    expect(() =>
+      store.sendMessage({ project_id: project.id, author: other, body: "Ready.", reply_to: reply.id, done: [`${asked.id}/${action.key}`] }),
+    ).toThrow(/another session's/);
   });
 
   test("refuses another thread, a question, an unknown id and an action item no longer open, writing nothing", () => {

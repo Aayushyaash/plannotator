@@ -341,7 +341,16 @@ function replyResult(store: InboxStore, reply: InboxMessage, base: string, calle
       const own = questions.filter((q) => q.message_id === id);
       if (own.length === 0) return null;
       const numbers = numbered(id);
-      return `questions of ${id}: ${own.map((q) => questionWords({ key: q.key, q: numbers.get(q.key) ?? 1, state: q.state }, false, false)).join("; ")}`;
+      // An action item's result in short ("done", "can't do it", "you saw it done"), as read_thread says it;
+      // the label names action items only when there is one, so a question-only trailer is unchanged.
+      const records = new Map(store.questionsOf(id).map((q) => [q.key, q]));
+      const short = (key: string): string | undefined => {
+        const result = records.get(key)?.action_result;
+        if (!key.startsWith("a-") || !result) return undefined;
+        return result.by === "agent" ? "you saw it done" : result.outcome === "cant" ? "can't do it" : "done";
+      };
+      const label = own.some((q) => q.key.startsWith("a-")) ? "questions and action items" : "questions";
+      return `${label} of ${id}: ${own.map((q) => questionWords({ key: q.key, q: numbers.get(q.key) ?? 1, state: q.state, ...(short(q.key) ? { result: short(q.key) } : {}) }, false, false)).join("; ")}`;
     }),
     `cursor ${cursor}`,
     url,

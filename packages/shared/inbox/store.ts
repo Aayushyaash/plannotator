@@ -1930,7 +1930,7 @@ export class InboxStore {
 
   /**
    * Send what the person marked once the Undo window passed: one reply per
-   * asking message ("Did 1 action item." and the "Actions you asked for"
+   * asking message ("Did 1 action item." and the "Action items you asked for"
    * section), the person's reply like any Send's (delivered by the reply
    * machinery: the wake, wait_for_reply, Send now), the action items marked sent
    * with it first. Returns the replies written.
@@ -1942,7 +1942,16 @@ export class InboxStore {
       const at = this.stamp();
       const sent = records.map((record) => ({ ...record, sent_revision: record.revision, sent_reply_id: replyId }) satisfies InboxQuestionRecord);
       const all = this.questionRecords(message.id).filter((r) => r.kind === "action");
-      const body = composeInboxActionsReply({ reported: sent, all: all.map((r) => sent.find((x) => x.id === r.id) ?? r) });
+      // What of that message still waits on the person, named on the report's last line (#2059).
+      const closed = this.closedByArchive(message);
+      const stillOpen = this.questionRecords(message.id)
+        .filter((r) => !sent.some((x) => x.id === r.id))
+        .filter((r) => {
+          const state = inboxQuestionState(r, closed);
+          return state === "open" || (r.kind !== "action" && state === "picked");
+        })
+        .map((r) => ({ kind: r.kind === "action" ? ("action" as const) : ("question" as const), position: r.position, prompt: r.prompt }));
+      const body = composeInboxActionsReply({ reported: sent, all: all.map((r) => sent.find((x) => x.id === r.id) ?? r), stillOpen });
       const reply: InboxMessage = {
         id: replyId,
         project_id: message.project_id,
@@ -2540,12 +2549,18 @@ export class InboxStore {
         problems.push(`${ref} is in another thread (${message.thread_id}): send with reply_to ${target.message_id} to mark it done there.`);
         continue;
       }
-      // Only the session that wrote an action item marks it done (another agent's action item is not yours to close).
-      if ((message.author.session ?? null) !== (author.session ?? null) || (message.author.host ?? null) !== (author.host ?? null)) {
+      // Only the session that wrote an action item marks it done (another agent's action item is not yours to close),
+      // or the session a still-waiting Re-ask note was sent to, for the ids that note lists (the asker ended; #2059).
+      const writer =
+        (message.author.session ?? null) === (author.session ?? null) && (message.author.host ?? null) === (author.host ?? null);
+      const granted = writer ? null : this.reaskGrants(threadId, author);
+      if (!writer && ![...granted!].some((id) => id === `${message.id}/${target.key}` || (target.key === null && id.startsWith(`${message.id}/`)))) {
         problems.push(`${ref}: that action item is another session's; only the session that wrote an action item marks it done.`);
         continue;
       }
-      const records = this.questionRecords(message.id).filter((r) => r.kind === "action" && (target.key === null || r.key === target.key));
+      const records = this.questionRecords(message.id).filter(
+        (r) => r.kind === "action" && (target.key === null || r.key === target.key) && (granted === null || granted.has(r.id)),
+      );
       if (records.length === 0) {
         problems.push(target.key === null ? `${ref}: that message has no action item.` : `${ref}: message ${target.message_id} has no action item ${target.key}.`);
         continue;
@@ -3095,7 +3110,7 @@ export class InboxStore {
       .flatMap((m) => this.questionRecords(m.id));
     const picked = records.filter((r) => inboxQuestionState(r, false) === "picked" && r.answer !== null);
     const open = records.filter((r) => inboxQuestionState(r, false) === "open");
-    if (open.length === 0) throw new InboxError("nothing_to_reask", "No open question is left to ask again.");
+    if (open.length === 0) throw new InboxError("nothing_to_reask", "No open question or action item is left to ask again.");
 
     const replyId = inboxId("msg");
     const at = this.stamp();
@@ -3144,6 +3159,27 @@ export class InboxStore {
    * one of the questions it lists is still open. Another session's new
    * question, or the last listed one answered, superseded or closed, ends it.
    */
+  /**
+   * The ids a still-waiting Re-ask note sent to `author` (its `to`: the
+   * person redirected it because the asker ended) lists: that session may
+   * mark those action items done, as the asker could. A note stops granting
+   * once that session wrote in the thread after it.
+   */
+  private reaskGrants(threadId: string, author: Extract<InboxAuthor, { kind: "agent" }>): Set<string> {
+    const out = new Set<string>();
+    const messages = this.threadMessages(threadId);
+    const same = (to: { host?: string; session?: string } | null | undefined): boolean =>
+      !!to && (to.session ?? null) === (author.session ?? null) && (to.host ?? "") === (author.host ?? "");
+    messages.forEach((note, index) => {
+      if (note.author.kind !== "person" || (note.reask?.length ?? 0) === 0 || !same(note.to)) return;
+      const wrote = messages
+        .slice(index + 1)
+        .some((m) => m.author.kind === "agent" && same({ host: m.author.host ?? "", session: m.author.session }));
+      if (!wrote) for (const id of note.reask!) out.add(id);
+    });
+    return out;
+  }
+
   private reaskWaiting(messages: readonly InboxMessage[]): boolean {
     // Most threads have no Re-ask note: they cost nothing more.
     if (!messages.some((m) => m.author.kind === "person" && (m.reask?.length ?? 0) > 0)) return false;

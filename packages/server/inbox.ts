@@ -97,6 +97,7 @@ import {
   INBOX_BRIDGE_EVENT_PATH,
   INBOX_BRIDGE_POLL_MAX_MS,
   INBOX_BRIDGE_POLL_PATH,
+  inboxReaskItemsOf,
   INBOX_MAX_REQUEST_BYTES,
   INBOX_SEND_NOW_POLL_FIELD,
   INBOX_TAGS_POLL_FIELD,
@@ -1603,6 +1604,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       ...(reply.ack_of ? { ack_of: reply.ack_of } : {}),
       // The person's Re-ask (approval "inbox-reask"): the wake takes INBOX_REASK_INSTRUCTION.
       ...((reply.reask?.length ?? 0) > 0 ? { reask: true } : {}),
+      // What the note lists (#2059): the wake names action items only when it lists some.
+      ...(inboxReaskItemsOf(reply.reask) ? { reask_items: inboxReaskItemsOf(reply.reask) } : {}),
     };
   };
 

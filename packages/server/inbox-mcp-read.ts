@@ -299,7 +299,7 @@ export function answerWords(answer: AgentAnswer | undefined): string {
 /**
  * Each question's number in its message: its rank by position, as the reply's
  * answers section numbers it. Action items (`kind: "action"`) are numbered on their
- * own (A1, A2…), as the reply's "Actions you asked for" numbers them.
+ * own (A1, A2…), as the reply's "Action items you asked for" numbers them.
  */
 function numbering(questions: readonly InboxQuestion[]): Map<string, number> {
   const rank = (list: readonly InboxQuestion[]) => [...list].sort((a, b) => a.position - b.position).map((q, i) => [q.key, i + 1] as const);
@@ -340,7 +340,7 @@ export function agentQuestions(questions: readonly InboxQuestion[]): AgentQuesti
  * leaves the answer out (wait_for_reply, whose reply body words it).
  */
 export function questionWords(q: AgentQuestionRef, withPrompt = false, withAnswer = true): string {
-  // An action item (key `a-…`) reads A1, A2…: the reply's "Actions you asked for" numbers it so.
+  // An action item (key `a-…`) reads A1, A2…: the reply's "Action items you asked for" numbers it so.
   const head = `${q.key.startsWith("a-") ? "A" : "Q"}${q.q} ${q.key}${withPrompt && q.prompt ? ` (${JSON.stringify(q.prompt)})` : ""}`;
   if (q.result) return `${head} ${q.result}`;
   if (q.state === "superseded") return `${head} ${q.superseded_by?.includes("/") ? `replaced by ${q.superseded_by}` : "no longer applies"}`;

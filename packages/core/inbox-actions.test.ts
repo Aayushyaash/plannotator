@@ -9,6 +9,7 @@ import { describe, expect, test } from "bun:test";
 import {
   checkInboxActionResult,
   composeInboxActionsReply,
+  inboxActionsStillOpenLine,
   inboxActionKey,
   INBOX_ACTION_EXAMPLE,
   parseInboxActionBlocks,
@@ -168,7 +169,7 @@ describe("what the agent gets", () => {
       [
         "Did 1 action item.",
         "",
-        "## Actions you asked for",
+        "## Action items you asked for",
         "",
         "1 of 1 done.",
         "",
@@ -187,6 +188,26 @@ describe("what the agent gets", () => {
     expect(body).toContain("1 of 2 done.");
     expect(body).toContain("### A2. Merge PR #12\nCan't do it: I'm not in the acme team; ask Dana.");
     expect(body.indexOf("### A1.")).toBeLessThan(body.indexOf("### A2."));
+  });
+
+  test("the still-open line names what of that message still waits, like the reply's still-open line", () => {
+    expect(inboxActionsStillOpenLine([])).toBe("");
+    expect(inboxActionsStillOpenLine([{ kind: "action", position: 1, prompt: "Approve the 2FA prompt for the npm org" }])).toBe(
+      "Still open: A2. Approve the 2FA prompt for the npm org — the person will do it in the Inbox; don't ask again.",
+    );
+    expect(
+      inboxActionsStillOpenLine([
+        { kind: "action", position: 1, prompt: "Approve the 2FA prompt" },
+        { kind: "question", position: 0, prompt: "Publish as latest?" },
+      ]),
+    ).toBe("Still open: Q1. Publish as latest?; A2. Approve the 2FA prompt — the person will answer or do them in the Inbox; don't ask again.");
+    expect(inboxActionsStillOpenLine([{ kind: "question", position: 0, prompt: "Publish as latest?" }, { kind: "question", position: 1, prompt: "Tag it?" }])).toBe(
+      "Still open: Q1. Publish as latest?; Q2. Tag it? — the person will answer them in the Inbox; don't ask again.",
+    );
+    const cant = record({ revision: 1, action_result: { outcome: "cant", note: "No key.", at: "2026-10-21T15:12:00.000Z", by: "person" } });
+    const body = composeInboxActionsReply({ reported: [cant], all: [cant, record({ key: "a-2", position: 1 })], stillOpen: [{ kind: "action", position: 1, prompt: "Merge PR #12" }], timeZone: "UTC" });
+    expect(body.endsWith("Can't do it: No key.\n\nStill open: A2. Merge PR #12 — the person will do it in the Inbox; don't ask again.")).toBe(true);
+    expect(body).toContain("0 of 2 done.");
   });
 
   test("a reply's question sections never count or number an action item", () => {
