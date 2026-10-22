@@ -174,6 +174,7 @@ test('the thread draws the To do card in place of the block', async () => {
   await expect(card.locator('.ib-badge')).toHaveText('Stopped');
   await expect(card.locator('[data-action-open]')).toHaveAttribute('href', 'https://vercel.com/acme/web/deployments/dpl_8Hk2mQ');
   await expect(card.locator('[data-action-watching]')).toHaveText('Claude Code is watching: the deployment; I go on by myself once it is Ready');
+  await expect(card.locator('[data-action-hint]')).toHaveText('Done goes to Claude Code after 10 s');
   // The block's own lines are not drawn beside the card.
   await expect(page.locator('section.ib-pane')).not.toContainText('Where: [Vercel]');
   // 👍 Looks good waits while the to-do does.
