@@ -1654,6 +1654,31 @@ body:has([data-popout="true"]) [data-sidebar-tabs="true"] {
   padding-left: 0.6rem;
   color: var(--muted-foreground);
 }
+/* GFM tables in Ask AI answers. The chat panel is narrow, so a wide table
+   scrolls sideways inside itself instead of widening the message. */
+.ai-markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+  font-size: 0.95em;
+}
+.ai-markdown th,
+.ai-markdown td {
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+.ai-markdown th {
+  background: color-mix(in oklab, var(--muted) 55%, transparent);
+  font-weight: 600;
+}
+.ai-markdown th[align="center"],
+.ai-markdown td[align="center"] { text-align: center; }
+.ai-markdown th[align="right"],
+.ai-markdown td[align="right"] { text-align: right; }
 
 /* Annotation highlights — shared by the plan editor and the code-review
    description annotations. (Moved here from packages/editor/index.css so both
