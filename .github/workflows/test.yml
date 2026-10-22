@@ -383,6 +383,8 @@ jobs:
           packages/ui/components/Settings.vim.test.tsx
           packages/ui/components/Settings.annotateParity.test.tsx
           packages/ui/components/Settings.compactDisplay.test.tsx
+          packages/ui/components/Settings.customFont.test.tsx
+          packages/ui/utils/diffFonts.test.ts
           packages/ui/components/Settings.agentTool.test.tsx
           packages/ui/components/settings/QuickLabelsTab.test.tsx
           packages/ui/components/AnnotationToolbar.touchTargets.test.tsx
