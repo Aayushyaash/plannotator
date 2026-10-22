@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ImagePeek, type ImagePeekHandle, type ImagePeekRow } from './ImagePeek';
 import { ImageZoomStage, type ImageZoomStageHandle, type ZoomMode } from './ImageZoomStage';
 
@@ -104,6 +104,7 @@ export const ImageLightbox: React.FC<{
   const [announced, setAnnounced] = useState('');
   const peekRef = useRef<ImagePeekHandle>(null);
   const stageRef = useRef<ImageZoomStageHandle>(null);
+  const refocusStage = useRef(false);
   const pillRef = useRef<HTMLButtonElement>(null);
   const endTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const current = stepping ? images![index]! : { src, alt, section: null };
@@ -123,12 +124,20 @@ export const ImageLightbox: React.FC<{
     go(next);
   };
   const go = (next: number) => {
+    // The stage is keyed by image, so stepping remounts it: keep focus on it
+    // when it had focus (its scroll keys, and Tab staying inside the dialog).
+    refocusStage.current = !!stageRef.current?.element && document.activeElement === stageRef.current.element;
     setIndex(next);
     setZoomMode('fit');
     setScale(null);
     const image = images![next]!;
     setAnnounced(`${next + 1} of ${images!.length}, ${lightboxImageName(image)}${image.section ? `, in “${image.section}”` : ''}`);
   };
+  useLayoutEffect(() => {
+    if (!refocusStage.current) return;
+    refocusStage.current = false;
+    stageRef.current?.element?.focus({ preventScroll: true });
+  }, [index]);
   const stepRef = useRef(step);
   stepRef.current = step;
   const steppingRef = useRef(stepping);

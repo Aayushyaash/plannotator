@@ -348,9 +348,14 @@ describe.if(hasDom)('ImageLightbox: zoom (#2067)', () => {
     expect(stage.tabIndex).toBe(0);
     expect(stage.getAttribute('aria-label')).toBe('Image: a.png');
     await act(async () => fitButton(host).click());
+    // Focus on the overlay (not the stage): ↓ does not pan.
+    host.querySelector<HTMLElement>('[data-image-lightbox]')!.focus();
+    await act(async () => { press('ArrowDown'); });
+    expect(view(img)).toEqual({ x: 0, y: 0, scale: 1 });
     stage.focus();
     const seen = behindTheLightbox();
-    const down = press('ArrowDown');
+    let down!: KeyboardEvent;
+    await act(async () => { down = press('ArrowDown'); });
     expect(down.defaultPrevented).toBe(true);
     expect(view(img)).toEqual({ x: 0, y: -40, scale: 1 });
     await act(async () => { press('PageDown'); });
@@ -364,9 +369,15 @@ describe.if(hasDom)('ImageLightbox: zoom (#2067)', () => {
     await act(async () => { press(' '); });
     expect(view(img).y).toBe(-525);
     expect(seen).toEqual([]);
-    // ← → are still stepping.
+    // ← → are still stepping, and focus stays on the new image's stage.
     await act(async () => { press('ArrowRight'); });
     expect(host.querySelector('[data-lightbox-count]')!.textContent).toBe('2 of 3');
+    const next = host.querySelector<HTMLElement>('[data-lightbox-stage]')!;
+    expect(next).not.toBe(stage);
+    expect(document.activeElement).toBe(next);
+    await act(async () => { press(']'); });
+    expect(host.querySelector('[data-lightbox-count]')!.textContent).toBe('3 of 3');
+    expect(document.activeElement).toBe(host.querySelector('[data-lightbox-stage]'));
   });
 
   test('the single overlay\'s focused stage takes ← → as sideways scrolling', async () => {
