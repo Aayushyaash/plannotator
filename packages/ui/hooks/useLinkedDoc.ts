@@ -6,7 +6,7 @@
  * annotation caching per filepath, and highlight re-application.
  */
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { normalizeBrowserPath } from "@plannotator/core/browser-paths";
 import { isDiagramRenderKind } from "@plannotator/core/annotatable";
 import type { Annotation, DocumentRenderAs, ImageAttachment } from "../types";
@@ -15,6 +15,13 @@ import type { SidebarTab } from "./useSidebar";
 import type { SourceSaveCapability } from "@plannotator/core/source-save";
 import type { VersionInfo } from "./usePlanDiff";
 import { annotationOwnsHighlight } from "../utils/annotationOwnsHighlight";
+import {
+  captureScrollAnchor,
+  restoreScrollAnchor,
+  scrollAnchorReady,
+  type ScrollAnchor,
+} from "../utils/scrollAnchor";
+import { getScrollViewportTop } from "./useScrollViewport";
 
 export interface LinkedDocLoadData {
   markdown?: string;
@@ -100,6 +107,13 @@ export interface UseLinkedDocOptions {
   getDocumentMarkdown?: (filepath: string, fallback?: string) => string | undefined;
   /** Let the host restore any state that was suspended while a linked doc was active. */
   onAfterBack?: () => void;
+  /**
+   * The element the documents scroll in (the host's ScrollViewportContext
+   * value). When given, opening a linked document remembers where the reader
+   * was in the root document, and back() returns them there. Omitted, nothing
+   * about scrolling changes.
+   */
+  scrollViewport?: HTMLElement | null;
 }
 
 interface SavedPlanState {
@@ -110,6 +124,8 @@ interface SavedPlanState {
   renderAs: DocumentRenderAs;
   rawHtml: string;
   shareHtml: string;
+  /** Where the reader was in the root document when it was left. */
+  scrollAnchor?: ScrollAnchor | null;
 }
 
 export interface CachedDocState {
@@ -176,8 +192,14 @@ export interface UseLinkedDocReturn {
     targetTab?: SidebarTab,
     options?: { notifyDocumentLoaded?: boolean; revealSidebar?: boolean },
   ) => void;
-  /** Return to the plan (caches doc annotations, restores plan state) */
-  back: () => void;
+  /** Return to the plan (caches doc annotations, restores plan state). With a
+   *  `scrollViewport`, the reader's place in the root comes back too, unless
+   *  `restoreScroll: false` (a caller that scrolls to a target itself). */
+  back: (options?: { restoreScroll?: boolean }) => void;
+  /** Stop a scroll restore that back() started and is still settling. A host
+   *  that scrolls programmatically (a jump to a comment or a section) calls it
+   *  first, so the restore cannot cancel or undo that scroll. */
+  cancelScrollRestore: () => void;
   /** Dismiss the current error */
   dismissError: () => void;
   /** All linked doc annotations including the active doc's live state (keyed by filepath).
@@ -216,6 +238,17 @@ export interface UseLinkedDocReturn {
 
 const HIGHLIGHT_REAPPLY_DELAY = 100;
 
+/**
+ * After back(), the root document is re-anchored on the next frames until its
+ * blocks are in the DOM, then again at these delays (ms) to absorb late layout:
+ * re-applied highlights, images that finish loading, a sidebar that resizes the
+ * reading column. A scroll the reader makes in between ends it.
+ */
+const SCROLL_RESTORE_SETTLE_DELAYS = [HIGHLIGHT_REAPPLY_DELAY + 50, 400, 1000];
+const SCROLL_RESTORE_MAX_WAIT_FRAMES = 60;
+/** The reader's own input, which ends a restore still settling. */
+const READER_INPUT_EVENTS = ['wheel', 'touchstart', 'keydown', 'pointerdown'] as const;
+
 export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
   const {
     markdown,
@@ -241,7 +274,21 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
     onDocumentActivated,
     getDocumentMarkdown,
     onAfterBack,
+    scrollViewport,
   } = options;
+
+  // Read through a ref so back() keeps its identity when the viewport mounts.
+  const scrollViewportRef = useRef<HTMLElement | null>(scrollViewport ?? null);
+  scrollViewportRef.current = scrollViewport ?? null;
+  // The restore of the last back(), while it settles: stops it and releases
+  // its frames, timers and listeners. Null when nothing is settling.
+  const stopScrollRestoreRef = useRef<(() => void) | null>(null);
+  const cancelScrollRestore = useCallback(() => {
+    const stop = stopScrollRestoreRef.current;
+    stopScrollRestoreRef.current = null;
+    stop?.();
+  }, []);
+  useEffect(() => cancelScrollRestore, [cancelScrollRestore]);
 
   const [linkedDoc, setLinkedDoc] = useState<{
     filepath: string;
@@ -270,8 +317,80 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
     []
   );
 
-  const back = useCallback(() => {
+  const restoreRootScroll = useCallback((anchor: ScrollAnchor) => {
+    cancelScrollRestore();
+    let stopped = false;
+    const frames = new Set<number>();
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    const win = typeof window === 'undefined' ? null : window;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      for (const id of frames) cancelAnimationFrame(id);
+      for (const id of timers) clearTimeout(id);
+      frames.clear();
+      timers.clear();
+      for (const type of READER_INPUT_EVENTS) win?.removeEventListener(type, onReaderInput, true);
+      if (stopScrollRestoreRef.current === stop) stopScrollRestoreRef.current = null;
+    };
+    // Any input of the reader's own ends the restore: from then on, where the
+    // page is is theirs.
+    function onReaderInput() { stop(); }
+    for (const type of READER_INPUT_EVENTS) {
+      win?.addEventListener(type, onReaderInput, { capture: true, passive: true });
+    }
+    stopScrollRestoreRef.current = stop;
+
+    const frame = (fn: () => void) => {
+      const id = requestAnimationFrame(() => { frames.delete(id); fn(); });
+      frames.add(id);
+    };
+    const later = (fn: () => void, ms: number) => {
+      const id = setTimeout(() => { timers.delete(id); fn(); }, ms);
+      timers.add(id);
+    };
+
+    let lastTop: number | null = null;
+    const apply = () => {
+      const viewport = scrollViewportRef.current;
+      if (stopped || !viewport) return;
+      // Something else scrolled since the last re-anchor (the reader, or the
+      // host scrolling to a target): that position wins.
+      if (lastTop !== null && Math.abs(getScrollViewportTop(viewport) - lastTop) > 2) {
+        stop();
+        return;
+      }
+      lastTop = restoreScrollAnchor(viewport, anchor);
+    };
+    let waited = 0;
+    const firstApply = () => {
+      if (stopped) return;
+      const viewport = scrollViewportRef.current;
+      if (viewport && scrollAnchorReady(viewport, anchor)) {
+        apply();
+        if (stopped) return;
+        const last = SCROLL_RESTORE_SETTLE_DELAYS[SCROLL_RESTORE_SETTLE_DELAYS.length - 1];
+        for (const delay of SCROLL_RESTORE_SETTLE_DELAYS) {
+          later(() => { apply(); if (delay === last) stop(); }, delay);
+        }
+        return;
+      }
+      if (++waited > SCROLL_RESTORE_MAX_WAIT_FRAMES) {
+        if (viewport) apply();
+        stop();
+        return;
+      }
+      frame(firstApply);
+    };
+    // Two frames: the swap commits, then layout settles.
+    frame(() => frame(firstApply));
+  }, [cancelScrollRestore]);
+
+  const back = useCallback((backOptions?: { restoreScroll?: boolean }) => {
     if (!savedPlanState.current) return;
+    // `back` may be handed straight to an onClick, so only an explicit false
+    // turns the restore off.
+    const restoreScroll = backOptions?.restoreScroll !== false;
     onBeforeNavigate?.();
 
     // Clear web-highlighter marks before swapping content to prevent React DOM mismatch
@@ -308,6 +427,8 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
     setError(null);
     savedPlanState.current = null;
     onAfterBack?.();
+    if (restoreScroll && saved.scrollAnchor) restoreRootScroll(saved.scrollAnchor);
+    else cancelScrollRestore();
 
     // Re-apply plan annotation highlights after DOM settles
     if (saved.annotations.length) {
@@ -331,6 +452,8 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
     onBeforeNavigate,
     getDocumentMarkdown,
     onAfterBack,
+    restoreRootScroll,
+    cancelScrollRestore,
   ]);
 
   const activateDocument = useCallback((
@@ -367,9 +490,14 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
     // Clear web-highlighter marks before swapping content to prevent React DOM mismatch
     viewerRef.current?.clearAllHighlights();
 
+    // A restore of an earlier back() must not pull the new document around.
+    cancelScrollRestore();
+
     // Save current state (plan or another linked doc)
     if (!savedPlanState.current) {
+      const viewport = scrollViewportRef.current;
       savedPlanState.current = {
+        scrollAnchor: viewport ? captureScrollAnchor(viewport) : null,
         markdown,
         annotations: [...annotations],
         selectedAnnotationId,
@@ -568,6 +696,7 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
 
   const restoreSession = useCallback((state: LinkedDocSessionState) => {
     viewerRef.current?.clearAllHighlights();
+    cancelScrollRestore();
 
     savedPlanState.current = null;
     docCache.current = new Map(state.docs);
@@ -711,6 +840,7 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
     open,
     openLoaded,
     back,
+    cancelScrollRestore,
     dismissError,
     getDocAnnotations,
     getFeedbackDocuments,
