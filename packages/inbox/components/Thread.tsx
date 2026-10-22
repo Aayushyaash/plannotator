@@ -68,6 +68,8 @@ import { ActionChecklist, type ActionMark } from './ActionChecklist';
 import { actionForBlock } from '../actions';
 import { splitInboxSkillsBlock } from '@plannotator/core/skill-reference-block';
 import { Tip } from './Tip';
+import { OpenQuestionsButton } from './OpenQuestions';
+import { openQuestionsShown, placeOf, threadOpenQuestions, type OpenQuestionPlace } from '../openQuestions';
 import { selectionToolbarShowing } from '../selectionToolbar';
 import { replyKeysToRenew, routeSendAnnotations, sendTargetAnswerIds, sendTargetsOf, type SendTarget, type SentContents } from '../sendTargets';
 
@@ -2514,6 +2516,32 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     }
   };
 
+  // Open questions in this thread (approval "inbox-thread-open-questions", option A): the "N open questions"
+  // button beside Re-ask lists them, and a row takes the person to the card (unfolding its message).
+  const openQ = resolved && !cameBack ? { questions: [], replaced: 0 } : threadOpenQuestions(thread.messages, liveMessage);
+  const isFolded = (messageId: string) => fold.folded.has(messageId) || hiddenNow.has(messageId);
+  const openQShown = openQuestionsShown(openQ.questions, { messageCount: thread.messages.length, folded: isFolded });
+  /** Where each listed card sits now: in a folded message, or above or below the middle of the thread's view. */
+  const measureOpenQuestions = (): ReadonlyMap<string, OpenQuestionPlace> => {
+    const places = new Map<string, OpenQuestionPlace>();
+    const body = bodyRef.current;
+    const current = foldRef.current;
+    const hidden = new Set(current.hidden.flatMap((ids, index) => (current.revealed.has(index) ? [] : ids)));
+    const view = body?.getBoundingClientRect() ?? { top: 0, bottom: 0 };
+    for (const q of openQ.questions) {
+      if (current.folded.has(q.messageId) || hidden.has(q.messageId)) {
+        places.set(q.id, 'folded');
+        continue;
+      }
+      const card =
+        body?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(q.messageId)}"] [data-question-key="${CSS.escape(q.key)}"]`) ??
+        body?.querySelector<HTMLElement>(`[data-message-article="${CSS.escape(q.messageId)}"]`) ??
+        null;
+      places.set(q.id, placeOf(card?.getBoundingClientRect() ?? null, view));
+    }
+    return places;
+  };
+
   // The error after a failed Send (or Re-ask) sits ABOVE the button row it belongs to (approval
   // "thread-foot-status-right"), in the two states that have one: the reply box and the closed foot.
   const errorAbove = !resolved && !(guard && staleQuestions.length > 0) && newMessage?.kind !== 'compose' && !(route.open && asking);
@@ -3383,6 +3411,16 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                     Re-ask
                   </button>
                 </Tip>
+              )}
+              {/* The thread's open questions (approval "inbox-thread-open-questions"): a list that takes the person to each card. */}
+              {openQShown && (
+                <OpenQuestionsButton
+                  questions={openQ.questions}
+                  replaced={openQ.replaced}
+                  phone={phone}
+                  measure={measureOpenQuestions}
+                  onPick={(q) => jumpTo({ kind: 'question', messageId: q.messageId, key: q.key })}
+                />
               )}
               {/* 👍 Looks good beside Reply: sent to the agent after the Undo window; hidden while a question waits. */}
               {ackOffered && !waiting && !draftKept && (
