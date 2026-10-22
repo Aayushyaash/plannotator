@@ -790,10 +790,22 @@ test('the Inbox\'s file viewer zooms like the lightbox: Ctrl + wheel keeps the p
   const image = zoomStage.locator('img[data-lightbox-image]');
   await expect(zoomStage).toHaveAttribute('data-image-zoom-stage', 'fit');
   await expect(pane().locator('[data-image-zoom]')).toHaveText(/^Zoom \d+%$/);
-  const rect = () => image.evaluate((img) => {
-    const r = img.getBoundingClientRect();
-    return { left: r.left, top: r.top, width: r.width, height: r.height };
-  });
+  // The image's box relative to the stage, so a stage that moves (a layout settling) is not read as a pan.
+  const rect = () =>
+    zoomStage.evaluate((stage) => {
+      const r = stage.querySelector('img[data-lightbox-image]')!.getBoundingClientRect();
+      const s = stage.getBoundingClientRect();
+      return { left: r.left - s.left, top: r.top - s.top, width: r.width, height: r.height, stageWidth: s.width, stageHeight: s.height };
+    });
+  // Leaving full screen gives the list (and maybe the sidebar) back with a spring: wait until the stage holds still.
+  const stageBox = async () => JSON.stringify(await zoomStage.boundingBox());
+  await expect
+    .poll(async () => {
+      const first = await stageBox();
+      await page.waitForTimeout(150);
+      return first === (await stageBox());
+    })
+    .toBe(true);
   const box = (await zoomStage.boundingBox())!;
   const px = box.x + box.width * 0.55;
   const py = box.y + box.height * 0.45;
@@ -806,25 +818,34 @@ test('the Inbox\'s file viewer zooms like the lightbox: Ctrl + wheel keeps the p
   await page.waitForTimeout(300);
   // One more notch: the image pixel under the pointer stays under it, on both axes.
   const before = await rect();
-  const u = (px - before.left) / before.width;
-  const v = (py - before.top) / before.height;
+  const u = (px - box.x - before.left) / before.width;
+  const v = (py - box.y - before.top) / before.height;
   await page.keyboard.down('Control');
   await page.mouse.wheel(0, -100);
   await page.keyboard.up('Control');
   await expect.poll(async () => (await rect()).width).toBeGreaterThan(before.width);
   await page.waitForTimeout(200);
   const after = await rect();
-  expect(Math.abs(after.left + u * after.width - px)).toBeLessThan(1);
-  expect(Math.abs(after.top + v * after.height - py)).toBeLessThan(1);
+  expect(Math.abs(box.x + after.left + u * after.width - px)).toBeLessThan(1);
+  expect(Math.abs(box.y + after.top + v * after.height - py)).toBeLessThan(1);
   // The page itself never zoomed.
   expect(await page.evaluate(() => window.visualViewport?.scale ?? 1)).toBe(1);
-  // A drag pans the image with the pointer.
+  // A drag pans the image with the pointer. The image never leaves the stage (an edge stops the pan), so the
+  // drag stays within the room the image has on each side.
+  const roomLeft = after.left + after.width - after.stageWidth;
+  const roomUp = after.top + after.height - after.stageHeight;
+  expect(roomLeft).toBeGreaterThan(60);
+  expect(roomUp).toBeGreaterThan(40);
+  const dx = -Math.min(120, Math.floor(roomLeft - 20));
+  const dy = -Math.min(80, Math.floor(roomUp - 20));
   await page.mouse.down();
-  await page.mouse.move(px - 120, py - 80, { steps: 6 });
+  await page.mouse.move(px + dx, py + dy, { steps: 6 });
   await page.mouse.up();
+  // The last move can land a frame after mouse.up resolves on a slow machine.
+  await expect.poll(async () => Math.round((await rect()).left - after.left)).toBe(dx);
   const panned = await rect();
-  expect(panned.left - after.left).toBeCloseTo(-120, 0);
-  expect(panned.top - after.top).toBeCloseTo(-80, 0);
+  expect(panned.left - after.left).toBeCloseTo(dx, 0);
+  expect(panned.top - after.top).toBeCloseTo(dy, 0);
   await page.mouse.move(box.x + 10, box.y + box.height - 10);
   await page.waitForTimeout(250);
   await page.screenshot({ path: join(zoomShots, 'zoomed-beside-thread-1280.png') });
