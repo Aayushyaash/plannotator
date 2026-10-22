@@ -4,12 +4,12 @@
  * it has always been drawn). Headings, lists, code, tables and question cards
  * keep their proportions to it.
  *
- * The app puts it on the document element (`applyDocumentTextSize`) and
- * packages/editor/index.css scales the document's own blocks from
- * `--doc-text-scale`. At the default nothing is set, so the page is exactly
- * today's. Only the document's blocks scale: the header, panels, badges and
- * menus keep their size. Raw HTML pages and diagrams draw themselves and do
- * not follow it.
+ * The app puts it on the document element (`applyDocumentTextSize`, through
+ * `hooks/useDocumentTextSize`) and packages/ui/theme.css scales the blocks of
+ * a document container (`data-doc-text-root`) from `--doc-text-scale`. At the
+ * default nothing is set, so the page is exactly today's. Only the document's
+ * blocks scale: the header, panels, badges, menus and popouts keep their size.
+ * Raw HTML pages and diagrams draw themselves and do not follow it.
  *
  * Deliberately free of imports so the settings registry can read it on every
  * surface (the guides.show viewer included).

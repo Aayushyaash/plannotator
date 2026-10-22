@@ -106,7 +106,9 @@ describe('the stylesheet', () => {
     const rules = css.split('}').filter((rule) => rule.includes(DOCUMENT_TEXT_SCALE_PROPERTY));
     expect(rules.length).toBeGreaterThan(0);
     for (const rule of rules) {
-      const selector = rule.slice(0, rule.indexOf('{')).trim();
+      // A rule inside `@layer base { … }` reads "@layer base { selector { …".
+      const parts = rule.split('{');
+      const selector = parts[parts.length - 2].trim();
       for (const part of selector.split(/,(?![^(]*\))/)) {
         expect(part.trim().startsWith(`[${DOCUMENT_TEXT_SIZE_ATTRIBUTE}]`)).toBe(true);
       }

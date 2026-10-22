@@ -2,7 +2,7 @@
  * Settings → Display → Text size (#2066): picking a step reaches the page the
  * app is on (through `useDocumentTextSize`, which the plan / annotate app
  * mounts), picking the default clears it again, the row is offered in annotate
- * too, and a host can hide it.
+ * too, and a host that does not opt in never shows a row that would do nothing.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import React, { act } from 'react';
@@ -20,7 +20,7 @@ const hasDom = typeof document !== 'undefined';
 let root: Root | null = null;
 let host: HTMLElement | null = null;
 
-function AppHarness(props: { mode: 'plan' | 'annotate'; hide?: boolean }) {
+function AppHarness(props: { mode: 'plan' | 'annotate'; show: boolean }) {
   useDocumentTextSize();
   return (
     <Settings
@@ -28,17 +28,17 @@ function AppHarness(props: { mode: 'plan' | 'annotate'; hide?: boolean }) {
       onTaterModeChange={() => {}}
       mode={props.mode}
       annotateParity={props.mode === 'annotate'}
-      hideDocumentTextSize={props.hide}
+      showDocumentTextSize={props.show}
       externalOpen
     />
   );
 }
 
-async function mount(mode: 'plan' | 'annotate', hide = false) {
+async function mount(mode: 'plan' | 'annotate', show = true) {
   host = document.createElement('div');
   document.body.appendChild(host);
   root = createRoot(host);
-  await act(async () => root?.render(<AppHarness mode={mode} hide={hide} />));
+  await act(async () => root?.render(<AppHarness mode={mode} show={show} />));
   const tab = Array.from(document.querySelectorAll<HTMLButtonElement>('nav.hidden button'))
     .find((b) => b.textContent?.trim() === 'Display');
   if (!tab) throw new Error('Display tab did not render');
@@ -95,14 +95,14 @@ describe.if(hasDom)('Settings → Display → Text size', () => {
     expect(document.documentElement.hasAttribute(DOCUMENT_TEXT_SIZE_ATTRIBUTE)).toBe(false);
   });
 
-  test('annotate offers the row too; a host can hide it', async () => {
+  test('annotate offers the row too; a host that does not opt in shows none', async () => {
     await mount('annotate');
     expect(row()).not.toBeNull();
     const mounted = root;
     await act(async () => mounted?.unmount());
     root = null;
     document.body.replaceChildren();
-    await mount('plan', true);
+    await mount('plan', false);
     expect(row()).toBeNull();
   });
 });

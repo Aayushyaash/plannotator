@@ -124,6 +124,8 @@ interface AppHeaderProps {
   /** The browser exposes WebMCP, so Settings shows the "Agent tools" opt-out.
    *  Nothing in the header renders for this alone. */
   webmcpAvailable?: boolean;
+  /** The open document is markdown or text, so Settings offers Text size (raw HTML and diagram files draw themselves). */
+  documentTextSizeAvailable?: boolean;
   /** A browser agent has completed at least one tool call in this session.
    *  Only then does the unobtrusive "Agent" indicator appear. */
   agentConnected?: boolean;
@@ -217,6 +219,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   onAgentToolChange,
   agentTerminalAvailable,
   webmcpAvailable = false,
+  documentTextSizeAvailable = false,
   agentConnected = false,
   onCallbackFeedback,
   onCallbackApprove,
@@ -486,6 +489,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
             onAgentToolChange={onAgentToolChange}
             agentTerminalAvailable={agentTerminalAvailable}
             webmcpAvailable={webmcpAvailable}
+            showDocumentTextSize={documentTextSizeAvailable}
           />
         </div>
 

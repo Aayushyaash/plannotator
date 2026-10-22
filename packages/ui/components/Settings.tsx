@@ -110,8 +110,13 @@ interface SettingsProps {
    * never wants it offered, passes true.
    */
   hideEnterSavesComment?: boolean;
-  /** Hide Display's Text size row, for a host that does not apply `documentTextSize` (`hooks/useDocumentTextSize`). */
-  hideDocumentTextSize?: boolean;
+  /**
+   * Show Display's Text size row (#2066). Default false: the row does
+   * something only where the page applies the `documentTextSize` setting
+   * (`hooks/useDocumentTextSize`), so a host opts in. Plannotator passes true
+   * in plan review and annotate on a markdown or text document.
+   */
+  showDocumentTextSize?: boolean;
   onUIPreferencesChange?: (prefs: UIPreferences) => void;
   /** Claude Code's permission mode was changed here (plan review). The host
    *  keeps its own copy in step, since its Approve sends the mode and its
@@ -1130,7 +1135,7 @@ const CommentsTab: React.FC = () => {
   );
 };
 
-export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', annotateParity = false, onUIPreferencesChange, onPermissionModeChange, externalOpen, onExternalClose, aiProviders = [], gitUser, autoUpdateSetting, updateCheckSetting, agentToolSetting, onAgentToolChange, sinceBaseUnavailable, isCompactTouchLayout = false, onDetectObsidianVaults, agentTerminalAvailable = false, webmcpAvailable = false, hideEnterSavesComment = false, hideDocumentTextSize = false }) => {
+export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', annotateParity = false, onUIPreferencesChange, onPermissionModeChange, externalOpen, onExternalClose, aiProviders = [], gitUser, autoUpdateSetting, updateCheckSetting, agentToolSetting, onAgentToolChange, sinceBaseUnavailable, isCompactTouchLayout = false, onDetectObsidianVaults, agentTerminalAvailable = false, webmcpAvailable = false, hideEnterSavesComment = false, showDocumentTextSize = false }) => {
   const webmcpTools = useWebMcpToolsEnabled();
   const autoUpdate = useConfigValue('autoUpdate');
   const updateChecksOn = updateCheckSetting ? updateCheckSetting.on : true;
@@ -1868,7 +1873,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
                 {activeTab === 'display' && mode !== 'review' && (
                   <>
                     {/* Text size (#2066): the document only, not the app around it */}
-                    {!hideDocumentTextSize && (<>
+                    {showDocumentTextSize && (<>
                     <div className="space-y-3" data-document-text-size-setting>
                       <div>
                         <div className="text-sm font-medium" id="document-text-size-label">Text size</div>
