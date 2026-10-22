@@ -33,6 +33,17 @@ const LINKED_BLOCKS = 3;
 /** Height of every block; a test changes it to model a reflowed column. */
 let blockHeight = 100;
 
+/**
+ * Who is writing scrollTop. A write while `writer` is 'host' is the host's own
+ * scroll; any other write is the restore's. `restoreWrites` counts those, and a
+ * running host smooth scroll is aborted by one, the way Chromium cancels a
+ * smooth scroll when scrollTop is assigned mid-animation.
+ */
+let writer: 'restore' | 'host' = 'restore';
+let restoreWrites = 0;
+let hostAnimationAborted = false;
+let hostAnimating = false;
+
 function makeViewport(): HTMLElement {
   const el = document.createElement('main');
   // Like a browser, the scroll offset is clamped to the content's height, so a
@@ -43,7 +54,13 @@ function makeViewport(): HTMLElement {
   Object.defineProperty(el, 'scrollTop', {
     configurable: true,
     get: () => { top = Math.min(top, maxTop()); return top; },
-    set: (value: number) => { top = Math.min(Math.max(0, value), maxTop()); },
+    set: (value: number) => {
+      if (writer !== 'host') {
+        restoreWrites++;
+        if (hostAnimating) hostAnimationAborted = true;
+      }
+      top = Math.min(Math.max(0, value), maxTop());
+    },
   });
   el.getBoundingClientRect = () => ({
     top: 0, left: 0, right: 800, bottom: 500, width: 800, height: 500, x: 0, y: 0,
@@ -130,6 +147,35 @@ async function settle(ms = 1200) {
   await act(async () => { await new Promise((r) => setTimeout(r, ms)); });
 }
 
+/** Wait until `check` holds, up to `ms`. */
+async function until(check: () => boolean, ms = 1000) {
+  const start = Date.now();
+  while (!check()) {
+    if (Date.now() - start > ms) throw new Error('condition not met in time');
+    await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+  }
+}
+
+/** The host scrolls by itself: set at once, or animated over `ms`. */
+function hostScroll(vp: HTMLElement, to: number) {
+  writer = 'host';
+  vp.scrollTop = to;
+  writer = 'restore';
+}
+async function hostSmoothScroll(vp: HTMLElement, to: number, ms: number, startDelay = 0) {
+  hostAnimating = true;
+  hostAnimationAborted = false;
+  await act(async () => { await new Promise((r) => setTimeout(r, startDelay)); });
+  const from = vp.scrollTop;
+  const steps = 10;
+  for (let i = 1; i <= steps && !hostAnimationAborted; i++) {
+    await act(async () => { await new Promise((r) => setTimeout(r, ms / steps)); });
+    if (hostAnimationAborted) break;
+    hostScroll(vp, from + ((to - from) * i) / steps);
+  }
+  hostAnimating = false;
+}
+
 /** The first block whose bottom is below the viewport's top, and its top. */
 function topBlock(vp: HTMLElement): { id: string | null; top: number } {
   for (const el of vp.querySelectorAll<HTMLElement>('[data-block-id]')) {
@@ -145,7 +191,17 @@ afterEach(async () => {
   viewport?.remove();
   viewport = null;
   blockHeight = 100;
+  writer = 'restore';
+  restoreWrites = 0;
+  hostAnimationAborted = false;
+  hostAnimating = false;
 });
+
+async function openNotes(get: () => UseLinkedDocReturn, filepath = '/site/notes.md') {
+  await act(async () => {
+    get().openLoaded({ filepath, markdown: '# Notes', renderAs: 'markdown' });
+  });
+}
 
 describe.if(hasDom)('useLinkedDoc back() scroll restore', () => {
   test('back from a linked HTML document returns to the block the reader left', async () => {
@@ -192,18 +248,89 @@ describe.if(hasDom)('useLinkedDoc back() scroll restore', () => {
   test('a scroll the reader makes while the restore settles wins', async () => {
     const { get, viewport: vp } = await mount();
     vp.scrollTop = 2350;
-    await act(async () => {
-      get().openLoaded({ filepath: '/site/notes.md', markdown: '# Notes', renderAs: 'markdown' });
-    });
+    await openNotes(get);
     expect(vp.scrollTop).toBe(0);
     await act(async () => { get().back(); });
-    // First re-anchor done after two frames; the reader scrolls before the
-    // later settle passes run.
-    await settle(80);
-    expect(topBlock(vp).id).toBe('block-23');
-    vp.scrollTop = 400;
+    // The first re-anchor lands; the reader scrolls before the later passes.
+    await until(() => topBlock(vp).id === 'block-23');
+    hostScroll(vp, 400);
     await settle();
     expect(vp.scrollTop).toBe(400);
+  });
+
+  test("the reader's own input ends the restore, even before the page moves", async () => {
+    const { get, viewport: vp } = await mount();
+    vp.scrollTop = 2350;
+    await openNotes(get);
+    expect(vp.scrollTop).toBe(0);
+    await act(async () => { get().back(); });
+    await until(() => topBlock(vp).id === 'block-23');
+    const at = vp.scrollTop;
+    restoreWrites = 0;
+    window.dispatchEvent(new Event('wheel'));
+    // A late image would make a later pass re-anchor; after the reader's
+    // input there is no later pass.
+    blockHeight = 80;
+    await settle();
+    expect(restoreWrites).toBe(0);
+    expect(vp.scrollTop).toBe(Math.min(at, 60 * 80 - 500));
+  });
+
+  test('a host scroll during the settle window wins once it cancels the restore', async () => {
+    const { get, viewport: vp } = await mount();
+    vp.scrollTop = 2350;
+    await openNotes(get);
+    expect(vp.scrollTop).toBe(0);
+    await act(async () => { get().back(); });
+    await until(() => topBlock(vp).id === 'block-23');
+    // The jump to a comment: the host cancels the restore, then smooth-scrolls
+    // to the comment. Its first step lands after the restore's next pass
+    // would have run, so without the cancel that pass would abort it.
+    restoreWrites = 0;
+    get().cancelScrollRestore();
+    blockHeight = 90; // late layout: a live restore would re-anchor here
+    await hostSmoothScroll(vp, 400, 300, 200);
+    await settle();
+    expect(hostAnimationAborted).toBe(false);
+    expect(restoreWrites).toBe(0);
+    expect(vp.scrollTop).toBe(400);
+  });
+
+  test('back({ restoreScroll: false }) leaves the scroll to the caller', async () => {
+    const { get, viewport: vp } = await mount();
+    vp.scrollTop = 2350;
+    await openNotes(get);
+    expect(vp.scrollTop).toBe(0);
+    restoreWrites = 0;
+    await act(async () => { get().back({ restoreScroll: false }); });
+    await settle();
+    expect(restoreWrites).toBe(0);
+    expect(vp.scrollTop).toBe(0);
+  });
+
+  test('A → B → Back returns to the place in the root, not in A', async () => {
+    const { get, viewport: vp } = await mount();
+    vp.scrollTop = 2350;
+    await openNotes(get, '/site/a.md');
+    expect(vp.scrollTop).toBe(0);
+    await openNotes(get, '/site/b.md');
+    expect(get().filepath).toBe('/site/b.md');
+    await act(async () => { get().back(); });
+    await settle();
+    expect(topBlock(vp)).toEqual({ id: 'block-23', top: -50 });
+  });
+
+  test('unmounting while the restore settles stops it', async () => {
+    const { get, viewport: vp } = await mount();
+    vp.scrollTop = 2350;
+    await openNotes(get);
+    expect(vp.scrollTop).toBe(0);
+    await act(async () => { get().back(); });
+    await act(async () => { root!.unmount(); });
+    root = null;
+    restoreWrites = 0;
+    await settle();
+    expect(restoreWrites).toBe(0);
   });
 
   test('without a scroll viewport, back() leaves scrolling alone', async () => {

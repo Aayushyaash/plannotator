@@ -2232,12 +2232,15 @@ const App: React.FC = () => {
   }, [isHtmlSurface, linkedDocHook.isActive, sourceFilePath, bundleIndex, bundleBackPath]);
 
   // Wrap linked doc back to also clear file browser active file
-  const handleLinkedDocBack = React.useCallback(() => {
+  // `restoreScroll: false` is for a caller that scrolls to a target itself
+  // (a jump to a comment): the reader's old place must not fight that scroll.
+  // The header's Back passes its click event, which never turns it off.
+  const handleLinkedDocBack = React.useCallback((options?: { restoreScroll?: boolean }) => {
     if (bundleBackPath) {
       void openBundleFile(bundleBackPath, { revealSidebar: false });
       return;
     }
-    linkedDocHook.back();
+    linkedDocHook.back(options?.restoreScroll === false ? { restoreScroll: false } : undefined);
     if (isEditingMarkdown) {
       setIsEditingMarkdown(false);
       setEditorDirty(false);
@@ -4816,6 +4819,9 @@ const App: React.FC = () => {
 
   // Keep selection behavior explicit across mobile/wide-mode transitions.
   const handleSelectAnnotation = React.useCallback((id: string | null) => {
+    // Selecting scrolls to the annotation; a Back restore still settling must
+    // not pull the page away from it.
+    if (id) linkedDocHook.cancelScrollRestore();
     setSelectedAnnotationId(id);
     if (id) setSelectedCodeAnnotationId(null);
     selectionRef.current = {
@@ -4823,7 +4829,7 @@ const App: React.FC = () => {
       codeAnnotationId: id ? null : selectionRef.current.codeAnnotationId,
     };
     if (id && isMobile && !isCompactTouchLayout && wideModeType === null) setIsPanelOpen(true);
-  }, [isCompactTouchLayout, isMobile, wideModeType]);
+  }, [isCompactTouchLayout, isMobile, wideModeType, linkedDocHook.cancelScrollRestore]);
 
   const handleAddCodeAnnotation = React.useCallback((input: CodeFileAnnotationInput) => {
     if (documentReadOnly) return;
@@ -5165,7 +5171,8 @@ const App: React.FC = () => {
     // A linked-doc session's source document is reached by going back, not by
     // opening it as a linked doc (useLinkedDoc treats that as a backlink).
     if (sourceFilePath && path === sourceFilePath && linkedDocHook.isActive) {
-      handleLinkedDocBack();
+      // Every caller of this scrolls to its own target once the root is back.
+      handleLinkedDocBack({ restoreScroll: false });
       return;
     }
     await linkedDocHook.open(path, undefined, undefined, openOptions);
@@ -5259,6 +5266,7 @@ const App: React.FC = () => {
       error: linkedDocHook.error,
       getDocAnnotations: linkedDocHook.getDocAnnotations,
       open: (path: string) => linkedDocHook.open(path),
+      cancelScrollRestore: linkedDocHook.cancelScrollRestore,
     },
     fileBrowserDirs: navigatorFileBrowser.dirs,
     fileBrowserActiveFile: fileBrowser.activeFile,
@@ -5304,9 +5312,10 @@ const App: React.FC = () => {
   };
 
 
-  const handleTocNavigate = (blockId: string) => {
-    // Navigation handled by TableOfContents component
-    // This is just a placeholder for future custom logic
+  const handleTocNavigate = (_blockId: string) => {
+    // TableOfContents scrolls to the heading itself; a Back restore still
+    // settling must not undo that.
+    linkedDocHook.cancelScrollRestore();
   };
 
   const aiAnnotationsContext = useMemo(
