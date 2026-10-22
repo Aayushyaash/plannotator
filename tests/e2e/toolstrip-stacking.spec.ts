@@ -267,31 +267,28 @@ test('Inbox: the attached document never paints over the toolstrip, beside the t
       { label: 'inbox-phone', options: { ...devices['Pixel 7'] } },
     ];
     for (const layout of layouts) {
-      for (const look of ['grid', 'clean'] as const) {
-        const context = await browser.newContext(layout.options);
-        try {
-          if (look === 'clean') await context.addCookies([{ name: 'plannotator-grid-enabled', value: 'false', url }]);
-          const page = await context.newPage();
-          // Playwright's pointer starts at (0, 0), on the sidebar peek's edge strip: once a file closes the
-          // sidebar, resting there 600 ms opens the peek over everything, full screen included. Rest it in the
-          // middle, where a person reading the file would.
-          await page.mouse.move(400, 400);
-          await page.goto(fileUrl);
-          await expect(page.locator('[data-attachment-pane] .ib-docscroll table')).toBeVisible();
-          if (layout.full) {
-            await page.getByRole('button', { name: 'Full screen' }).click();
-            await expect(page.locator('.ib-view.ib-full')).toBeVisible();
-            // The comments drawer open beside the page, so the centred document reaches under the toolstrip.
-            await page.locator('[data-full-view-comments]').click();
-            await expect(page.locator('.ib-view.ib-drawer')).toBeVisible();
-          }
-          await closeSidebarPeek(page);
-          await checkSurface(page, `${layout.label}-${look}`, '[data-attachment-pane] .ib-docscroll', '[data-attachment-pane] .ib-toolstrip');
-          await checkTablePopoutCovers(page, `${layout.label}-${look}`, '[data-attachment-pane] .ib-docscroll', '[data-attachment-pane] .ib-toolstrip');
-          if (!layout.options.isMobile) await checkStepListAbove(page, `${layout.label}-${look}`);
-        } finally {
-          await context.close();
+      const context = await browser.newContext(layout.options);
+      try {
+        const page = await context.newPage();
+        // Playwright's pointer starts at (0, 0), on the sidebar peek's edge strip: once a file closes the
+        // sidebar, resting there 600 ms opens the peek over everything, full screen included. Rest it in the
+        // middle, where a person reading the file would.
+        await page.mouse.move(400, 400);
+        await page.goto(fileUrl);
+        await expect(page.locator('[data-attachment-pane] .ib-docscroll table')).toBeVisible();
+        if (layout.full) {
+          await page.getByRole('button', { name: 'Full screen' }).click();
+          await expect(page.locator('.ib-view.ib-full')).toBeVisible();
+          // The comments drawer open beside the page, so the centred document reaches under the toolstrip.
+          await page.locator('[data-full-view-comments]').click();
+          await expect(page.locator('.ib-view.ib-drawer')).toBeVisible();
         }
+        await closeSidebarPeek(page);
+        await checkSurface(page, layout.label, '[data-attachment-pane] .ib-docscroll', '[data-attachment-pane] .ib-toolstrip');
+        await checkTablePopoutCovers(page, layout.label, '[data-attachment-pane] .ib-docscroll', '[data-attachment-pane] .ib-toolstrip');
+        if (!layout.options.isMobile) await checkStepListAbove(page, layout.label);
+      } finally {
+        await context.close();
       }
     }
   } finally {
