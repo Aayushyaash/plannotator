@@ -7098,7 +7098,7 @@ const App: React.FC = () => {
 
   return (
     <ThemeProvider defaultTheme="dark" manageFavicon>
-      <TooltipProvider delayDuration={900} skipDelayDuration={200} disableHoverableContent>
+      <TooltipProvider disableHoverableContent>
       <div
         data-print-region="root"
         data-pn-browser-canvas={browserCanvas}

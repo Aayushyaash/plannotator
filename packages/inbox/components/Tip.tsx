@@ -1,5 +1,5 @@
 import { useCallback, useState, type ReactElement, type ReactNode } from 'react';
-import { Tooltip } from '@plannotator/ui/components/Tooltip';
+import { Tooltip, TOOLTIP_DELAY_MS } from '@plannotator/ui/components/Tooltip';
 import { isTextCut as isTextCutIn, noHover } from '@plannotator/ui/utils/textCut';
 import { tooltipContainerOf } from '@plannotator/ui/components/HostTitle';
 
@@ -12,7 +12,7 @@ export function isTextCut(el: Element | null | undefined): boolean {
 }
 
 /** How long the pointer rests before a tooltip opens (the list chips' timing). */
-export const TIP_DELAY_MS = 150;
+export const TIP_DELAY_MS = TOOLTIP_DELAY_MS;
 
 /**
  * The Inbox's hover text: ui's Tooltip (the component the list's chips use),

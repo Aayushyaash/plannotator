@@ -176,24 +176,31 @@ test('no chip loses a fraction of a pixel to the subject, and a chip cut by a fr
   }
 });
 
-test("a tooltip floats like the window's other floating surfaces: no outline with Soft's float on, ui's border with it off", async ({ browser }) => {
+test("a tooltip floats with no visible border (owner's ruling q4), Soft's float on or off, and keeps an edge for forced colors", async ({ browser }) => {
   const { context, page } = await openPage(browser);
   try {
-    const borderOf = async () => {
+    const styleOf = async () => {
       await page.locator('.ib-side .ib-proj', { hasText: LONG }).hover();
       await expect(tooltip(page)).toBeVisible({ timeout: 1000 });
-      const found = await tooltip(page).evaluate((el) => ({ inRoot: el.closest('[data-pn-tooltip-root]') !== null, border: getComputedStyle(el).borderTopColor }));
+      const found = await tooltip(page).evaluate((el) => {
+        const cs = getComputedStyle(el);
+        return { inRoot: el.closest('[data-pn-tooltip-root]') !== null, border: cs.borderTopColor, width: cs.borderTopWidth, shadow: cs.boxShadow };
+      });
       await page.mouse.move(700, 880);
       await expect(tooltip(page)).toHaveCount(0);
       return found;
     };
     // Portaled into the window's root, so the window's tokens reach it.
-    const on = await borderOf();
+    const on = await styleOf();
     expect(on.inRoot).toBe(true);
     expect(on.border).toBe('rgba(0, 0, 0, 0)');
+    expect(on.width).toBe('1px');
+    expect(on.shadow).not.toBe('none');
     await page.addStyleTag({ content: '.pn-inbox, :root.light .pn-inbox { --ib-soft-float: initial !important; }' });
-    const off = await borderOf();
-    expect(off.border).not.toBe('rgba(0, 0, 0, 0)');
+    const off = await styleOf();
+    expect(off.border).toBe('rgba(0, 0, 0, 0)');
+    expect(off.width).toBe('1px');
+    expect(off.shadow).not.toBe('none');
   } finally {
     await context.close();
   }

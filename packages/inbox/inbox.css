@@ -1634,7 +1634,7 @@ pre code.pn-code[data-keep-layout] {
 .ib-handle-hit { position: absolute; top: 0; bottom: 0; left: -8px; right: -8px; }
 .ib-edge:focus-visible [data-resize-track] { background-color: var(--ring); }
 .ib-edge-tip-pos { z-index: 50; }
-.ib-edge-tip { background: var(--popover); color: var(--muted-foreground); box-shadow: var(--ib-shadow-tooltip); border-radius: 6px; padding: 4px 8px; font-family: var(--font-sans); font-size: var(--ib-fs-11, 11px); font-weight: 500; }
+.ib-edge-tip { background: var(--popover); color: var(--muted-foreground); box-shadow: var(--float-shadow); outline: 1px solid transparent; border-radius: 6px; padding: 4px 8px; font-family: var(--font-sans); font-size: var(--ib-fs-11, 11px); font-weight: 500; }
 
 /* attachments of any kind: the image gallery in a message, thumbnail and
    download tiles, and the image and code panes (inbox-attachments design,
@@ -3067,9 +3067,9 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
 .ib-tip-name { font-weight: 600; overflow-wrap: anywhere; }
 .ib-tip-path { font-family: var(--font-mono); font-size: var(--ib-fs-11, 11px); color: var(--muted-foreground); overflow-wrap: anywhere; }
 .ib-tip-fp { font-family: var(--font-mono); font-size: var(--ib-fs-11, 11px); overflow-wrap: anywhere; }
-/* A tooltip (ui's popup, portaled into the window's root) floats like the window's other floating surfaces:
-   with --ib-soft-float on, Soft's shadow and no outline; off, ui's own border and shadow, unchanged. */
-.pn-inbox [data-pn-tooltip] { border-color: var(--ib-float-line-s, var(--border)); box-shadow: var(--ib-float-s, var(--tw-shadow)); }
+/* A tooltip (ui's popup, portaled into the window's root) floats like the window's other floating surfaces. ui
+   draws it borderless with its own float shadow; with --ib-soft-float on it takes the window's float shadow. */
+.pn-inbox [data-pn-tooltip] { box-shadow: var(--ib-float-s, var(--float-shadow)); }
 
 /* Tip: a control that can be disabled hangs its tooltip on this wrapper, since a disabled control takes no
    pointer events; the pointer passes through the disabled control to the wrapper. */

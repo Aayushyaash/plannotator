@@ -719,6 +719,14 @@
     --card-ring: rgba(255, 255, 255, 0.08);
     --card-shadow:
       0 0 0 1px var(--card-ring), 0 1px 3px 0 rgba(0, 0, 0, 0.2), 0 2px 8px -2px rgba(0, 0, 0, 0.3);
+    /* Floating surfaces with no border (the tooltip): a faint ring in the
+     * shadow plus a soft drop. The ink is the background taken toward black in
+     * its own hue (the Inbox's Soft float shadow, same formula). Hosts override
+     * --float-shadow to restyle every borderless float at once. */
+    --float-shadow-ink: var(--background);
+    --float-shadow:
+      0 0 0 1px color-mix(in oklch, var(--foreground) 8%, transparent),
+      0 16px 40px -10px color-mix(in oklch, var(--float-shadow-ink) 70%, transparent);
   }
 
   html {
@@ -760,6 +768,16 @@
     --card-shadow:
       0 0 0 1px var(--card-ring), 0 1px 3px 0 rgba(0, 0, 0, 0.04),
       0 2px 8px -2px rgba(0, 0, 0, 0.06);
+    --float-shadow-ink: var(--foreground);
+    --float-shadow:
+      0 0 0 1px color-mix(in oklch, var(--border) 70%, transparent),
+      0 12px 32px -8px color-mix(in oklch, var(--float-shadow-ink) 22%, transparent);
+  }
+
+  @supports (color: oklch(from red l c h)) {
+    :root:not(.light) {
+      --float-shadow-ink: oklch(from var(--background) calc(l * 0.2) calc(c * 0.5) h);
+    }
   }
 
   * {
