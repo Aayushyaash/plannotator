@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isLoopbackHostHeader } from "./loopback-host";
+import { isLoopbackForwardedFor, isLoopbackHostHeader } from "./loopback-host";
 
 describe("isLoopbackHostHeader", () => {
 	test("accepts loopback names carrying the server's own port", () => {
@@ -28,5 +28,23 @@ describe("isLoopbackHostHeader", () => {
 		}
 		expect(isLoopbackHostHeader(null, 5000)).toBe(false);
 		expect(isLoopbackHostHeader("localhost:5000", undefined)).toBe(false);
+	});
+
+	test("isLoopbackForwardedFor", () => {
+		expect(isLoopbackForwardedFor("127.0.0.1")).toBe(true);
+		expect(isLoopbackForwardedFor("127.0.0.1, 127.0.0.2")).toBe(true);
+		expect(isLoopbackForwardedFor("localhost")).toBe(true);
+		expect(isLoopbackForwardedFor("::1")).toBe(true);
+		expect(isLoopbackForwardedFor("[::1]:52817")).toBe(true);
+		expect(isLoopbackForwardedFor("127.0.0.1:8080, [::1]")).toBe(true);
+
+		// Non-loopback
+		expect(isLoopbackForwardedFor("100.64.0.9")).toBe(false);
+		expect(isLoopbackForwardedFor("127.0.0.1, 100.64.0.9")).toBe(false);
+		expect(isLoopbackForwardedFor("192.168.1.50")).toBe(false);
+		expect(isLoopbackForwardedFor("example.com")).toBe(false);
+		expect(isLoopbackForwardedFor("")).toBe(false);
+		expect(isLoopbackForwardedFor(null)).toBe(false);
+		expect(isLoopbackForwardedFor(undefined)).toBe(false);
 	});
 });

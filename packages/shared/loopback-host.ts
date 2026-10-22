@@ -27,6 +27,29 @@ export function isLoopbackHostname(hostname: string): boolean {
 }
 
 /**
+ * True when every address in an `X-Forwarded-For` value is a loopback
+ * address (an optional port allowed). A local reverse proxy (nginx, Caddy,
+ * portless) adds loopback addresses; `tailscale serve` adds the peer's own
+ * address, so anything else, or a missing or empty value, is false (#1867).
+ */
+export function isLoopbackForwardedFor(headerValue: string | null | undefined): boolean {
+	if (!headerValue) return false;
+	const parts = headerValue.split(",").map((p) => p.trim()).filter(Boolean);
+	if (parts.length === 0) return false;
+	return parts.every((part) => {
+		let host = part;
+		if (host.startsWith("[")) {
+			const close = host.indexOf("]");
+			if (close > 0) host = host.slice(0, close + 1);
+		} else if (host.includes(":") && host.indexOf(":") === host.lastIndexOf(":")) {
+			// IPv4 with a port (127.0.0.1:8080); several colons is a bare IPv6 address.
+			host = host.slice(0, host.indexOf(":"));
+		}
+		return isLoopbackHostname(host);
+	});
+}
+
+/**
  * True when `hostHeader` is `<loopback name>:<port>`: `localhost`, any
  * `127.x.y.z` literal, or `[::1]`, followed by exactly this server's port.
  * A missing port, another port, or any other name is refused.
