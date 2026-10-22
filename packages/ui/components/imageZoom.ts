@@ -1,0 +1,159 @@
+/**
+ * The image lightbox's zoom math, kept pure so it can be tested without a
+ * layout engine. A viewport is a translate plus a scale on the image, where
+ * scale 1 is the image's own pixels (Actual size) and the translate is the
+ * image's top-left corner inside the stage, in CSS pixels.
+ *
+ * The rules: the smallest scale is Fit (never above 1, so a small image is
+ * not blown up), the largest is 8 (800%); an axis on which the image is
+ * smaller than the stage is centred, and an axis on which it is larger is
+ * kept covering the stage, so the image can never be panned out of sight.
+ */
+
+export interface ZoomSize {
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface ZoomViewport {
+  readonly x: number;
+  readonly y: number;
+  readonly scale: number;
+}
+
+export interface ZoomLimits {
+  readonly min: number;
+  readonly max: number;
+}
+
+/** The share of the stage Fit may fill on each axis (1 = edge to edge). */
+export interface ZoomInset {
+  readonly x: number;
+  readonly y: number;
+}
+
+/** 800%: an image pixel is then 8 screen pixels, enough to read any screenshot. */
+export const LIGHTBOX_ZOOM_MAX = 8;
+/** Wheel zoom: factor = exp(-deltaY * sensitivity), with deltaY capped so a
+ * mouse notch (100 px) is about 1.28x, close to the diagram canvas's step,
+ * while a trackpad pinch (a few px per event) stays smooth. */
+export const WHEEL_ZOOM_SENSITIVITY = 0.01;
+export const WHEEL_ZOOM_DELTA_CAP = 25;
+/** A plain-wheel gesture keeps the meaning it started with (zoom or scroll)
+ * until the wheel rests this long, so wheeling in past the screen's edge
+ * does not flip from zooming to scrolling halfway through. */
+export const WHEEL_LATCH_MS = 250;
+/** A press that travels less than this is a tap (a click), not a pan. */
+export const TAP_SLOP_MOUSE_PX = 4;
+export const TAP_SLOP_TOUCH_PX = 10;
+/** Two taps this close in time and space are a double tap (or double click). */
+export const DOUBLE_TAP_MS = 300;
+export const DOUBLE_TAP_SLOP_PX = 24;
+/** A double click at Fit zooms to twice the Fit scale. */
+export const DOUBLE_TAP_ZOOM = 2;
+
+const FULL: ZoomInset = { x: 1, y: 1 };
+
+function valid(size: ZoomSize | null | undefined): size is ZoomSize {
+  return !!size && size.width > 0 && size.height > 0;
+}
+
+export function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+/** The scale at which the whole image fits the stage, never above 1. */
+export function fitScale(image: ZoomSize, stage: ZoomSize, inset: ZoomInset = FULL): number {
+  if (!valid(image) || !valid(stage)) return 1;
+  return Math.min(1, (stage.width * inset.x) / image.width, (stage.height * inset.y) / image.height);
+}
+
+export function zoomLimits(image: ZoomSize, stage: ZoomSize, inset: ZoomInset = FULL): ZoomLimits {
+  const min = fitScale(image, stage, inset);
+  return { min, max: Math.max(min, LIGHTBOX_ZOOM_MAX) };
+}
+
+function placeAxis(position: number, content: number, room: number): number {
+  if (content <= room) return (room - content) / 2;
+  return clampNumber(position, room - content, 0);
+}
+
+/** The scale within the limits, and the image centred or covering the stage on each axis. */
+export function clampViewport(view: ZoomViewport, image: ZoomSize, stage: ZoomSize, limits: ZoomLimits): ZoomViewport {
+  const scale = clampNumber(view.scale, limits.min, limits.max);
+  return {
+    scale,
+    x: placeAxis(view.x, image.width * scale, stage.width),
+    y: placeAxis(view.y, image.height * scale, stage.height),
+  };
+}
+
+/** Fit: the whole image, centred. */
+export function fitViewport(image: ZoomSize, stage: ZoomSize, inset: ZoomInset = FULL): ZoomViewport {
+  const limits = zoomLimits(image, stage, inset);
+  return clampViewport({ x: 0, y: 0, scale: limits.min }, image, stage, limits);
+}
+
+/**
+ * Actual size: the image's own pixels. An axis on which it is larger than the
+ * stage starts at its top or left edge (a tall screenshot is read from the
+ * top); an axis on which it is smaller is centred.
+ */
+export function actualViewport(image: ZoomSize, stage: ZoomSize, inset: ZoomInset = FULL): ZoomViewport {
+  const limits = zoomLimits(image, stage, inset);
+  return clampViewport({ x: 0, y: 0, scale: 1 }, image, stage, limits);
+}
+
+/** Zoom by `factor` about a point of the stage, so the pixel under it stays under it. */
+export function zoomAt(
+  view: ZoomViewport,
+  factor: number,
+  px: number,
+  py: number,
+  image: ZoomSize,
+  stage: ZoomSize,
+  limits: ZoomLimits,
+): ZoomViewport {
+  const scale = clampNumber(view.scale * factor, limits.min, limits.max);
+  const ratio = scale / view.scale;
+  return clampViewport({ x: px - (px - view.x) * ratio, y: py - (py - view.y) * ratio, scale }, image, stage, limits);
+}
+
+/** Move the image by a pointer's travel (or a scroll's, negated by the caller). */
+export function panBy(view: ZoomViewport, dx: number, dy: number, image: ZoomSize, stage: ZoomSize, limits: ZoomLimits): ZoomViewport {
+  return clampViewport({ x: view.x + dx, y: view.y + dy, scale: view.scale }, image, stage, limits);
+}
+
+/** Whether the image is larger than the stage on either axis (so there is something to pan). */
+export function overflows(view: ZoomViewport, image: ZoomSize, stage: ZoomSize): boolean {
+  return image.width * view.scale > stage.width + 0.5 || image.height * view.scale > stage.height + 0.5;
+}
+
+/** Whether a viewport is at the Fit scale. */
+export function atFit(view: ZoomViewport, limits: ZoomLimits): boolean {
+  return Math.abs(view.scale - limits.min) < 1e-3;
+}
+
+/**
+ * A wheel event's travel in CSS pixels. Lines (Firefox's mouse wheel) count
+ * 16 px and pages the stage's height. Shift turns a vertical wheel sideways,
+ * as it does on a page (macOS already reports it as deltaX).
+ */
+export function wheelTravel(
+  event: { deltaX: number; deltaY: number; deltaMode: number; shiftKey: boolean },
+  pageHeight: number,
+): { dx: number; dy: number } {
+  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? pageHeight : 1;
+  let dx = event.deltaX * unit;
+  let dy = event.deltaY * unit;
+  if (event.shiftKey && dx === 0) {
+    dx = dy;
+    dy = 0;
+  }
+  return { dx, dy };
+}
+
+/** The zoom factor for a wheel's vertical travel: up (negative) zooms in. */
+export function wheelZoomFactor(dy: number): number {
+  return Math.exp(-clampNumber(dy, -WHEEL_ZOOM_DELTA_CAP, WHEEL_ZOOM_DELTA_CAP) * WHEEL_ZOOM_SENSITIVITY);
+}

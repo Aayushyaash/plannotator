@@ -2353,8 +2353,17 @@ For the Plannotator Inbox's composers (approval "inbox-skill-references"). Every
 For the Plannotator Inbox's one viewer (approval "inbox-image-viewer", 2026-10-15). A host that passes none of the new props sees no change.
 
 - **`components/ImagePeek`** (new): the picture list a stepper opens ("A · Peek"). Props `rows: ImagePeekRow[]` (`{ key, label, items: ImagePeekItem[] }`; an item is `{ key, name, thumb?, tile?, count?, attached?, detail? }`), `current`, `onPick(key)`, `onClose(reason: 'key' | 'outside')`, `variant: 'popover' | 'sheet'` (a phone's bottom sheet, three across, with a backdrop), `label`, `id`, `className`. An ARIA `grid` (rows with a `rowheader`, `gridcell` items, `aria-selected` on the open one); focus starts on the open item; ← → along the items, ↑ ↓ between rows, Home / End, Enter / Space pick, Esc / Tab close. A press outside a popover closes it, except on an element marked `data-peek-opener`. `forwardRef` exposes **`ImagePeekHandle.handleKey(event)`** for a modal that intercepts keys before they reach it. Images are only `<img src>`. Also exported: `peekMove` (the key rule, pure).
-- **`ImageLightbox`** gains **`images?: LightboxImage[]`** (`{ src, alt, section? }`): with two or more it is a full-screen stepping view ("2 of 4 · in “Options”", ← → and `]` `[`, the end note, Actual size, the pill and the peek); without it, the same single-image overlay byte for byte. Also exported: `collectDocumentImages(container)` and `lightboxImageName(image)`.
+- **`ImageLightbox`** gains **`images?: LightboxImage[]`** (`{ src, alt, section? }`): with two or more it is a full-screen stepping view ("2 of 4 · in “Options”", ← → and `]` `[`, the end note, Actual size, the pill and the peek); without it, the single-image overlay (byte for byte until the zoom below). Also exported: `collectDocumentImages(container)` and `lightboxImageName(image)`.
 - **`Viewer`** gains **`imageLightboxStepping?: boolean`** (the lightbox steps through every zoomable image of the rendered document; Plannotator's plan review and annotate pass it) and **`onImageClick?: (src, alt) => void`** (the host takes image clicks and no lightbox opens; the Inbox opens a message's captured image in its own viewer). Both absent: unchanged.
+
+## Zoom in `ImageLightbox` (#2067; no prop change, no core change)
+
+Both forms of **`ImageLightbox`** now zoom and pan (`components/ImageZoomStage`, with the pure math in `components/imageZoom.ts`): Ctrl/⌘ + wheel, trackpad pinch (Safari's gesture events too) and two fingers zoom about the pointer; a plain wheel scrolls an image larger than the stage and zooms one that fits; drag pans; a double click toggles Fit and 2× Fit; Fit to 800%. What a host notices:
+
+- **The single overlay's DOM changed.** The image sits in a full-screen focusable stage (`role="group"`, `tabIndex=0`, `data-lightbox-stage`) and is placed with a transform; the alt caption is pinned near the bottom. `[data-image-lightbox] img` still finds the one image.
+- **A tap or click beside the image closes it, from the click** (a press that moved, a cancelled touch, or a click on the image does not). Closing on the pointerup let a touch's synthesized click land on the page beneath.
+- **Actual size pans instead of scrolling.** The stepping stage is no longer an `overflow: auto` scroller with scrollbars: the wheel, a drag, and the browser's scroll keys while the stage has focus move the image.
+- **The page never zooms over the lightbox**: Ctrl + wheel and `gesturestart` / `gesturechange` / `gestureend` are prevented anywhere over it.
 
 ## `Tooltip` `shouldOpen` (ui 0.53.0; additive, no core change)
 
