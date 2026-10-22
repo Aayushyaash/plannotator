@@ -162,6 +162,8 @@ export function ComposeDialog(props: ComposeDialogProps) {
   }, [body, chosen, threadName, nameState.edited ? '' : suggested, uploadIds.join(',')]);
   const draftId = useRef(request.draft?.id ?? inboxId('drf'));
 
+  // Nothing written: no words, no files, no typed thread name. An empty compose is never kept as a draft.
+  const empty = body.trim() === '' && files.files.length === 0 && threadName.trim() === '';
   const saved = draftSnapshot(draft);
   const dirty = isDirty({ body, session: chosen, files: uploadIds, threadName }, saved, draft !== null) || files.uploading;
   const projectName = current?.name ?? null;
@@ -199,7 +201,9 @@ export function ComposeDialog(props: ComposeDialogProps) {
       textRef.current?.focus();
       return;
     }
-    if (dirty) {
+    // Something written that was not saved: ask. An empty compose (a draft emptied too) is never kept, so it
+    // closes asking nothing; a reopened draft emptied this way stays saved as it was.
+    if (dirty && !empty) {
       setQuestion(true);
       return;
     }
@@ -261,6 +265,7 @@ export function ComposeDialog(props: ComposeDialogProps) {
 
   // ── drafts ──
   const save = async (base: string | null = draft?.updated_at ?? null): Promise<DraftView | null> => {
+    if (empty) return null;
     if (files.uploading) {
       setError('Wait for the files to finish uploading.');
       return null;
@@ -354,7 +359,8 @@ export function ComposeDialog(props: ComposeDialogProps) {
   const sendable = !!target;
   // While the sessions are read, neither Save draft nor a dead To: a neutral "Looking…" state.
   const loading = !model;
-  const saveOffered = !sendable && !loading;
+  // Save draft only for something written: an empty compose offers none (a phone shows the disabled Send instead).
+  const saveOffered = !sendable && !loading && !empty;
   const title = draft ? 'Draft' : 'New message';
   const status = statusLine({ target, anyLive, ended: endedTo, projectName: target?.project.name ?? projectName, loading: loading && !target });
   const endedNote = endedTo ?? (lost && !target ? { host: lost.host, session: lost.session, project_root: lost.project.root, project_name: lost.project.name, started_at: lost.started_at } : null);
@@ -473,7 +479,14 @@ export function ComposeDialog(props: ComposeDialogProps) {
               Save draft
             </button>
           ) : (
-            <button type="button" className="ib-cp-barb ib-strong" onClick={() => void send()} disabled={busy !== null} data-compose-send="">
+            <button
+              type="button"
+              className={`ib-cp-barb ib-strong${sendable ? '' : ' ib-dis'}`}
+              aria-disabled={!sendable || undefined}
+              onClick={() => void send()}
+              disabled={busy !== null}
+              data-compose-send=""
+            >
               Send
             </button>
           )}

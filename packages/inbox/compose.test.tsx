@@ -196,6 +196,10 @@ test.skipIf(!hasDom)('no live agent: Send sends nothing and says so; Escape asks
   await openCompose(el);
   await until(() => dialog()!.querySelector('[data-compose-to="none"]') !== null, 'the no-agent state');
   expect(dialog()!.querySelector('[data-compose-note="none"]')?.textContent).toContain('Nothing can be sent until one is.');
+  // To is a line of text here, not a button: focus that started on To lands in the message.
+  await until(() => document.activeElement === dialog()!.querySelector('textarea'), 'focus in the message');
+  // Nothing written: no Save draft (an empty compose is never kept).
+  expect(dialog()!.querySelector('[data-compose-save]')).toBeNull();
   // An empty compose closes at once, asking nothing.
   key('Escape');
   await until(() => dialog() === null, 'compose closed');
@@ -301,11 +305,16 @@ test.skipIf(!hasDom)('a plain New message opens with To empty and focus on To; S
   expect(toButton().getAttribute('data-compose-to')).toBe('choose');
   expect(toButton().getAttribute('aria-label')).toBe('To: choose an agent');
   expect(document.activeElement).toBe(toButton());
+  // Pinned on purpose: the user-facing refusal while To is empty.
   expect(dialog()!.querySelector('[data-compose-status]')?.textContent).toBe('Choose an agent to send it.');
   expect(dialog()!.querySelector('[data-compose-send]')?.getAttribute('aria-disabled')).toBe('true');
+  // Nothing written yet: Save draft is not offered (an empty compose is never kept).
+  expect(dialog()!.querySelector('[data-compose-save]')).toBeNull();
   type('Look at the relay budget.');
+  await until(() => dialog()!.querySelector('[data-compose-save]') !== null, 'Save draft once something is written');
   key('Enter', { metaKey: true });
   await until(() => dialog()!.querySelector('[data-compose-error]') !== null, 'the error');
+  // Pinned on purpose: the user-facing refusal ⌘↵ gives while To is empty.
   expect(dialog()!.querySelector('[data-compose-error]')?.textContent).toBe('Nothing sent: choose a live agent first.');
   expect(posted.some((p) => p.path === '/api/inbox/messages')).toBe(false);
   // Escape in the picker with nobody picked: focus goes back to To.
@@ -345,6 +354,51 @@ test.skipIf(!hasDom)('a plain New message opens with To empty and focus on To; S
   act(() => (document.querySelector('[data-compose-action="message"]') as HTMLElement).click());
   await until(() => dialog()?.querySelector('[data-compose-to="ses_empty_a"]') != null, 'To names the action\'s session');
   expect(document.activeElement).toBe(dialog()!.querySelector('textarea'));
+  key('Escape');
+  await until(() => dialog() === null, 'compose closed');
+});
+
+// The owner's own case: a message sent to session A; the next plain New
+// message must not name A. The picker lists A first but highlights no row,
+// so Enter there brings nothing back.
+test.skipIf(!hasDom)('sent to session A, the next plain New message opens with To empty; the picker lists A first with no row highlighted, Enter picks nothing, an arrow highlights A', async () => {
+  await poll('ses_owner_a', 'claude-code', projects[0]!);
+  await poll('ses_owner_b', 'pi', projects[0]!);
+  const el = await renderApp();
+  await openCompose(el);
+  await pickTo('ses_owner_a');
+  type('First message to A.');
+  act(() => (dialog()!.querySelector('[data-compose-send]') as HTMLButtonElement).click());
+  await until(() => dialog() === null, 'sent');
+  expect(posted.find((p) => p.path === '/api/inbox/messages')!.body).toMatchObject({ to: { session: 'ses_owner_a' } });
+
+  await openCompose(el);
+  await until(() => dialog()!.querySelector('[data-compose-to]:not([data-loading])') !== null, 'To loaded');
+  await new Promise((r) => setTimeout(r, 200));
+  const toButton = dialog()!.querySelector('button[data-compose-to]') as HTMLButtonElement;
+  expect(toButton.getAttribute('data-compose-to')).toBe('choose');
+  expect(document.activeElement).toBe(toButton);
+
+  act(() => toButton.click());
+  await until(() => dialog()!.querySelector('[data-compose-picker] [role="option"]') !== null, 'the picker');
+  const input = dialog()!.querySelector('[data-compose-picker] input') as HTMLInputElement;
+  const options = () => [...dialog()!.querySelectorAll<HTMLElement>('[data-compose-picker] [role="option"]')];
+  expect(options()[0]!.getAttribute('data-compose-session')).toBe('ses_owner_a');
+  expect(options().some((o) => o.getAttribute('aria-selected') === 'true')).toBe(false);
+  expect(input.hasAttribute('aria-activedescendant')).toBe(false);
+  const press = (k: string) =>
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+    });
+  press('Enter');
+  expect(dialog()!.querySelector('[data-compose-picker]')).not.toBeNull();
+  expect(toButton.getAttribute('data-compose-to')).toBe('choose');
+  // An arrow key highlights the first row (A); Enter then picks it, by the person's choice.
+  press('ArrowDown');
+  expect(options()[0]!.getAttribute('aria-selected')).toBe('true');
+  expect(input.getAttribute('aria-activedescendant')).toBe(options()[0]!.id);
+  press('Enter');
+  await until(() => dialog()!.querySelector('[data-compose-to="ses_owner_a"]') !== null, 'A picked');
   key('Escape');
   await until(() => dialog() === null, 'compose closed');
 });
