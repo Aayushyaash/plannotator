@@ -1680,6 +1680,8 @@ pre code.pn-code[data-keep-layout] {
 /* a panorama keeps its height (never more than the pane's) and scrolls sideways from its left edge, rather than fitting to a sliver */
 .ib-imgstage[data-fit="fit"][data-wide="true"] { justify-content: flex-start; }
 .ib-imgstage[data-fit="fit"][data-wide="true"] img { max-width: none; flex: none; }
+/* Actual size: the image's auto margins centre it when it fits; start-aligned, so one wider than the stage overflows to the right only and its left edge stays reachable by scroll (centred, it overflowed both ways). */
+.ib-imgstage[data-fit="actual"] { justify-content: flex-start; }
 .ib-imgstage[data-fit="actual"] img { max-width: none; max-height: none; cursor: zoom-out; margin: auto; }
 .ib-imgstage[data-fit="fit"] img.ib-noup { cursor: default; }
 .ib-imgbar { position: absolute; top: 12px; right: 14px; display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 9px; background: var(--card); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15); z-index: 3; }

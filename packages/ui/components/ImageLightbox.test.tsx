@@ -146,6 +146,24 @@ describe.if(hasDom)('ImageLightbox: the light version (plan review and annotate)
     expect(closed).toBe(1);
   });
 
+  test('Actual size never stretches the image to the stage (#2067)', async () => {
+    // The stage is a flex row, and a flex item stretches to the row's height
+    // unless something opts it out: the image then showed at the fit size and
+    // barely scrolled. happy-dom lays nothing out, so this checks the opt-out
+    // the layout relies on; tests/e2e/inbox-image-viewer.spec.ts measures the
+    // real sizes in Chromium.
+    const host = await mountStepping(IMAGES[0]!.src, () => {});
+    await act(async () => host.querySelector<HTMLButtonElement>('[data-lightbox-fit]')!.click());
+    expect(host.querySelector('[data-lightbox-stage]')!.getAttribute('data-lightbox-stage')).toBe('actual');
+    const img = host.querySelector('[data-lightbox-image]')!.classList;
+    // Auto margins cancel the stretch (and centre an image smaller than the stage).
+    expect(img.contains('m-auto')).toBe(true);
+    // Not shrunk below its own width, and no max size left over from Fit.
+    expect(img.contains('shrink-0')).toBe(true);
+    expect(img.contains('max-h-full')).toBe(false);
+    expect(img.contains('max-w-full')).toBe(false);
+  });
+
   test('collectDocumentImages reads the zoomable images in order under their headings', () => {
     const article = document.createElement('article');
     article.innerHTML = '<h2>Options</h2><img class="cursor-zoom-in" src="a.png" alt="A"><img src="icon.svg"><h2>Mobile</h2><p><img class="cursor-zoom-in" src="m.png" alt="M"></p><img class="cursor-zoom-in" src="a.png">';
