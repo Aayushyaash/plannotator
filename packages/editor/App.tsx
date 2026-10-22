@@ -13,6 +13,12 @@ import '@plannotator/ui/utils/math-eager';
 import '@plannotator/ui/utils/identity-tater';
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { toast, Toaster } from 'sonner';
+import {
+  compactDocumentTitle as resolveCompactDocumentTitle,
+  documentHeaderName,
+  documentTabTitle,
+  type DocumentTitleInput,
+} from './documentTitle';
 import { type Origin, getAgentName } from '@plannotator/shared/agents';
 import { isNothingToSendFeedbackBody } from '@plannotator/shared/annotate-decision';
 import { isDiagramRenderKind, shouldStripFrontmatter } from '@plannotator/shared/annotatable';
@@ -703,7 +709,10 @@ const App: React.FC = () => {
   // loopback proxy origin instead of rendering srcdoc HTML. Pinpoint-only,
   // vim/edit/diff/share hidden, annotations stamped with the page they were
   // made on.
-  const [liveApp, setLiveApp] = useState<{ appUrl: string; origin: string; token: string } | null>(null);
+  const [liveApp, setLiveApp] = useState<{ appUrl: string; origin: string; token: string; targetUrl?: string } | null>(null);
+  // A folder session's folder (not a review of several files): names the tab
+  // before a file is chosen.
+  const [sessionFolderPath, setSessionFolderPath] = useState<string | null>(null);
   const [livePageUrl, setLivePageUrl] = useState('');
   // Interact/Annotate mode for HTML and live-app surfaces. Armed = the bridge
   // captures clicks for pinpoint annotation; disarmed (Interact) = clicks are
@@ -771,10 +780,6 @@ const App: React.FC = () => {
   const initialSidebarPreferenceAppliedRef = useRef(false);
   const lastAppliedTocEnabledRef = useRef(uiPrefs.tocEnabled);
   const goalSetupMode = goalSetupBundle !== null;
-
-  useEffect(() => {
-    document.title = repoInfo ? `${repoInfo.display} · Plannotator` : "Plannotator";
-  }, [repoInfo]);
 
   const [initialExportTab, setInitialExportTab] = useState<'share' | 'annotations' | 'notes'>();
   const [isPlanDiffActive, setIsPlanDiffActive] = useState(false);
@@ -3843,6 +3848,7 @@ const App: React.FC = () => {
             appUrl: data.appUrl,
             origin: new URL(data.appUrl).origin,
             token: data.liveToken,
+            targetUrl: data.targetUrl,
           });
         } else if (data.renderAs === 'html' && data.rawHtml) {
           setRenderAs('html');
@@ -3915,6 +3921,9 @@ const App: React.FC = () => {
           setImageBaseDir(folderLike ? data.filePath : data.filePath.replace(/\/[^/]+$/, ''));
           if (data.mode === 'annotate') {
             setSourceFilePath(data.filePath);
+          }
+          if (data.mode === 'annotate-folder') {
+            setSessionFolderPath(data.filePath);
           }
         }
         setPlanDir(data.planDir ?? undefined);
@@ -6423,18 +6432,35 @@ const App: React.FC = () => {
   const handleSaveToOctarine = useCallback(() => headerHandlersRef.current.handleQuickSaveToNotes('octarine'), []);
   const handleSaveToBear = useCallback(() => headerHandlersRef.current.handleQuickSaveToNotes('bear'), []);
 
-  const compactDocumentTitle = useMemo(() => {
-    const path = linkedDocHook.filepath ?? sourceFilePath ?? fileBrowser.activeFile;
+  // The open document's name for the tab, the desktop header and the compact
+  // header (#2061): one input, one resolver (documentTitle.ts).
+  const planHeading = useMemo(
+    () => blocks.find((block) => block.type === 'heading')?.content ?? null,
+    [blocks],
+  );
+  const documentTitleInput = useMemo<DocumentTitleInput>(() => ({
+    apiMode: isApiMode,
+    annotateMode,
+    archiveMode: archive.archiveMode,
+    goalSetupMode,
+    annotateSource,
+    linkedPath: linkedDocHook.filepath,
+    sourceFilePath,
+    activeFile: fileBrowser.activeFile,
+    folderPath: sessionFolderPath,
     // A review of several files names the open file's place in it.
-    if (path && bundleFiles && bundleIndex >= 0) {
-      return `${annotateBundleBaseName(path)} (${bundleIndex + 1} of ${bundleFiles.length})`;
-    }
-    if (path) return path.replace(/\\/g, '/').split('/').pop() || path;
-    if (archive.currentInfo?.title) return archive.currentInfo.title;
-    if (annotateSource === 'message') return 'Message';
-    if (annotateSource === 'folder') return 'Choose a file';
-    return 'Plan';
-  }, [annotateSource, archive.currentInfo?.title, bundleFiles, bundleIndex, fileBrowser.activeFile, linkedDocHook.filepath, sourceFilePath]);
+    bundle: bundleFiles ? { index: bundleIndex, total: bundleFiles.length } : null,
+    liveAppUrl: liveApp?.targetUrl ?? null,
+    planHeading,
+    archiveTitle: archive.currentInfo?.title ?? null,
+    repo: repoInfo,
+  }), [annotateMode, annotateSource, archive.archiveMode, archive.currentInfo?.title, bundleFiles, bundleIndex, fileBrowser.activeFile, goalSetupMode, isApiMode, linkedDocHook.filepath, liveApp?.targetUrl, planHeading, repoInfo, sessionFolderPath, sourceFilePath]);
+  const compactDocumentTitle = useMemo(() => resolveCompactDocumentTitle(documentTitleInput), [documentTitleInput]);
+  const headerDocumentName = useMemo(() => documentHeaderName(documentTitleInput), [documentTitleInput]);
+  const tabTitle = useMemo(() => documentTabTitle(documentTitleInput), [documentTitleInput]);
+  useEffect(() => {
+    document.title = tabTitle;
+  }, [tabTitle]);
 
   // The header's file switcher for a review of several files.
   const bundleSwitcher = useMemo(() => {
@@ -7123,6 +7149,7 @@ const App: React.FC = () => {
           compactNavigatorOpen={isCompactNavigatorOpen}
           onCompactNavigatorToggle={() => toggleSidebarTab(effectiveCompactNavigatorTab)}
           compactDocumentTitle={compactDocumentTitle}
+          documentName={headerDocumentName ?? undefined}
           compactSessionActions={compactSessionActions}
           compactDocumentActions={compactDocumentActions}
           bundleSwitcher={bundleSwitcher}

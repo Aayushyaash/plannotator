@@ -15,6 +15,7 @@ import type { AgentToolSetting } from '@plannotator/ui/utils/agentToolSetting';
 import { SparklesIcon } from '@plannotator/ui/components/SparklesIcon';
 import type { CompactPlanAction } from '@plannotator/ui/components/PlanHeaderMenu';
 import { HtmlSurfaceControls } from '@plannotator/ui/components/HtmlSurfaceControls';
+import { Tooltip } from '@plannotator/ui/components/Tooltip';
 import { BundleSwitcher, type BundleSwitcherProps } from './BundleSwitcher';
 
 /** Plannotator's refresh strings for the published control: the document
@@ -60,6 +61,10 @@ interface AppHeaderProps {
    *  the logo. Desktop only; the compact shell names the position in its
    *  title and offers previous/next in its Options menu. */
   bundleSwitcher?: BundleSwitcherProps;
+  /** The open document's name beside the logo ("Plannotator / notes.md"),
+   *  its full path or URL in a tooltip. Desktop only, and not drawn beside
+   *  a `bundleSwitcher`, which already names the open file. */
+  documentName?: { name: string; title?: string };
   // Mode flags (stable after mount)
   isApiMode: boolean;
   annotateMode: boolean;
@@ -185,6 +190,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   compactSessionActions,
   compactDocumentActions,
   bundleSwitcher,
+  documentName,
   isApiMode,
   annotateMode,
   archiveMode,
@@ -255,7 +261,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
       data-app-header="true"
       className={`${compactTouchLayout ? 'h-[52px] grid grid-cols-[44px_minmax(0,1fr)_44px] items-center px-1' : 'h-12 flex items-center justify-between px-2 md:px-4'} border-b border-border/50 bg-card/50 backdrop-blur-xl z-[50] ${sticky ? 'sticky top-0' : 'relative'}`}
     >
-      <div className={compactTouchLayout ? 'flex items-center justify-start' : 'flex items-center gap-2'}>
+      <div className={compactTouchLayout ? 'flex items-center justify-start' : 'flex min-w-0 items-center gap-2'}>
         {compactTouchLayout ? (
           compactNavigatorAvailable && onCompactNavigatorToggle ? (
             <CompactPlanNavigatorTrigger
@@ -268,7 +274,11 @@ export const AppHeader = React.memo<AppHeaderProps>(({
         ) : (
           <>
             <AppHeaderLogo />
-            {bundleSwitcher && <BundleSwitcher {...bundleSwitcher} />}
+            {bundleSwitcher ? (
+              <BundleSwitcher {...bundleSwitcher} />
+            ) : documentName ? (
+              <HeaderDocumentName {...documentName} />
+            ) : null}
           </>
         )}
       </div>
@@ -283,7 +293,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
         </div>
       )}
 
-      <div className={`flex items-center gap-1 md:gap-2 ${compactTouchLayout ? 'justify-end' : ''}`}>
+      <div className={`flex items-center gap-1 md:gap-2 ${compactTouchLayout ? 'justify-end' : 'shrink-0'}`}>
         {/* Bot callback buttons — only shown when ?cb=&ct= params are present */}
         {!compactTouchLayout && callbackConfig && !isApiMode && isSharedSession && (
           <>
@@ -549,6 +559,41 @@ export const CompactPlanNavigatorTrigger = ({
     <span className="sr-only">Plan navigation</span>
   </button>
 );
+
+/** "/ notes.md" after the logo: the name cut with an ellipsis when the header
+ *  runs short, the full path in the app's tooltip (and to screen readers).
+ *  The tooltip wraps a long path rather than running off a narrow window. */
+const HeaderDocumentName: React.FC<{ name: string; title?: string }> = ({ name, title }) => {
+  const descriptionId = React.useId();
+  const label = (
+    <span
+      data-header-document-name="true"
+      className="min-w-0 truncate text-sm text-foreground/90 rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      tabIndex={title ? 0 : undefined}
+      aria-describedby={title ? descriptionId : undefined}
+    >
+      {name}
+    </span>
+  );
+  return (
+    <div className="flex min-w-0 items-center gap-2 md:gap-2.5 pl-0.5">
+      <span className="shrink-0 text-sm text-muted-foreground/60" aria-hidden="true">/</span>
+      {title ? (
+        <>
+          <Tooltip
+            content={<span className="block max-w-[min(560px,calc(100vw-2rem))] whitespace-normal font-mono [overflow-wrap:anywhere]">{title}</span>}
+            side="bottom"
+            align="start"
+            delayDuration={400}
+          >
+            {label}
+          </Tooltip>
+          <span id={descriptionId} className="sr-only">{title}</span>
+        </>
+      ) : label}
+    </div>
+  );
+};
 
 const AppHeaderLogo = () => (
   <div className="flex items-center gap-2 md:gap-3">
