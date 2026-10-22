@@ -1464,6 +1464,7 @@ const App: React.FC = () => {
     onDocumentActivated: handleLinkedDocumentActivated,
     getDocumentMarkdown: getLinkedDocumentMarkdown,
     onAfterBack: restoreLinkedDocumentEditableKey,
+    scrollViewport,
   });
 
   // Active document's version-diff baseline: the root document's own

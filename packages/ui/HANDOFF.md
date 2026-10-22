@@ -2413,6 +2413,11 @@ Settings → Display can show a **Text size** row (13 / 15 / 17 / 19 / 21 px of 
 - **`theme.css`**: rules gated on `[data-doc-text-size]` scale the blocks (`[data-block-id]`, `[data-diff-block-index]`, `[data-doc-text]`) inside a document container (`[data-doc-text-root]`: `Viewer`'s article and `PlanDiffViewer`'s), leaving out diagrams and the table / diagram popouts (`[data-popout]`): Tailwind's `--text-*` scale, the size a block root passes down (in the base layer, so a block's own size class wins), the renderers' fixed 12.5–15 px sizes, `pre code.pn-code`, the question context, and the controls beside the text (`ListMarker`'s `[data-list-numeral]` / `[data-list-check]`, `QuestionBlock`'s `[data-question-control]`). Without the attribute nothing applies. `Viewer`'s frontmatter card and `PlanRawDiffView` carry `data-doc-text`.
 - **`Settings`** gains **`showDocumentTextSize?: boolean`** (default false): the row shows only when a host passes true, since it does nothing unless the page applies the setting.
 
+## Back from a linked document keeps the reader's place (#2082; next ui release; additive, no core change)
+
+- **`useLinkedDoc` option `scrollViewport?: HTMLElement | null`** (the element the documents scroll in, the host's `ScrollViewportContext` value). With it, opening a linked document from the root remembers where the reader was, and `back()` returns them there once the root has rendered. Without it nothing about scrolling changes.
+- **`utils/scrollAnchor`** (new): `captureScrollAnchor(viewport)`, `restoreScrollAnchor(viewport, anchor)`, `scrollAnchorReady(viewport, anchor)`, `ScrollAnchor`. The anchor is the first `[data-block-id]` visible at the viewport's top plus its offset (the raw scrollTop is the fallback), so a reflowed column or a late image does not move the reader. `back()` re-anchors on the next frames until the block is in the DOM, then at about 150, 400 and 1000 ms; a scroll the reader makes in between ends it. A raw-HTML root scrolls inside its own frame and is not restored.
+
 ## The law (guardrails for anyone editing `@plannotator/ui`)
 
 These are enforced socially and, where possible, by CI. They exist because a prior from-scratch reimplementation of this UI broke the app and was reverted.
