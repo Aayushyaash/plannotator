@@ -27,6 +27,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
+import { NO_BROWSER } from '../helpers/no-browser';
 
 const repo = resolve(__dirname, '../..');
 const builtBinary = resolve(process.env.PLANNOTATOR_E2E_BINARY ?? join(repo, '.local/plannotator'));
@@ -417,7 +418,7 @@ test('plan review and annotate get the light version: full screen, ← → acros
     ['# Checkout plan', '', '## Options', '', '![A: one page](checkout-a-single-page.png)', '', '![B: three steps](checkout-b-steps.png)', '', '![C: a drawer](checkout-c-drawer.png)', '', '## Mobile', '', '![Phone](checkout-mobile.png)', ''].join('\n'),
   );
   const readyFile = join(root, 'ready.jsonl');
-  const env = { PATH: process.env.PATH ?? '', HOME: join(world.root, 'home'), PLANNOTATOR_DATA_DIR: world.dataDir, PLANNOTATOR_READY_FILE: readyFile, PLANNOTATOR_SKIP_BROWSER_OPEN: '1', PLANNOTATOR_REMOTE: '0' };
+  const env = { PATH: process.env.PATH ?? '', HOME: join(world.root, 'home'), PLANNOTATOR_DATA_DIR: world.dataDir, PLANNOTATOR_READY_FILE: readyFile, PLANNOTATOR_SKIP_BROWSER_OPEN: '1', PLANNOTATOR_BROWSER: NO_BROWSER, NO_BROWSER, PLANNOTATOR_REMOTE: '0' };
   let child: ChildProcess | undefined;
   let url = '';
   try {
@@ -492,7 +493,7 @@ test('Actual size shows an image at its real size: a tall one scrolls, a small o
   const doc = join(root, 'PLAN.md');
   writeFileSync(doc, ['# Sizes', '', '![Tall](tall.png)', '', '![Small](small.png)', ''].join('\n'));
   const readyFile = join(root, 'ready.jsonl');
-  const env = { PATH: process.env.PATH ?? '', HOME: join(world.root, 'home'), PLANNOTATOR_DATA_DIR: world.dataDir, PLANNOTATOR_READY_FILE: readyFile, PLANNOTATOR_SKIP_BROWSER_OPEN: '1', PLANNOTATOR_REMOTE: '0' };
+  const env = { PATH: process.env.PATH ?? '', HOME: join(world.root, 'home'), PLANNOTATOR_DATA_DIR: world.dataDir, PLANNOTATOR_READY_FILE: readyFile, PLANNOTATOR_SKIP_BROWSER_OPEN: '1', PLANNOTATOR_BROWSER: NO_BROWSER, NO_BROWSER, PLANNOTATOR_REMOTE: '0' };
   let child: ChildProcess | undefined;
   let url = '';
   try {
