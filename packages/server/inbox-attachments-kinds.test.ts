@@ -329,7 +329,7 @@ test("an HTML page attached from a home folder exposes no hidden file and no .en
   }
   const nested = await asset("frame.html");
   expect(nested.status).toBe(200);
-  expect(nested.headers.get("content-security-policy")).toBe("sandbox allow-scripts; connect-src 'none'");
+  expect(nested.headers.get("content-security-policy")).toBe("sandbox allow-scripts allow-modals; connect-src 'none'");
 });
 
 test("deleting a thread removes the markups its annotations named and leaves a markup no annotation names yet", async () => {

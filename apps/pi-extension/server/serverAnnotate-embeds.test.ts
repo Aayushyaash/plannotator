@@ -85,7 +85,7 @@ describe("pi annotate server: embedded local documents", () => {
 			});
 			expect(response.status).toBe(200);
 			expect(response.headers.get("content-type")).toContain("text/html");
-			expect(response.headers.get("content-security-policy")).toBe("sandbox allow-scripts");
+			expect(response.headers.get("content-security-policy")).toBe("sandbox allow-scripts allow-modals");
 			expect(response.headers.get("x-content-type-options")).toBe("nosniff");
 			expect(await response.text()).toContain("EMBEDDED_SIBLING");
 		});
