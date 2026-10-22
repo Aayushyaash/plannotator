@@ -222,7 +222,7 @@ export function PanelControlsRow({
           </button>
         )}
         {onCopyRawDiff && (
-          <Tooltip content={copyLabel} side="bottom" delayDuration={300}>
+          <Tooltip content={copyLabel} side="bottom">
             <button
               type="button"
               onClick={onCopyRawDiff}
