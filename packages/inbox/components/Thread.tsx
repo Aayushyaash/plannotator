@@ -16,6 +16,8 @@ import { AttachmentTiles, AttachmentsCount, changedCount } from './AttachmentTil
 import { AttachmentPane, type AttachmentPaneHandle } from './AttachmentPane';
 import type { OpenInSurface } from './OpenIn';
 import { attachmentSequence } from '../stepping';
+import { fileViewFor, openingView, parseFileView, readFileViewChoice, writeFileViewChoice, type FileView } from '../fileView';
+import type { InboxToastModel } from './Toast';
 import { AnnotationsChip } from './AnnotationsChip';
 import { agentName, clockTime, dayWords, fullTime, plural, whenTime } from '../format';
 import { foldSnippet, holdingsOf, isDelivered, isPersonLook, isPersonReply, lastNonNote, lookBoundary, newSinceLook, planFolds, snippetText, type FoldSnippet, type Holding } from '../folding';
@@ -579,10 +581,10 @@ export interface ThreadPaneProps {
   draftChanged?: number;
   onClose: () => void;
   /** The attachment open beside the thread (`#…&file=att_…`), its version, and an annotation to show. */
-  file: { id: string; version: 'current' | 'sent'; focus: string | null; linked?: string | null } | null;
+  file: { id: string; version: 'current' | 'sent'; focus: string | null; linked?: string | null; view?: 'full' | 'side' | null } | null;
   /** `replace`: swap the history entry (stepping between files), so Back returns to the thread in one press. */
   /** `back`: the browser's Back when the entry on screen was opened from `file` (a linked page's Back), else a new entry. */
-  onOpenFile: (file: { id: string; version: 'current' | 'sent'; focus: string | null; linked?: string | null } | null, options?: { replace?: boolean; back?: boolean }) => void;
+  onOpenFile: (file: { id: string; version: 'current' | 'sent'; focus: string | null; linked?: string | null; view?: 'full' | 'side' | null } | null, options?: { replace?: boolean; back?: boolean }) => void;
   /** Open the guided review a message carries (the record's 4.2). */
   onOpenGuide: (messageId: string) => void;
   /**
@@ -660,6 +662,8 @@ export interface ThreadPaneProps {
    * list back and put focus on this thread's row. Absent: no such button.
    */
   onBackToList?: (fileName: string | null) => void;
+  /** The window's one toast: "Files open side by side now" with Undo, when a picked view becomes the remembered one. */
+  onToast?: (toast: Omit<InboxToastModel, 'id'>) => void;
   /**
    * A search result to land on (`#thread=…&msg=…`): the message is unfolded
    * if folded or hidden in the middle fold, scrolled to the centre, focused
@@ -826,7 +830,7 @@ async function replyLanded(threadId: string, key: string): Promise<'yes' | 'no' 
 
 const THREAD_GONE_TEXT = 'This thread was deleted, so nothing was sent.';
 
-export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged = 0, onClose, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onAction, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, landing = null, onLanded }: ThreadPaneProps) {
+export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged = 0, onClose, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onAction, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, onToast, landing = null, onLanded }: ThreadPaneProps) {
   // "Open in" (OpenIn.tsx): apps on this computer; a new tab only through the tailnet or on a phone.
   const openIn: OpenInSurface | undefined = phone || remote === true ? 'tab' : remote === null ? undefined : 'apps';
   const root = thread.messages[0]!;
@@ -1360,21 +1364,61 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
    * Inbox does not follow plan review's shared hide-tools choice). A step
    * keeps it.
    */
-  const [full, setFull] = useState(false);
+  // The view rides the address (`view=full|side`; fileView.ts): a link without it opens by the remembered choice, else by kind.
+  const fileAttachment = file ? (allFiles.find((a) => a.id === file.id) ?? null) : null;
+  const viewOf = (narrow: boolean) =>
+    file ? fileViewFor(fileAttachment ?? { kind: 'file' }, { address: parseFileView(file.view), choice: readFileViewChoice(), narrow }) : 'side';
+  /** The view the file is in, as the address carries it (a phone's or a stacked window's room left out). */
+  const full = viewOf(false) === 'full';
+  /** What the window shows: full screen also wherever there is no room for the file beside the thread. */
+  const shownFull = viewOf(phone || fileStacked) === 'full';
+  /** The view the open file is in, carried by every route change that keeps the frame (a step, a version, a linked page). */
+  const currentView: FileView = full ? 'full' : 'side';
+  const fileRef = useRef(file);
+  fileRef.current = file;
+  /** Switch the open file's view in place (the same history entry). Escape's last rung, a Send: never saved. */
+  const setFull = (next: boolean) => {
+    const current = fileRef.current;
+    if (current) onOpenFile({ ...current, view: next ? 'full' : 'side' }, { replace: true });
+  };
+  /**
+   * The person picked a view with a button: it applies now and to every
+   * file opened next. A phone or a stacked window has no such button and
+   * saves nothing. When the remembered choice changes, the window's toast
+   * says so once, with Undo (the old choice back, and this file's view).
+   */
+  const pickView = (next: FileView) => {
+    setFull(next === 'full');
+    if (phone || fileStacked) return;
+    const before = readFileViewChoice();
+    writeFileViewChoice(next);
+    if (before === next) return;
+    const lead = next === 'side' ? 'Files open side by side now' : 'Files open full screen now';
+    const detail = next === 'side' ? 'until you choose Full screen' : 'until you choose Side by side';
+    onToast?.({
+      icon: 'check',
+      lead,
+      detail,
+      speech: `${lead}, ${detail}.`,
+      onUndo: () => {
+        writeFileViewChoice(before);
+        setFull(next !== 'full');
+      },
+    });
+  };
   /** Bumped when the person opens a file, so focus moves into its pane. */
   const [paneFocus, setPaneFocus] = useState(0);
   const paneRef = useRef<AttachmentPaneHandle>(null);
   /** Every attachment of the thread in thread order: what the pane steps through. */
   const steps = useMemo(() => attachmentSequence(thread.messages, attachments, inlineImages), [thread.messages, attachments, inlineImages]);
-  const openFile = (attachment: Pick<InboxAttachmentState, 'id' | 'kind' | 'ref'>, version: 'current' | 'sent' = 'current', focus: string | null = null) => {
-    // HTML opens full screen; so does an image from a message's text (approval "inbox-image-viewer"). Documents open beside the thread.
-    setFull(attachment.kind === 'html' || attachment.ref !== undefined);
-    onOpenFile({ id: attachment.id, version, focus });
+  const openFile = (attachment: Pick<InboxAttachmentState, 'id' | 'kind' | 'ref'>, version: 'current' | 'sent' = 'current', focus: string | null = null, view: FileView | null = null) => {
+    // The remembered choice, else today's rule (fileView.ts); a tile's ⋯ names one for this file alone.
+    onOpenFile({ id: attachment.id, version, focus, view: view ?? openingView(attachment) });
   };
   /** A tile, or a link in a message: the file as it is now, focus in its pane (a typed comment in the open file asks first). */
-  const openFromMessage = (attachment: Pick<InboxAttachmentState, 'id' | 'kind' | 'ref'> & { name?: string }) => {
+  const openFromMessage = (attachment: Pick<InboxAttachmentState, 'id' | 'kind' | 'ref'> & { name?: string }, view: FileView | null = null) => {
     const go = () => {
-      openFile(attachment);
+      openFile(attachment, 'current', null, view);
       setPaneFocus((n) => n + 1);
     };
     const pane = paneRef.current;
@@ -1525,7 +1569,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   const arrivalIds = useMemo(() => new Set(arrivals.map((m) => m.id)), [arrivals]);
   const candidates = arrivals.filter((m) => !sightedIds.has(m.id) && !fold.folded.has(m.id) && !hiddenNow.has(m.id)).map((m) => m.id);
   /** A file over the thread: full screen, or where it cannot sit beside it (a phone, a stacked window). */
-  const fileCovers = file !== null && (full || phone || fileStacked);
+  const fileCovers = file !== null && shownFull;
   const arrivalsRef = useRef(arrivals);
   arrivalsRef.current = arrivals;
   const sightedRef = useRef(sightedIds);
@@ -2537,7 +2581,6 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   const backToList = () => {
     const name = openAttachment?.name ?? null;
     const go = () => {
-      setFull(false);
       onBackToList!(name);
     };
     if (paneRef.current) paneRef.current.leave(null, go);
@@ -2928,6 +2971,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                           attachments={messageFiles}
                           annotationCounts={countsByPath}
                           onOpen={openFromMessage}
+                          onOpenAs={phone || fileStacked ? undefined : openFromMessage}
                           openId={file && !full && !phone && !fileStacked ? file.id : null}
                           placement="header"
                           openIn={openIn}
@@ -2992,6 +3036,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                     attachments={attachments.filter((a) => a.message_id === message.id)}
                     annotationCounts={countsByPath}
                     onOpen={openFromMessage}
+                    onOpenAs={phone || fileStacked ? undefined : openFromMessage}
                     openId={file && !full && !phone && !fileStacked ? file.id : null}
                     openIn={openIn}
                   />
@@ -3395,20 +3440,23 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
         projectRoot={thread.project.root}
         repo={thread.project.repo ?? null}
         version={file!.version}
-        onVersion={(version) => onOpenFile({ id: openAttachment.id, version, focus: null })}
-        full={full || phone || fileStacked}
+        onVersion={(version) => onOpenFile({ id: openAttachment.id, version, focus: null, view: currentView })}
+        full={shownFull}
         fullLocked={phone || fileStacked}
         phone={phone}
         openIn={openIn}
         steps={steps}
         // A step keeps the frame the person is in, and replaces the route.
-        onStep={(attachmentId, version) => onOpenFile({ id: attachmentId, version, focus: null }, { replace: true })}
+        onStep={(attachmentId, version) => onOpenFile({ id: attachmentId, version, focus: null, view: currentView }, { replace: true })}
         // A link in an attached HTML page to another file of the thread: a new entry, so Back returns to the page; the frame stays.
-        onOpenLinked={(attachmentId) => onOpenFile({ id: attachmentId, version: 'current', focus: null })}
+        onOpenLinked={(attachmentId) => onOpenFile({ id: attachmentId, version: 'current', focus: null, view: currentView })}
         // A page the attached page links to: in the route (`linked=`), so each one is a history entry and Back steps back through them.
         linked={file!.linked ?? null}
-        onLinked={(linked, options) => onOpenFile({ id: openAttachment.id, version: file!.version, focus: null, linked }, options)}
-        onToggleFull={() => setFull(!full)}
+        onLinked={(linked, options) => onOpenFile({ id: openAttachment.id, version: file!.version, focus: null, linked, view: currentView }, options)}
+        onToggleFull={(pick) => {
+          if (pick) pickView(full ? 'side' : 'full');
+          else setFull(!full);
+        }}
         focusId={file!.focus}
         focusRequest={paneFocus}
         fromPerson={thread.messages.find((m) => m.id === openAttachment.message_id)?.author.kind === 'person'}
@@ -3419,9 +3467,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
         })()}
         onSaved={saveRecord}
         onRemoved={dropRecord}
-        onOpenAt={(attachmentId, version, focus) => onOpenFile({ id: attachmentId, version, focus }, { replace: true })}
+        onOpenAt={(attachmentId, version, focus) => onOpenFile({ id: attachmentId, version, focus, view: currentView }, { replace: true })}
         onClose={() => {
-          setFull(false);
           onOpenFile(null);
         }}
         strip={{

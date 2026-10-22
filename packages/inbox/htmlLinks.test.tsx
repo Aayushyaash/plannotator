@@ -140,7 +140,8 @@ async function until(check: () => boolean, what: string) {
 }
 
 async function renderSheet() {
-  window.location.hash = `#thread=${world.htmlLinks.thread}&file=${world.htmlLinks.ids['SHEET.html']}`;
+  // Beside the thread (`view=side`), where the comments panel is docked: a link without it opens an HTML page full screen.
+  window.location.hash = `#thread=${world.htmlLinks.thread}&file=${world.htmlLinks.ids['SHEET.html']}&view=side`;
   host = document.createElement('div');
   document.body.appendChild(host);
   act(() => {

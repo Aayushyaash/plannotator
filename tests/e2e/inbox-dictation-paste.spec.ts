@@ -32,6 +32,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, rememberInboxOf, removeInboxScratch } from './inbox-scratch';
+import { forgetFileViewChoice } from './file-view';
 import { NO_BROWSER } from '../helpers/no-browser';
 import { FORCE_PLAIN_TEXT_PASTE_FLAG } from '../../packages/ui/utils/pasteInsert';
 
@@ -286,6 +287,8 @@ test('a file full screen over the thread: the reply box hidden under it takes no
     await p.locator('section.ib-pane .ib-atts [data-attachment-id]').first().click();
     await p.getByRole('button', { name: 'Full screen' }).click();
     await expect(p.locator('.ib-view.ib-full')).toBeVisible();
+    // The pick is remembered in the context's cookies: forget it, so the next test's file opens beside the thread again.
+    await forgetFileViewChoice(p);
     await p.locator('.ib-view.ib-full').getByText('Retry with the same key').click();
     await dictate(p, 'Not into the hidden box. ');
     await p.waitForTimeout(300);
@@ -303,6 +306,8 @@ test('a full-screen file: its own comment box (portaled outside the file) takes 
     await p.locator('section.ib-pane .ib-atts [data-attachment-id]').first().click();
     await p.getByRole('button', { name: 'Full screen' }).click();
     await expect(p.locator('.ib-view.ib-full')).toBeVisible();
+    // The pick is remembered in the context's cookies: forget it, so the next test's file opens beside the thread again.
+    await forgetFileViewChoice(p);
     await p.getByRole('button', { name: /Global comment/ }).first().click();
     const comment = p.getByPlaceholder(/comment/i).last();
     await expect(comment).toBeFocused();

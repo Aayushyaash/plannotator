@@ -23,6 +23,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
+import { forgetFileViewChoice } from './file-view';
 import { NO_BROWSER } from '../helpers/no-browser';
 
 const repo = resolve(__dirname, '../..');
@@ -182,9 +183,11 @@ test('a file beside the thread: ‹ Inbox, then Mark read; Archive ends the head
   expect(await headerOrder(pane)).toEqual(['back', 'mark-read', 'expand', 'archive']);
   await view.getByRole('button', { name: 'Full screen' }).click();
   await expect(view).toHaveClass(/ib-full/);
+  await forgetFileViewChoice(page);
   await shot(page, '4-file-full-screen');
-  await view.getByRole('button', { name: 'Exit full screen' }).click();
+  await view.getByRole('button', { name: 'Side by side' }).click();
   await expect(view).not.toHaveClass(/ib-full/);
+  await forgetFileViewChoice(page);
   expect(await headerOrder(pane)).toEqual(['back', 'mark-read', 'expand', 'archive']);
 });
 
