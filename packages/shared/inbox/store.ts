@@ -3174,7 +3174,7 @@ export class InboxStore {
       if (note.author.kind !== "person" || (note.reask?.length ?? 0) === 0 || !same(note.to)) return;
       const wrote = messages
         .slice(index + 1)
-        .some((m) => m.author.kind === "agent" && same({ host: m.author.host ?? "", session: m.author.session }));
+        .some((m) => m.author.kind === "agent" && same({ host: m.author.host ?? "", session: m.author.session ?? undefined }));
       if (!wrote) for (const id of note.reask!) out.add(id);
     });
     return out;

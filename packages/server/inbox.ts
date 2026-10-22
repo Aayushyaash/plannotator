@@ -660,6 +660,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   const draftListeners = new Set<(threadId: string) => void>();
   // The Inbox windows open now and whether any can show a notification (inbox-windows.ts).
   const windows = createInboxWindows({ graceMs: options.windowGraceMs });
+  /** Event streams open now (health's `event_streams`): Inbox tabs of one origin share one. */
+  let openEventStreams = 0;
   const binaryPath = options.binaryPath !== undefined ? options.binaryPath : version !== "dev" ? process.execPath : null;
   // The sidebar's Update button (packages/server/inbox-updates.ts): the daily
   // release check, the binary on disk, Update now, Remind me tomorrow.
@@ -764,6 +766,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     pid: process.pid,
     update: updates.current(),
     notify_reach: windows.reach(notificationsState().enabled),
+    // Additive: event streams open now (windows' and the phone door's). Inbox tabs of one origin share one.
+    event_streams: openEventStreams,
   });
 
   /**
@@ -1446,6 +1450,16 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       return Number.isSafeInteger(value) ? value : null;
     };
     const cursor = seqOf(req.headers.get("last-event-id")) ?? seqOf(url.searchParams.get("cursor"));
+    // `once=1` (additive): the hello and the replay after the cursor, then the response ends. A tab that
+    // listens to another tab's stream (packages/inbox/sharedEvents.ts) fetches what it missed (it slept,
+    // or the new leader started past it) without holding a connection open. Not counted as a stream.
+    if (url.searchParams.get("once") === "1") {
+      let text = `event: hello\ndata: ${JSON.stringify({ serverSession, cursor: store.cursor() })}\n\n`;
+      if (cursor !== null) for (const line of store.changesSince(cursor)) text += `id: ${line.seq}\nevent: record\ndata: ${JSON.stringify(eventPayload(line))}\n\n`;
+      return new Response(text, {
+        headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" },
+      });
+    }
     const encoder = new TextEncoder();
     let cleanup = () => {};
     const stream = new ReadableStream<Uint8Array>({
@@ -1457,6 +1471,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
             cleanup();
           }
         };
+        openEventStreams += 1;
+        let counted = true;
         const sendLine = (line: InboxLine) => send(`id: ${line.seq}\nevent: record\ndata: ${JSON.stringify(eventPayload(line))}\n\n`);
         send(`retry: 2000\nevent: hello\ndata: ${JSON.stringify({ serverSession, cursor: store.cursor() })}\n\n`);
         if (cursor !== null) for (const line of store.changesSince(cursor)) sendLine(line);
@@ -1488,6 +1504,10 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
         if (windowId) deliveryListeners.add(sendDeliveries);
         const heartbeat = setInterval(() => send(": ping\n\n"), SSE_HEARTBEAT_MS);
         cleanup = () => {
+          if (counted) {
+            counted = false;
+            openEventStreams -= 1;
+          }
           clearInterval(heartbeat);
           unsubscribe();
           statusListeners.delete(onStatus);
@@ -1956,17 +1976,34 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       if (path === "/api/inbox/threads" && req.method === "GET") return json(listModel(projectFilterOf(url), archivedModeOf(url)));
       if (path === "/api/inbox/threads/archived" && req.method === "GET") return json(archivedModel(url));
       if (path === "/api/inbox/projects" && req.method === "GET") return json({ serverSession, cursor: store.cursor(), projects: projectFolders() });
-      if (path === "/api/inbox/events" && req.method === "GET") return eventStream(req, url, via);
+      if (path === "/api/inbox/events" && req.method === "GET") {
+      // Another site's page must not hold (or time) a stream of everything the Inbox holds:
+      // refused like the other read routes. The phone's door and agents send no fetch metadata.
+      if (!isSameOriginOrNoOrigin(origin, req.headers.get("host") ?? "", req.headers.get("sec-fetch-site"))) {
+        return json({ error: "Cross-origin requests are not accepted.", code: "cross_origin" }, 403);
+      }
+      return eventStream(req, url, via);
+    }
       // A window's report: its browser's notification permission for its own origin changed (inbox-windows.ts).
       if (path === "/api/inbox/window") {
         if (req.method !== "POST") return json({ error: "Use POST." }, 405);
         const body = await readBody(req);
         if (checkServerSession(body, serverSession) === "mismatch") return json(serverSessionMismatchBody(INBOX_SERVER_SESSION_MISMATCH_ERROR), 409);
         const windowId = parseWindowId(body.window);
-        const permission = parseWindowPermission(body.permission);
         if (!windowId) throw new InboxError("validation_error", "window: 8 to 64 letters, digits, - or _.", { field: "window" });
+        // The tab closed (its pagehide beacon, or the tab that holds the shared stream saw it go): it stops counting.
+        if (body.gone === true) {
+          windows.leave(windowId);
+          return json({ notify_reach: windows.reach(notificationsState().enabled) });
+        }
+        const permission = parseWindowPermission(body.permission);
         if (!permission) throw new InboxError("validation_error", "permission: granted, default, denied or unsupported.", { field: "permission" });
-        windows.report(windowId, { permission, origin: parseWindowOrigin(body.origin), via });
+        // `served_by` (additive): the tab whose event stream this tab listens to (tabs share one stream).
+        const servedBy = body.served_by === undefined || body.served_by === null ? null : parseWindowId(body.served_by);
+        if (body.served_by !== undefined && body.served_by !== null && !servedBy) {
+          throw new InboxError("validation_error", "served_by: 8 to 64 letters, digits, - or _.", { field: "served_by" });
+        }
+        windows.report(windowId, { permission, origin: parseWindowOrigin(body.origin), via, servedBy });
         return json({ notify_reach: windows.reach(notificationsState().enabled) });
       }
       if (path === "/api/inbox/restart") {

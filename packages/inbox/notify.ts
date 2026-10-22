@@ -27,6 +27,7 @@ import type { InboxAuthor, InboxListRow, InboxMessage, InboxNotifyReach, InboxSe
 import { inboxApi, type InboxEvent, type ListModel, type NotificationSettings } from './api';
 import { agentName, plural } from './format';
 import { pageInFront } from './sound';
+import { inboxEventsServedBy } from './sharedEvents';
 
 /** The one tag every Inbox notification carries: a new one replaces the last. */
 export const NOTIFICATION_TAG = 'plannotator-inbox';
@@ -383,7 +384,8 @@ export function useInboxNotifications(options: {
   // older Inbox answers 404: nothing to tell.
   const reportWindow = useCallback(() => {
     void inboxApi
-      .reportWindow({ window: windowId.current, permission: permissionRef.current, origin: window.location.origin })
+      // A tab listening to another tab's stream names it, so the server counts this tab under it (sharedEvents.ts).
+      .reportWindow({ window: windowId.current, permission: permissionRef.current, origin: window.location.origin, served_by: inboxEventsServedBy() })
       .then((answer) => setReach(answer.notify_reach))
       .catch(() => {});
   }, []);
