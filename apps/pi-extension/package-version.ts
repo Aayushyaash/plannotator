@@ -65,8 +65,8 @@ export function checkPackageVersion(loaded: string | null, onDisk: string | null
 
 /** Thrown in place of a lazy import that would mix two versions of the package. */
 export class PlannotatorUpdatedError extends Error {
-	constructor(message: string) {
-		super(message);
+	constructor(message: string, options?: { cause?: unknown }) {
+		super(message, options);
 		this.name = "PlannotatorUpdatedError";
 	}
 }
@@ -103,7 +103,14 @@ export async function importFresh<T>(load: () => Promise<T>, options: FreshImpor
 		return await load();
 	} catch (error) {
 		if (isStaleModuleLinkError(error)) {
-			throw new PlannotatorUpdatedError(packageUpdatedMessage(loaded, readOnDisk(), host));
+			const onDisk = readOnDisk();
+			const message = packageUpdatedMessage(loaded, onDisk, host);
+			// Same version on both sides: the files may have changed under the same
+			// version, or the package itself may be broken. Keep Bun's own words so
+			// a packaging bug is not hidden behind "restart".
+			const sameVersion = loaded !== null && onDisk !== null && loaded === onDisk;
+			const detail = sameVersion && error instanceof Error ? ` (${error.message})` : "";
+			throw new PlannotatorUpdatedError(`${message}${detail}`, { cause: error });
 		}
 		throw error;
 	}

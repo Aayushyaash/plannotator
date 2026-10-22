@@ -30,6 +30,8 @@ describe("checkPackageVersion", () => {
 		expect(checkPackageVersion("0.28.26", null, "pi")).toBeNull();
 	});
 
+	// The wording is pinned on purpose: it is the one instruction the person
+	// gets when an upgrade under a running host breaks a launch (#2085).
 	test("a different version names both versions and the host", () => {
 		expect(checkPackageVersion("0.28.25", "0.28.26", "oh-my-pi")).toBe(
 			"Plannotator was updated from 0.28.25 to 0.28.26 while Oh My Pi was running. Restart Oh My Pi to load the new version.",
@@ -101,7 +103,17 @@ describe("importFresh", () => {
 			},
 			{ loaded: "0.28.26", readOnDisk: () => "0.28.26", host: "pi" },
 		);
-		await expect(result).rejects.toThrow("Plannotator's files changed on disk while Pi was running. Restart Pi to load the new version.");
+		let caught: unknown;
+		try {
+			await result;
+		} catch (error) {
+			caught = error;
+		}
+		expect(isPlannotatorUpdatedError(caught)).toBe(true);
+		// Restart is still the advice, and Bun's own error is kept: it may be a packaging bug.
+		expect((caught as Error).message).toContain("Restart Pi");
+		expect((caught as Error).message).toContain(LINK_ERROR);
+		expect((caught as Error).cause).toBeInstanceOf(SyntaxError);
 	});
 
 	test("any other import failure passes through unchanged", async () => {
