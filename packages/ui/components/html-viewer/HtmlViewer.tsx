@@ -139,7 +139,6 @@ function parseVimBridgeHelp(value: unknown): boolean | null {
 
 const MAX_VIM_COPY_TEXT_LENGTH = 2 * 1024 * 1024;
 
-/** Default wait for the bridge's `ready` on the `bridgeScriptUrl` path. */
 /**
  * The srcdoc frame's sandbox. `allow-modals` lets the page's alert, confirm
  * and prompt open (#2063: people's own pages and local sites). Never
@@ -148,6 +147,7 @@ const MAX_VIM_COPY_TEXT_LENGTH = 2 * 1024 * 1024;
  */
 export const HTML_VIEWER_SANDBOX = "allow-scripts allow-modals";
 
+/** Default wait for the bridge's `ready` on the `bridgeScriptUrl` path. */
 export const DEFAULT_BRIDGE_READY_TIMEOUT_MS = 5000;
 
 /**
