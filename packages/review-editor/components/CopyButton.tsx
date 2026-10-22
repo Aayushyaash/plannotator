@@ -58,7 +58,7 @@ export const CopyButton: React.FC<CopyButtonProps> = ({ text, className = '', va
     <button
       type="button"
       onClick={handleCopy}
-      className={`absolute top-1.5 right-1.5 p-1 rounded-md opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground hover:bg-muted ${className}`}
+      className={`absolute top-1.5 right-1.5 p-1 rounded-md opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity text-muted-foreground hover:text-foreground hover:bg-muted ${className}`}
       title={copied ? 'Copied!' : 'Copy'}
     >
       {copied ? <CheckIcon /> : <CopyIcon />}
