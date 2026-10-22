@@ -292,7 +292,11 @@ test('the foot after a pick: the buttons on the left, the draft status at the ro
   const box = async (sel: string) => (await page.locator(sel).first().boundingBox())!;
   const send = async () => box('.ib-pfoot [data-foot-buttons] .ib-btn.ib-pri');
   const reask = async () => box('.ib-pfoot [data-foot-buttons] [data-reask]');
-  // Wide: one line. Send first, the status after Re-ask, ending at the row's end.
+  // Wide: one line. Send first, the status after Re-ask, ending at the row's end. Since the "N open questions"
+  // button joined the row (approval "inbox-thread-open-questions"), one line needs a window this wide; at 1440 the
+  // status sits on its own line above, as the approved mock draws it.
+  await page.setViewportSize({ width: 1920, height: 1000 });
+  await expect.poll(async () => Math.round((await box('.ib-pfoot [data-foot-status]')).y - (await send()).y)).toBeLessThan(10);
   const wide = { row: await box('.ib-pfoot [data-foot-row]'), status: await box('.ib-pfoot [data-foot-status]'), send: await send(), reask: await reask() };
   expect(Math.abs(wide.status.y + wide.status.height / 2 - (wide.send.y + wide.send.height / 2))).toBeLessThan(2);
   expect(wide.status.x).toBeGreaterThan(wide.reask.x + wide.reask.width);
