@@ -1,6 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { importFresh } from "./package-version.ts";
 
 type PlannotatorBrowserModule = typeof import("./plannotator-browser.ts");
 
@@ -65,10 +66,12 @@ export function getStartupErrorMessage(error: unknown): string {
  *
  * Concurrent callers share one import, while a failed import is cleared so a
  * later invocation can retry instead of retaining a permanently rejected promise.
+ * If the package on disk changed since startup, it fails with the restart
+ * message instead of linking new files against old ones (#2085).
  */
 export function loadPlannotatorBrowser(): Promise<PlannotatorBrowserModule> {
 	if (!browserModulePromise) {
-		browserModulePromise = import("./plannotator-browser.ts").catch((error: unknown) => {
+		browserModulePromise = importFresh(() => import("./plannotator-browser.ts")).catch((error: unknown) => {
 			browserModulePromise = undefined;
 			throw error;
 		});
