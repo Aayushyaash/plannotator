@@ -210,10 +210,12 @@ test('a waking connection: Queued, then one wake naming the message, then Delive
   await expect(page.locator('[data-ack-pill]')).toContainText('Queued for Claude Code; it gets this when its session is back.');
   const bridge = (path: string, body: unknown) =>
     fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${registry.token}` }, body: JSON.stringify(body) });
-  // The session polls while a turn runs: "is working", and no Send now (a 👍 asks nothing of the agent).
+  // The session polls while a turn runs: "is working", no Send now and no countdown (a 👍 asks nothing of the
+  // agent and waits for the turn to end: the owner's decision, INBOX_AUTO_SEND_ACK_NOTES false).
   expect((await bridge('/api/inbox/bridge/poll', { session, host: 'claude-code', waitMs: 0, busy: true, send_now: true })).status).toBe(200);
   await page.goto(`${world.url}#thread=${threads.wake}`);
-  await expect(page.locator('[data-ack-pill]')).toContainText('Queued · Claude Code is working; it gets this when its turn ends.');
+  await expect(page.locator('[data-ack-pill]')).toContainText(/Undelivered(?: \d+ min)? · Claude Code is working · it gets this when its turn ends/);
+  await expect(page.locator('[data-ack-pill]')).not.toContainText('by itself');
   await expect(page.locator('[data-send-now]')).toHaveCount(0);
   await shot(page, '06-queued');
   // The session's connection polls: one command, the wake naming the message.

@@ -9,6 +9,8 @@ import { formatBytes, plural } from '../format';
 import { Icon } from '../icons';
 import { FileName } from './FileName';
 import { Tip } from './Tip';
+import { useConfigValue } from '@plannotator/ui/config';
+import { isCommentSubmitKey } from '@plannotator/ui/utils/commentSubmitKey';
 
 /** A fresh annotation id. */
 function newId(): string {
@@ -81,6 +83,7 @@ export const VideoAttachmentView = forwardRef<VideoAttachmentViewHandle, {
   const videoRef = useRef<HTMLVideoElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const [duration, setDuration] = useState<number | null>(attachment.duration_ms ? attachment.duration_ms / 1000 : null);
+  const enterSavesComment = useConfigValue('enterSavesComment');
   const [current, setCurrent] = useState(0);
   const [ratio, setRatio] = useState(attachment.width && attachment.height ? attachment.width / attachment.height : 16 / 9);
   const [failed, setFailed] = useState(false);
@@ -271,7 +274,7 @@ export const VideoAttachmentView = forwardRef<VideoAttachmentViewHandle, {
           }
         }}
         onKeyDown={(event) => {
-          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
+          if (isCommentSubmitKey(event, enterSavesComment)) {
             event.preventDefault();
             event.stopPropagation();
             void submit();

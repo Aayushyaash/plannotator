@@ -6,7 +6,7 @@
  * accessible name carries the state in words. Pure, for the tests.
  */
 import { inboxAgentName, type InboxListRow, type InboxListSection, type InboxRowDelivery } from '@plannotator/core/inbox-types';
-import { deliveryText } from './deliveryLine';
+import { deliveryText, type DeliveryLine } from './deliveryLine';
 import { whenTime } from './format';
 
 /** Whom it goes to, as the thread names it ("Claude Code", "Claude Code (another session)", an MCP agent's own name). */
@@ -20,8 +20,27 @@ export function rowDeliveryLine(d: InboxRowDelivery, time: (iso: string) => stri
   const name = rowDeliveryName(d);
   // "Saved for <the agent that asked>": the session that asked may be another than the thread's first agent.
   const endedName = d.asking ? inboxAgentName({ kind: 'agent', ...d.asking }) : name;
-  const text = deliveryText(d.reason, { name, at: d.at, time, undeliveredHost: name, endedName });
+  const text = deliveryText(d.reason, {
+    name,
+    at: d.at,
+    time,
+    undeliveredHost: name,
+    endedName,
+    wait: rowWait(d) ?? undefined,
+    ...(d.state === 'delivered' && d.auto_after_min !== undefined ? { autoAfterMin: d.auto_after_min } : {}),
+    ...(d.state === 'delivered' && d.turn_ended ? { turnEnded: true } : {}),
+  });
   return d.kind === 'ack' ? `👍 Looks good · ${text}` : text;
+}
+
+/**
+ * The row's wait on a busy session (approval "inbox-busy-agent-reply"):
+ * "Undelivered N min", blue while it can go in now (`steerable`), grey when
+ * it cannot. Null for every other state, and from an older Inbox.
+ */
+export function rowWait(d: InboxRowDelivery | null | undefined): NonNullable<DeliveryLine['wait']> | null {
+  if (!d || d.reason !== 'working' || !d.waiting_since) return null;
+  return { since: d.waiting_since, steerable: d.steerable === true, autoSendAt: d.auto_send_at ?? null };
 }
 
 /** The state in words, for the row's accessible name (the time follows it there). */

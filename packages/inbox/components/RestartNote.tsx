@@ -72,7 +72,7 @@ export function CommandLine({ text, label, announcement }: { text: string; label
 }
 
 /** Copy `/reload-plugins`. */
-function ReloadCopy() {
+export function ReloadCopy() {
   return <CopyCommand text={RELOAD_COMMAND} label="Copy /reload-plugins" announcement={RELOAD_COPIED_ANNOUNCEMENT} />;
 }
 
@@ -133,6 +133,61 @@ export function RestartLine({ note, name }: { note: RestartNote; name: string })
   return (
     <div className="ib-rw-note" data-restart-note={note.fix}>
       <ReloadLead where={`in that ${name} to get Send now`} updateCommand={updating ? note.updateCommand : null} />
+      <Fold question="Still no Send now after reloading?">
+        <div data-restart-fallback="">
+          {note.command ? (
+            <>
+              Type <code>/exit</code> in that {name}, then run:
+              <CommandLine text={note.command} label={`Copy the command that restarts this ${name} session`} />
+            </>
+          ) : (
+            <>
+              Type <code>/exit</code> in that {name}, then run <code>claude --resume</code> in its folder and pick the session.
+            </>
+          )}
+          <p className="ib-rw-warn">/exit stops the turn it is working on.</p>
+        </div>
+        <p className="ib-rw-after">Your reply waits here.</p>
+      </Fold>
+    </div>
+  );
+}
+
+/**
+ * In the grey "can't go in sooner" band under a reply that waits on a busy
+ * session (approval "inbox-busy-agent-reply"): why it cannot go into the
+ * running turn, and the fix with Copy. The session runs an older plugin
+ * (`restart`): one sentence with `/reload-plugins`. The installed plugin is
+ * itself behind this Inbox (`update_plugin`): the two steps. With no note
+ * (no known fix): just that it cannot go in sooner. The manual path stays
+ * folded, as under RestartLine.
+ */
+export function StuckReason({ note, name }: { note: RestartNote | null; name: string }) {
+  if (!note) {
+    return (
+      <p className="ib-m-why" data-stuck-why="">
+        It can't go in sooner.
+      </p>
+    );
+  }
+  const updating = note.fix === 'update_plugin';
+  return (
+    <div className="ib-rw-note ib-m-whybox" data-restart-note={note.fix}>
+      {updating ? (
+        <>
+          <p className="ib-m-why" data-stuck-why="">
+            It can't go in sooner: this session runs an older Plannotator plugin.
+          </p>
+          <ReloadLead where={`in that ${name} to fix it`} updateCommand={note.updateCommand} />
+        </>
+      ) : (
+        <p className="ib-m-why" data-stuck-why="" data-reload-lead="restart">
+          <span>
+            It can't go in sooner: this session runs an older Plannotator plugin. Type <code>{RELOAD_COMMAND}</code> in that {name} to fix it.
+          </span>
+          <ReloadCopy />
+        </p>
+      )}
       <Fold question="Still no Send now after reloading?">
         <div data-restart-fallback="">
           {note.command ? (

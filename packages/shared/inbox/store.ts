@@ -53,6 +53,7 @@ import {
 import {
   inboxId,
   INBOX_ACK_LABEL,
+  INBOX_AUTO_SEND_ACK_NOTES,
   INBOX_RECORD_VERSION,
   type InboxAck,
   type InboxAddressee,
@@ -88,6 +89,8 @@ import {
   inboxDefaultSkip,
   inboxDeliveryState,
   type InboxDeliveryConnection,
+  type InboxDeliveryDecision,
+  type InboxDeliverNowBy,
   type InboxQuestionState,
   type InboxRowDelivery,
 } from "@plannotator/core/inbox-types";
@@ -372,6 +375,14 @@ function hasTags(message: InboxMessage): boolean {
   return (message.tags?.length ?? 0) > 0;
 }
 
+/**
+ * A delivery's `into_turn`, written only for an item the Inbox marked to go
+ * in by itself (the connection's report, decided by the server).
+ */
+function intoTurnOf(by: InboxDeliverNowBy | null | undefined, intoTurn: boolean | undefined): { into_turn?: boolean } {
+  return by === "auto" && typeof intoTurn === "boolean" ? { into_turn: intoTurn } : {};
+}
+
 /** The tag a person's message carries for `session`, or null. */
 function tagOf(message: InboxMessage, session: string): InboxTag | null {
   return message.tags?.find((tag) => tag.session === session) ?? null;
@@ -459,6 +470,15 @@ export interface InboxDeliveryPresence {
   connection(session: string): InboxDeliveryConnection | null;
   /** Whether the session that asked is still there, with the sessions route's grace (`askerLive`). */
   askerLive(session: string): boolean;
+  /** The server's wait before an item goes into a busy session's turn by itself (`INBOX_AUTO_SEND_AFTER_MS`). Absent: never. */
+  autoSendAfterMs?: number;
+  /**
+   * The server's clock for an item waiting on `session`: since when it waits
+   * on that busy session, and since when it may go in by itself (null: not
+   * yet, the session has not been seen able to take it mid-turn). Null when
+   * no clock runs. Absent: never known.
+   */
+  waitOf?(session: string, itemId: string): { since: string; autoSince: string | null } | null;
 }
 
 export class InboxStore {
@@ -1038,7 +1058,7 @@ export class InboxStore {
           ...(seq === undefined ? {} : { seq }),
           ...(message.author.kind === "person" ? { sent_annotations: carried.get(message.id) ?? 0 } : {}),
           // When the 👍 reached the agent: its note delivered as a turn, or an agent read it.
-          ...(message.ack ? { ack: { ...message.ack, delivered_at: this.ackDeliveredAt(message.ack) } } : {}),
+          ...(message.ack ? { ack: { ...message.ack, delivered_at: this.ackDeliveredAt(message.ack), ...this.ackNoteWire(message.ack) } } : {}),
         };
       }),
     };
@@ -1236,6 +1256,25 @@ export class InboxStore {
       return connection ? { busy: connection.busy, send_now: connection.send_now } : null;
     };
     const askerLive = (session: string): boolean => (presence ? presence.askerLive(session) : true);
+    // How long it waited on a busy session, and whether it goes in by itself (approval "inbox-busy-agent-reply"):
+    // the server's clock while it waits, the item's own record once the Inbox marked it.
+    const waitOf = (item: InboxMessage, session: string | null) => {
+      const clock = session ? (presence?.waitOf?.(session, item.id) ?? null) : null;
+      const ack = !!item.ack_of && !INBOX_AUTO_SEND_ACK_NOTES;
+      return {
+        waitingSince: clock?.since ?? item.wait_started_at ?? null,
+        autoSince: clock?.autoSince ?? null,
+        nowBy: item.deliver_now_by ?? null,
+        nowAt: item.deliver_now_at ?? null,
+        intoTurn: item.delivery?.into_turn ?? null,
+        autoSendAfterMs: ack ? null : (presence?.autoSendAfterMs ?? null),
+      };
+    };
+    const waitWire = (decision: InboxDeliveryDecision) => ({
+      ...(decision.wait ? { waiting_since: decision.wait.since, steerable: decision.wait.steerable, auto_send_at: decision.wait.autoSendAt } : {}),
+      ...(decision.autoAfterMin !== undefined ? { auto_after_min: decision.autoAfterMin } : {}),
+      ...(decision.turnEnded ? { turn_ended: true } : {}),
+    });
 
     if (lastReal.author.kind === "person") {
       if (isInboxNote(lastReal)) return null;
@@ -1268,6 +1307,7 @@ export class InboxStore {
           wakes: true,
           sendingNow: !!last.deliver_now_at,
           connection,
+          ...waitOf(last, lastTo.session),
         });
         return {
           kind,
@@ -1279,6 +1319,7 @@ export class InboxStore {
           host: to.host ?? null,
           name: null,
           ...(another ? { another_session: true } : {}),
+          ...waitWire(decision),
         };
       }
       // A reply that tags agents: the owner's own delivery, never another recipient's.
@@ -1296,6 +1337,7 @@ export class InboxStore {
         wakes: wakingSession !== null || (askedSession !== null && connection != null),
         sendingNow: !!last.deliver_now_at,
         connection,
+        ...waitOf(last, replySession),
       });
       const author = root.author.kind === "agent" ? root.author : null;
       return {
@@ -1308,6 +1350,7 @@ export class InboxStore {
         host: author?.host ?? null,
         name: author?.name ?? null,
         ...(decision.reason === "ended" && askingAuthor ? { asking: { host: askingAuthor.host ?? null, name: askingAuthor.name ?? null } } : {}),
+        ...waitWire(decision),
       };
     }
 
@@ -1317,7 +1360,11 @@ export class InboxStore {
     if (target.author.kind !== "agent" || !ack || ack.not_sent) return null;
     const base = { kind: "ack" as const, message_id: target.id, host: target.author.host ?? null, name: target.author.name ?? null, send_now: false };
     const deliveredAt = this.ackDeliveredAt(ack);
-    if (deliveredAt) return { ...base, state: "delivered", reason: "delivered", at: deliveredAt };
+    const note = ack.note_id ? this.messages.get(ack.note_id) : undefined;
+    if (deliveredAt) {
+      const decision = inboxDeliveryState({ delivered: true, undelivered: false, askerEnded: false, wakes: true, sendingNow: false, connection: undefined, ...(note ? waitOf(note, target.author.session ?? null) : {}) });
+      return { ...base, state: "delivered", reason: "delivered", at: deliveredAt, ...waitWire(decision) };
+    }
     if (ack.settled_seq == null) return { ...base, state: "queued", reason: "ack_pending", at: null };
     if (target.wakes === true && ack.note_id) {
       const session = target.author.session;
@@ -1326,10 +1373,12 @@ export class InboxStore {
         undelivered: false,
         askerEnded: false,
         wakes: true,
-        sendingNow: false,
+        sendingNow: !!note?.deliver_now_at,
         connection: session ? connectionOf(session) : undefined,
+        ...(note ? waitOf(note, session ?? null) : {}),
       });
-      return { ...base, state: decision.state === "sending" ? "sending" : "queued", reason: decision.reason, at: null };
+      // A 👍 offers no Send now of its own (it asks nothing of the agent), and waits for the turn to end (INBOX_AUTO_SEND_ACK_NOTES).
+      return { ...base, state: decision.state === "sending" ? "sending" : "queued", reason: decision.reason, at: null, ...waitWire(decision) };
     }
     return { ...base, state: "saved", reason: "reads", at: null };
   }
@@ -1775,6 +1824,25 @@ export class InboxStore {
   private ackDeliveredAt(ack: InboxAck): string | null {
     const note = ack.note_id ? this.messages.get(ack.note_id) : undefined;
     return note?.delivery?.at ?? ack.seen_at ?? null;
+  }
+
+  /** The window's view of a 👍's note: when it was written, and whether it was asked to go now (and by whom). */
+  private ackNoteWire(ack: InboxAck): {
+    note_at?: string;
+    deliver_now_at?: string | null;
+    deliver_now_by?: InboxDeliverNowBy | null;
+    wait_started_at?: string | null;
+    delivered_into_turn?: boolean | null;
+  } {
+    const note = ack.note_id ? this.messages.get(ack.note_id) : undefined;
+    if (!note) return {};
+    return {
+      note_at: note.created_at,
+      deliver_now_at: note.deliver_now_at ?? null,
+      deliver_now_by: note.deliver_now_by ?? null,
+      wait_started_at: note.wait_started_at ?? null,
+      delivered_into_turn: note.delivery?.into_turn ?? null,
+    };
   }
 
   /** The note carrying a message's 👍 to the agent, while it stands. */
@@ -3784,7 +3852,7 @@ export class InboxStore {
    * agent up to it (the Sent band's "Delivered to <agent>, <time>"). A tagged
    * session's delivery marks nothing for the owner. Idempotent per session.
    */
-  recordDelivery(replyId: string, by: { host: string; session: string }): InboxMessage {
+  recordDelivery(replyId: string, by: { host: string; session: string; intoTurn?: boolean }): InboxMessage {
     const reply = this.messages.get(replyId);
     if (!reply || reply.author.kind !== "person" || (!reply.reply_to && !reply.to)) throw new InboxError("message_not_found", `No reply ${replyId}.`);
     if (!this.isFor(reply, by.session)) {
@@ -3796,14 +3864,16 @@ export class InboxStore {
       const at = this.stamp();
       const delivered: InboxMessage = {
         ...reply,
-        tags: reply.tags!.map((t) => (t.session === by.session ? { ...t, delivery: { state: "delivered" as const, host: by.host, session: by.session, at } } : t)),
+        tags: reply.tags!.map((t) =>
+          t.session === by.session ? { ...t, delivery: { state: "delivered" as const, host: by.host, session: by.session, at, ...intoTurnOf(t.deliver_now_by, by.intoTurn) } } : t,
+        ),
       };
       this.appendMessage(delivered, at);
       return delivered;
     }
     if (reply.delivery) return reply;
     const at = this.stamp();
-    const delivered: InboxMessage = { ...reply, delivery: { state: "delivered", host: by.host, session: by.session, at } };
+    const delivered: InboxMessage = { ...reply, delivery: { state: "delivered", host: by.host, session: by.session, at, ...intoTurnOf(reply.deliver_now_by, by.intoTurn) } };
     this.appendMessage(delivered, at);
     this.markAgentChecked(reply.thread_id, this.messageSeq.get(reply.id) ?? 0, at);
     // A 👍 that reached the agent was seen: a later wait on every thread is not answered by it again.
@@ -3952,7 +4022,7 @@ export class InboxStore {
    * is the server's check, before this is called. `session` names one
    * recipient (a tagged session's own line); absent, the owner.
    */
-  requestDeliverNow(messageId: string, session?: string | null): InboxMessage {
+  requestDeliverNow(messageId: string, session?: string | null, by: InboxDeliverNowBy = "person"): InboxMessage {
     const message = this.messages.get(messageId);
     if (!message) throw new InboxError("message_not_found", `No message ${messageId}.`);
     const tag = session && !this.isOwner(message, session) ? tagOf(message, session) : null;
@@ -3963,7 +4033,7 @@ export class InboxStore {
       if (tag.delivery) throw new InboxError("already_delivered", "That session already took this.", { delivery: tag.delivery });
       if (tag.deliver_now_at) return message;
       const at = this.stamp();
-      const next: InboxMessage = { ...message, tags: message.tags!.map((t) => (t.session === tag.session ? { ...t, deliver_now_at: at } : t)) };
+      const next: InboxMessage = { ...message, tags: message.tags!.map((t) => (t.session === tag.session ? { ...t, deliver_now_at: at, deliver_now_by: by } : t)) };
       this.appendMessage(next, at);
       return next;
     }
@@ -3973,9 +4043,53 @@ export class InboxStore {
     if (message.delivery) throw new InboxError("already_delivered", "That session already took this.", { delivery: message.delivery });
     if (message.deliver_now_at) return message;
     const at = this.stamp();
-    const next: InboxMessage = { ...message, deliver_now_at: at };
+    const next: InboxMessage = { ...message, deliver_now_at: at, deliver_now_by: by };
     this.appendMessage(next, at);
     return next;
+  }
+
+  /**
+   * What goes into `session`'s running turn by itself now (owner approval
+   * "inbox-busy-agent-reply", 2026-10-21): every item the session is handed
+   * (`pendingReplies`: the person's replies, messages, Re-ask notes and, while
+   * `INBOX_AUTO_SEND_ACK_NOTES` holds, the note carrying a 👍) whose clock
+   * (`clockOf`: the server's, started the first time it saw this session busy
+   * with Send now possible while the item waited; null while not started) has
+   * run `afterMs`, and that was never asked to go now (no `deliver_now_by`, by
+   * the person or by an earlier automatic attempt, so it fires once). The
+   * Inbox's set-aside and reopened notes never do. Each is marked as a Send
+   * now with `deliver_now_by: "auto"` and `wait_started_at` (when it began to
+   * wait, `waitedSince`); the caller has checked that the session works now
+   * and its connection can take an item mid-turn. Returns the items it marked.
+   */
+  autoSendDue(
+    session: string,
+    options: {
+      afterMs: number;
+      tags?: boolean;
+      clockOf: (itemId: string) => { autoSince: number | null; since: number } | null;
+    },
+  ): InboxMessage[] {
+    const now = this.now().getTime();
+    const marked: InboxMessage[] = [];
+    for (const item of this.pendingReplies(session, { tags: options.tags })) {
+      if ((item.set_aside?.length ?? 0) > 0 || (item.reopened?.length ?? 0) > 0) continue;
+      if (!INBOX_AUTO_SEND_ACK_NOTES && item.ack_of) continue;
+      const clock = options.clockOf(item.id);
+      if (!clock || clock.autoSince === null || clock.autoSince + options.afterMs > now) continue;
+      const owner = this.isOwner(item, session);
+      const tag = owner ? null : tagOf(item, session);
+      const asked = owner ? item.deliver_now_at || item.deliver_now_by : !tag || tag.deliver_now_at || tag.deliver_now_by;
+      if (asked) continue;
+      const at = this.stamp();
+      const waited = new Date(clock.since).toISOString();
+      const next: InboxMessage = tag
+        ? { ...item, tags: item.tags!.map((t) => (t.session === session ? { ...t, deliver_now_at: at, deliver_now_by: "auto" as const, wait_started_at: waited } : t)) }
+        : { ...item, deliver_now_at: at, deliver_now_by: "auto", wait_started_at: waited };
+      this.appendMessage(next, at);
+      marked.push(next);
+    }
+    return marked;
   }
 
   /**
@@ -4165,7 +4279,9 @@ export class InboxStore {
     if (!to) throw new InboxError("session_not_live", "That session is not live any more: nothing was changed. Pick another live session.");
     if (message.to.session === to.session && message.to.host === to.host) return message;
     const at = this.stamp();
-    const next: InboxMessage = { ...message, to: { host: to.host, session: to.session } };
+    // Moved to another session: an earlier mark (the person's Send now or the Inbox's own) belonged to the
+    // old one, so it neither goes in at once nor stays blocked from going in by itself; its wait starts again.
+    const next: InboxMessage = { ...message, to: { host: to.host, session: to.session }, deliver_now_at: null, deliver_now_by: null, wait_started_at: null };
     this.appendMessage(next, at);
     return next;
   }

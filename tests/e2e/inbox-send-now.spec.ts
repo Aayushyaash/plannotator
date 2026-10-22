@@ -190,7 +190,7 @@ async function replyInWindow(page: Page, words: string): Promise<void> {
   await expect(pane.locator('article.ib-message[data-author="person"]').last()).toContainText(words);
 }
 
-test('Claude Code at work: the reply reads "Queued · … is working" with Send now; pressing it hands the reply over with `now`, then Delivered', async () => {
+test('Claude Code at work: the reply reads "Undelivered · … is working" with Send now; pressing it hands the reply over with `now`, then Delivered', async () => {
   const { page } = world;
   const sent = await world.agent.send(
     { project_path: world.ledger, subject: 'Migration shipped', body: 'The ledger migration is shipped and the backfill is running. Anything else before I move on to the export?' },
@@ -207,7 +207,7 @@ test('Claude Code at work: the reply reads "Queued · … is working" with Send 
 
   const line = pane.locator('[data-delivery]');
   await expect(line).toHaveAttribute('data-delivery', 'queued');
-  await expect(line).toContainText('Queued · Claude Code is working; it gets this when its turn ends.');
+  await expect(line).toContainText(/Undelivered(?: \d+ min)? · Claude Code is working · goes in by itself in /);
   const button = pane.locator('[data-send-now]');
   await expect(button).toBeVisible();
   await expect(button).toHaveText('Send now');
@@ -218,10 +218,12 @@ test('Claude Code at work: the reply reads "Queued · … is working" with Send 
   await expect(tick).toHaveAttribute('data-tick', 'queued');
   await expect(tick).toHaveAttribute('aria-label', 'Queued for Claude Code,');
   await expect(row.locator('.ib-st')).toHaveText('Migration shipped');
-  await tick.hover();
-  // The tooltip is ui's (never a native title) and says what the thread's own line says.
   await expect(tick).not.toHaveAttribute('title', /./);
-  await expect(page.locator('[data-pn-tooltip]')).toHaveText('Queued · Claude Code is working; it gets this when its turn ends.');
+  // Waiting on a busy agent (approval "inbox-busy-agent-reply"): "Undelivered" in place of the count, and on hover
+  // the row's own Send now takes the count's and the time's place (so the tick's tooltip is not offered then).
+  await expect(row.locator('[data-undelivered]')).toHaveText(/^Undelivered/);
+  await row.hover();
+  await expect(page.locator(`[data-row="${sent.thread_id}"] > [data-row-send-now]`)).toBeVisible();
   await page.mouse.move(0, 0);
   // Handed out without `now` while nobody pressed it.
   await expect.poll(() => connection.commands.length, { timeout: 15_000 }).toBe(1);

@@ -1,0 +1,121 @@
+/**
+ * Shared key cases for every comment composer (#1934, "Enter saves a
+ * comment"). Each composer's test file mounts the REAL composer and hands
+ * this a probe; the cases are the same everywhere, which is the point: one
+ * setting, one behaviour.
+ *
+ * Off (the default): plain Enter is the field's (a new line), Cmd/Ctrl+Enter
+ * saves. On: plain Enter saves, Shift+Enter is the field's, Cmd/Ctrl+Enter
+ * still saves, and an Enter that belongs to an IME composition never saves
+ * (`isComposing`, or Safari's keyCode 229 with `isComposing` false).
+ *
+ * DOM-gated: callers skip it without a document.
+ */
+import { expect, test } from 'bun:test';
+import { act } from 'react';
+import { configStore } from '../config/configStore';
+
+export interface MountedComposer {
+  field: () => HTMLTextAreaElement;
+  /** How many times the composer saved so far. */
+  saves: () => number;
+}
+
+export async function setEnterSavesComment(on: boolean): Promise<void> {
+  await act(async () => {
+    configStore.set('enterSavesComment', on);
+  });
+}
+
+/** Type into a React-controlled textarea. */
+export async function typeInto(el: HTMLTextAreaElement, value: string): Promise<void> {
+  const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set;
+  await act(async () => {
+    if (setter) setter.call(el, value);
+    else el.value = value;
+    el.selectionStart = el.selectionEnd = value.length;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup', { key: value.slice(-1) || 'a', bubbles: true }));
+  });
+}
+
+export async function pressKey(
+  el: HTMLElement,
+  key: string,
+  init: KeyboardEventInit & { keyCode?: number } = {},
+): Promise<KeyboardEvent> {
+  const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init });
+  await act(async () => {
+    el.dispatchEvent(event);
+  });
+  await act(async () => {});
+  return event;
+}
+
+/**
+ * Register the shared cases. `mount` mounts a fresh composer with `text`
+ * already written (so a save has something to save); the caller's afterEach
+ * unmounts it and the cases reset the setting themselves.
+ */
+export function describeCommentSubmitKeys(
+  name: string,
+  mount: (text: string) => Promise<MountedComposer>,
+  options: { skip: boolean; text?: string },
+): void {
+  const text = options.text ?? 'needs a test';
+  const run = (title: string, body: () => Promise<void>) =>
+    test.skipIf(options.skip)(`${name}: ${title}`, async () => {
+      try {
+        await body();
+      } finally {
+        await setEnterSavesComment(false);
+      }
+    });
+
+  run('off (the default): Enter is a new line, not a save', async () => {
+    await setEnterSavesComment(false);
+    const composer = await mount(text);
+    const event = await pressKey(composer.field(), 'Enter');
+    expect(composer.saves()).toBe(0);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  run('off: Cmd/Ctrl+Enter saves', async () => {
+    await setEnterSavesComment(false);
+    const composer = await mount(text);
+    await pressKey(composer.field(), 'Enter', { ctrlKey: true });
+    expect(composer.saves()).toBe(1);
+  });
+
+  run('on: Enter saves and adds no new line', async () => {
+    await setEnterSavesComment(true);
+    const composer = await mount(text);
+    const event = await pressKey(composer.field(), 'Enter');
+    expect(composer.saves()).toBe(1);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  run('on: Shift+Enter is a new line, not a save', async () => {
+    await setEnterSavesComment(true);
+    const composer = await mount(text);
+    const event = await pressKey(composer.field(), 'Enter', { shiftKey: true });
+    expect(composer.saves()).toBe(0);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  run('on: Cmd+Enter still saves', async () => {
+    await setEnterSavesComment(true);
+    const composer = await mount(text);
+    await pressKey(composer.field(), 'Enter', { metaKey: true });
+    expect(composer.saves()).toBe(1);
+  });
+
+  run('on: an Enter that commits an IME composition never saves', async () => {
+    await setEnterSavesComment(true);
+    const composer = await mount(text);
+    await pressKey(composer.field(), 'Enter', { isComposing: true, keyCode: 229 });
+    // Safari reports the committing Enter with isComposing false and keyCode 229.
+    await pressKey(composer.field(), 'Enter', { isComposing: false, keyCode: 229 });
+    expect(composer.saves()).toBe(0);
+  });
+}

@@ -3710,3 +3710,50 @@ ol.ib-rl-two .ib-rw-cmd { font-weight: 400; margin-top: 6px; }
   .pn-inbox .ib-todo-hint { margin-left: 0; flex-basis: 100%; }
   .pn-inbox .ib-todo-note { font-size: var(--ib-fs-16-in, 16px); }
 }
+/*
+ * A reply waiting on a busy agent (owner approval "inbox-busy-agent-reply", 2026-10-21; mock.html in
+ * .product/approved/inbox-busy-agent-reply/). Blue while it can go into the running turn now (Send now, and it
+ * goes in by itself after 5 minutes); grey when it cannot go in sooner. Blue, not amber: amber already means an
+ * agent waits on you (Holds up). On the Inbox's own tokens, light and dark.
+ */
+.pn-inbox {
+  --ib-wait-fg: color-mix(in oklab, var(--primary) 62%, var(--foreground));
+  --ib-wait-bg: color-mix(in oklab, var(--primary) 20%, transparent);
+  --ib-wait-band: color-mix(in oklab, var(--primary) 11%, var(--card));
+}
+:root.light .pn-inbox {
+  --ib-wait-fg: color-mix(in oklab, var(--primary) 74%, var(--foreground));
+  --ib-wait-bg: color-mix(in oklab, var(--primary) 12%, transparent);
+  --ib-wait-band: color-mix(in oklab, var(--primary) 8%, var(--card));
+}
+.pn-inbox .ib-badge.ib-b-wait { background: var(--ib-wait-bg); color: var(--ib-wait-fg); border-color: transparent; font-variant-numeric: tabular-nums; }
+.pn-inbox .ib-badge.ib-b-wait[data-stuck] { background: color-mix(in oklch, var(--foreground) 7%, transparent); color: var(--muted-foreground); }
+.ib-row .ib-c:has(.ib-b-wait) { display: flex; justify-content: flex-end; align-items: center; }
+.ib-nrow .ib-l1 .ib-c:has(.ib-b-wait) { display: inline-flex; align-items: center; }
+.pn-inbox .ib-ract[data-row-send-now] svg { color: var(--ib-wait-fg); }
+/* The band under the reply. */
+.pn-inbox .ib-delivered.ib-undl { width: fit-content; max-width: 100%; margin-top: 12px; padding: 6px 6px 6px 11px; gap: 12px; border-radius: var(--ib-lr-sm, 8px); background: var(--ib-wait-band); border: 1px solid color-mix(in oklab, var(--primary) 22%, var(--border)); color: var(--foreground); font-size: var(--ib-fs-13, 13px); }
+.pn-inbox .ib-delivered.ib-undl .ib-dl-main > svg { color: var(--ib-wait-fg); margin-top: 3px; }
+.pn-inbox .ib-delivered.ib-undl strong { font-weight: 600; color: var(--ib-wait-fg); font-variant-numeric: tabular-nums; }
+.pn-inbox .ib-delivered.ib-undl .ib-m-mute { color: var(--muted-foreground); }
+.pn-inbox .ib-tg-dl strong { font-weight: 600; color: var(--ib-wait-fg); font-variant-numeric: tabular-nums; }
+.pn-inbox .ib-tg-dl .ib-m-mute { color: var(--muted-foreground); }
+.pn-inbox .ib-sendnow.ib-sendnow-go { margin-left: 0; height: 28px; padding: 0 12px 0 10px; display: inline-flex; align-items: center; gap: 6px; border-color: transparent; background: var(--primary); color: var(--primary-foreground); font-weight: 600; border-radius: var(--ib-pill-s, 7px); }
+.pn-inbox .ib-sendnow.ib-sendnow-go:hover { background: color-mix(in oklab, var(--primary) 88%, var(--foreground)); }
+.pn-inbox .ib-sendnow.ib-sendnow-go svg { width: 14px; height: 14px; }
+/* It can't go in sooner: the same band, quieter, no button, the reason under it. */
+.pn-inbox .ib-delivered.ib-undl[data-stuck] { background: color-mix(in oklab, var(--foreground) 4%, var(--card)); border-color: var(--border); flex-direction: column; align-items: flex-start; gap: 6px; padding: 8px 12px 9px 11px; max-width: min(620px, 100%); }
+.pn-inbox .ib-delivered.ib-undl[data-stuck] .ib-dl-main > svg, .pn-inbox .ib-delivered.ib-undl[data-stuck] strong { color: var(--foreground); }
+.pn-inbox .ib-undl .ib-m-whybox { margin: 0; padding: 0; border: 0; background: none; width: 100%; }
+.pn-inbox .ib-undl .ib-m-why { color: var(--muted-foreground); padding-left: 20px; line-height: 1.7; margin: 0; }
+.pn-inbox .ib-undl .ib-m-why > span { margin-right: 6px; }
+.pn-inbox .ib-undl .ib-m-why code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.92em; padding: 1px 5px; border-radius: 5px; background: color-mix(in oklch, var(--foreground) 7%, transparent); color: var(--foreground); white-space: nowrap; }
+.pn-inbox .ib-undl .ib-m-whybox .ib-rl-lead, .pn-inbox .ib-undl .ib-m-whybox .ib-rl-fold { padding-left: 20px; }
+@media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
+  .pn-inbox .ib-delivered.ib-undl { width: 100%; flex-wrap: wrap; padding: 10px 10px 10px 12px; }
+  .pn-inbox .ib-delivered.ib-undl .ib-dl-main { flex: 1 1 100%; }
+  .pn-inbox .ib-sendnow.ib-sendnow-go { height: 36px; margin-left: 20px; padding: 0 14px 0 12px; font-size: var(--ib-fs-14, 14px); }
+  .pn-inbox .ib-sendnow.ib-sendnow-go::after { inset: -4px -4px; }
+}
+/* After it went into its turn by itself: the check in the delivered tick's colour. */
+.pn-inbox .ib-delivered[data-auto] .ib-dl-main > svg { color: var(--ib-tick-delivered); }

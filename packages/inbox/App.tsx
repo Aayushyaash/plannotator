@@ -1473,6 +1473,24 @@ function Inbox() {
   }, []);
 
   /**
+   * Send now from a list row (approval "inbox-busy-agent-reply"): the reply
+   * waiting on a busy agent goes into its running turn now, as the thread's
+   * Send now does. No toast: the row's tick and badge say it.
+   */
+  const sendNowFromRow = async (row: InboxListRow) => {
+    const id = row.delivery?.message_id;
+    if (!id) return;
+    try {
+      await inboxApi.sendNow(id);
+    } catch (cause) {
+      showError(cause);
+      return;
+    }
+    await afterWrite();
+    say('Sending it now.');
+  };
+
+  /**
    * Mark read, or move it back (the pressed button, `E` again, Undo). The
    * thread leaves the top for Quiet with its waiting questions closed; Undo
    * reopens them as they were. An agent stopped or held up on it makes the
@@ -2303,6 +2321,7 @@ function Inbox() {
           }}
           onOpen={openRow}
           onMarkRead={(row) => void markRead(row.thread_id, true)}
+          onSendNow={(row) => void sendNowFromRow(row)}
           onRowAction={rowAction}
           onSearch={(opener) => openSearch(opener)}
           onCompose={(opener) => openCompose({}, opener)}

@@ -9,6 +9,8 @@ import { ConventionalLabelPicker, type LabelDef } from './ConventionalLabelPicke
 import type { ConventionalLabel, ConventionalDecoration } from '@plannotator/ui/types';
 import type { AIChatEntry } from '../hooks/useAIChat';
 import { useDraggable } from '@plannotator/ui/hooks/useDraggable';
+import { useConfigValue } from '@plannotator/ui/config';
+import { isCommentSubmitKey } from '@plannotator/ui/utils/commentSubmitKey';
 import {
   hasPrimaryCoarsePointer,
   useVisibleViewportBounds,
@@ -129,6 +131,7 @@ export const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
   const horizontalInset = toolbarWidth / 2;
   const suggestedCodeRef = useRef<HTMLTextAreaElement>(null);
   const [toolbarHeight, setToolbarHeight] = useState<number | null>(null);
+  const enterSavesComment = useConfigValue('enterSavesComment');
   const handleTabIndent = useTabIndent(setSuggestedCode);
   const { dragPosition, dragHandleProps, wasDragged, reset: resetDrag } = useDraggable(toolbarRef);
 
@@ -283,7 +286,9 @@ export const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
               if (e.key === 'Escape') {
                 e.stopPropagation();
                 onDismiss();
-              } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+              } else if (isCommentSubmitKey(e, enterSavesComment)) {
+                // Prevented so a plain Enter (the setting on) adds no newline.
+                e.preventDefault();
                 onSubmit();
               }
             }}

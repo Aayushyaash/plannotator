@@ -292,7 +292,7 @@ test.skipIf(!hasDom)('an MCP agent gets the other heads-up; Send carries the tag
     [S.pi, 'queued'],
     [S.codex, 'saved'],
   ]);
-  expect(el.querySelector(`[data-tag-line="${S.pi}"]`)!.textContent).toContain('Queued · Pi is working; it gets this when its turn ends.');
+  expect(el.querySelector(`[data-tag-line="${S.pi}"]`)!.textContent).toContain('Undelivered · Pi is working · goes in by itself in 5 min');
   expect(el.querySelector(`[data-tag-line="${S.codex}"]`)!.textContent).toContain(`Saved for ${codexLabel}. It sees it the next time it reads this thread.`);
   // The message head names who it was tagged to.
   expect(el.querySelector('[data-tagged-names]')!.textContent).toBe(` · tagged Pi, ${codexLabel}`);

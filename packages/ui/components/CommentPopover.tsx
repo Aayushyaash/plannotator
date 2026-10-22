@@ -5,6 +5,8 @@ import { AttachmentsButton } from './AttachmentsButton';
 import { useDraggable } from '../hooks/useDraggable';
 import { SparklesIcon } from './SparklesIcon';
 import { hasUnsavedCommentContent } from '../utils/commentContent';
+import { isCommentSubmitKey } from '../utils/commentSubmitKey';
+import { useConfigValue } from '../config/useConfig';
 import { useSkillReferenceAutocomplete } from '../hooks/useSkillReferenceAutocomplete';
 import { HumanOnlySkillNotice, SkillReferenceMenu } from './SkillReferenceMenu';
 import { ComposerTokenTextarea, type ComposerMentionChips } from './ComposerTokenTextarea';
@@ -561,6 +563,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   const composerListboxOpen = skillAc.menu !== null || mentionAc.menu !== null;
   const activeComposerOptionId = activeSkillOptionId ?? activeMentionOptionId;
 
+  const enterSavesComment = useConfigValue('enterSavesComment');
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (skillAc.onKeyDown(e)) return;
     if (mentionAc.onKeyDown(e)) return;
@@ -577,7 +580,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
       }
       return;
     }
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+    if (isCommentSubmitKey(e, enterSavesComment)) {
       e.preventDefault();
       handleSubmit();
     }

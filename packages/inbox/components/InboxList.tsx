@@ -15,7 +15,8 @@ import { inboxHasUnsent } from '@plannotator/core/inbox-types';
 import { DraftLabel } from './DraftLabel';
 import { ThreadRowMenu } from './RowMenu';
 import type { RowMenuAction } from '../rowMenu';
-import { rowTimeIso } from '../rowDelivery';
+import { rowTimeIso, rowWait } from '../rowDelivery';
+import { UndeliveredBadge } from './Undelivered';
 import { TimeWithTick } from './DeliveryTick';
 
 export interface InboxListProps {
@@ -46,6 +47,8 @@ export interface InboxListProps {
   onOpen: (row: InboxListRow) => void;
   /** The row's hover action (a row that waits on the person): Mark read, without opening it. Absent: no action. */
   onMarkRead?: (row: InboxListRow) => void;
+  /** The row's hover action on a reply waiting on a busy agent that can take it now: Send now. Absent: no action. */
+  onSendNow?: (row: InboxListRow) => void;
   /** A phone (phone.ts): the list fills the window and its rows are a mail app's. */
   phone?: boolean;
   /** The project shown (null: every project). A phone opens another project's list at its top, as a mail app opens another mailbox. */
@@ -113,6 +116,9 @@ function subjectOf(row: InboxListRow): string {
 }
 
 function countOf(row: InboxListRow): ReactNode {
+  // A reply waiting on a busy agent (approval "inbox-busy-agent-reply"): how long, in place of the count.
+  const wait = rowWait(row.delivery);
+  if (wait) return <UndeliveredBadge wait={wait} />;
   // A Quiet row says why it is there: archived (resolved), or marked read.
   if (row.section === 'quiet' && row.resolved_at !== null && row.back_from_archive !== true) return 'Archived';
   // What the person has not sent (approval "inbox-reply-drafts"): "Draft · Your reply, 2 picks".
@@ -228,11 +234,42 @@ function WideRow({ row, selected, filtered, lit, keys, onOpen }: { row: InboxLis
  * never opens the thread. The action is the row's sibling (a button cannot
  * hold a button).
  */
-function RowWithAction({ row, menu, onMarkRead, children }: { row: InboxListRow; menu: boolean; onMarkRead?: (row: InboxListRow) => void; children: ReactNode }) {
+function RowWithAction({
+  row,
+  menu,
+  onMarkRead,
+  onSendNow,
+  children,
+}: {
+  row: InboxListRow;
+  menu: boolean;
+  onMarkRead?: (row: InboxListRow) => void;
+  onSendNow?: (row: InboxListRow) => void;
+  children: ReactNode;
+}) {
   const offer = onMarkRead && offersRowMarkRead(row);
+  // A reply waiting on a busy agent that can take it now: Send now, on hover and keyboard focus as Mark read.
+  const sendNow = onSendNow && !offer && row.delivery?.send_now === true && rowWait(row.delivery) !== null;
   return (
     <div className="ib-rw" data-row={row.thread_id} data-menu={menu ? '' : undefined}>
       {children}
+      {sendNow && (
+        <Tip content={`Send now: put your reply into ${agentName(rowAgent(row))}'s running turn without waiting for it to end`}>
+          <button
+            type="button"
+            className="ib-ract"
+            data-row-send-now=""
+            aria-label={`Send now: ${row.subject ?? '(no subject)'}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onSendNow(row);
+            }}
+          >
+            <Icon name="send" size={15} />
+            Send now
+          </button>
+        </Tip>
+      )}
       {offer && (
         <Tip content={`Mark read (E): out of the top until ${agentName(rowAgent(row))} writes again`}>
           <button
@@ -388,6 +425,7 @@ export function InboxList(props: InboxListProps) {
   });
   const openRow = useCallback((row: InboxListRow) => latest.current.onOpen(row), []);
   const markRead = useCallback((row: InboxListRow) => latest.current.onMarkRead?.(row), []);
+  const sendNow = useCallback((row: InboxListRow) => latest.current.onSendNow?.(row), []);
   // A row's time reads "8:22 PM" today and "Oct 19" after midnight: a new day renders every row again.
   const day = new Date().toDateString();
   return (
@@ -500,6 +538,7 @@ export function InboxList(props: InboxListProps) {
                       lit={lit(row)}
                       onOpen={openRow}
                       onMarkRead={props.onMarkRead ? markRead : undefined}
+                      onSendNow={props.onSendNow ? sendNow : undefined}
                       day={day}
                       menu={menuRow === row.thread_id}
                       keys={rowKeys}
@@ -522,6 +561,7 @@ interface ListRowProps {
   lit: boolean;
   onOpen: (row: InboxListRow) => void;
   onMarkRead?: (row: InboxListRow) => void;
+  onSendNow?: (row: InboxListRow) => void;
   /** Today's date: the row's time is written against it (shortTime). */
   day: string;
   /** Its right-click menu is open (RowMenu.tsx): the muted background. */
@@ -536,11 +576,11 @@ interface ListRowProps {
  * list update renders only the rows that changed.
  */
 const ListRow = memo(
-  function ListRow({ row, shape, filtered, selected, lit, onOpen, onMarkRead, menu, keys }: ListRowProps) {
+  function ListRow({ row, shape, filtered, selected, lit, onOpen, onMarkRead, onSendNow, menu, keys }: ListRowProps) {
     const open = () => onOpen(row);
     if (shape === 'phone') return <PhoneRow row={row} filtered={filtered} lit={lit} menu={menu} keys={keys} onOpen={open} />;
     return (
-      <RowWithAction row={row} menu={menu} onMarkRead={onMarkRead}>
+      <RowWithAction row={row} menu={menu} onMarkRead={onMarkRead} onSendNow={onSendNow}>
         {shape === 'narrow' ? (
           <NarrowRow row={row} filtered={filtered} lit={lit} keys={keys} selected={selected} onOpen={open} />
         ) : (
@@ -559,6 +599,7 @@ const ListRow = memo(
     a.keys === b.keys &&
     a.onOpen === b.onOpen &&
     a.onMarkRead === b.onMarkRead &&
+    a.onSendNow === b.onSendNow &&
     sameValue(a.row, b.row),
 );
 

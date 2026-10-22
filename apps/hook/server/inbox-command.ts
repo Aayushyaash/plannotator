@@ -34,7 +34,7 @@ import { exposureWarning, type InboxTailscaleState } from "@plannotator/server/i
 import { openBrowser } from "@plannotator/server/browser";
 import { agentSpec, createAgentEnvironment, formatConnectReport, inboxConnectDisabled } from "@plannotator/server/inbox-agents";
 import { addInboxNote, inboxNotesDisabled, markNotesAsked } from "@plannotator/server/inbox-agent-notes";
-import { INBOX_AGENT_LABELS, INBOX_NOTE_AGENT_IDS, type InboxConnectReport, type InboxNoteAgentId } from "@plannotator/core/inbox-types";
+import { INBOX_AGENT_LABELS, INBOX_AUTO_SEND_AFTER_MS, INBOX_NOTE_AGENT_IDS, type InboxConnectReport, type InboxNoteAgentId } from "@plannotator/core/inbox-types";
 import { writeUrlQr } from "@plannotator/server/qr";
 import { getCliVersion } from "./cli";
 import { inboxHostSessionFromEnv, runInboxMcpShim } from "./inbox-mcp-shim";
@@ -252,6 +252,8 @@ async function serveInbox(dataDir: string, open: boolean, htmlContent: string | 
       htmlContent,
       selfCommand: selfCommand(),
       publishTailnet: tailscale,
+      // Testing knob: how long a reply waits on a busy agent before it goes in by itself (default 5 minutes).
+      ...autoSendAfterMsFromEnv(),
       // The stop route (uninstall --purge) ends the process.
       onStopRequested: () => process.exit(0),
       // Its data folder (or inbox.json) is gone or another Inbox's: nothing
@@ -424,4 +426,27 @@ export async function runInboxCommand(args: readonly string[], assets: InboxComm
     process.exit(0);
   }
   return serveInbox(dataDir, !noOpen, assets.htmlContent, tailscale, connect);
+}
+
+/**
+ * `PLANNOTATOR_INBOX_AUTO_SEND_MS`: a testing knob for the end-to-end proof
+ * on the compiled binary (approval "inbox-busy-agent-reply"): how long a
+ * reply waits on a busy agent before the Inbox puts it into the running turn
+ * by itself. A whole number of milliseconds from 1,000 up to the default; it
+ * can only make the wait shorter, and only in a build that is not a release
+ * (`version` not X.Y.Z, e.g. `0.0.0-dev` or a source run) or under the test
+ * sandbox (`PLANNOTATOR_TEST_SANDBOX`). A release ignores it, so an agent that
+ * starts the Inbox cannot make replies jump into turns. Anything else is
+ * ignored (the default, `INBOX_AUTO_SEND_AFTER_MS`, 5 minutes).
+ */
+export function autoSendAfterMsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  version: string | undefined = getCliVersion(),
+): { autoSendAfterMs?: number } {
+  const release = typeof version === "string" && /^\d+\.\d+\.\d+$/.test(version);
+  if (release && !env.PLANNOTATOR_TEST_SANDBOX) return {};
+  const raw = env.PLANNOTATOR_INBOX_AUTO_SEND_MS?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return {};
+  const ms = Number(raw);
+  return Number.isSafeInteger(ms) && ms >= 1_000 && ms <= INBOX_AUTO_SEND_AFTER_MS ? { autoSendAfterMs: ms } : {};
 }

@@ -4,6 +4,7 @@ import { cn } from '../../lib/utils';
 import type { ScreenRect } from '../../utils/diagram-projection';
 import { SparklesIcon } from '../SparklesIcon';
 import { Button } from '../ui/button';
+import { isCommentSubmitKey } from '../../utils/commentSubmitKey';
 import type { DiagramComposerDraft } from './useDiagramComments';
 
 /**
@@ -101,7 +102,10 @@ export function DiagramComposer({
       onCancel();
       return;
     }
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+    // Enter saves here whatever the "Enter saves a comment" setting says (it
+    // always has: a diagram comment is one short line); the shared check adds
+    // the IME guard Safari needs (keyCode 229) and keeps Shift+Enter a newline.
+    if (isCommentSubmitKey(event, true)) {
       event.preventDefault();
       if (canWrite && !asking && text.trim() !== '') onSubmit(text);
     }
