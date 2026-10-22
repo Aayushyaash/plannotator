@@ -136,6 +136,30 @@ describe('bare URL autolinks keep underscores (Workspaces ids: ws_, doc_, prj_)'
     expect(html).toContain('</a>)');
   });
 
+  test('a trailing ! stays outside the link', () => {
+    const html = renderInline('see https://a.com/a_b!');
+    expect(linkHrefs(html)).toEqual(['https://a.com/a_b']);
+    expect(html).toContain('</a>!');
+  });
+
+  test('$ inside a URL stays in it', () => {
+    expect(linkHrefs(renderInline('pay https://a.com/x$y_z ok'))).toEqual(['https://a.com/x$y_z']);
+  });
+
+  // Guards the one-pass path: a URL that ends inside its plain-text chunk
+  // must not get a loop turn of its own (each turn rescans the rest of the
+  // text). 32,000 URLs render in about 0.1 s in one pass and several seconds
+  // with a turn per URL, so the budget is far from both.
+  test('a paragraph of many plain URLs renders in one pass', () => {
+    const n = 32_000;
+    const text = Array.from({ length: n }, (_, i) => `https://a.com/p${i}`).join(' ');
+    const started = performance.now();
+    const html = renderInline(text);
+    const elapsed = performance.now() - started;
+    expect(html.split('<a ').length - 1).toBe(n);
+    expect(elapsed).toBeLessThan(2_000);
+  });
+
   test('@ and # inside a URL stay in it', () => {
     expect(linkHrefs(renderInline('at https://a.com/@user_1#top'))).toEqual(['https://a.com/@user_1#top']);
   });
