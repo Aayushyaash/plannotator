@@ -16,6 +16,8 @@ import type { AnnotationScope, AnnotationDocumentGroup } from '../utils/annotati
 import type { QuestionPanelRow } from '../utils/questionAnswers';
 import { QuestionsPanelSection } from './QuestionsPanelSection';
 import { HostTitle } from './HostTitle';
+import { isCommentSubmitKey } from '../utils/commentSubmitKey';
+import { useConfigValue } from '../config/useConfig';
 
 // Card type-word colors. Deletion uses `destructive` (reliably red on every
 // theme, matching the in-document .deletion highlight). Comment uses the
@@ -929,6 +931,7 @@ const AnnotationEditComposer: React.FC<{
   const mention = useMentionAutocomplete({ text: value, setText: onChange, textareaRef, source: mentionSource });
   const listboxId = `annotation-card-mentions-${useId().replace(/:/g, '')}`;
   const menuOpen = mention.menu !== null;
+  const enterSavesComment = useConfigValue('enterSavesComment');
 
   // Focus-on-open, unchanged: this component mounts exactly when editing starts.
   useEffect(() => {
@@ -943,7 +946,7 @@ const AnnotationEditComposer: React.FC<{
     // (and only a second Escape cancels the edit), and an arrowed-to row
     // takes Enter. Mod+Enter is never consumed by the menu.
     if (mention.onKeyDown(e)) return;
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+    if (isCommentSubmitKey(e, enterSavesComment)) {
       e.preventDefault();
       onSave(mention.mentionIds);
     } else if (e.key === 'Escape') {
@@ -1203,6 +1206,7 @@ const CodeAnnotationCard: React.FC<{
 }> = ({ annotation, isSelected, isMe, onSelect, onDelete, onEdit, readOnly = false }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState(annotation.text || '');
+  const enterSavesComment = useConfigValue('enterSavesComment');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -1299,7 +1303,7 @@ const CodeAnnotationCard: React.FC<{
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+              if (isCommentSubmitKey(e, enterSavesComment)) {
                 e.preventDefault();
                 handleSaveEdit();
               } else if (e.key === 'Escape') {

@@ -101,6 +101,12 @@ interface SettingsProps {
    * true; a host that omits it keeps the pre-parity annotate tab set.
    */
   annotateParity?: boolean;
+  /**
+   * Hide General's "Enter saves a comment" row (#1934). Default false: the
+   * row shows. A host that drives the `enterSavesComment` setting itself, or
+   * never wants it offered, passes true.
+   */
+  hideEnterSavesComment?: boolean;
   onUIPreferencesChange?: (prefs: UIPreferences) => void;
   /** Claude Code's permission mode was changed here (plan review). The host
    *  keeps its own copy in step, since its Approve sends the mode and its
@@ -1011,7 +1017,7 @@ const CommentsTab: React.FC = () => {
   );
 };
 
-export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', annotateParity = false, onUIPreferencesChange, onPermissionModeChange, externalOpen, onExternalClose, aiProviders = [], gitUser, autoUpdateSetting, updateCheckSetting, agentToolSetting, onAgentToolChange, sinceBaseUnavailable, isCompactTouchLayout = false, onDetectObsidianVaults, agentTerminalAvailable = false, webmcpAvailable = false }) => {
+export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', annotateParity = false, onUIPreferencesChange, onPermissionModeChange, externalOpen, onExternalClose, aiProviders = [], gitUser, autoUpdateSetting, updateCheckSetting, agentToolSetting, onAgentToolChange, sinceBaseUnavailable, isCompactTouchLayout = false, onDetectObsidianVaults, agentTerminalAvailable = false, webmcpAvailable = false, hideEnterSavesComment = false }) => {
   const webmcpTools = useWebMcpToolsEnabled();
   const autoUpdate = useConfigValue('autoUpdate');
   const updateChecksOn = updateCheckSetting ? updateCheckSetting.on : true;
@@ -1045,6 +1051,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
   const gridEnabled = useConfigValue('gridEnabled');
   const diagramShadow = useConfigValue('diagramShadow');
   const vimModeEnabled = useConfigValue('vimModeEnabled');
+  const enterSavesComment = useConfigValue('enterSavesComment');
   const vimHudEnabled = useConfigValue('vimHudEnabled');
   const vimHudKeyPanelEnabled = useConfigValue('vimHudKeyPanelEnabled');
   const agentTerminalSide = useConfigValue('agentTerminalSide');
@@ -1451,6 +1458,22 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
                         )}
                       </div>
                     </div>
+
+                    {/* Enter saves a comment (#1934): opt-in, cookie-only.
+                        Governs every comment composer; never the decision keys. */}
+                    {!hideEnterSavesComment && (
+                      <>
+                        <div className="border-t border-border" />
+                        <div data-enter-saves-comment-setting="true">
+                          <ToggleSwitch
+                            checked={enterSavesComment}
+                            onChange={(v) => configStore.set('enterSavesComment', v)}
+                            label="Enter saves a comment"
+                            description={`Shift+Enter adds a new line. ${modKeyWord}+Enter still saves.`}
+                          />
+                        </div>
+                      </>
+                    )}
 
                     {/* Update notices: on by default. Writes updateCheck to
                         ~/.plannotator/config.json; off makes no request to GitHub. */}

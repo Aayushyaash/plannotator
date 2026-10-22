@@ -2,6 +2,8 @@ import React, { useRef } from 'react';
 import { Dialog } from '@base-ui/react/dialog';
 import { SparklesIcon } from '@plannotator/ui/components/SparklesIcon';
 import { useReviewAnnotationToolbarShortcuts } from '@plannotator/ui/shortcuts';
+import { useConfigValue } from '@plannotator/ui/config';
+import { isCommentSubmitKey } from '@plannotator/ui/utils/commentSubmitKey';
 
 interface ExpandedCommentDialogProps {
   title: string;
@@ -40,6 +42,7 @@ export const ExpandedCommentDialog: React.FC<ExpandedCommentDialogProps> = ({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const askAIEnabled = aiAvailable && !!onAskAI && commentText.trim().length > 0;
   const submitLabel = isEditing ? 'Update' : 'Add Comment';
+  const enterSavesComment = useConfigValue('enterSavesComment');
 
   useReviewAnnotationToolbarShortcuts({
     target: 'document',
@@ -126,6 +129,14 @@ export const ExpandedCommentDialog: React.FC<ExpandedCommentDialogProps> = ({
               ref={textareaRef}
               value={commentText}
               onChange={(event) => setCommentText(event.target.value)}
+              onKeyDown={(event) => {
+                // Mod+Enter is the shortcut scope's (above). A plain Enter saves
+                // only with "Enter saves a comment" on; Shift+Enter stays a newline.
+                if (event.metaKey || event.ctrlKey) return;
+                if (!isCommentSubmitKey(event, enterSavesComment)) return;
+                event.preventDefault();
+                if (canSubmit) onSubmit();
+              }}
               placeholder="Leave feedback..."
               className="w-full h-full min-h-0 max-h-full bg-muted text-sm leading-relaxed placeholder:text-muted-foreground resize-y focus:outline-none rounded-lg border-0 px-3 py-2"
             />
