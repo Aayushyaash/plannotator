@@ -388,10 +388,23 @@ button.ib-mut { border-radius: 6px; }
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.ib-mk { width: 16px; height: 16px; flex: none; display: inline-flex; align-items: center; justify-content: center; }
-.ib-mk > svg, .ib-mk > img { width: 16px; height: 16px; display: block; }
-.ib-mk.ib-big { width: 30px; height: 30px; border-radius: var(--ib-r9-s, 8px); background: var(--muted); }
-.ib-mk.ib-big > svg, .ib-mk.ib-big > img { width: 17px; height: 17px; }
+/* Agent marks: one size scale, 16, 20, 24, 30, 44, each with its corner (16 → 5, 20 → 6, 24 → 6, 30 → 9,
+   44 → 10). The owner's design-system ruling q12 (2026-10-22): no other size anywhere. A mark is .ib-mk:
+   bare, its glyph is the mark (16 in rows and menus); .ib-big, a tile on --muted with the glyph inside
+   (-g). Every place that sizes a mark takes its width, height and corner from here (agentMarkScale.test.ts).
+   30's corner is Soft's (--ib-soft-shape; 8 with Soft off, today's). Declared on :root too, for marks in
+   popovers portaled out of .pn-inbox; .pn-inbox computes them again with its Soft switches. */
+:root, .pn-inbox {
+  --ib-mark-16: 16px; --ib-mark-16-r: 5px; --ib-mark-16-g: 10px;
+  --ib-mark-20: 20px; --ib-mark-20-r: 6px; --ib-mark-20-g: 12px;
+  --ib-mark-24: 24px; --ib-mark-24-r: 6px; --ib-mark-24-g: 14px;
+  --ib-mark-30: 30px; --ib-mark-30-r: var(--ib-r9-s, 8px); --ib-mark-30-g: 17px;
+  --ib-mark-44: 44px; --ib-mark-44-r: 10px; --ib-mark-44-g: 24px;
+}
+.ib-mk { width: var(--ib-mark-16); height: var(--ib-mark-16); flex: none; display: inline-flex; align-items: center; justify-content: center; }
+.ib-mk > svg, .ib-mk > img { width: var(--ib-mark-16); height: var(--ib-mark-16); display: block; }
+.ib-mk.ib-big { width: var(--ib-mark-30); height: var(--ib-mark-30); border-radius: var(--ib-mark-30-r); background: var(--muted); }
+.ib-mk.ib-big > svg, .ib-mk.ib-big > img { width: var(--ib-mark-30-g); height: var(--ib-mark-30-g); }
 
 /* shell */
 .ib-shell { display: flex; height: 100%; width: 100%; overflow: hidden; }
@@ -525,7 +538,7 @@ button.ib-mut { border-radius: 6px; }
 .pn-inbox .ib-cpill:hover { background: var(--ib-sidectl-hover-s, color-mix(in oklch, var(--muted) 60%, transparent)); }
 .pn-inbox .ib-cpill:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .ib-cpill-ags { display: inline-flex; gap: 3px; flex: none; color: var(--foreground); }
-.ib-cpill-ag { display: block; width: 16px; height: 16px; flex: none; }
+.ib-cpill-ag { display: block; width: var(--ib-mark-16); height: var(--ib-mark-16); flex: none; }
 .ib-cpill-l { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pn-inbox .ib-cpill svg.ib-ic { flex: none; margin-right: -3px; color: var(--muted-foreground); transition: none; }
 .ib-cpill[data-connect-prompt="copied"] svg.ib-ic { color: var(--success); }
@@ -1886,8 +1899,8 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
 @media (prefers-reduced-motion: reduce) {
   .ib-msg[data-revealed], .ib-fline[data-revealed] .ib-fl-meta { animation: none; }
 }
-.ib-fline .ib-mk.ib-big { width: 24px; height: 24px; border-radius: var(--ib-r8-s, 6px); }
-.ib-fline .ib-mk.ib-big > svg, .ib-fline .ib-mk.ib-big > img { width: 14px; height: 14px; }
+.ib-fline .ib-mk.ib-big { width: var(--ib-mark-24); height: var(--ib-mark-24); border-radius: var(--ib-mark-24-r); }
+.ib-fline .ib-mk.ib-big > svg, .ib-fline .ib-mk.ib-big > img { width: var(--ib-mark-24-g); height: var(--ib-mark-24-g); }
 .ib-fl-nm { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ib-fl-sn { color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .ib-fl-sn b { font-weight: 600; color: var(--foreground); }
@@ -2419,8 +2432,8 @@ label.ib-anote-r:hover { background: color-mix(in oklch, var(--muted) 40%, trans
 .ib-anote-table > li:last-child .ib-anote-r { border-radius: 0 0 9px 9px; }
 .ib-anote-table > li:only-child .ib-anote-r { border-radius: 9px; }
 .ib-anote-r > input[type="checkbox"] { grid-area: chk; width: 16px; height: 16px; margin: 0; accent-color: var(--primary); }
-.ib-anote-r > .ib-mk { grid-area: mk; width: 20px; height: 20px; }
-.ib-anote-r > .ib-mk > svg, .ib-anote-r > .ib-mk > img { width: 18px; height: 18px; }
+.ib-anote-r > .ib-mk { grid-area: mk; width: var(--ib-mark-20); height: var(--ib-mark-20); }
+.ib-anote-r > .ib-mk > svg, .ib-anote-r > .ib-mk > img { width: var(--ib-mark-20); height: var(--ib-mark-20); }
 .ib-anote-main { grid-area: main; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .ib-anote-st { grid-area: st; display: flex; justify-content: flex-end; min-width: 0; }
 .ib-anote-name { font-weight: 600; font-size: var(--ib-fs-13-5, 13.5px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
@@ -2480,8 +2493,8 @@ label.ib-anote-r:hover { background: color-mix(in oklch, var(--muted) 40%, trans
 .ib-cn { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 4px 16px; padding: 20px 22px; border: 1px solid color-mix(in oklch, var(--primary) 50%, var(--border)); border-radius: 12px; background: var(--card); box-shadow: var(--card-shadow); }
 .ib-cn > * { grid-column: 2; min-width: 0; }
 .ib-cn > .ib-cn-mark { grid-column: 1; grid-row: 1 / span 3; }
-.ib-cn-mark .ib-mk.ib-big { width: 44px; height: 44px; border-radius: 10px; }
-.ib-cn-mark .ib-mk.ib-big > svg, .ib-cn-mark .ib-mk.ib-big > img { width: 24px; height: 24px; }
+.ib-cn-mark .ib-mk.ib-big { width: var(--ib-mark-44); height: var(--ib-mark-44); border-radius: var(--ib-mark-44-r); }
+.ib-cn-mark .ib-mk.ib-big > svg, .ib-cn-mark .ib-mk.ib-big > img { width: var(--ib-mark-44-g); height: var(--ib-mark-44-g); }
 .ib-cn-eb { font-size: var(--ib-fs-12, 12px); font-weight: 600; color: var(--primary); letter-spacing: 0.02em; }
 .ib-cn-eb .ib-cn-ebl { text-transform: uppercase; }
 .ib-empty .ib-cn h3 { font-size: var(--ib-fs-18, 18px); font-weight: 650; letter-spacing: -0.01em; }
@@ -2516,14 +2529,17 @@ label.ib-anote-r:hover { background: color-mix(in oklch, var(--muted) 40%, trans
 .ib-cl li.ib-cl-now { font-weight: 550; }
 .ib-cl li.ib-cl-now .ib-cl-ring { border-color: var(--primary); background: color-mix(in oklch, var(--primary) 25%, transparent); }
 .ib-cn-smark { display: inline-flex; flex: none; }
-.ib-cn-smark .ib-mk.ib-big { width: 22px; height: 22px; border-radius: 6px; }
-.ib-cn-smark .ib-mk.ib-big > svg, .ib-cn-smark .ib-mk.ib-big > img { width: 13px; height: 13px; }
+/* Beside 13.5 px text and the 14 px ticks and rings of "Already connected" and "Left to do": the scale's 20 (was 22). */
+.ib-cn-smark .ib-mk.ib-big { width: var(--ib-mark-20); height: var(--ib-mark-20); border-radius: var(--ib-mark-20-r); }
+.ib-cn-smark .ib-mk.ib-big > svg, .ib-cn-smark .ib-mk.ib-big > img { width: var(--ib-mark-20-g); height: var(--ib-mark-20-g); }
 /* A phone (PHONE_QUERY): one column, the mark above the eyebrow, full-width 44 px buttons. */
 @media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
   .ib-empty { padding-top: 14px; }
   .ib-cn { grid-template-columns: minmax(0, 1fr); padding: 16px; }
   .ib-cn > *, .ib-cn > .ib-cn-mark { grid-column: 1; grid-row: auto; }
-  .ib-cn-mark .ib-mk.ib-big { width: 36px; height: 36px; }
+  /* The card's mark on a phone: the scale's 30 (was 36), the size of the phone's other agent tiles. */
+  .ib-cn-mark .ib-mk.ib-big { width: var(--ib-mark-30); height: var(--ib-mark-30); border-radius: var(--ib-mark-30-r); }
+  .ib-cn-mark .ib-mk.ib-big > svg, .ib-cn-mark .ib-mk.ib-big > img { width: var(--ib-mark-30-g); height: var(--ib-mark-30-g); }
   .ib-cn-acts .ib-btn { flex: 1; justify-content: center; }
   .ib-cl { grid-template-columns: minmax(0, 1fr); }
   .ib-try-quote { font-size: var(--ib-fs-14, 14px); }
@@ -2937,9 +2953,10 @@ dialog.ib-cp::backdrop { background: oklch(0 0 0 / 0.45); }
 .ib-drafts-n { color: var(--muted-foreground); font-size: var(--ib-fs-14, 14px); }
 .ib-drafts-empty { color: var(--muted-foreground); font-size: var(--ib-fs-14, 14px); }
 .ib-draft { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--ib-hair); }
-.pn-inbox .ib-draft-open { flex: 1; min-width: 0; display: grid; grid-template-columns: 36px minmax(0, 1fr) max-content; align-items: center; gap: 14px; padding: 12px 8px 12px 0; border: 0; background: none; text-align: left; color: var(--foreground); }
+.pn-inbox .ib-draft-open { flex: 1; min-width: 0; display: grid; grid-template-columns: var(--ib-mark-30) minmax(0, 1fr) max-content; align-items: center; gap: 14px; padding: 12px 8px 12px 0; border: 0; background: none; text-align: left; color: var(--foreground); }
 .pn-inbox .ib-draft-open:hover { background: color-mix(in oklch, var(--muted) 30%, transparent); }
-.ib-draft-mk { width: 36px; height: 36px; border-radius: 9px; background: var(--muted); display: inline-flex; align-items: center; justify-content: center; color: var(--muted-foreground); }
+/* A draft's mark: the scale's 30 (was a 36 tile around the 30 mark). */
+.ib-draft-mk { width: var(--ib-mark-30); height: var(--ib-mark-30); border-radius: var(--ib-mark-30-r); background: var(--muted); display: inline-flex; align-items: center; justify-content: center; color: var(--muted-foreground); }
 .ib-draft-mk .ib-mk.ib-big { background: transparent; }
 .ib-draft-t { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
 .ib-draft-to { font-size: var(--ib-fs-13, 13px); color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -3424,7 +3441,6 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
 /* Drafts: Soft rows. */
 .ib-draft { border-bottom-color: var(--ib-sep-s, var(--ib-hair)); }
 .pn-inbox .ib-draft-open:hover { background: var(--ib-hover-s, color-mix(in oklch, var(--muted) 30%, transparent)); }
-.ib-draft-mk { border-radius: var(--ib-r11-s, 9px); }
 
 /* What's new: its bar shares the panes' hairline; the release card is raised. */
 .ib-wn-bar { border-bottom-color: var(--ib-sep-s, var(--border)); }
@@ -3482,8 +3498,9 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
 .ib-tg-opt { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 8px; cursor: pointer; min-width: 0; }
 .ib-tg-opt:hover { background: color-mix(in oklch, var(--muted) 55%, transparent); }
 .ib-tg-opt[aria-selected="true"] { background: var(--muted); }
-.ib-tg-opt .ib-mk.ib-big { width: 22px; height: 22px; border-radius: 6px; }
-.ib-tg-opt .ib-mk.ib-big > svg, .ib-tg-opt .ib-mk.ib-big > img { width: 14px; height: 14px; }
+/* Beside a two-line option (name over detail): the scale's 24 (was 22; 26 on a phone). */
+.ib-tg-opt .ib-mk.ib-big { width: var(--ib-mark-24); height: var(--ib-mark-24); border-radius: var(--ib-mark-24-r); }
+.ib-tg-opt .ib-mk.ib-big > svg, .ib-tg-opt .ib-mk.ib-big > img { width: var(--ib-mark-24-g); height: var(--ib-mark-24-g); }
 .ib-tg-opt[aria-selected="true"] .ib-mk.ib-big { background: var(--card); }
 .ib-tg-ol { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
 .ib-tg-on { font-weight: 600; color: var(--foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3522,8 +3539,9 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
 
 /* Several agents on one thread: overlapping marks (the row, the thread head). */
 .ib-tg-stack { display: inline-flex; align-items: center; flex: none; }
-.ib-tg-stack .ib-mk { width: 18px; height: 18px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 1.5px var(--card); }
-.ib-tg-stack .ib-mk > svg, .ib-tg-stack .ib-mk > img { width: 13px; height: 13px; }
+/* The scale's 20, square like every agent mark (was an 18 px circle). */
+.ib-tg-stack .ib-mk { width: var(--ib-mark-20); height: var(--ib-mark-20); border-radius: var(--ib-mark-20-r); background: var(--muted); box-shadow: 0 0 0 1.5px var(--card); }
+.ib-tg-stack .ib-mk > svg, .ib-tg-stack .ib-mk > img { width: var(--ib-mark-20-g); height: var(--ib-mark-20-g); }
 .ib-tg-stack .ib-mk + .ib-mk { margin-left: -5px; }
 .ib-tg-plus { display: inline-flex; align-items: center; height: 16px; margin-left: 3px; padding: 0 5px; border-radius: 999px; font-size: var(--ib-fs-10-5, 10.5px); font-weight: 600; color: var(--muted-foreground); background: var(--muted); }
 .ib-tg-hwho { display: inline-flex; align-items: center; gap: 6px; color: var(--foreground); font-weight: 500; min-width: 0; }
@@ -3534,7 +3552,6 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
 @media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
   .ib-tg-menu { left: -1px; right: -1px; margin-bottom: 10px; max-height: min(300px, calc(var(--ib-vvh, 100dvh) * 0.45)); }
   .ib-tg-opt { min-height: 44px; }
-  .ib-tg-opt .ib-mk.ib-big { width: 26px; height: 26px; }
   .ib-tg-on { font-size: var(--ib-fs-14, 14px); }
   .ib-tg-od { font-size: var(--ib-fs-12-5, 12.5px); }
   .ib-tg-goes { gap: 5px; }
