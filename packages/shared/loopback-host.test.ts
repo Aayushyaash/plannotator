@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isLoopbackHostHeader } from "./loopback-host";
+import { isLoopbackForwardedFor, isLoopbackHostHeader } from "./loopback-host";
 
 describe("isLoopbackHostHeader", () => {
 	test("accepts loopback names carrying the server's own port", () => {
@@ -31,7 +31,6 @@ describe("isLoopbackHostHeader", () => {
 	});
 
 	test("isLoopbackForwardedFor", () => {
-		const { isLoopbackForwardedFor } = require("./loopback-host");
 		expect(isLoopbackForwardedFor("127.0.0.1")).toBe(true);
 		expect(isLoopbackForwardedFor("127.0.0.1, 127.0.0.2")).toBe(true);
 		expect(isLoopbackForwardedFor("localhost")).toBe(true);
