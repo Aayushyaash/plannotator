@@ -85,6 +85,7 @@ jobs:
           packages/review-editor/components/DiffViewer.imagePreview.test.tsx
           packages/review-editor/components/DiffViewer.headerControls.test.tsx
           packages/review-editor/components/DiffViewer.markdownPreview.test.tsx
+          packages/review-editor/components/DiffViewer.changeNavigation.test.tsx
 
       # Seam contracts + the remaining DOM-gated tests. Scoped to the DOM files
       # (not the whole ui suite) to keep this process light. Files get isolated
@@ -168,6 +169,7 @@ jobs:
           packages/inbox/listHeaderCompose.test.tsx
           packages/inbox/composeThread.test.tsx
           packages/inbox/sendNow.test.tsx
+          packages/inbox/undelivered.test.tsx
           packages/inbox/tagAgents.test.tsx
           packages/inbox/restartWarning.test.tsx
           packages/inbox/pasteFiles.test.tsx
@@ -204,6 +206,7 @@ jobs:
           packages/inbox/openIn.test.tsx
           packages/inbox/htmlLinks.test.tsx
           packages/inbox/videoAttachment.test.tsx
+          packages/inbox/commentSubmitKey.test.tsx
           packages/inbox/skillReferences.test.tsx
           packages/inbox/messageComments.test.tsx
           packages/ui/components/HumanOnlySkillNotice.test.tsx
@@ -230,6 +233,7 @@ jobs:
           packages/ui/components/Viewer.diagramLazyRestore.test.tsx
           packages/ui/components/Viewer.diagramAnchorHostile.test.tsx
           packages/ui/components/CommentPopover.skillReferences.test.tsx
+          packages/ui/components/commentSubmitKey.composers.test.tsx
           packages/ui/components/CommentPopover.mentionChips.test.tsx
           packages/ui/components/SkillReferenceMenu.placement.test.tsx
           packages/ui/components/sidebar/FileBrowser.test.ts
@@ -250,6 +254,7 @@ jobs:
           packages/review-editor/components/AllFilesCodeView.autoViewed.test.tsx
           packages/review-editor/components/AllFilesCodeView.imagePreview.test.tsx
           packages/review-editor/components/AllFilesCodeView.markdownPreview.test.tsx
+          packages/review-editor/components/AllFilesCodeView.changeNavigation.test.tsx
           packages/review-editor/components/MarkdownFilePreview.test.tsx
           packages/review-editor/hooks/useMarkdownPreview.test.tsx
           packages/review-editor/components/MarkdownViewMenu.test.tsx
@@ -264,6 +269,7 @@ jobs:
           packages/review-editor/components/TokenHoverCard.test.tsx
           packages/review-editor/components/TokenHoverAnnouncementDialog.test.tsx
           packages/review-editor/utils/stitchTokenIdentifier.test.ts
+          packages/review-editor/utils/diffSelection.test.ts
           packages/review-editor/hooks/useAutoViewed.test.tsx
           packages/review-editor/hooks/useReviewProgress.test.tsx
           packages/review-editor/hooks/useCallFlowAnalysis.test.tsx
@@ -320,6 +326,7 @@ jobs:
           packages/editor/App.agentTool.test.tsx
           packages/ui/hooks/useFirstRunAnnouncementWindow.test.tsx
           packages/review-editor/components/ReviewSidebar.generalComment.test.tsx
+          packages/review-editor/components/commentSubmitKey.review.test.tsx
           packages/review-editor/components/ReviewSidebar.outdated.test.tsx
           packages/ui/components/HtmlSurfaceControls.test.tsx
           packages/ui/components/AnnotationPanel.unanchored.test.tsx

@@ -18,6 +18,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { unsentReply } from './unsent';
+import { configStore } from '@plannotator/ui/config';
 
 const hasDom = typeof document !== 'undefined';
 const { InboxApp } = (hasDom ? await import('./App') : {}) as typeof import('./App');
@@ -64,7 +65,7 @@ function loopback(path: string, method = 'GET', body?: string): Promise<{ status
   });
 }
 
-const TESTS = 32;
+const TESTS = 33;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -226,6 +227,28 @@ test.skipIf(!hasDom)('typed words are saved while typing, and come back in the b
   const again = await renderApp(`#thread=${world.waiting}`);
   await until(() => (again.querySelector('textarea') as HTMLTextAreaElement | null)?.value === 'Pagefind, but index the changelog too', 'the words back');
   expect(document.activeElement).not.toBe(again.querySelector('textarea'));
+});
+
+test.skipIf(!hasDom)('the reply box is a message, not a comment: "Enter saves a comment" leaves its Enter a new line (#1934)', async () => {
+  configStore.set('enterSavesComment', true);
+  try {
+    const el = await renderApp(`#thread=${world.waiting}`);
+    await until(() => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Reply'), 'the foot');
+    act(() => button(el, 'Reply').click());
+    await settle();
+    type(el, 'Pagefind');
+    const box = el.querySelector('textarea') as HTMLTextAreaElement;
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    act(() => {
+      box.dispatchEvent(enter);
+    });
+    await settle();
+    expect(enter.defaultPrevented).toBe(false);
+    expect(posted.some((p) => p.path.endsWith('/reply'))).toBe(false);
+    expect(el.querySelector('textarea')).not.toBeNull();
+  } finally {
+    configStore.set('enterSavesComment', false);
+  }
 });
 
 test.skipIf(!hasDom)('leaving the thread before the pause in typing still saves the words', async () => {

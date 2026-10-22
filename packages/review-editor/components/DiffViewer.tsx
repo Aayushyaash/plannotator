@@ -30,7 +30,7 @@ import { ImageDiffPreview } from './ImageDiffPreview';
 import { isFileScopedAnnotation, lineRangeForAnnotation } from '../utils/annotationScope';
 import { lineAnnotationMetadata } from '../utils/annotationDisplay';
 import type { AnnotationScrollTarget } from '../types';
-import { getLineNumberFromNode, getSideFromNode, getDiffSelection } from '../utils/diffSelection';
+import { getLineNumberFromNode, getSideFromNode, getDiffSelection, snapshotDiffSelection, rangeForGutterClick, type DiffSelectionSnapshot } from '../utils/diffSelection';
 import { isContentConsistentWithPatch } from '../utils/patchConsistency';
 import { hashString } from '../utils/hashString';
 import { markdownPreviewSourcePath, markdownViewsFor, resolveMarkdownView, type MarkdownFileView } from '../utils/markdownPreview';
@@ -49,6 +49,15 @@ import {
   resolveLineSelectionBehavior,
   type LineSelectionSource,
 } from '../utils/lineSelectionBehavior';
+import {
+  changeJumpDirection,
+  findChangeElement,
+  listDiffChanges,
+  placementOf,
+  readingLineFor,
+  resolveChangeJump,
+  type ChangePlacement,
+} from '../utils/changeNavigation';
 
 interface PierreDiffContentProps {
   filePath: string;
@@ -189,6 +198,10 @@ interface DiffViewerProps {
   prUrl?: string;
   prDiffScope?: string;
   isFocused?: boolean;
+  /** `N` / `Shift+N` step through this file's changes (#1543). On only for the
+   *  focused file of the active single-file panel, so one key never moves two
+   *  diffs. */
+  changeNavigation?: boolean;
   diffStyle: 'split' | 'unified';
   diffOverflow?: 'scroll' | 'wrap';
   diffIndicators?: 'bars' | 'classic' | 'none';
@@ -296,6 +309,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   prUrl,
   prDiffScope,
   isFocused = false,
+  changeNavigation = false,
   diffStyle,
   diffOverflow,
   diffIndicators = 'bars',
@@ -362,6 +376,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
     useOverlayViewport<HTMLDivElement>();
   const splitSurfaceRef = useRef<HTMLDivElement>(null);
   const diffContentRef = useRef<HTMLDivElement>(null);
+  const selectionSnapshotRef = useRef<DiffSelectionSnapshot | null>(null);
   const [fileCommentAnchor, setFileCommentAnchor] = useState<HTMLElement | null>(null);
 
   // Resizable split pane — only applies when Pierre renders a two-column grid
@@ -835,12 +850,34 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   }, [onLineSelection]);
 
   const handleGutterUtilityClick = useCallback((range: SelectedLineRange) => {
-    handleLineSelectionInteraction('gutter-comment-action', range);
+    const snapshot = selectionSnapshotRef.current;
+    selectionSnapshotRef.current = null;
+    const effectiveRange = rangeForGutterClick(range, snapshot);
+    handleLineSelectionInteraction('gutter-comment-action', effectiveRange);
   }, [handleLineSelectionInteraction]);
 
   useEffect(() => {
     const root = diffContentRef.current;
     if (!root) return;
+    let clearTimer: ReturnType<typeof setTimeout> | null = null;
+    const onPointerDown = () => {
+      if (clearTimer) {
+        clearTimeout(clearTimer);
+        clearTimer = null;
+      }
+      selectionSnapshotRef.current = snapshotDiffSelection(root);
+    };
+    const onCancel = () => {
+      selectionSnapshotRef.current = null;
+    };
+    const onPointerUp = () => {
+      clearTimer = setTimeout(() => {
+        selectionSnapshotRef.current = null;
+      }, 200);
+    };
+    root.addEventListener('pointerdown', onPointerDown, true);
+    root.addEventListener('pointercancel', onCancel, true);
+    root.addEventListener('pointerup', onPointerUp, true);
     const handler = () => {
       requestAnimationFrame(() => {
         const selection = getDiffSelection(root);
@@ -859,13 +896,69 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
       });
     };
     root.addEventListener('mouseup', handler, true);
-    return () => root.removeEventListener('mouseup', handler, true);
+    return () => {
+      if (clearTimer) clearTimeout(clearTimer);
+      root.removeEventListener('pointerdown', onPointerDown, true);
+      root.removeEventListener('pointercancel', onCancel, true);
+      root.removeEventListener('pointerup', onPointerUp, true);
+      root.removeEventListener('mouseup', handler, true);
+    };
     // The diff body unmounts while collapsed or previewed; re-attach to the new one.
   }, [collapsed, markdownPreviewEnabled]);
 
   const handlePierreLineSelectionEnd = useCallback((range: SelectedLineRange | null) => {
     handleLineSelectionInteraction('range-gesture', range);
   }, [handleLineSelectionInteraction]);
+  // N / Shift+N: the next / previous change of this file (#1543). Single-file
+  // diffs are not line-virtualized, so every change's first line is in the DOM.
+  const changes = useMemo(() => listDiffChanges(augmentedDiff?.hunks), [augmentedDiff]);
+  // The change the last jump landed on, while it is still on screen.
+  const changeCursorRef = useRef<number | null>(null);
+  useEffect(() => {
+    changeCursorRef.current = null;
+  }, [changes]);
+  const jumpChange = useCallback((direction: 'next' | 'prev'): boolean => {
+    const container = containerRef.current;
+    if (!container || changes.length === 0) return false;
+    const view = container.getBoundingClientRect();
+    const readingLine = readingLineFor(view, direction, {
+      atTop: container.scrollTop <= 1,
+      atBottom: container.scrollTop + container.clientHeight >= container.scrollHeight - 1,
+    });
+    const elements = changes.map((change) => findChangeElement(container, change));
+    const placements = elements.map((el): ChangePlacement => {
+      // Not rendered (should not happen here): count it by its order.
+      if (!el) return 'after';
+      return placementOf(el.getBoundingClientRect(), readingLine);
+    });
+    const cursor = changeCursorRef.current;
+    const cursorEl = cursor != null ? elements[cursor] : null;
+    const cursorRect = cursorEl?.getBoundingClientRect();
+    const cursorOnScreen = !!cursorRect && cursorRect.bottom > view.top && cursorRect.top < view.bottom;
+    const target = resolveChangeJump(placements, direction, cursorOnScreen ? cursor : null);
+    // No change that way: leave the key to anyone else.
+    if (target == null) return false;
+    const el = elements[target];
+    if (!el) return false;
+    changeCursorRef.current = target;
+    const rect = el.getBoundingClientRect();
+    const top = container.scrollTop + (rect.top - view.top) - view.height / 2 + rect.height / 2;
+    const reduceMotion = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    container.scrollTo({ top: Math.max(0, top), behavior: reduceMotion ? 'auto' : 'smooth' });
+    return true;
+  }, [changes]);
+
+  useEffect(() => {
+    if (!changeNavigation || collapsed || markdownPreviewEnabled) return;
+    const handler = (e: KeyboardEvent) => {
+      const direction = changeJumpDirection(e);
+      if (!direction || changes.length === 0) return;
+      if (jumpChange(direction)) e.preventDefault();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [changeNavigation, collapsed, markdownPreviewEnabled, changes, jumpChange]);
 
   // Token interaction handlers (code area clicks)
   const handleTokenClick = useCallback((props: DiffTokenEventBaseProps, event: MouseEvent) => {

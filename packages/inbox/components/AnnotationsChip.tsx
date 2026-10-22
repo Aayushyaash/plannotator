@@ -3,6 +3,8 @@ import type { InboxAnnotationRecord, InboxAttachmentState } from '@plannotator/c
 import { annotationOf, recordQuote, recordTag } from '../attachments';
 import { plural } from '../format';
 import { Icon } from '../icons';
+import { useConfigValue } from '@plannotator/ui/config';
+import { isCommentSubmitKey } from '@plannotator/ui/utils/commentSubmitKey';
 
 export interface AnnotationsChipProps {
   records: readonly InboxAnnotationRecord[];
@@ -28,6 +30,7 @@ export function AnnotationsChip({ records, attachments, onEdit, onRemove, onOpen
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const enterSavesComment = useConfigValue('enterSavesComment');
   const rootRef = useRef<HTMLDivElement>(null);
 
   // Read at the key press, not from the render that bound the listener: an Escape that lands right after a
@@ -185,7 +188,7 @@ export function AnnotationsChip({ records, attachments, onEdit, onRemove, onOpen
                       rows={2}
                       onChange={(event) => setEditing({ id: record.id, text: event.target.value })}
                       onKeyDown={(event) => {
-                        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                        if (isCommentSubmitKey(event, enterSavesComment)) {
                           event.preventDefault();
                           void run(async () => {
                             await onEdit(record, editing.text);

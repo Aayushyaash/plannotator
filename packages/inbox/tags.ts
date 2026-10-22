@@ -14,7 +14,7 @@
 import { INBOX_HOST_NAMES, type InboxMessageWire, type InboxParticipant, type InboxTag, type InboxThread } from '@plannotator/core/inbox-types';
 import type { MentionPerson } from '@plannotator/ui/utils/mentions';
 import type { TaggableModel, TaggableSession } from './api';
-import { deliveryLine, type DeliveryLine, type RecipientConnection } from './deliveryLine';
+import { deliveryLine, waitInputs, type DeliveryLine, type RecipientConnection } from './deliveryLine';
 
 /** The group heading of the agents that read the Inbox only (MCP): never woken. */
 export const TAG_READERS_GROUP = 'Reads the Inbox, not woken';
@@ -194,10 +194,20 @@ export function tagDeliveryLine(
   name: string,
   connection: RecipientConnection | null | undefined,
   time: (iso: string) => string,
+  /** The reply's id: the server's clock for it on that session ("Undelivered 3 min"). */
+  messageId?: string | null,
 ): DeliveryLine {
   if (!tag.wakes && !tag.delivery && tag.read_at) return { state: 'delivered', text: `${name} read this thread, ${time(tag.read_at)}` };
   if (!tag.wakes && !tag.delivery) return { state: 'saved', text: `Saved for ${name}. It sees it the next time it reads this thread.` };
-  return deliveryLine({ name, deliveredAt: tag.delivery?.at ?? null, time, wakes: true, sendingNow: !!tag.deliver_now_at, connection });
+  return deliveryLine({
+    name,
+    deliveredAt: tag.delivery?.at ?? null,
+    time,
+    wakes: true,
+    sendingNow: !!tag.deliver_now_at,
+    connection,
+    ...(messageId ? waitInputs(connection, messageId, { ...tag, into_turn: tag.delivery?.into_turn ?? null }) : {}),
+  });
 }
 
 /** The tags of the person's message the window reads (a wire message may carry them). */
