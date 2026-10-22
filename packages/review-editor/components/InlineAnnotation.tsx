@@ -61,6 +61,7 @@ export const InlineAnnotation: React.FC<InlineAnnotationProps> = ({
         onEdit={() => onEdit(metadata.annotationId)}
         copyText={metadata.copyText}
         onDelete={() => onDelete(metadata.annotationId)}
+        selected={isSelected}
       />
     </div>
   );

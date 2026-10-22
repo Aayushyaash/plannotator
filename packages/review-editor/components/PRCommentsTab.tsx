@@ -3,6 +3,7 @@ import type { PRContext, PRComment, PRReview, PRReviewThread } from '@plannotato
 import { MarkdownBody } from './MarkdownBody';
 import { CopyButton } from './CopyButton';
 import { DiffHunkPreview } from './DiffHunkPreview';
+import { focusCommentHunk } from '../utils/commentHunkFocus';
 import { OverlayScrollArea } from '@plannotator/ui/components/OverlayScrollArea';
 import { getItem, setItem } from '@plannotator/ui/utils/storage';
 import { Popover } from '@base-ui/react/popover';
@@ -652,7 +653,15 @@ function ThreadCard({ thread, isSelected, isCollapsed, onSelect, onToggleCollaps
           {/* Diff hunk */}
           {first.diffHunk && (
             <div className="mt-2">
-              <DiffHunkPreview hunk={first.diffHunk} maxHeight={96} />
+              <DiffHunkPreview
+                hunk={first.diffHunk}
+                collapsedHunk={focusCommentHunk(first.diffHunk, {
+                  side: thread.diffSide,
+                  line: thread.line,
+                  startLine: thread.startLine,
+                })}
+                maxHeight={96}
+              />
             </div>
           )}
 
@@ -723,7 +732,7 @@ function PRCommentLinkActions({ url, body, commentId, author, onAnnotate }: {
   if (!url && !body && !onAnnotate) return null;
 
   return (
-    <div className="mt-2 pt-2 border-t border-border/20 flex items-center justify-end gap-1 opacity-0 group-hover/card:opacity-100 transition-opacity duration-100">
+    <div className="mt-2 pt-2 border-t border-border/20 flex items-center justify-end gap-1 opacity-0 group-hover/card:opacity-100 group-focus-within/card:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity duration-100">
       {onAnnotate && commentId && (
         <button
           type="button"

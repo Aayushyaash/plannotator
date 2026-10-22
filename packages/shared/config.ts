@@ -25,6 +25,7 @@ import { execSync } from "child_process";
 import type { DefaultDiffType, DiffLineBgIntensity, DiffOptions, ThemeConfig } from '@plannotator/core/config-types';
 import { isFaviconStyle, type FaviconStyle } from './favicon';
 import { isAnnotateAgentTerminalSide, type AnnotateAgentTerminalSide } from './agent-terminal';
+import { parseAgentSwitchConfig, agentSwitchConfigValue, type AgentSwitchConfigValue } from './agent-switch';
 export type { DefaultDiffType, DiffLineBgIntensity, DiffOptions, ThemeConfig, FaviconStyle };
 
 /** Single conventional comment label entry stored in config.json */
@@ -143,6 +144,15 @@ export interface PlannotatorConfig {
    */
   agentTerminalDefaultAgent?: string;
   /**
+   * OpenCode: which agent the session switches to after a plan is approved or
+   * review feedback is sent: "disabled", an agent name, or
+   * `{ "switchTo": "custom", "customName": "<name>" }` (#1390). Written by
+   * the UI through POST /api/config, because some webviews (Glimpse) keep no
+   * cookies between runs. Unset: the surface's default (plan approval switches
+   * to "build", review feedback stays). See `@plannotator/core/agent-switch`.
+   */
+  agentSwitch?: AgentSwitchConfigValue;
+  /**
    * Enable `gh attestation verify` during CLI installation/upgrade.
    * Read by scripts/install.sh|ps1|cmd on every run (not by any runtime code).
    * When true, the installer runs build-provenance verification after the
@@ -162,7 +172,13 @@ export interface PlannotatorConfig {
    * PLANNOTATOR_SKIP_OPENCODE_INSTALL env vars, which are in turn overridden
    * by the --skip-codex / --skip-gemini / --skip-kiro / --skip-vibe /
    * --skip-opencode flags. OpenCode has no detection leg, so its entry is a
-   * plain do-not-write switch. Default: all off.
+   * plain do-not-write switch. `skills` skips the skills/slash-command
+   * checkout for every scope (PLANNOTATOR_SKIP_SKILLS_INSTALL / --skip-skills).
+   * `claudePlugin` stops the installers from updating an already-installed
+   * Claude Code plugin (`claude plugin marketplace update plannotator` +
+   * `claude plugin update plannotator@plannotator`);
+   * PLANNOTATOR_SKIP_CLAUDE_PLUGIN_UPDATE / --skip-claude-plugin
+   * (-SkipClaudePlugin). Default: all off.
    */
   skipInstall?: {
     codex?: boolean;
@@ -170,6 +186,8 @@ export interface PlannotatorConfig {
     kiro?: boolean;
     vibe?: boolean;
     opencode?: boolean;
+    skills?: boolean;
+    claudePlugin?: boolean;
   };
   /**
    * Enable Jina Reader for URL-to-markdown conversion during annotation.
@@ -230,6 +248,132 @@ export interface PlannotatorConfig {
    * this key. Default: false.
    */
   autoUpdate?: boolean;
+  /**
+   * Update notices: whether Plannotator asks GitHub (once a day per machine,
+   * from the machine, never the browser) whether a newer stable release
+   * exists, and tells you in the Inbox, the review windows and the terminal.
+   * `false` makes no automatic request at all, which also stops auto-update;
+   * `plannotator update` and the Inbox's Check now still ask when you run them.
+   * PLANNOTATOR_UPDATE_CHECK wins over this key. Default: true.
+   */
+  updateCheck?: boolean;
+  /**
+   * The Claude Code mod (apps/hook/hooks/mod/): non-blocking plan review,
+   * annotate, code review and annotate-last, plus "Ask this session", where
+   * Claude Code runs hooks modules. On by default; `false` turns it off.
+   * PLANNOTATOR_CLAUDE_MOD wins over this key. Default: true.
+   */
+  claudeCodeMod?: boolean;
+  /**
+   * The `plannotator` agent tool (packages/shared/plannotator-tool.ts) on the
+   * hosts that register it: the Claude Code mod, Pi (and the Pi extension in
+   * Oh My Pi) and OpenCode 2. `true` puts it in the agent's tool list, `false`
+   * keeps it out (the slash commands are unchanged either way). Read once when
+   * a session starts, so a change applies to the next session.
+   * PLANNOTATOR_AGENT_TOOL wins over this key. Unset: the host's default,
+   * AGENT_TOOL_DEFAULTS (on for the Claude Code mod and Oh My Pi, off on Pi
+   * and OpenCode 2).
+   */
+  agentTool?: boolean;
+  /**
+   * The Plannotator Inbox's `plannotator_inbox` tool on the hosts that will
+   * register it (the Claude Code mod, Pi, OpenCode 2), set from the Inbox's
+   * own Settings: `true` / `false` for every host, or one boolean per host
+   * (`{ "claude-code": true, "pi": false }`). Read once when a session starts,
+   * so a change applies to the next session. PLANNOTATOR_INBOX_TOOL wins over
+   * this key. Unset (or a host left out): INBOX_TOOL_DEFAULTS.
+   */
+  inboxTool?: boolean | Partial<Record<InboxToolHost, boolean>>;
+  /**
+   * The Plannotator Inbox's one-line reminder at session start
+   * (INBOX_REMINDER_TEXT), on the hosts that register `plannotator_inbox`
+   * (the Claude Code mod, Pi, OpenCode), set in this file or by the Inbox's Settings → Agents: `true` / `false`
+   * for every host, or one boolean per host. It only ever applies where that
+   * session has the Inbox tool and the Inbox has run on this computer
+   * (`inbox/inbox.json` exists at session start), so the tool switch
+   * (PLANNOTATOR_INBOX_TOOL, `inboxTool`) turns it off too; there is no env
+   * var of its own. Read once when a session starts. Unset (or a host left
+   * out): on wherever the tool is on.
+   */
+  inboxReminder?: boolean | Partial<Record<InboxToolHost, boolean>>;
+  /**
+   * The Plannotator Inbox's browser notifications, set from the Inbox page
+   * (its one-time ask and its Settings), kept here rather than in the page's
+   * localStorage so they survive the Inbox moving to another port (another
+   * origin). `enabled`: notify at all (unset: on). `dismissed`: the person answered the ask with "Not now". `allowedOrigin`:
+   * the page origin where the person last turned them on, so a page on a new
+   * port asks again with "The Inbox moved to a new address".
+   */
+  inboxNotifications?: {
+    enabled?: boolean;
+    dismissed?: boolean;
+    allowedOrigin?: string | null;
+  };
+  /**
+   * The Plannotator Inbox's question sound ("Ding-dong"), set from the Inbox
+   * page (its Settings row and its one-time dialog), kept here for the same
+   * reason as `inboxNotifications`: the Inbox's port, and so its origin, can
+   * change. `enabled`: ring at all (unset: on). `volume`: 10 to 100 (unset:
+   * 60), the same on every device. `dialogDueFor`: the version whose first
+   * start found someone who used an earlier Inbox, so the one-time "The Inbox
+   * can ring now" dialog waits for a page to claim it. `dialogShownFor`: the
+   * version it was shown for (or a fresh install was marked with, so it never
+   * shows); once set it never shows again. Both are written by the server
+   * only; the claim is a compare-and-set, so only one tab ever shows it.
+   */
+  /**
+   * The Plannotator Inbox window's text size: the body size in px (12, 13,
+   * 14 or 15) its whole type ramp scales from. Unset: 14. Written by the
+   * Inbox's Settings → General → Appearance through POST /api/inbox/settings
+   * `{ text_size }`.
+   */
+  inboxTextSize?: number;
+  inboxSound?: {
+    enabled?: boolean;
+    volume?: number;
+    dialogDueFor?: string;
+    dialogShownFor?: string;
+  };
+  /**
+   * The Plannotator Inbox's note in each agent's own instructions file
+   * (packages/server/inbox-agent-notes.ts). `offered`: the window's question
+   * was answered at least once, or `plannotator inbox --notes` added a note;
+   * `asked` names each agent it covered (each agent is asked once). Which
+   * notes exist is kept in `inbox/agent-notes.json`, beside the files they are in.
+   */
+  inboxAgentNotes?: {
+    offered?: boolean;
+    /**
+     * The agents the window's question was asked about, each once (Add, Not
+     * now, Don't add a note, or `plannotator inbox --notes`). Absent before
+     * 0.28.19: `offered` alone then counts for the agents that could take a
+     * note when it is first read (notesAsked in inbox-agent-notes.ts).
+     */
+    asked?: string[];
+  };
+  /**
+   * The Plannotator Inbox's phone surface: pairing, the device door
+   * (`/api/inbox/device/*`), the tailnet and Wi-Fi listeners, the relay and
+   * Settings' Phones block. Hidden until the iPhone app ships, so `true` is
+   * for the app's own development and proofs. PLANNOTATOR_INBOX_PHONES wins
+   * over this key. Read once when the Inbox starts. Default: false.
+   */
+  inboxPhones?: boolean;
+  /**
+   * Publish the Plannotator Inbox over the tailnet (`tailscale serve`, HTTPS,
+   * never funnel) at every start, for the Tailscale login that owns this
+   * machine. Written by the Inbox's Settings ("Over your tailnet");
+   * PLANNOTATOR_INBOX_TAILSCALE wins over this key, and `plannotator inbox
+   * --tailscale` turns it on for one run. Default: false.
+   */
+  inboxTailscale?: boolean;
+  /**
+   * Extra Tailscale logins (`Tailscale-User-Login`, e.g. "me@example.com")
+   * the tailnet-published Inbox lets in besides the machine's owner: for a
+   * shared tailnet where you sign in as another login on another device, or
+   * a tagged machine, which has no owner. Config only. Default: none.
+   */
+  inboxTailscaleAllow?: string[];
   /**
    * Inject a Plannotator Flavored Markdown reminder into every EnterPlanMode
    * call so the agent is aware it can enrich plans with code-file links,
@@ -607,7 +751,7 @@ export function detectGitUser(cwd?: string): string | null {
  * Build the serverConfig payload for API responses.
  * Reads config.json fresh each call so the response reflects the latest file on disk.
  */
-export function getServerConfig(gitUser: string | null): {
+export function getServerConfig(gitUser: string | null, agentToolIntegration?: string | null): {
   displayName?: string;
   diffOptions?: DiffOptions;
   theme?: ThemeConfig;
@@ -618,11 +762,22 @@ export function getServerConfig(gitUser: string | null): {
   conventionalLabels?: CCLabelConfig[] | null;
   agentTerminalSide?: PlannotatorConfig["agentTerminalSide"];
   agentTerminalDefaultAgent?: string;
+  agentSwitch?: AgentSwitchConfigValue;
   autoUpdate: boolean;
   autoUpdateEnv?: boolean;
+  updateCheck: boolean;
+  updateCheckEnv?: boolean;
+  agentTool?: boolean;
+  agentToolConfigured?: boolean;
+  agentToolEnv?: boolean;
+  agentToolHost?: AgentToolHost;
+  agentToolEnabled?: boolean;
 } {
   const cfg = loadConfig();
   const autoUpdateEnv = parseAutoUpdateEnv();
+  const updateCheckEnv = parseUpdateCheckEnv();
+  const agentToolEnv = parseAgentToolEnv();
+  const agentToolHost = agentToolHostOf(agentToolIntegration);
   return {
     displayName: cfg.displayName,
     diffOptions: cfg.diffOptions,
@@ -643,11 +798,78 @@ export function getServerConfig(gitUser: string | null): {
       cfg.agentTerminalDefaultAgent !== "" && {
         agentTerminalDefaultAgent: cfg.agentTerminalDefaultAgent,
       }),
+    ...agentSwitchAdvert(cfg.agentSwitch),
     // Always explicit (the config-file value, default false) so a stale
     // cookie can never show the toggle on while the config says off.
     // autoUpdateEnv carries PLANNOTATOR_AUTO_UPDATE when it overrides the file.
     autoUpdate: coerceConfigBoolean(cfg.autoUpdate, false),
     ...(autoUpdateEnv !== undefined && { autoUpdateEnv }),
+    // Same shape for update notices (default true); updateCheckEnv carries
+    // PLANNOTATOR_UPDATE_CHECK when it overrides the file.
+    updateCheck: coerceConfigBoolean(cfg.updateCheck, true),
+    ...(updateCheckEnv !== undefined && { updateCheckEnv }),
+    ...agentToolAdvert(cfg, agentToolEnv, agentToolHost),
+  };
+}
+
+/**
+ * The agent switch as getServerConfig advertises it: only a value that parses
+ * (a hand-edited typo is left out, so the client keeps its cookie or the
+ * surface default), re-serialized to its canonical shape.
+ */
+function agentSwitchAdvert(value: unknown): { agentSwitch?: AgentSwitchConfigValue } {
+  const choice = parseAgentSwitchConfig(value);
+  const canonical = choice && agentSwitchConfigValue(choice);
+  return canonical !== undefined ? { agentSwitch: canonical } : {};
+}
+
+/**
+ * The POST /api/config allowlist entry for the agent switch, shared by every
+ * plan, review and annotate server in both runtimes. Returns the value to
+ * save, `undefined` when the body leaves it out, or `null` when it is present
+ * and invalid (the route answers 400 and saves nothing).
+ */
+export function agentSwitchConfigToSave(body: { agentSwitch?: unknown }): AgentSwitchConfigValue | undefined | null {
+  if (body.agentSwitch === undefined) return undefined;
+  const choice = parseAgentSwitchConfig(body.agentSwitch);
+  return (choice && agentSwitchConfigValue(choice)) ?? null;
+}
+
+/**
+ * What a Settings toggle or a one-time "turn the tool on" offer needs about
+ * the `plannotator` agent tool (see getServerConfig):
+ *  - agentToolHost: the integration that started this server, when it is one
+ *    that registers the tool (`agentToolIntegration`: the session-bridge host,
+ *    see agentToolHostOf); absent otherwise, and then so are the fields below
+ *    except a value config.json sets;
+ *  - agentTool: the config-file value, or the host's default while unset
+ *    (always explicit when the host is known, like autoUpdate);
+ *  - agentToolConfigured: whether config.json holds an explicit choice;
+ *  - agentToolEnv: PLANNOTATOR_AGENT_TOOL when it overrides the file;
+ *  - agentToolEnabled: the effective value for this host (env, then file,
+ *    then default). It describes the NEXT session: a running session read the
+ *    setting when it started and never re-reads it.
+ */
+function agentToolAdvert(
+  cfg: PlannotatorConfig,
+  env: boolean | undefined,
+  host: AgentToolHost | null,
+): {
+  agentTool?: boolean;
+  agentToolConfigured?: boolean;
+  agentToolEnv?: boolean;
+  agentToolHost?: AgentToolHost;
+  agentToolEnabled?: boolean;
+} {
+  const configured = parseConfigBoolean(cfg.agentTool);
+  if (!host) return configured !== undefined ? { agentTool: configured, agentToolConfigured: true } : {};
+  const value = configured ?? AGENT_TOOL_DEFAULTS[host];
+  return {
+    agentTool: value,
+    agentToolConfigured: configured !== undefined,
+    ...(env !== undefined && { agentToolEnv: env }),
+    agentToolHost: host,
+    agentToolEnabled: env ?? value,
   };
 }
 
@@ -688,13 +910,18 @@ export function resolveDefaultDiffType(cfg?: PlannotatorConfig): DefaultDiffType
  * plus "true"/"false"/"1"/"0" strings; anything else falls back to the default.
  */
 function coerceConfigBoolean(value: unknown, fallback: boolean): boolean {
+  return parseConfigBoolean(value) ?? fallback;
+}
+
+/** `coerceConfigBoolean` without a fallback: undefined when the value is not a recognizable boolean. */
+function parseConfigBoolean(value: unknown): boolean | undefined {
   if (typeof value === "boolean") return value;
   if (typeof value === "string") {
     const v = value.trim().toLowerCase();
     if (v === "true" || v === "1") return true;
     if (v === "false" || v === "0") return false;
   }
-  return fallback;
+  return undefined;
 }
 
 /**
@@ -800,6 +1027,286 @@ export function resolveAutoUpdate(
   const fromEnv = parseAutoUpdateEnv(env);
   if (fromEnv !== undefined) return fromEnv;
   return coerceConfigBoolean(config.autoUpdate, false);
+}
+
+/**
+ * Resolve whether Plannotator checks for a newer release and shows update
+ * notices (default on; this is the opt-out). Off also stops auto-update,
+ * which needs the check.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_UPDATE_CHECK env var  →  config.updateCheck  →  default true
+ *
+ * Env `0` / `false` / `off` / `disabled` turn it off and `1` / `true` / `on`
+ * turn it on; an empty or unrecognized value counts as unset.
+ */
+export function resolveUpdateCheck(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const fromEnv = parseUpdateCheckEnv(env);
+  if (fromEnv !== undefined) return fromEnv;
+  return coerceConfigBoolean(config.updateCheck, true);
+}
+
+/** The PLANNOTATOR_UPDATE_CHECK override, or undefined when it does not decide. */
+export function parseUpdateCheckEnv(env: NodeJS.ProcessEnv = process.env): boolean | undefined {
+  const v = env.PLANNOTATOR_UPDATE_CHECK?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return undefined;
+}
+
+/**
+ * Resolve whether the Claude Code mod is on (default on; this is the opt-out).
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_CLAUDE_MOD env var  →  config.claudeCodeMod  →  default true
+ *
+ * Env `1` / `true` / `on` turn it on and `0` / `false` / `off` / `disabled`
+ * turn it off; an empty or unrecognized value counts as unset. The mod is a
+ * hooks module that cannot import this file, so it carries a mirror
+ * (`apps/hook/hooks/mod/enabled.ts`) that `enabled.test.ts` keeps in step.
+ */
+export function resolveClaudeCodeMod(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const v = env.PLANNOTATOR_CLAUDE_MOD?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return coerceConfigBoolean(config.claudeCodeMod, true);
+}
+
+/**
+ * The hosts that register the `plannotator` agent tool. `oh-my-pi` is the Pi
+ * extension running inside Oh My Pi (a Pi fork), which the extension tells
+ * from plain Pi itself (`apps/pi-extension/pi-host.ts`): it is the same
+ * extension and the same session bridge (host `pi`), with its own default.
+ */
+export type AgentToolHost = "claude-code" | "pi" | "oh-my-pi" | "opencode";
+
+/**
+ * Whether each host registers the `plannotator` agent tool when nothing is
+ * set: the owner's call, and the one place it lives. On for the Claude Code
+ * mod (the tool is deferred behind tool search there, so it costs only its
+ * name until used) and for Oh My Pi (owner's call 2026-10-12: OMP lists an
+ * extension tool as one line in its system prompt, about 50 tokens, and loads
+ * the schema only when the model reads it); off on Pi and OpenCode 2 (a full
+ * tool definition, about 800 tokens, in every request). The mod's mirror
+ * (`apps/hook/hooks/mod/enabled.ts`) is kept equal to the claude-code entry by
+ * `enabled.test.ts`.
+ */
+export const AGENT_TOOL_DEFAULTS: Readonly<Record<AgentToolHost, boolean>> = {
+  "claude-code": true,
+  pi: false,
+  "oh-my-pi": true,
+  opencode: false,
+};
+
+/**
+ * The tool host for a server's launching integration, or null. Callers pass
+ * the session-bridge host that started the server (the Claude Code mod and
+ * the OpenCode 2 plugin hand one to the CLI), or, for the servers that run
+ * inside the Pi extension, the extension's own host (`pi` or `oh-my-pi`).
+ * Never the agent origin: an origin of claude-code or opencode also covers
+ * the classic hook and OpenCode 1, which have no tool, and the CLI's origin
+ * `oh-my-pi` is a `plannotator` run from OMP's shell, which has none either
+ * (the CLI only ever passes a session-bridge host, which is never `oh-my-pi`).
+ */
+export function agentToolHostOf(host: string | null | undefined): AgentToolHost | null {
+  return host === "claude-code" || host === "pi" || host === "oh-my-pi" || host === "opencode" ? host : null;
+}
+
+/** The PLANNOTATOR_AGENT_TOOL override, or undefined when it does not decide. */
+export function parseAgentToolEnv(env: NodeJS.ProcessEnv = process.env): boolean | undefined {
+  const v = env.PLANNOTATOR_AGENT_TOOL?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return undefined;
+}
+
+/**
+ * Resolve whether `host` registers the `plannotator` agent tool.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_AGENT_TOOL env var  →  config.agentTool  →  AGENT_TOOL_DEFAULTS[host]
+ *
+ * Env `1` / `true` / `on` turn it on and `0` / `false` / `off` / `disabled`
+ * turn it off; an empty or unrecognized value counts as unset. The env var and
+ * the config key override the host default in both directions. Hosts call it
+ * ONCE per session start and never again for that session: the tool list is
+ * part of the model's prompt, so changing it mid-session would change the
+ * prompt prefix (and miss the cache). A change applies to the next session.
+ */
+export function resolveAgentTool(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv,
+  host: AgentToolHost,
+): boolean {
+  return parseAgentToolEnv(env) ?? parseConfigBoolean(config.agentTool) ?? AGENT_TOOL_DEFAULTS[host];
+}
+
+/**
+ * The hosts that register the Inbox's `plannotator_inbox` tool. The Pi
+ * extension registers it as `pi` in Oh My Pi too: OMP has no Inbox host key
+ * of its own (yet), so `inboxTool.pi` and the Pi default decide there.
+ */
+export type InboxToolHost = "claude-code" | "pi" | "opencode";
+
+/**
+ * Whether each host registers the Inbox's `plannotator_inbox` tool when
+ * nothing is set: the agent tool's rule (on for the Claude Code mod, where
+ * tools are deferred behind tool search; off on Pi and OpenCode 2, which send
+ * every tool's full definition with each request).
+ */
+export const INBOX_TOOL_DEFAULTS: Readonly<Record<InboxToolHost, boolean>> = {
+  "claude-code": AGENT_TOOL_DEFAULTS["claude-code"],
+  pi: AGENT_TOOL_DEFAULTS.pi,
+  opencode: AGENT_TOOL_DEFAULTS.opencode,
+};
+
+export const INBOX_TOOL_HOSTS: readonly InboxToolHost[] = ["claude-code", "pi", "opencode"];
+
+/** The PLANNOTATOR_INBOX_TOOL override, or undefined when it does not decide. */
+export function parseInboxToolEnv(env: NodeJS.ProcessEnv = process.env): boolean | undefined {
+  const v = env.PLANNOTATOR_INBOX_TOOL?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return undefined;
+}
+
+/** config.inboxTool for one host: the shared boolean, the host's own entry, or undefined. */
+export function configuredInboxTool(config: PlannotatorConfig, host: InboxToolHost): boolean | undefined {
+  const value = config.inboxTool;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return parseConfigBoolean((value as Record<string, unknown>)[host]);
+  }
+  return parseConfigBoolean(value);
+}
+
+/**
+ * Resolve whether `host` registers the Inbox tool. Priority (highest wins):
+ * PLANNOTATOR_INBOX_TOOL → config.inboxTool (shared or per host) →
+ * INBOX_TOOL_DEFAULTS[host]. Hosts call it once per session start, like
+ * resolveAgentTool, so a change applies to the next session.
+ */
+export function resolveInboxTool(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv,
+  host: InboxToolHost,
+): boolean {
+  return parseInboxToolEnv(env) ?? configuredInboxTool(config, host) ?? INBOX_TOOL_DEFAULTS[host];
+}
+
+/** config.inboxReminder for one host: the shared boolean, the host's own entry, or undefined. */
+export function configuredInboxReminder(config: PlannotatorConfig, host: InboxToolHost): boolean | undefined {
+  const value = config.inboxReminder;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return parseConfigBoolean((value as Record<string, unknown>)[host]);
+  }
+  return parseConfigBoolean(value);
+}
+
+/**
+ * Resolve whether a `host` session starts with the Inbox's one-line reminder
+ * (INBOX_REMINDER_TEXT): only where that session gets the Inbox tool
+ * (resolveInboxTool), then config.inboxReminder (shared or per host), on by
+ * default. No env var of its own: PLANNOTATOR_INBOX_TOOL decides it through
+ * the tool. Hosts call it once per session start, with the tool.
+ */
+export function resolveInboxReminder(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv,
+  host: InboxToolHost,
+): boolean {
+  return resolveInboxTool(config, env, host) && (configuredInboxReminder(config, host) ?? true);
+}
+
+/**
+ * Resolve whether the Plannotator Inbox serves phones (pairing, the device
+ * door, the tailnet and Wi-Fi listeners, the relay, Settings' Phones block).
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_INBOX_PHONES env var  →  config.inboxPhones  →  default false
+ *
+ * Env `1` / `true` / `on` turn it on and `0` / `false` / `off` / `disabled`
+ * turn it off; an empty or unrecognized value counts as unset. Off until the
+ * iPhone app ships: the Inbox then does nothing phone-related at all.
+ */
+export function resolveInboxPhones(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const v = env.PLANNOTATOR_INBOX_PHONES?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return coerceConfigBoolean(config.inboxPhones, false);
+}
+
+/** The PLANNOTATOR_INBOX_TAILSCALE override, or undefined when it does not decide. */
+export function parseInboxTailscaleEnv(env: NodeJS.ProcessEnv = process.env): boolean | undefined {
+  const v = env.PLANNOTATOR_INBOX_TAILSCALE?.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "off" || v === "disabled") return false;
+  return undefined;
+}
+
+export type InboxTailscaleSource = "flag" | "env" | "config" | "default";
+
+/**
+ * Resolve whether the Plannotator Inbox publishes itself over the tailnet.
+ *
+ * Priority (highest wins):
+ *   PLANNOTATOR_INBOX_TAILSCALE  →  `plannotator inbox --tailscale` (this run,
+ *   also the control route)  →  config.inboxTailscale  →  default false
+ *
+ * The env var is a hard switch: `0` / `false` / `off` / `disabled` keeps it
+ * off even against the flag, `1` / `true` / `on` keeps it on; an empty or
+ * unrecognized value counts as unset. The flag only turns it on.
+ */
+export function resolveInboxTailscale(
+  config: PlannotatorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+  flag = false,
+): { on: boolean; source: InboxTailscaleSource } {
+  const fromEnv = parseInboxTailscaleEnv(env);
+  if (fromEnv !== undefined) return { on: fromEnv, source: "env" };
+  if (flag) return { on: true, source: "flag" };
+  const fromConfig = parseConfigBoolean(config.inboxTailscale);
+  if (fromConfig !== undefined) return { on: fromConfig, source: "config" };
+  return { on: false, source: "default" };
+}
+
+/**
+ * config.inboxTailscaleAllow, normalized: trimmed, lower-cased (logins are
+ * compared case-insensitively), deduplicated. Entries that are not strings,
+ * are empty, or carry whitespace or control characters are dropped: a login
+ * is one token.
+ */
+export function resolveInboxTailscaleAllow(config: PlannotatorConfig): string[] {
+  const value = config.inboxTailscaleAllow;
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const login = entry.trim().toLowerCase();
+    if (login === "" || /[\s\u0000-\u001f\u007f]/.test(login) || out.includes(login)) continue;
+    out.push(login);
+  }
+  return out;
+}
+
+/**
+ * After a POST /api/config saveConfig: whether an `agentTool` change did NOT
+ * reach config.json. saveConfig logs a write failure and returns normally, so
+ * the handlers check the file and answer 500 instead of `ok`: the one-time
+ * "turn the tool on" offer and the Settings switch then report that nothing
+ * changed rather than promising the tool in the next session.
+ */
+export function agentToolSaveFailed(toSave: { agentTool?: unknown }): boolean {
+  if (typeof toSave.agentTool !== "boolean") return false;
+  return parseConfigBoolean(loadConfig().agentTool) !== toSave.agentTool;
 }
 
 /** The PLANNOTATOR_AUTO_UPDATE override, or undefined when it does not decide. */

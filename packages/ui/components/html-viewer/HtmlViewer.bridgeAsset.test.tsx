@@ -113,7 +113,7 @@ describe.if(hasDom)('HtmlViewer bridgeScriptUrl', () => {
     expect(srcdoc).toContain(`<script src="${ASSET_URL}"></script>`);
     expect(srcdoc).not.toContain(BRIDGE_SCRIPT);
     // The sandbox is unchanged by the delivery path.
-    expect(iframe.getAttribute('sandbox')).toBe('allow-scripts');
+    expect(iframe.getAttribute('sandbox')).toBe('allow-scripts allow-modals');
   });
 
   test("a relative URL is resolved against the PARENT document, so a page's own <base href> cannot redirect it", async () => {

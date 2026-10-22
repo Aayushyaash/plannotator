@@ -188,6 +188,10 @@ export interface HtmlElementContext {
   component?: string;
   /** Live-app sessions only: the route the element was seen on and the page title. */
   page?: { url: string; title?: string };
+  /** Media elements only: the file the element shows, resolved by the bridge
+   *  exactly as the composer quote names it (src, data-src, srcset,
+   *  <picture>/<source>, poster), query and fragment scrubbed. */
+  sourceName?: string;
 }
 
 export type AlertKind = 'note' | 'tip' | 'warning' | 'caution' | 'important';
@@ -382,6 +386,28 @@ export interface CodeAnnotation {
    * inline on the current diff and never posted as an inline PR comment.
    */
   outdated?: boolean;
+  /**
+   * Code review only: a comment made by selecting text in a Markdown file's
+   * rendered preview. Always file-scoped (`scope: 'file'`); `lineStart` /
+   * `lineEnd` are the file-comment sentinels, not source lines. Exported with
+   * the quoted text; in PR mode it goes into the review body, never inline.
+   * Additive: annotations without it behave exactly as before.
+   */
+  markdownPreview?: MarkdownPreviewAnchor;
+}
+
+/** Where a comment made in a rendered Markdown preview points (see `CodeAnnotation.markdownPreview`). */
+export interface MarkdownPreviewAnchor {
+  /** The rendered text the reviewer selected. */
+  originalText: string;
+  /** The preview view it was made in: the rendered diff or the whole new version. */
+  view: 'diff' | 'whole';
+  /** In the rendered diff: the kind of section the selection started in. */
+  diffContext?: 'added' | 'removed' | 'modified' | 'unchanged';
+  /** web-highlighter positions, valid only in the view it was made in;
+   *  other views re-anchor by text. */
+  startMeta?: AnnotationTextMeta;
+  endMeta?: AnnotationTextMeta;
 }
 
 /** Token-level metadata passed from selection to annotation creation. */
@@ -446,6 +472,15 @@ export interface AIQuestion {
     label?: string;
     text?: string;
     sourcePath?: string;
+    /** Agent-facing identity of the selected element(s) (raw-HTML / live-app
+     *  pinpoints): sent with the question, never shown in the chat. */
+    detail?: string;
+    /** 1-based source lines of a text selection in a markdown document (the
+     *  enclosing block's span, or first to last block for a selection over
+     *  several). `buildDefaultPrompt` appends them to the `Source:` line
+     *  (`, line 41` / `, lines 41–44`). Optional: absent prints no lines. */
+    lineStart?: number;
+    lineEnd?: number;
   };
   /** undefined = general question (no file scope) */
   filePath?: string;
@@ -462,6 +497,16 @@ export interface AIResponse {
   text: string;
   isStreaming: boolean;
   error?: string;
+  /** Server error code with `error` (e.g. `agent_busy`, `session_gone` from "Ask this session"). */
+  errorCode?: string;
+  /** "Ask this session": the question is waiting for a busy session, or interrupting it. */
+  status?: 'waiting' | 'interrupting';
+  /**
+   * "Ask this session": a note shown under the answer (not an error). Set when
+   * the person typed into the session while it answered, so the answer stops
+   * where their prompt took the turn over.
+   */
+  notice?: string;
   createdAt: number;
 }
 
@@ -497,3 +542,29 @@ export type {
   MentionSource,
   MentionTrigger,
 } from './utils/mentions';
+
+/**
+ * The composer handed to the host (opt-in `onHostDraft` on `Viewer` and
+ * `HtmlViewer`; Plannotator supplies neither). With it a viewer draws no
+ * toolbar or composer of its own: it reports what a comment would be on, and
+ * the host writes the comment, saves it, and draws it as saved through
+ * `annotations` or `applySharedAnnotations`.
+ */
+export interface HostDraft {
+  /** The annotation a comment here would carry, with an empty `text`. */
+  annotation: Annotation;
+  /**
+   * `'selection'`: a text selection settled; the host offers its own Comment
+   * (a phone's edit menu). `'compose'`: open the composer now (a pinpoint
+   * tap, Comment mode, an HTML pin).
+   */
+  intent: 'selection' | 'compose';
+  /** What it is on, as a composer names it (Plannotator's pinpoint label: "Button", a heading's words). Absent for text. */
+  label?: string;
+  /**
+   * Drop the draft: its pending highlight or pin goes. The host calls it when
+   * the person cancels, and after the save, before it draws the saved
+   * annotation. A draft already replaced by a newer one ignores it.
+   */
+  cancel: () => void;
+}

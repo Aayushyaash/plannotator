@@ -5,6 +5,7 @@ import { CopyButton } from './CopyButton';
 import {
   exportReviewFeedback,
   formatCallFlowAnnotationTargets,
+  markdownPreviewQuote,
   formatConventionalPrefix,
   OUTDATED_ANNOTATION_LABEL,
 } from '../utils/exportFeedback';
@@ -136,7 +137,9 @@ function buildAnnotationFileComments(
 // body is the same text the review body fold uses, minus the path prefix.
 function buildFileLevelComments(annotations: CodeAnnotation[]): PRReviewFileLevelComment[] {
   return annotations
-    .filter(a => a.scope === 'file')
+    // A comment made in a Markdown preview quotes rendered text, not lines:
+    // it always rides the review body (see buildFileScopedBody).
+    .filter(a => a.scope === 'file' && !a.markdownPreview)
     .map(a => ({ path: a.filePath, body: `${a.text ?? ''}${formatCallFlowAnnotationTargets(a)}`.trim() }))
     .filter(c => c.path.length > 0 && c.body.length > 0);
 }
@@ -150,7 +153,11 @@ function buildFileScopedBody(annotations: CodeAnnotation[], withheld: ReadonlySe
   for (const a of annotations) {
     const scope = a.scope ?? 'line';
     const callFlowContext = formatCallFlowAnnotationTargets(a);
-    if (scope === 'file' && !fileLevel && (a.text || callFlowContext)) {
+    if (scope === 'file' && a.markdownPreview && a.text) {
+      // Never inline and never a file-level thread: the quote is rendered
+      // text, which maps to no line the platform could anchor to.
+      parts.push(`**${a.filePath} (rendered Markdown):**\n\n${markdownPreviewQuote(a.markdownPreview)}\n${a.text}`.trim());
+    } else if (scope === 'file' && !fileLevel && (a.text || callFlowContext)) {
       parts.push(`**${a.filePath}:** ${a.text ?? ''}${callFlowContext}`.trim());
     } else if (scope === 'general' && (a.text || callFlowContext)) {
       parts.push(`${a.text ?? ''}${callFlowContext}`.trim());
@@ -188,6 +195,24 @@ function buildFailedCommentsMarkdown(
  * GitHub requires a body for COMMENT and REQUEST_CHANGES reviews, so an inline-only review gets a
  * neutral pointer. Approvals and GitLab discussions can remain bodyless.
  */
+/** What a narrowed retry will send, for the partial-submission notice. */
+export function describePartialRetry(partial: PRReviewSubmissionPartial, mrLabel: string): string {
+  const { retry } = partial;
+  const parts: string[] = [];
+  if (retry.fileComments.length > 0) {
+    parts.push(`the ${retry.fileComments.length} unposted inline comment${retry.fileComments.length === 1 ? '' : 's'}`);
+  }
+  if (retry.body !== undefined) parts.push('the unposted general comment');
+  if (partial.approval === 'failed') parts.push(`the ${mrLabel} decision`);
+  const what = parts.length > 1
+    ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+    : parts[0] ?? 'nothing';
+  const notAgain = retry.body !== undefined
+    ? 'posted comments are not sent again.'
+    : 'posted comments and the general note are not sent again.';
+  return `Retry sends only ${what}; ${notAgain}`;
+}
+
 export function buildPlatformReviewBody(
   action: PRReviewAction,
   platform: ReviewPlatform,
@@ -220,11 +245,12 @@ export function buildPRActionRequest(
     throw new Error('Partial review target is missing its server-authorized retry');
   }
   const retry = target.partial?.retry;
-  // A narrowed retry (GitLab partial) resends only its own inline comments.
+  // A narrowed retry (GitLab/Bitbucket partial) resends only its own inline
+  // comments, plus the general comment when the server reports it unposted.
   const fileLevelComments = retry ? [] : target.fileLevelComments;
   return {
     action: retry?.action ?? action,
-    body: retry ? '' : body,
+    body: retry ? (retry.body ?? '') : body,
     fileComments: retry?.fileComments ?? target.fileComments,
     ...(fileLevelComments.length > 0 ? { fileLevelComments } : {}),
     ...(target.prUrl ? { targetPrUrl: target.prUrl } : {}),
@@ -586,15 +612,18 @@ export function ReviewSubmissionDialog({
                             />
                           </>
                         )}
+                        {target.partial.reviewBodyError && (
+                          <div className="mt-1 break-words text-destructive">
+                            {target.partial.reviewBodyError}
+                          </div>
+                        )}
                         {target.partial.approval === 'failed' && (
                           <div className="mt-1 text-destructive">
                             {target.partial.approvalError ?? `Failed to approve ${mrLabel}.`}
                           </div>
                         )}
                         <div className="mt-1 text-muted-foreground">
-                          {target.partial.retry.fileComments.length > 0
-                            ? `Retry sends only the ${target.partial.retry.fileComments.length} unposted inline comment${target.partial.retry.fileComments.length === 1 ? '' : 's'}; posted comments and the general note are not sent again.`
-                            : `Retry only repeats the ${mrLabel} approval; posted comments and the general note are not sent again.`}
+                          {describePartialRetry(target.partial, mrLabel)}
                         </div>
                         <div className="mt-1 text-muted-foreground">
                           {recoveryPersistsRefresh

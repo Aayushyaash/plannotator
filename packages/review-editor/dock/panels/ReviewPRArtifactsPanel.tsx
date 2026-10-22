@@ -848,7 +848,7 @@ export const ReviewPRArtifactsPanel: React.FC<IDockviewPanelProps> = () => {
                       type="button"
                       aria-label={`Hide ${artifact.name}`}
                       title="Hide artifact"
-                      className={`flex min-h-11 w-11 shrink-0 items-center justify-center rounded-r-md text-muted-foreground/55 transition-opacity duration-150 hover:bg-muted hover:text-foreground focus-visible:z-10 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring motion-reduce:transition-none ${active ? 'opacity-70' : 'opacity-0 group-hover:opacity-55 group-focus-within:opacity-55'}`}
+                      className={`flex min-h-11 w-11 shrink-0 items-center justify-center rounded-r-md text-muted-foreground/55 transition-opacity duration-150 hover:bg-muted hover:text-foreground focus-visible:z-10 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring motion-reduce:transition-none ${active ? 'opacity-70' : 'opacity-0 group-hover:opacity-55 group-focus-within:opacity-55 [@media(hover:none)]:opacity-55'}`}
                       onClick={() => setHidden((ids) => {
                         ids.add(artifact.id);
                         return ids;

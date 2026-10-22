@@ -6,10 +6,16 @@ import { useTheme } from '@plannotator/ui/components/ThemeProvider';
 import { useConfigValue } from '@plannotator/ui/config';
 import { useReviewState } from '../dock/ReviewStateContext';
 import { resolveSyntaxTheme, buildLineBgOverrides } from '../hooks/usePierreTheme';
+import { buildPierreFontCSS } from '../utils/pierreFontCss';
 
 interface DiffHunkPreviewProps {
   /** Raw diff hunk string (unified diff format). */
   hunk: string;
+  /**
+   * Optional narrower hunk to render while collapsed (e.g. the lines around a
+   * review comment); "Show full context" switches to `hunk`.
+   */
+  collapsedHunk?: string;
   /** Max height in pixels before "Show more" toggle. Default 128. */
   maxHeight?: number;
   className?: string;
@@ -21,8 +27,8 @@ interface DiffHunkPreviewProps {
  */
 function buildPierreCSS(
   mode: 'light' | 'dark',
-  fontFamily: string,
-  fontSize: string,
+  fontFamily: string | undefined,
+  fontSize: string | undefined,
   lineBgIntensity: DiffLineBgIntensity,
 ): string {
   try {
@@ -31,11 +37,7 @@ function buildPierreCSS(
     const fg = styles.getPropertyValue('--foreground').trim();
     if (!bg || !fg) return '';
 
-    const fontCSS = (fontFamily || fontSize) ? `
-      pre, code, [data-line-content], [data-column-number] {
-        ${fontFamily ? `font-family: '${fontFamily}', monospace !important;` : ''}
-        ${fontSize ? `font-size: ${fontSize} !important; line-height: 1.5 !important;` : ''}
-      }` : '';
+    const fontCSS = buildPierreFontCSS(fontFamily, fontSize);
 
     return `
       :host, [data-diff], [data-file], [data-diffs-header], [data-error-wrapper], [data-virtualizer-buffer] {
@@ -65,6 +67,7 @@ function buildPierreCSS(
  */
 export const DiffHunkPreview: React.FC<DiffHunkPreviewProps> = ({
   hunk,
+  collapsedHunk,
   maxHeight = 128,
   className,
 }) => {
@@ -73,23 +76,24 @@ export const DiffHunkPreview: React.FC<DiffHunkPreviewProps> = ({
   const lineBgIntensity = useConfigValue('diffLineBgIntensity');
   const [expanded, setExpanded] = useState(false);
 
+  const shown = !expanded && collapsedHunk ? collapsedHunk : hunk;
   const fileDiff = useMemo(() => {
-    if (!hunk) return undefined;
+    if (!shown) return undefined;
     try {
       // Robustly handle all three hunk formats the tour agent might produce:
       //   1. Full git diff: starts with "diff --git" — use as-is
       //   2. File-level diff: starts with "--- " — prepend "diff --git" line only
       //   3. Bare hunk: starts with "@@ " — prepend full synthetic headers
-      const patch = hunk.startsWith('diff --git')
-        ? hunk
-        : hunk.startsWith('--- ')
-          ? `diff --git a/file b/file\n${hunk}`
-          : `diff --git a/file b/file\n--- a/file\n+++ b/file\n${hunk}`;
+      const patch = shown.startsWith('diff --git')
+        ? shown
+        : shown.startsWith('--- ')
+          ? `diff --git a/file b/file\n${shown}`
+          : `diff --git a/file b/file\n--- a/file\n+++ b/file\n${shown}`;
       return getSingularPatch(patch);
     } catch {
       return undefined;
     }
-  }, [hunk]);
+  }, [shown]);
 
   // Initialize synchronously so the very first render (inside a tooltip) is already themed.
   // The lazy initializer reads computed CSS variables from the document root.
@@ -134,6 +138,10 @@ export const DiffHunkPreview: React.FC<DiffHunkPreviewProps> = ({
             diffStyle: 'unified',
             disableLineNumbers: true,
             overflow: 'wrap',
+            // A narrowed hunk starts mid-file; Pierre would otherwise spend a
+            // row on an "N unmodified lines" separator for the lines it cut
+            // (which are not even unmodified on a new file).
+            ...(shown !== hunk ? { hunkSeparators: 'simple' as const } : {}),
           }}
         />
       </div>

@@ -4,6 +4,7 @@ import { getSingularPatch, processFile } from '@pierre/diffs';
 import { CodeAnnotation, CodeAnnotationType, SelectedLineRange, DiffAnnotationMetadata, TokenAnnotationMeta, ConventionalLabel, ConventionalDecoration } from '@plannotator/ui/types';
 import type { DiffTokenEventBaseProps } from '@pierre/diffs';
 import { usePierreTheme } from '../hooks/usePierreTheme';
+import { useFileContents } from '../hooks/useFileContents';
 import { useWorkerPoolThemeSync } from '../workerPool';
 import { CommentPopover } from '@plannotator/ui/components/CommentPopover';
 import { storage } from '@plannotator/ui/utils/storage';
@@ -13,6 +14,13 @@ import { ToolbarHost, type ToolbarHostHandle } from './ToolbarHost';
 import { OverlayScrollArea } from '@plannotator/ui/components/OverlayScrollArea';
 import { useOverlayViewport } from '@plannotator/ui/hooks/useOverlayViewport';
 import { FileHeader } from './FileHeader';
+// Lazy: the rendered views bring the text highlighter (which needs a DOM at
+// import), so it loads the first time a file is shown as Changes or Read.
+// (The single-file build inlines the chunk; no diagram engine is in it:
+// diagram fences render as code.)
+const MarkdownFilePreview = React.lazy(async () => ({ default: (await import('./MarkdownFilePreview')).MarkdownFilePreview }));
+import { fileViewOfRendered, renderedViewOf, type MarkdownPreviewView } from '../hooks/useMarkdownPreview';
+import { MarkdownViewMenu } from './MarkdownViewMenu';
 import { BinaryFileNotice } from './BinaryFileNotice';
 import { FileCommentBanner } from './FileCommentBanner';
 import { DiffHScrollbar } from './DiffHScrollbar';
@@ -22,9 +30,10 @@ import { ImageDiffPreview } from './ImageDiffPreview';
 import { isFileScopedAnnotation, lineRangeForAnnotation } from '../utils/annotationScope';
 import { lineAnnotationMetadata } from '../utils/annotationDisplay';
 import type { AnnotationScrollTarget } from '../types';
-import { getLineNumberFromNode, getSideFromNode, getDiffSelection } from '../utils/diffSelection';
+import { getLineNumberFromNode, getSideFromNode, getDiffSelection, snapshotDiffSelection, rangeForGutterClick, type DiffSelectionSnapshot } from '../utils/diffSelection';
 import { isContentConsistentWithPatch } from '../utils/patchConsistency';
 import { hashString } from '../utils/hashString';
+import { markdownPreviewSourcePath, markdownViewsFor, resolveMarkdownView, type MarkdownFileView } from '../utils/markdownPreview';
 import { InlineAnnotation } from './InlineAnnotation';
 import { InlineAIMarker } from './InlineAIMarker';
 import type { AIChatEntry } from '../hooks/useAIChat';
@@ -40,6 +49,15 @@ import {
   resolveLineSelectionBehavior,
   type LineSelectionSource,
 } from '../utils/lineSelectionBehavior';
+import {
+  changeJumpDirection,
+  findChangeElement,
+  listDiffChanges,
+  placementOf,
+  readingLineFor,
+  resolveChangeJump,
+  type ChangePlacement,
+} from '../utils/changeNavigation';
 
 interface PierreDiffContentProps {
   filePath: string;
@@ -180,6 +198,10 @@ interface DiffViewerProps {
   prUrl?: string;
   prDiffScope?: string;
   isFocused?: boolean;
+  /** `N` / `Shift+N` step through this file's changes (#1543). On only for the
+   *  focused file of the active single-file panel, so one key never moves two
+   *  diffs. */
+  changeNavigation?: boolean;
   diffStyle: 'split' | 'unified';
   diffOverflow?: 'scroll' | 'wrap';
   diffIndicators?: 'bars' | 'classic' | 'none';
@@ -210,6 +232,8 @@ interface DiffViewerProps {
    * header "generated" tag. The single-file surface never collapses for it:
    * opening a file as its own tab is already an explicit request to see it. */
   isGenerated?: boolean;
+  /** A test file: a flask after the name in the header. */
+  isTest?: boolean;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
   isStaged?: boolean;
@@ -243,7 +267,34 @@ interface DiffViewerProps {
    */
   onTokenHoverEnter?: (props: DiffTokenEventBaseProps, filePath: string) => void;
   onTokenHoverLeave?: () => void;
+  /** Every file path in this review. A link in the Markdown preview to one of
+   *  them opens it; any other local link renders inert. */
+  reviewFilePaths?: ReadonlySet<string>;
+  /** Open another file of this review (a link in the Markdown preview). */
+  onOpenReviewFile?: (filePath: string) => void;
+  /**
+   * A Markdown file's view (Source / Changes / Read) when the host owns it
+   * (review state: per-file choices and the remembered starting view).
+   * `how` says whether the person picked it (the header menu) or navigation
+   * needed it (a search hit, a comment that lives in another view). Absent:
+   * the viewer keeps its own view. `markdownPreviewSupported: false` hides
+   * the control.
+   */
+  markdownView?: MarkdownFileView;
+  onMarkdownViewChange?: (view: MarkdownFileView, how: 'chosen' | 'shown') => void;
+  markdownPreviewSupported?: boolean;
+  /** Set while the file's view cannot change (All files holds it in an edit session). */
+  markdownViewDisabledReason?: string | null;
 }
+
+/** Shown while the preview's code loads (it is split from the diff view). */
+const MarkdownPreviewPending: React.FC = () => (
+  <div className="min-h-full px-4 py-4 sm:px-6" data-markdown-preview="" data-markdown-preview-view="pending">
+    <div role="status" data-markdown-preview-state="loading" className="mx-auto max-w-3xl rounded-md border border-border/60 bg-muted/20 p-4 text-sm text-muted-foreground">
+      Loading the full Markdown file…
+    </div>
+  </div>
+);
 
 export const DiffViewer: React.FC<DiffViewerProps> = ({
   patch,
@@ -258,6 +309,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   prUrl,
   prDiffScope,
   isFocused = false,
+  changeNavigation = false,
   diffStyle,
   diffOverflow,
   diffIndicators = 'bars',
@@ -282,6 +334,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   onToggleViewed,
   showViewedControls = true,
   isGenerated = false,
+  isTest = false,
   collapsed = false,
   onToggleCollapsed,
   isStaged = false,
@@ -304,6 +357,12 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   onCodeNavRequest,
   onTokenHoverEnter,
   onTokenHoverLeave,
+  reviewFilePaths,
+  onOpenReviewFile,
+  markdownView: markdownViewProp,
+  onMarkdownViewChange,
+  markdownPreviewSupported = true,
+  markdownViewDisabledReason = null,
 }) => {
   const pierreTheme = usePierreTheme({ fontFamily, fontSize, compactTouchLayout });
   // Worker-pool highlighting: keep the pool's theme pair in step with the UI
@@ -317,6 +376,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
     useOverlayViewport<HTMLDivElement>();
   const splitSurfaceRef = useRef<HTMLDivElement>(null);
   const diffContentRef = useRef<HTMLDivElement>(null);
+  const selectionSnapshotRef = useRef<DiffSelectionSnapshot | null>(null);
   const [fileCommentAnchor, setFileCommentAnchor] = useState<HTMLElement | null>(null);
 
   // Resizable split pane — only applies when Pierre renders a two-column grid
@@ -395,28 +455,41 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
     return parsed;
   }, [patch, filePath]);
 
-  // Fetch full file contents for expandable context
-  const [fileContents, setFileContents] = useState<{ forPath: string; old: string | null; new: string | null } | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setFileContents(null);
-    // Nothing to expand into: the patch is the whole content of the session.
-    if (!contextExpansionAvailable) return;
-    const params = new URLSearchParams({ path: filePath });
-    if (oldPath) params.set('oldPath', oldPath);
-    if (reviewBase) params.set('base', reviewBase);
-    if (reviewSnapshotId) params.set('snapshot', reviewSnapshotId);
-    fetch(`/api/file-content?${params}`, { signal: controller.signal })
-      .then(res => res.ok ? res.json() : null)
-      .then((data: { oldContent: string | null; newContent: string | null } | null) => {
-        if (data && (data.oldContent != null || data.newContent != null)) {
-          setFileContents({ forPath: filePath, old: data.oldContent, new: data.newContent });
-        }
-      })
-      .catch(() => {}); // Silent fallback — no expansion in demo mode
-    return () => controller.abort();
-  }, [filePath, oldPath, reviewBase, reviewSnapshotId, contextExpansionAvailable]);
+  // Fetch full file contents for expandable context (and the Markdown preview)
+  const fileContentsResult = useFileContents({
+    filePath,
+    oldPath,
+    reviewBase,
+    reviewSnapshotId,
+    enabled: contextExpansionAvailable,
+  });
+  const { fileContents } = fileContentsResult;
+  // The document the preview shows: the new file, or the old one for a
+  // deletion. Null when that path is not Markdown (incl. a rename away from
+  // Markdown), so no preview is offered.
+  const markdownSourcePath = markdownPreviewSourcePath(filePath, oldPath, status);
+  // A static patch has no full file behind it, so the preview could never
+  // show anything: no toggle at all.
+  const canPreviewMarkdown = markdownPreviewSupported && contextExpansionAvailable && markdownSourcePath !== null;
+  const markdownViews = useMemo(() => markdownViewsFor({ status, patch }), [status, patch]);
+  const [localMarkdownView, setLocalMarkdownView] = useState<{ path: string; view: MarkdownFileView } | null>(null);
+  const viewControlled = markdownViewProp !== undefined;
+  const markdownView: MarkdownFileView = canPreviewMarkdown
+    ? resolveMarkdownView(
+      viewControlled
+        ? markdownViewProp
+        : localMarkdownView?.path === filePath ? localMarkdownView.view : 'source',
+      markdownViews,
+    )
+    : 'source';
+  const markdownPreviewEnabled = markdownView !== 'source';
+  const setMarkdownView = useCallback((view: MarkdownFileView, how: 'chosen' | 'shown') => {
+    if (viewControlled) onMarkdownViewChange?.(view, how);
+    else setLocalMarkdownView({ path: filePath, view });
+  }, [viewControlled, onMarkdownViewChange, filePath]);
+  const setMarkdownPreview = useCallback((on: boolean, rendered: MarkdownPreviewView = 'diff') => {
+    setMarkdownView(on ? fileViewOfRendered(rendered) : 'source', 'shown');
+  }, [setMarkdownView]);
 
   // Re-parse the patch with full file contents so hunk indices are computed
   // against the complete file (isPartial: false), enabling expansion.
@@ -449,6 +522,41 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
       return fileDiff;
     }
   }, [patch, filePath, oldPath, fileContents, fileDiff]);
+
+  const chooseMarkdownView = useCallback((view: MarkdownFileView) => {
+    // The line selection and its composer live in the diff a rendered view
+    // replaces; drop them rather than leave a selection nothing shows.
+    if (view !== 'source' && !markdownPreviewEnabled) onLineSelection(null);
+    setMarkdownView(view, 'chosen');
+  }, [markdownPreviewEnabled, onLineSelection, setMarkdownView]);
+
+  // Turned on from elsewhere (`P`, another file's choice it follows): the
+  // line selection lives in the diff the preview replaces.
+  const wasPreviewEnabledRef = useRef(markdownPreviewEnabled);
+  useEffect(() => {
+    if (markdownPreviewEnabled && !wasPreviewEnabledRef.current && pendingSelection && isFocused) onLineSelection(null);
+    wasPreviewEnabledRef.current = markdownPreviewEnabled;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [markdownPreviewEnabled]);
+
+  // Navigation that targets diff lines (a search hit, a semantic-diff / AI
+  // "scroll to lines", a requested line selection) switches the file back to
+  // the diff first; the effects below then run against the mounted diff.
+  // Only a CHANGE counts, so turning the preview on while a selection or
+  // match is already active does not bounce straight back.
+  const prevPendingSelectionRef = useRef(pendingSelection);
+  const prevActiveSearchMatchIdRef = useRef(activeSearchMatch?.id ?? null);
+  useEffect(() => {
+    const activeSearchMatchId = activeSearchMatch?.id ?? null;
+    const selectionChanged = pendingSelection !== prevPendingSelectionRef.current;
+    const searchChanged = activeSearchMatchId !== prevActiveSearchMatchIdRef.current;
+    prevPendingSelectionRef.current = pendingSelection;
+    prevActiveSearchMatchIdRef.current = activeSearchMatchId;
+    if (!markdownPreviewEnabled) return;
+    if ((selectionChanged && pendingSelection && isFocused) || (searchChanged && activeSearchMatchId)) {
+      setMarkdownPreview(false);
+    }
+  }, [pendingSelection, activeSearchMatch, markdownPreviewEnabled, isFocused, setMarkdownPreview]);
 
   const previousScrollFilePathRef = useRef(filePath);
   useLayoutEffect(() => {
@@ -514,27 +622,64 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   // Scroll to a comment ONLY on sidebar navigation (scrollTargetAnnotation),
   // never on a bare in-diff selection — clicking a comment must not move the
   // viewport. Keyed on the token so re-clicking the same sidebar row re-centers.
+  // A line comment in a file shown as a Markdown preview switches back to the
+  // diff first (this effect runs again once it is mounted); a file comment
+  // shows above the preview too, so it scrolls in place.
+  const annotationsRef = useRef(annotations);
+  annotationsRef.current = annotations;
+  const handledScrollTargetRef = useRef<AnnotationScrollTarget | null>(null);
   useEffect(() => {
     if (!scrollTargetAnnotation || !containerRef.current) return;
+    if (handledScrollTargetRef.current === scrollTargetAnnotation) return;
     const targetId = scrollTargetAnnotation.id;
 
-    const timeoutId = setTimeout(() => {
+    const target = annotationsRef.current.find((ann) => ann.id === targetId);
+    if (target?.markdownPreview) {
+      // A comment made in the preview lives there: show the preview, whose
+      // highlighter scrolls to the selected comment.
+      if (!markdownPreviewEnabled && canPreviewMarkdown) {
+        setMarkdownPreview(true, target.markdownPreview.view);
+        return;
+      }
+      if (markdownPreviewEnabled) {
+        handledScrollTargetRef.current = scrollTargetAnnotation;
+        return;
+      }
+    }
+    if (markdownPreviewEnabled) {
+      if (!target) return; // another file's comment
+      if (!isFileScopedAnnotation(target)) {
+        setMarkdownPreview(false);
+        return;
+      }
+    }
+    handledScrollTargetRef.current = scrollTargetAnnotation;
+
+    // The diff may still be rendering (just switched back from the preview):
+    // retry for a moment before giving up.
+    let attempts = 0;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const tryScroll = () => {
       const annotationEl = containerRef.current?.querySelector(
         `[data-annotation-id="${targetId}"]`
       );
       if (annotationEl) {
         annotationEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
       }
-    }, 100);
+      attempts += 1;
+      if (attempts < 20) timeoutId = setTimeout(tryScroll, 100);
+    };
+    timeoutId = setTimeout(tryScroll, 100);
 
     return () => clearTimeout(timeoutId);
-  }, [scrollTargetAnnotation, viewport]);
+  }, [scrollTargetAnnotation, viewport, markdownPreviewEnabled]);
 
   // Apply search highlights to diff lines (including inside shadow DOM).
   // The query is already debounced upstream (useReviewSearch), so this runs synchronously.
   // activeSearchMatchId is NOT in deps — the swap effect handles that with O(1) updates.
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!containerRef.current || markdownPreviewEnabled) return;
 
     const query = searchQuery;
     const matches = searchMatches;
@@ -549,20 +694,20 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
     roots.forEach(root =>
       applySearchHighlights(root, query, matches, activeSearchMatchId)
     );
-  }, [searchQuery, searchMatches, filePath, diffStyle, diffOverflow, diffIndicators, lineDiffType, disableLineNumbers, disableBackground, expandUnchanged, augmentedDiff, viewport]);
+  }, [searchQuery, searchMatches, filePath, diffStyle, diffOverflow, diffIndicators, lineDiffType, disableLineNumbers, disableBackground, expandUnchanged, augmentedDiff, viewport, markdownPreviewEnabled]);
 
   // Swap active search highlight instantly when stepping between matches.
   // This avoids a full rebuild just to change two elements' background color.
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!containerRef.current || markdownPreviewEnabled) return;
     swapActiveSearchHighlight(containerRef.current, activeSearchMatchId);
-  }, [activeSearchMatchId, viewport]);
+  }, [activeSearchMatchId, viewport, markdownPreviewEnabled]);
 
   // Scroll to active search match (with retry for lazy-rendered content)
   useEffect(() => {
-    if (!activeSearchMatch || !containerRef.current) return;
+    if (!activeSearchMatch || !containerRef.current || markdownPreviewEnabled) return;
     return retryScrollToSearchMatch(containerRef.current, activeSearchMatch);
-  }, [activeSearchMatch, filePath, diffStyle, diffOverflow, diffIndicators, lineDiffType, disableLineNumbers, disableBackground, expandUnchanged, viewport]);
+  }, [activeSearchMatch, filePath, diffStyle, diffOverflow, diffIndicators, lineDiffType, disableLineNumbers, disableBackground, expandUnchanged, viewport, markdownPreviewEnabled]);
 
   // Scroll to the selected line range — drives "jump to entity" from semantic-diff
   // clicks and AI "scroll to lines". Mirrors the scroll-to-annotation behavior used
@@ -574,7 +719,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   // pendingSelection, but its lines are by definition already visible, so we leave
   // the view untouched and avoid yanking it on every selection.
   useEffect(() => {
-    if (!pendingSelection || !containerRef.current) return;
+    if (!pendingSelection || !containerRef.current || markdownPreviewEnabled) return;
     const container = containerRef.current;
     let cancelled = false;
     let attempts = 0;
@@ -603,7 +748,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
       cancelled = true;
       cancelAnimationFrame(raf);
     };
-  }, [pendingSelection, filePath, augmentedDiff, viewport]);
+  }, [pendingSelection, filePath, augmentedDiff, viewport, markdownPreviewEnabled]);
 
   // Map annotations to @pierre/diffs format
   const lineAnnotations = useMemo(() => {
@@ -705,12 +850,34 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   }, [onLineSelection]);
 
   const handleGutterUtilityClick = useCallback((range: SelectedLineRange) => {
-    handleLineSelectionInteraction('gutter-comment-action', range);
+    const snapshot = selectionSnapshotRef.current;
+    selectionSnapshotRef.current = null;
+    const effectiveRange = rangeForGutterClick(range, snapshot);
+    handleLineSelectionInteraction('gutter-comment-action', effectiveRange);
   }, [handleLineSelectionInteraction]);
 
   useEffect(() => {
     const root = diffContentRef.current;
     if (!root) return;
+    let clearTimer: ReturnType<typeof setTimeout> | null = null;
+    const onPointerDown = () => {
+      if (clearTimer) {
+        clearTimeout(clearTimer);
+        clearTimer = null;
+      }
+      selectionSnapshotRef.current = snapshotDiffSelection(root);
+    };
+    const onCancel = () => {
+      selectionSnapshotRef.current = null;
+    };
+    const onPointerUp = () => {
+      clearTimer = setTimeout(() => {
+        selectionSnapshotRef.current = null;
+      }, 200);
+    };
+    root.addEventListener('pointerdown', onPointerDown, true);
+    root.addEventListener('pointercancel', onCancel, true);
+    root.addEventListener('pointerup', onPointerUp, true);
     const handler = () => {
       requestAnimationFrame(() => {
         const selection = getDiffSelection(root);
@@ -729,12 +896,69 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
       });
     };
     root.addEventListener('mouseup', handler, true);
-    return () => root.removeEventListener('mouseup', handler, true);
-  }, []);
+    return () => {
+      if (clearTimer) clearTimeout(clearTimer);
+      root.removeEventListener('pointerdown', onPointerDown, true);
+      root.removeEventListener('pointercancel', onCancel, true);
+      root.removeEventListener('pointerup', onPointerUp, true);
+      root.removeEventListener('mouseup', handler, true);
+    };
+    // The diff body unmounts while collapsed or previewed; re-attach to the new one.
+  }, [collapsed, markdownPreviewEnabled]);
 
   const handlePierreLineSelectionEnd = useCallback((range: SelectedLineRange | null) => {
     handleLineSelectionInteraction('range-gesture', range);
   }, [handleLineSelectionInteraction]);
+  // N / Shift+N: the next / previous change of this file (#1543). Single-file
+  // diffs are not line-virtualized, so every change's first line is in the DOM.
+  const changes = useMemo(() => listDiffChanges(augmentedDiff?.hunks), [augmentedDiff]);
+  // The change the last jump landed on, while it is still on screen.
+  const changeCursorRef = useRef<number | null>(null);
+  useEffect(() => {
+    changeCursorRef.current = null;
+  }, [changes]);
+  const jumpChange = useCallback((direction: 'next' | 'prev'): boolean => {
+    const container = containerRef.current;
+    if (!container || changes.length === 0) return false;
+    const view = container.getBoundingClientRect();
+    const readingLine = readingLineFor(view, direction, {
+      atTop: container.scrollTop <= 1,
+      atBottom: container.scrollTop + container.clientHeight >= container.scrollHeight - 1,
+    });
+    const elements = changes.map((change) => findChangeElement(container, change));
+    const placements = elements.map((el): ChangePlacement => {
+      // Not rendered (should not happen here): count it by its order.
+      if (!el) return 'after';
+      return placementOf(el.getBoundingClientRect(), readingLine);
+    });
+    const cursor = changeCursorRef.current;
+    const cursorEl = cursor != null ? elements[cursor] : null;
+    const cursorRect = cursorEl?.getBoundingClientRect();
+    const cursorOnScreen = !!cursorRect && cursorRect.bottom > view.top && cursorRect.top < view.bottom;
+    const target = resolveChangeJump(placements, direction, cursorOnScreen ? cursor : null);
+    // No change that way: leave the key to anyone else.
+    if (target == null) return false;
+    const el = elements[target];
+    if (!el) return false;
+    changeCursorRef.current = target;
+    const rect = el.getBoundingClientRect();
+    const top = container.scrollTop + (rect.top - view.top) - view.height / 2 + rect.height / 2;
+    const reduceMotion = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    container.scrollTo({ top: Math.max(0, top), behavior: reduceMotion ? 'auto' : 'smooth' });
+    return true;
+  }, [changes]);
+
+  useEffect(() => {
+    if (!changeNavigation || collapsed || markdownPreviewEnabled) return;
+    const handler = (e: KeyboardEvent) => {
+      const direction = changeJumpDirection(e);
+      if (!direction || changes.length === 0) return;
+      if (jumpChange(direction)) e.preventDefault();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [changeNavigation, collapsed, markdownPreviewEnabled, changes, jumpChange]);
 
   // Token interaction handlers (code area clicks)
   const handleTokenClick = useCallback((props: DiffTokenEventBaseProps, event: MouseEvent) => {
@@ -778,6 +1002,10 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   const fileComments = useMemo(
     () => annotations.filter(isFileScopedAnnotation),
     [annotations],
+  );
+  const fileCommentsOutsidePreview = useMemo(
+    () => fileComments.filter((comment) => !comment.markdownPreview),
+    [fileComments],
   );
 
   // Files over the review size cap arrive as a contents-free stub, which
@@ -823,6 +1051,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
         oldPath={oldPath}
         isViewed={isViewed}
         isGenerated={isGenerated}
+        isTest={isTest}
         onToggleViewed={onToggleViewed}
         showViewedControl={showViewedControls}
         collapseToggle={onToggleCollapsed && (
@@ -844,94 +1073,144 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
         showStageControl={showStageControls}
         stageError={stageError}
         onFileComment={setFileCommentAnchor}
+        renderMarkdownView={canPreviewMarkdown
+          ? ({ iconOnly, touch }) => (
+            <MarkdownViewMenu
+              filePath={filePath}
+              view={markdownView}
+              views={markdownViews}
+              status={status}
+              onChoose={chooseMarkdownView}
+              iconOnly={iconOnly}
+              touch={touch}
+              disabledReason={markdownViewDisabledReason}
+            />
+          )
+          : undefined}
       />
-      {!collapsed && diffOverflow !== 'wrap' && (
+      {!collapsed && !markdownPreviewEnabled && diffOverflow !== 'wrap' && (
         <DiffHScrollbar className="absolute inset-x-2 bottom-0 z-30" />
       )}
       </div>
 
-      {!collapsed && <OverlayScrollArea
-        className={`flex-1 min-h-0 relative ${isDraggingSplit ? 'select-none' : ''}`}
-        overflowX="scroll"
-        overflowY="auto"
-        onViewportReady={onViewportReady}
-      >
-        {/* Specific first, general second, and never both: whichever applies,
-            a card with no hunks to draw says why instead of reading as empty. */}
-        {isImagePreview ? (
-          <ImageDiffPreview
-            filePath={filePath}
-            status={status ?? 'modified'}
-            snapshotId={imageSnapshotId ?? reviewSnapshotId}
-            variant="single"
-            compact={compactTouchLayout}
-            fallback={isOversizedStub ? <OversizedFileNotice /> : isContentlessBinary ? <BinaryFileNotice /> : null}
-            tooLargeFallback={isOversizedStub ? <OversizedFileNotice /> : undefined}
-          />
-        ) : (
-          <>
-            {isOversizedStub && <OversizedFileNotice />}
-            {isContentlessBinary && <BinaryFileNotice />}
-          </>
-        )}
-        <FileCommentBanner
-          comments={fileComments}
-          selectedAnnotationId={selectedAnnotationId}
-          onSelect={onSelectAnnotation}
-          onEdit={onEditAnnotation}
-          onDelete={onDeleteAnnotation}
-        />
-        <div className="p-4" ref={diffContentRef}>
-          <div ref={splitSurfaceRef} className="relative min-w-0" style={splitGridStyle}>
-            {isSplitLayout && diffOverflow !== 'wrap' && (
-              <div
-                className="absolute top-0 bottom-0 z-10 cursor-col-resize group"
-                style={{ left: `${splitRatio * 100}%`, width: 9, marginLeft: -4 }}
-                onPointerDown={handleSplitDragStart}
-                onDoubleClick={resetSplitRatio}
-              >
-                <div className="pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-border transition-[width,background-color] group-hover:w-0.5 group-hover:bg-primary/50 group-active:w-0.5 group-active:bg-primary/70" />
+      {!collapsed && (
+        <OverlayScrollArea
+          className={`flex-1 min-h-0 relative ${isDraggingSplit ? 'select-none' : ''}`}
+          overflowX="scroll"
+          overflowY="auto"
+          onViewportReady={onViewportReady}
+        >
+          {markdownPreviewEnabled ? (
+            <>
+              {/* Comments made in the preview are highlighted in it; the
+                  banner keeps the header's file comments. */}
+              <FileCommentBanner
+                comments={fileCommentsOutsidePreview}
+                selectedAnnotationId={selectedAnnotationId}
+                onSelect={onSelectAnnotation}
+                onEdit={onEditAnnotation}
+                onDelete={onDeleteAnnotation}
+              />
+              <React.Suspense fallback={<MarkdownPreviewPending />}>
+              <MarkdownFilePreview
+                filePath={filePath}
+                oldPath={oldPath}
+                status={status}
+                patch={patch}
+                contents={fileContentsResult}
+                imageSnapshotId={imageSnapshotId ?? reviewSnapshotId}
+                imagesAvailable={imagePreviewAvailable}
+                reviewFilePaths={reviewFilePaths}
+                onOpenReviewFile={onOpenReviewFile}
+                variant="single"
+                view={renderedViewOf(markdownView)}
+                onViewChange={(view) => setMarkdownPreview(true, view)}
+              />
+              </React.Suspense>
+            </>
+          ) : (
+            <>
+              {/* Specific first, general second, and never both: whichever applies,
+                  a card with no hunks to draw says why instead of reading as empty. */}
+              {isImagePreview ? (
+                <ImageDiffPreview
+                  filePath={filePath}
+                  status={status ?? 'modified'}
+                  snapshotId={imageSnapshotId ?? reviewSnapshotId}
+                  variant="single"
+                  compact={compactTouchLayout}
+                  fallback={isOversizedStub ? <OversizedFileNotice /> : isContentlessBinary ? <BinaryFileNotice /> : null}
+                  tooLargeFallback={isOversizedStub ? <OversizedFileNotice /> : undefined}
+                />
+              ) : (
+                <>
+                  {isOversizedStub && <OversizedFileNotice />}
+                  {isContentlessBinary && <BinaryFileNotice />}
+                </>
+              )}
+              <FileCommentBanner
+                comments={fileComments}
+                selectedAnnotationId={selectedAnnotationId}
+                onSelect={onSelectAnnotation}
+                onEdit={onEditAnnotation}
+                onDelete={onDeleteAnnotation}
+              />
+              <div className="p-4" ref={diffContentRef}>
+                <div ref={splitSurfaceRef} className="relative min-w-0" style={splitGridStyle}>
+                  {isSplitLayout && diffOverflow !== 'wrap' && (
+                    <div
+                      className="absolute top-0 bottom-0 z-10 cursor-col-resize group"
+                      style={{ left: `${splitRatio * 100}%`, width: 9, marginLeft: -4 }}
+                      onPointerDown={handleSplitDragStart}
+                      onDoubleClick={resetSplitRatio}
+                    >
+                      <div className="pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-border transition-[width,background-color] group-hover:w-0.5 group-hover:bg-primary/50 group-active:w-0.5 group-active:bg-primary/70" />
+                    </div>
+                  )}
+                  <PierreDiffContent
+                    filePath={filePath}
+                    fileDiff={augmentedDiff}
+                    pierreTheme={pierreTheme}
+                    diffStyle={diffStyle}
+                    diffOverflow={diffOverflow}
+                    diffIndicators={diffIndicators}
+                    lineDiffType={lineDiffType}
+                    disableLineNumbers={disableLineNumbers}
+                    disableBackground={disableBackground}
+                    expandUnchanged={expandUnchanged}
+                    mergedAnnotations={mergedAnnotations}
+                    pendingSelection={pendingSelection ?? selectedAnnotationRange}
+                    onLineSelectionEnd={handlePierreLineSelectionEnd}
+                    onLineSelectionChange={compactTouchLayout ? handlePierreLineSelectionChange : undefined}
+                    onGutterUtilityClick={handleGutterUtilityClick}
+                    renderAnnotation={renderAnnotation}
+                    onTokenClick={handleTokenClick}
+                    onTokenEnter={handleTokenEnter}
+                    onTokenLeave={handleTokenLeave}
+                  />
+                </div>
               </div>
-            )}
-            <PierreDiffContent
-              filePath={filePath}
-              fileDiff={augmentedDiff}
-              pierreTheme={pierreTheme}
-              diffStyle={diffStyle}
-              diffOverflow={diffOverflow}
-              diffIndicators={diffIndicators}
-              lineDiffType={lineDiffType}
-              disableLineNumbers={disableLineNumbers}
-              disableBackground={disableBackground}
-              expandUnchanged={expandUnchanged}
-              mergedAnnotations={mergedAnnotations}
-              pendingSelection={pendingSelection ?? selectedAnnotationRange}
-              onLineSelectionEnd={handlePierreLineSelectionEnd}
-              onLineSelectionChange={compactTouchLayout ? handlePierreLineSelectionChange : undefined}
-              onGutterUtilityClick={handleGutterUtilityClick}
-              renderAnnotation={renderAnnotation}
-              onTokenClick={handleTokenClick}
-              onTokenEnter={handleTokenEnter}
-              onTokenLeave={handleTokenLeave}
-            />
-          </div>
-        </div>
+              <ToolbarHost
+                ref={toolbarHostRef}
+                patch={patch}
+                filePath={filePath}
+                isFocused={isFocused}
+                onLineSelection={onLineSelection}
+                onAddAnnotation={onAddAnnotation}
+                onEditAnnotation={onEditAnnotation}
+                aiAvailable={aiAvailable}
+                onAskAI={onAskAI}
+                isAILoading={isAILoading}
+                onViewAIResponse={onViewAIResponse}
+                aiHistoryMessages={aiHistoryMessages}
+              />
+            </>
+          )}
+        </OverlayScrollArea>
+      )}
 
-      <ToolbarHost
-        ref={toolbarHostRef}
-        patch={patch}
-        filePath={filePath}
-        isFocused={isFocused}
-        onLineSelection={onLineSelection}
-        onAddAnnotation={onAddAnnotation}
-        onEditAnnotation={onEditAnnotation}
-        aiAvailable={aiAvailable}
-        onAskAI={onAskAI}
-        isAILoading={isAILoading}
-        onViewAIResponse={onViewAIResponse}
-        aiHistoryMessages={aiHistoryMessages}
-      />
-
+      {/* The header's Comment button works in every view (diff, preview,
+          collapsed), so its composer is mounted outside them. */}
       {fileCommentAnchor && (
         <CommentPopover
           anchorEl={fileCommentAnchor}
@@ -945,7 +1224,6 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
           onClose={() => setFileCommentAnchor(null)}
         />
       )}
-      </OverlayScrollArea>}
     </div>
   );
 };

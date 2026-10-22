@@ -25,7 +25,7 @@ The OpenCode plugin (`@plannotator/opencode`) hooks into OpenCode's plugin syste
 OpenCode support has four explicit modes:
 
 - **`plan-agent`** (default): `submit_plan` is available to OpenCode's built-in `plan` agent plus any extra agents listed in `planningAgents`.
-- **`manual`**: `submit_plan` is not registered. Use `/plannotator-last`, `/plannotator-annotate`, and `/plannotator-review` when you want Plannotator.
+- **`manual`**: `submit_plan` is not registered. Use `/plannotator-last`, `/plannotator-annotate`, and `/plannotator-review` when you want Plannotator. On OpenCode 2 the agent can still open a review with the [`plannotator` tool](#the-plannotator-tool), which every mode registers.
 - **`user-managed`**: `submit_plan` is registered but no prompts or agent permissions are modified. You configure which agents can call `submit_plan` via OpenCode's agent configuration.
 - **`all-agents`**: legacy broad behavior. Primary agents can see and call `submit_plan`.
 
@@ -135,17 +135,18 @@ With other plugins, the same rule applies. Only the Plannotator entry becomes a 
 
 ## Approve with annotations
 
-Unlike Claude Code, OpenCode supports feedback on approval. This means:
+OpenCode supports feedback on approval. The header has one decision button: **Approve** with nothing to send, **Send Feedback** once you add annotations. Behind its arrow:
 
-- **Approve** (no annotations) — Agent proceeds with implementation
-- **Approve** (with annotations) — Agent proceeds, but also receives your annotations as notes
-- **Send Feedback** — Plan is rejected. Agent receives your annotations and revises the plan.
+- **Send Feedback**: the plan is rejected. The agent receives your annotations and revises the plan.
+- **Approve with notes**: the agent proceeds, and also receives your annotations as notes.
+- **Approve with a note…** (nothing added yet): approve with a short note.
+- **Approve, discard N annotations…**: approve and drop the annotations, after one confirmation.
 
 This makes it possible to approve a plan while leaving minor suggestions that the agent can incorporate during implementation.
 
 ## Agent switching
 
-OpenCode supports multiple agents. By default, approved plans are handed off to the build agent, while code review feedback stays on your current agent. To change either, configure [Agent switching settings](/docs/getting-started/ui-settings/#agent-switching):
+OpenCode supports multiple agents. By default, approved plans are handed off to the build agent, while code review feedback stays on your current agent. The Approve button names the agent (**Approve → build**), and the decision menu's **After approval, switch to** section changes it on the spot. To change either default, configure [Agent switching settings](/docs/getting-started/ui-settings/#agent-switching):
 
 1. Open **Settings** (gear icon)
 2. Under "Agent Switch", select from available agents or enter a custom agent name
@@ -183,7 +184,25 @@ Install the CLI for slash command support:
 curl -fsSL https://plannotator.ai/install.sh | bash
 ```
 
-This also clears any cached plugin versions.
+This also clears cached plugin versions for both OpenCode 1 and OpenCode 2. To update the plugin later, run the install script again and restart OpenCode.
+
+## The `plannotator` tool
+
+On OpenCode 2 the plugin can also give the agent a `plannotator` tool, in every workflow mode. It is off by default (see the end of this section). Ask the agent to "open notes.md in Plannotator" or "let me review these changes in Plannotator", and it opens the review itself:
+
+- The tool returns as soon as the page is open, so the session does not wait while you review.
+- The agent can pass several files to open them as one review, in the order it chose.
+- Your feedback arrives later as a new message. Its first line names what you reviewed and the review's session id, for example `Plannotator: notes.md (pn-3f2a9c) — Feedback.`
+- The agent can list the reviews it opened in this session, including the ones you opened with the slash commands, and close one it no longer needs. Closing sends the agent nothing, and your unsent comments stay saved as a draft.
+- A subagent can open a file or code review too. Its feedback arrives in your main session, which also lists and closes it.
+
+Plan review still goes through `submit_plan`. The tool needs the CLI, like the slash commands. OpenCode 1 does not get the tool.
+
+The tool is off by default: turn it on with `PLANNOTATOR_AGENT_TOOL=1` or `{ "agentTool": true }` in `~/.plannotator/config.json` (the environment variable wins in both directions). Off, the slash commands work as before. OpenCode reads the setting when it starts, so restart OpenCode after you change it.
+
+## Ask this session
+
+On OpenCode 2, Ask AI in code review, annotate and `/plannotator-last` is answered by your OpenCode session ("Ask this session"), and it is the only Ask AI option there. In plan review the session is waiting for your decision, so it gives a quick answer from its context only. OpenCode 1 and remote sessions use a separate provider you pick. See [Ask this session](/docs/guides/ai-features/#ask-this-session).
 
 ## Plugin installation
 

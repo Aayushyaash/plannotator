@@ -7,8 +7,8 @@ import { ActionMenuDivider, ActionMenuItem } from './ActionMenu';
 import { ConfirmDialog, type ConfirmDialogProps } from './ConfirmDialog';
 import { useDismissablePopover } from '../hooks/useDismissablePopover';
 import { useCompactTouchLayout } from '../hooks/useIsMobile';
-import { submitHint } from '../utils/platform';
 import { cn } from '../lib/utils';
+import { isCommentSubmitKey } from '../utils/commentSubmitKey';
 import type {
   DecisionActionId,
   DecisionComposer,
@@ -58,6 +58,16 @@ export interface DecisionControlProps {
   dismissOnIframeFocus?: boolean;
   /** Confirm surface override; defaults to the ui ConfirmDialog. */
   confirmDialog?: React.ComponentType<ConfirmDialogProps>;
+  /**
+   * Rows rendered under the decisions, inside the same menu (#1057: plan
+   * review's "After approval, switch to" agent picker and Claude Code's
+   * permission-mode line). Not decisions: they never close the menu by
+   * themselves. Interactive rows use `role="menuitem"` or
+   * `role="menuitemradio"` so the arrow keys reach them. Absent: the menu is
+   * the decisions alone, exactly as before. A function receives
+   * `closeMenu`, for a row that leaves the menu (e.g. one opening Settings).
+   */
+  menuFooter?: React.ReactNode | ((api: { closeMenu: () => void }) => React.ReactNode);
 }
 
 const NOTE_MAX_HEIGHT_PX = 144;
@@ -99,6 +109,14 @@ export interface DecisionNoteFieldProps {
   placeholder?: string;
   disabled?: boolean;
   autoFocus?: boolean;
+  /**
+   * The field is a COMMENT composer (the review sidebar's "+ General
+   * comment"), so the "Enter saves a comment" setting applies: pass its value
+   * and a plain Enter also submits (Shift+Enter stays a new line). Default
+   * false: in the decision control's own composer a note rides a decision,
+   * and only Mod+Enter fires it.
+   */
+  enterSubmits?: boolean;
 }
 
 /**
@@ -115,6 +133,7 @@ export const DecisionNoteField: React.FC<DecisionNoteFieldProps> = ({
   placeholder = 'Add a note...',
   disabled = false,
   autoFocus = true,
+  enterSubmits = false,
 }) => {
   const ref = useAutoGrow(text);
 
@@ -133,15 +152,15 @@ export const DecisionNoteField: React.FC<DecisionNoteFieldProps> = ({
         onCancel();
         return;
       }
-      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      if (enterSubmits ? isCommentSubmitKey(event, true) : event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
         event.stopPropagation();
         if (!disabled) onSubmit();
       }
-      // Plain Enter falls through: the field is multi-line and Enter's job is
-      // a newline.
+      // Otherwise plain Enter falls through: the field is multi-line and
+      // Enter's job is a newline.
     },
-    [disabled, onCancel, onSubmit],
+    [disabled, enterSubmits, onCancel, onSubmit],
   );
 
   return (
@@ -228,8 +247,7 @@ export const DecisionNoteDialog: React.FC<{
           disabled={disabled}
           autoFocus={!isCompactTouchLayout}
         />
-        <div className="mt-3 flex items-center justify-between gap-2">
-          <span className="text-[11px] leading-snug text-muted-foreground">{submitHint}</span>
+        <div className="mt-3 flex items-center justify-end gap-2">
           <Button
             variant={toneButtonVariant(composer.tone)}
             size="xs"
@@ -257,6 +275,7 @@ export const DecisionControl: React.FC<DecisionControlProps> = ({
   labelBreakpoint = 'md',
   dismissOnIframeFocus = false,
   confirmDialog,
+  menuFooter,
 }) => {
   const rootRef = useRef<HTMLDivElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -404,7 +423,9 @@ export const DecisionControl: React.FC<DecisionControlProps> = ({
       const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End'];
       if (!keys.includes(event.key)) return;
       const items = Array.from(
-        popoverRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [],
+        popoverRef.current?.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitem"]:not(:disabled), [role="menuitemradio"]:not(:disabled)',
+        ) ?? [],
       );
       if (items.length === 0) return;
       event.preventDefault();
@@ -550,6 +571,9 @@ export const DecisionControl: React.FC<DecisionControlProps> = ({
                   />
                 </React.Fragment>
               ))}
+              {typeof menuFooter === 'function'
+                ? menuFooter({ closeMenu: () => closePopover() })
+                : menuFooter}
             </div>
           ) : activeItem?.composer ? (
             <div className="p-2">
@@ -571,10 +595,7 @@ export const DecisionControl: React.FC<DecisionControlProps> = ({
                 onCancel={backToMenu}
                 placeholder={activeItem.composer.placeholder}
               />
-              <div className="mt-2 flex items-center justify-between gap-2 px-0.5">
-                <span className="text-[11px] leading-snug text-muted-foreground">
-                  {submitHint} send · Esc back, note kept
-                </span>
+              <div className="mt-2 flex items-center justify-end gap-2 px-0.5">
                 <Button
                   variant={toneButtonVariant(activeItem.composer.tone)}
                   size="xs"

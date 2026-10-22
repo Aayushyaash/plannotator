@@ -70,6 +70,17 @@ export interface AIPermissionRequestMessage {
   toolUseId: string;
 }
 
+/**
+ * Progress of a question that has not started answering yet. Only the
+ * "Ask this session" provider emits it: `waiting` while a busy session
+ * finishes its turn, `interrupting` while it is being stopped, `running`
+ * once the question was delivered.
+ */
+export interface AIStatusMessage {
+  type: "status";
+  status: "waiting" | "interrupting" | "running";
+}
+
 export interface AIUnknownMessage {
   type: "unknown";
   /** The raw message from the provider, for debugging/transparency. */
@@ -84,7 +95,27 @@ export type AIMessage =
   | AIErrorMessage
   | AIResultMessage
   | AIPermissionRequestMessage
+  | AIStatusMessage
   | AIUnknownMessage;
+
+/** Per-question options. Providers that do not understand a field ignore it. */
+export interface AIQueryOptions {
+  /**
+   * What to do when the host session is busy ("Ask this session" only):
+   * `wait` holds the question until the session is idle, `interrupt` stops
+   * the session's current work first. Absent: report `agent_busy` and let the
+   * reviewer choose.
+   */
+  busyPolicy?: "wait" | "interrupt";
+  /**
+   * "Ask this session" only: the reviewer's unsubmitted (draft) annotations,
+   * as the plain list `formatDraftAnnotationsForAsk` builds. The bridge wraps
+   * it in a read-only frame (`formatSessionAskText`), never as feedback. An
+   * empty string means the drafts sent earlier were all removed; absent means
+   * nothing changed since the session last saw them.
+   */
+  draftAnnotations?: string;
+}
 
 // ---------------------------------------------------------------------------
 // Session — a live conversation with the AI
@@ -104,7 +135,7 @@ export interface AISession {
    * Send a prompt and stream back messages.
    * The returned async iterable yields messages as they arrive.
    */
-  query(prompt: string): AsyncIterable<AIMessage>;
+  query(prompt: string, options?: AIQueryOptions): AsyncIterable<AIMessage>;
 
   /**
    * Abort the current in-flight query.
@@ -213,6 +244,21 @@ export interface AIProvider {
    * did not report one.
    */
   readonly toolVersion?: string;
+
+  /** Display label overriding the provider-name lookup (e.g. "Ask this session · Pi"). */
+  readonly label?: string;
+
+  /**
+   * Present only on the "Ask this session" provider: the live host status,
+   * reported by `/api/ai/capabilities` so the client can default to it.
+   */
+  readonly sessionBridge?: {
+    host: string;
+    status: "ready" | "busy" | "blocked" | "gone";
+    modes: { turn: boolean; transient: boolean };
+    /** `false` only when the host never interrupts the session's work. */
+    interruptible?: false;
+  };
 
   /**
    * Create a fresh session (no parent history).
@@ -324,4 +370,6 @@ export interface OpenCodeConfig extends AIProviderConfig {
   hostname?: string;
   /** Port for the spawned OpenCode server. Default: 0 (OS-assigned free port). */
   port?: number;
+  /** How long Ask AI waits for the event stream's first frame before it gives up. Default: 10000 ms. */
+  firstEventTimeoutMs?: number;
 }

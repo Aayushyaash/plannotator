@@ -57,6 +57,14 @@ describe("parseReviewArgs", () => {
     });
   });
 
+  // #1907: `plannotator review --gate` (an agent waiting for the sign-off) must
+  // not be refused as an unknown option on hosts that run the CLI as written.
+  test("--gate is accepted, marked, and absent otherwise", () => {
+    expect(parseReviewArgs("--gate")).toMatchObject({ gate: true, errors: [] });
+    expect(parseReviewArgs(["--gate", "../wt"])).toMatchObject({ gate: true, words: ["../wt"], errors: [] });
+    expect("gate" in parseReviewArgs("")).toBe(false);
+  });
+
   test("--no-git-remote-check sets the opt-out bit and is absent otherwise", () => {
     // #1553: every host (CLI, OpenCode, Pi) forwards this bit to the review
     // server. It must be absent — not `true` — when the flag is not typed, or
@@ -300,11 +308,33 @@ describe("review directory targets", () => {
     });
   });
 
-  test("a path-shaped typo fails loudly instead of reviewing the caller's repo", () => {
+  test("a sole path-shaped typo fails loudly instead of reviewing the caller's repo", () => {
     withTree((root) => {
-      for (const input of ["./missing", "../missing", "missing/sub", "please review ./missing"]) {
+      for (const input of ["./missing", "../missing", "missing/sub", "~/plannotator-missing-dir-xyz"]) {
         expect(() => target(input, root)).toThrow("does not exist");
       }
+      expect(() => target("./file", root)).toThrow("not a directory");
+    });
+  });
+
+  test("path-shaped prose among several words is ignored, not fatal (v0.27.23 regression)", () => {
+    withTree((root) => {
+      expect(target("review the frontend/backend split", root)).toEqual({
+        ignored: ["review", "the", "frontend/backend", "split"],
+      });
+      expect(target("look at the api/users code", root)).toEqual({
+        ignored: ["look", "at", "the", "api/users", "code"],
+      });
+      // A path-shaped word naming a file is prose too.
+      expect(target("look at ./file please", root)).toEqual({ ignored: ["look", "at", "./file", "please"] });
+      // An existing directory among the words still selects it.
+      expect(target("look at ./backend please", root)).toEqual({
+        directory: join(root, "backend"),
+        ignored: ["look", "at", "please"],
+      });
+      expect(target("./missing ./backend", root)).toEqual({ directory: join(root, "backend"), ignored: ["./missing"] });
+      // A path word next to a PR URL is not a sole target either.
+      expect(target("https://github.com/a/b/pull/1 ./missing", root)).toEqual({ ignored: ["./missing"] });
     });
   });
 

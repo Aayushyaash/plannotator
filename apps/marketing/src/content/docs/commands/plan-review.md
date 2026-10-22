@@ -29,6 +29,8 @@ Agent resubmits → Plan Diff shows what changed
 
 The hook configuration lives at `apps/hook/hooks/hooks.json` and matches the `ExitPlanMode` tool name.
 
+On Claude Code 2.1.287 or newer, the [Plannotator mod](/docs/guides/claude-code/#the-plannotator-mod) runs plan review instead of the hook, and Claude does not wait. When the review opens, Claude ends its turn, and your decision arrives later as a message. A revised plan updates the same tab. After you approve, Claude calls `ExitPlanMode` once more and works from the exact plan text you approved.
+
 ## Codex flow
 
 Codex does not expose a dedicated `ExitPlanMode` interception point. Instead, Plannotator integrates through Codex's experimental `Stop` hook.
@@ -70,6 +72,8 @@ When you select text in the plan, the annotation toolbar appears with these opti
 | **Global comment** | General feedback (not tied to text) | "The plan looks good overall but needs tests" |
 
 If you want a replacement or an insertion, ask for it in a comment ("Change `WebSocket` to `SSE`" or "Add a retry mechanism here") — the agent will incorporate it during the revision.
+
+A comment saves with `Cmd/Ctrl+Enter`; plain Enter adds a new line. If `Cmd/Ctrl+Enter` is taken on your computer, or you prefer chat-style keys, turn on **Enter saves a comment** in Settings → General: Enter then saves and Shift+Enter adds a new line, in every comment box (plan review, annotate, code review and the Inbox's file comments). `Cmd/Ctrl+Enter` keeps saving. The setting is kept in your browser; other Plannotator tabs already open, an open Inbox tab included, pick up a change after a reload. The Inbox's reply box is a message, not a comment: Enter there stays a new line.
 
 ## Image attachments
 

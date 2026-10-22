@@ -49,6 +49,15 @@ export interface ParsedReviewArgs {
    */
   gitRemoteCheck?: boolean;
   /**
+   * `true` when the invocation carried `--gate` (#1907): the caller waits for
+   * the reviewer's sign-off, so a bare Approve must reach it. The review page
+   * always has Approve and the CLI always prints the approval, so the flag
+   * changes nothing here; it marks the intent for a host that otherwise only
+   * logs a bare Approve (the Claude Code mod takes the command over as the
+   * `plannotator` tool's gated review).
+   */
+  gate?: boolean;
+  /**
    * Argument-shape problems the host must surface before starting a session.
    * Always present; empty means the invocation parsed cleanly. Hosts differ in
    * how they surface these (CLI exits 1, Pi/OpenCode notify), which is why the
@@ -67,6 +76,7 @@ export function parseReviewArgs(input: string | string[]): ParsedReviewArgs {
   let base: string | undefined;
   let diffType: DiffType | undefined;
   let gitRemoteCheck: boolean | undefined;
+  let gate = false;
   const errors: string[] = [];
   const positional: string[] = [];
 
@@ -104,6 +114,9 @@ export function parseReviewArgs(input: string | string[]): ParsedReviewArgs {
       }
       case "--no-git-remote-check":
         gitRemoteCheck = false;
+        break;
+      case "--gate":
+        gate = true;
         break;
       case "--local":
         useLocal = true;
@@ -196,6 +209,7 @@ export function parseReviewArgs(input: string | string[]): ParsedReviewArgs {
     base,
     diffType,
     ...(gitRemoteCheck === undefined ? {} : { gitRemoteCheck }),
+    ...(gate ? { gate } : {}),
     errors,
   };
 }
@@ -207,7 +221,7 @@ export interface ReviewTarget {
   ignored: string[];
 }
 
-/** Path-shaped words are always directory intent, so a typo in one fails loudly. */
+/** Path-shaped words are directory candidates even inside prose. */
 function looksLikePath(word: string): boolean {
   return /[\\/]/.test(word) || word.startsWith(".") || word.startsWith("~");
 }
@@ -217,11 +231,13 @@ function looksLikePath(word: string): boolean {
  * discovery. Slash-command hosts forward raw user words verbatim, so prose
  * stays tolerated (the annotate tolerant-args precedent, annotate-target.ts):
  *
- * - A sole word is a directory candidate; a path-shaped word always is (in
- *   prose, a bare word that happens to match a directory never hijacks).
- * - A candidate that is an existing directory is the target. One that exists
- *   but is not a directory, or a path-shaped one that does not exist, throws:
- *   that is a typo'd target and must never review the caller's repo.
+ * - A sole word is the target: an existing directory opens there, and a file,
+ *   or a path-shaped word that does not exist, throws (a typo'd target must
+ *   never review the caller's repo). A sole bare word naming nothing is prose.
+ * - Among several words only path-shaped ones are candidates (in prose, a bare
+ *   word that happens to match a directory never hijacks). A candidate that is
+ *   an existing directory is the target; one that is missing or a file is
+ *   prose ("the frontend/backend split", "look at ./notes.txt") and ignored.
  * - Every other word is returned in `ignored`, and the review opens in the
  *   invoking cwd exactly as before directory targets existed.
  * - Two targets (two directories, or a directory and a PR/MR URL) throw.
@@ -246,6 +262,10 @@ export function resolveReviewTarget(
       isDirectory = statSync(resolved).isDirectory();
     } catch {
       isDirectory = undefined;
+    }
+    if (!sole && !isDirectory) {
+      ignored.push(word);
+      continue;
     }
     if (isDirectory === undefined) {
       if (pathLike) throw new Error(`Review directory does not exist or is not accessible: ${resolved}`);

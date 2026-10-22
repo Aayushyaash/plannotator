@@ -104,6 +104,16 @@ describe.if(hasDom)('HtmlViewer link delivery', () => {
     expect(seen).toEqual([]);
   });
 
+  test('an armed (Annotate) document follows a link too: the host gets it whatever the mode', async () => {
+    const seen: string[] = [];
+    const { postFromBridge } = await mountViewer({
+      annotateModeActive: true,
+      onOpenLink: (href: string) => seen.push(href),
+    });
+    await postFromBridge({ type: LINK_CLICK, href: 'c.html#top' });
+    expect(seen).toEqual(['c.html#top']);
+  });
+
   test('read-only documents still navigate — following a link is a read action', async () => {
     const seen: string[] = [];
     const { postFromBridge } = await mountViewer({

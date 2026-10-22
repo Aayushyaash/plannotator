@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback, memo } from 'react';
 import type { AIChatEntry, PendingPermission } from '../hooks/useAIChat';
+import { hasPendingBusyChoice } from '@plannotator/ui/hooks/useAIChat';
 import { renderChatMarkdown } from '../utils/renderChatMarkdown';
 import { formatLineRange } from '../utils/formatLineRange';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
@@ -11,7 +12,9 @@ import { PermissionCard } from './PermissionCard';
 import { AIConfigBar } from './AIConfigBar';
 import { submitHint } from '@plannotator/ui/utils/platform';
 import { OverlayScrollArea } from '@plannotator/ui/components/OverlayScrollArea';
-import type { AIProviderOption } from '@plannotator/ui/utils/aiProvider';
+import { findSessionBridge, hasNonInterruptibleSession, type AIProviderOption } from '@plannotator/ui/utils/aiProvider';
+import { NewChatButton } from '@plannotator/ui/components/ai/NewChatButton';
+import { SessionAskActions, SessionAskNote, SessionAskStatus, sessionAskErrorTone, type SessionAskAction } from '@plannotator/ui/components/ai/SessionAskNotice';
 
 interface AITabProps {
   messages: AIChatEntry[];
@@ -29,6 +32,13 @@ interface AITabProps {
   aiConfig?: { providerId: string | null; model: string | null; reasoningEffort?: string | null };
   onAIConfigChange?: (config: { providerId?: string | null; model?: string | null; reasoningEffort?: string | null }) => void;
   hasAISession?: boolean;
+  /** "Ask this session": the reviewer's choice on a busy answer. */
+  onSessionAskAction?: (questionId: string, action: SessionAskAction) => void;
+  /** Optional note on how to get "Ask this session" (askSessionSetupHint). */
+  askSessionSetupHint?: string | null;
+  /** Start a new chat: clear the tab so the next question starts a fresh AI
+   *  session (#1981). Absent: no button. */
+  onNewChat?: () => void;
 }
 
 interface FileGroup {
@@ -57,7 +67,12 @@ export const AITab: React.FC<AITabProps> = ({
   aiConfig,
   onAIConfigChange,
   hasAISession = false,
+  onSessionAskAction,
+  askSessionSetupHint,
+  onNewChat,
 }) => {
+  // A session that is never interrupted (T3 Code): Stop only stops listening.
+  const listenOnly = hasNonInterruptibleSession(aiProviders);
   const scrollRef = useRef<HTMLDivElement>(null);
   // File chat groups default to expanded; this tracks the ones the user has
   // explicitly collapsed (inverted set), so a freshly-shown file's chat is
@@ -151,6 +166,16 @@ export const AITab: React.FC<AITabProps> = ({
     });
   };
 
+  const rootRef = useRef<HTMLDivElement>(null);
+  const handleNewChat = useCallback(() => {
+    if (!onNewChat) return;
+    onNewChat();
+    // The button leaves with the messages; keep focus in the tab.
+    requestAnimationFrame(() => {
+      rootRef.current?.querySelector<HTMLTextAreaElement>('textarea')?.focus();
+    });
+  }, [onNewChat]);
+
   const handleGeneralSubmit = () => {
     if (!generalInput.trim() || !onAskGeneral) return;
     onAskGeneral(generalInput.trim());
@@ -160,7 +185,7 @@ export const AITab: React.FC<AITabProps> = ({
   // Empty state
   if (messages.length === 0 && !isCreatingSession) {
     return (
-      <div className="flex flex-col h-full">
+      <div ref={rootRef} className="flex flex-col h-full">
         <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground px-4 py-12 text-center">
           <div className="w-10 h-10 rounded-full bg-muted/50 flex items-center justify-center mb-3">
             <SparklesIcon className="w-5 h-5" />
@@ -178,14 +203,23 @@ export const AITab: React.FC<AITabProps> = ({
           selectedReasoningEffort={aiConfig?.reasoningEffort ?? null}
           onReasoningEffortChange={(effort) => onAIConfigChange?.({ reasoningEffort: effort })}
           hasSession={hasAISession}
+          setupHint={askSessionSetupHint}
         />
-        {onAskGeneral && <GeneralInput value={generalInput} onChange={setGeneralInput} onSubmit={handleGeneralSubmit} disabled={isStreaming} isStreaming={isStreaming} onStop={onStop} />}
+        {onAskGeneral && <GeneralInput value={generalInput} onChange={setGeneralInput} onSubmit={handleGeneralSubmit} disabled={isStreaming} isStreaming={isStreaming} onStop={onStop} observationOnly={listenOnly} />}
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div ref={rootRef} className="flex flex-col h-full">
+      {onNewChat && messages.length > 0 && (
+        <NewChatButton
+          onNewChat={handleNewChat}
+          busy={isStreaming || isCreatingSession}
+          pendingChoice={hasPendingBusyChoice(messages)}
+          sessionBridge={!!findSessionBridge(aiProviders)}
+        />
+      )}
       <OverlayScrollArea className="flex-1 min-h-0">
       <div ref={scrollRef} className="p-2">
         {isCreatingSession && messages.length === 0 && (
@@ -219,7 +253,7 @@ export const AITab: React.FC<AITabProps> = ({
               {isExpanded && (
                 <div className="ml-3 border-l border-border/30 pl-2 space-y-2 mt-1">
                   {fileMessages.map(({ question, response }) => (
-                    <QAPair key={question.id} question={question} response={response} onScrollToLines={onScrollToLines} />
+                    <QAPair key={question.id} question={question} response={response} canInterrupt={!listenOnly} onScrollToLines={onScrollToLines} onSessionAskAction={onSessionAskAction} />
                   ))}
                 </div>
               )}
@@ -239,7 +273,7 @@ export const AITab: React.FC<AITabProps> = ({
             )}
             <div className="space-y-2">
               {generalMessages.map(({ question, response }) => (
-                <QAPair key={question.id} question={question} response={response} onScrollToLines={onScrollToLines} />
+                <QAPair key={question.id} question={question} response={response} canInterrupt={!listenOnly} onScrollToLines={onScrollToLines} onSessionAskAction={onSessionAskAction} />
               ))}
             </div>
           </div>
@@ -276,10 +310,11 @@ export const AITab: React.FC<AITabProps> = ({
         selectedReasoningEffort={aiConfig?.reasoningEffort ?? null}
         onReasoningEffortChange={(effort) => onAIConfigChange?.({ reasoningEffort: effort })}
         hasSession={hasAISession}
+        setupHint={askSessionSetupHint}
       />
 
       {/* General question input */}
-      {onAskGeneral && <GeneralInput value={generalInput} onChange={setGeneralInput} onSubmit={handleGeneralSubmit} disabled={isStreaming} isStreaming={isStreaming} onStop={onStop} />}
+      {onAskGeneral && <GeneralInput value={generalInput} onChange={setGeneralInput} onSubmit={handleGeneralSubmit} disabled={isStreaming} isStreaming={isStreaming} onStop={onStop} observationOnly={listenOnly} />}
     </div>
   );
 };
@@ -292,7 +327,8 @@ const GeneralInput: React.FC<{
   disabled?: boolean;
   isStreaming?: boolean;
   onStop?: () => void;
-}> = ({ value, onChange, onSubmit, disabled, isStreaming, onStop }) => {
+  observationOnly?: boolean;
+}> = ({ value, onChange, onSubmit, disabled, isStreaming, onStop, observationOnly = false }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const autoResize = useCallback(() => {
@@ -328,9 +364,10 @@ const GeneralInput: React.FC<{
           <button
             onClick={onStop}
             className="p-1.5 mb-px rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors flex-shrink-0"
-            title="Stop generating"
-            aria-label="Stop generating"
+            title={observationOnly ? 'Stop listening; the question keeps running in the session' : 'Stop generating'}
+            aria-label={observationOnly ? 'Stop listening' : 'Stop generating'}
           >
+            {observationOnly && <span className="text-[10px] mr-1">Stop listening</span>}
             <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
               <rect x="6" y="6" width="12" height="12" rx="2" />
             </svg>
@@ -357,7 +394,9 @@ const QAPair = memo<{
   question: AIChatEntry['question'];
   response: AIChatEntry['response'];
   onScrollToLines: AITabProps['onScrollToLines'];
-}>(({ question, response, onScrollToLines }) => {
+  onSessionAskAction?: AITabProps['onSessionAskAction'];
+  canInterrupt?: boolean;
+}>(({ question, response, onScrollToLines, onSessionAskAction, canInterrupt }) => {
   const scope = getQuestionScope(question);
   const renderedResponse = useMemo(
     () => response.text ? renderChatMarkdown(response.text) : null,
@@ -392,7 +431,14 @@ const QAPair = memo<{
       {/* Response */}
       <div className="group relative p-2.5 rounded-lg border border-border/50 bg-popover/50 hover:bg-muted/30 transition-colors">
         {response.error ? (
-          <p className="text-xs text-destructive">{response.error}</p>
+          <>
+            <p className={`text-xs ${sessionAskErrorTone(response)}`}>{response.error}</p>
+            <SessionAskActions
+              response={response}
+              canInterrupt={canInterrupt}
+              onAction={onSessionAskAction ? (action) => onSessionAskAction(question.id, action) : undefined}
+            />
+          </>
         ) : response.text ? (
           <>
             <div className="text-xs review-comment-body">
@@ -401,11 +447,14 @@ const QAPair = memo<{
             </div>
             {!response.isStreaming && <CopyButton text={response.text} />}
           </>
+        ) : response.status ? (
+          <SessionAskStatus response={response} />
         ) : response.isStreaming ? (
           <span className="text-xs text-muted-foreground">
             <span className="ai-streaming-cursor" /> Thinking...
           </span>
         ) : null}
+        {!response.error && <SessionAskNote response={response} />}
       </div>
     </div>
   );

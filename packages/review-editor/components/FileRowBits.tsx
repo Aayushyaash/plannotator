@@ -1,13 +1,17 @@
 import React from 'react';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
-import type { DiffFile } from '../types';
 
 /**
  * Shared atoms for file rows — used by both the tree view (FileTreeNode) and
  * the sections view (SectionsPanel), so the two lists render one visual
  * language: same viewed circle, same leading change-type letter, same
  * stage button/dot.
+ *
+ * The change-type letter and +/- counts are the shared diff-file-tree atoms
+ * from @plannotator/ui (the same ones the embeddable DiffFileTree renders);
+ * they are re-exported here so review call sites keep importing one module.
  */
+export { ChangeTypeLetter, DiffCounts } from '@plannotator/ui/components/DiffFileTree';
 
 /** Viewed checkbox — always visible: green check-circle when viewed, empty
  * circle otherwise. Fixed 16px slot, same as StageControl, so the two align
@@ -18,7 +22,7 @@ export const ViewedControl: React.FC<{
   /** Deprecated no-op — the control is always visible now. */
   forceVisible?: boolean;
 }> = ({ isViewed, onToggle }) => (
-  <Tooltip content={isViewed ? 'Viewed — click to unmark' : 'Mark as viewed'} side="bottom" delayDuration={300}>
+  <Tooltip content={isViewed ? 'Viewed — click to unmark' : 'Mark as viewed'} side="bottom">
     <span
       role="checkbox"
       aria-checked={isViewed}
@@ -53,39 +57,6 @@ export const ViewedControl: React.FC<{
   </Tooltip>
 );
 
-/** Right-anchored +/- pair — one fixed-width block so the numbers always end
- * flush at the row edge, stay tight together, and add-only rows leave no
- * phantom gap. */
-export const DiffCounts: React.FC<{ additions: number; deletions: number }> = ({ additions, deletions }) => (
-  <span className="min-w-[7ch] text-right whitespace-nowrap flex-shrink-0 text-[10px] tabular-nums">
-    {additions > 0 && <span className="additions">+{additions}</span>}
-    {additions > 0 && deletions > 0 && <span> </span>}
-    {deletions > 0 && <span className="deletions">-{deletions}</span>}
-  </span>
-);
-
-/** Leading change-type letter — A/D/R/U carry weight and color; modified gets
- * a whisper-quiet M so the column has no holes. Fixed slot keeps names aligned. */
-export const ChangeTypeLetter: React.FC<{
-  status: DiffFile['status'];
-  oldPath?: string;
-  untracked?: boolean;
-}> = ({ status, oldPath, untracked }) => (
-  <span className="w-3 text-center text-[10px] flex-shrink-0">
-    {untracked ? (
-      <span className="font-semibold text-muted-foreground/70" title="Untracked file">U</span>
-    ) : status === 'added' ? (
-      <span className="font-semibold text-success" title="Added file">A</span>
-    ) : status === 'deleted' ? (
-      <span className="font-semibold text-destructive" title="Deleted file">D</span>
-    ) : status === 'renamed' ? (
-      <span className="font-semibold text-[#007aff]" title={oldPath ? `Renamed from ${oldPath}` : 'Renamed file'}>R</span>
-    ) : (
-      <span className="text-muted-foreground/40" title="Modified file">M</span>
-    )}
-  </span>
-);
-
 /** Staging affordance — plus button on unstaged working files (always
  * visible, brightens on hover), primary dot when staged, spinner mid-flight.
  * Fixed 16px slot. */
@@ -102,7 +73,7 @@ export const StageControl: React.FC<{
     );
   }
   return (
-    <Tooltip content="Stage file (git add)" side="bottom" delayDuration={300}>
+    <Tooltip content="Stage file (git add)" side="bottom">
       <span
         role="button"
         // tabIndex + key handling: lives INSIDE the row <button> (a real nested
@@ -170,3 +141,34 @@ export const AnnotationBadge: React.FC<{ count: number }> = ({ count }) => {
     </span>
   );
 };
+
+/** A foldable section header for the left panel lists: the status view's
+ * Committed / Changes / Untracked headers and the tree's kind blocks. Chevron,
+ * optional icon, label, then anything the caller adds (counts). */
+export const PanelSectionHeader: React.FC<{
+  label: string;
+  collapsed: boolean;
+  onToggle: () => void;
+  icon?: React.ReactNode;
+  children?: React.ReactNode;
+}> = ({ label, collapsed, onToggle, icon, children }) => (
+  <button
+    type="button"
+    onClick={onToggle}
+    aria-expanded={!collapsed}
+    className="w-full flex items-center gap-1.5 px-2 py-1.5 text-muted-foreground hover:text-foreground transition-colors"
+  >
+    <svg
+      className={`w-2.5 h-2.5 flex-shrink-0 transition-transform ${collapsed ? '-rotate-90' : ''}`}
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth={2}
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+    </svg>
+    {icon}
+    <span className="text-[11px] font-medium">{label}</span>
+    {children}
+  </button>
+);

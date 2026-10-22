@@ -17,6 +17,7 @@ import { PlanCleanDiffView } from "./PlanCleanDiffView";
 import { PlanRawDiffView } from "./PlanRawDiffView";
 import { PlanDiffBadge } from "./PlanDiffBadge";
 import { VSCodeIcon } from "./VSCodeIcon";
+import { noteServerSessionMismatch, withServerSession } from "../../utils/serverSession";
 
 interface PlanDiffViewerProps {
   diffBlocks: PlanDiffBlock[];
@@ -44,8 +45,12 @@ const defaultOpenVscodeDiff = async (
     const res = await fetch("/api/plan/vscode-diff", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ baseVersion }),
+      // The stale-tab guard (a no-op for a host that never adopted a session).
+      body: JSON.stringify(withServerSession({ baseVersion })),
     });
+    if (await noteServerSessionMismatch(res)) {
+      return { error: "This review was replaced. Reload the page." };
+    }
     const data = (await res.json()) as { ok?: boolean; error?: string };
     if (!res.ok || data.error) {
       return { error: data.error || "Failed to open VS Code diff" };
@@ -98,7 +103,7 @@ export const PlanDiffViewer: React.FC<PlanDiffViewerProps> = ({
 
   return (
     <div className="relative z-50 w-full" style={maxWidth ? { maxWidth } : { maxWidth: 832 }}>
-      <article className="w-full bg-card border border-border/50 rounded-xl shadow-xl p-5 md:p-8 lg:p-10 xl:p-12 relative">
+      <article className="w-full bg-card border border-border/50 rounded-xl shadow-xl p-5 md:p-8 lg:p-10 xl:p-12 relative" data-doc-text-root="">
         {/* Top-left: repo info + diff badge — matches Viewer layout (flex-col) so badge doesn't jump position */}
         <div className="absolute top-3 left-3 md:top-4 md:left-5 flex flex-col items-start gap-1 text-[9px] text-muted-foreground/50 font-mono">
           {repoInfo && (

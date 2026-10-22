@@ -311,7 +311,7 @@ describe("pi PLANNOTATOR_BROWSER script path", () => {
 			try {
 				const marker = join(dir, "opened.txt");
 				const script = join(dir, "handler.sh");
-				writeFileSync(script, `#!/bin/sh\nprintf '%s' \"$1\" > \"${marker}\"\n`, {
+				writeFileSync(script, `#!/bin/sh\nprintf '%s' \"$1\" > \"${marker}.tmp\" && mv \"${marker}.tmp\" \"${marker}\"\n`, {
 					mode: 0o755,
 				});
 				process.env.PLANNOTATOR_BROWSER = script;
@@ -319,7 +319,8 @@ describe("pi PLANNOTATOR_BROWSER script path", () => {
 				const result = await openBrowser("http://127.0.0.1:19432");
 				expect(result.opened).toBe(true);
 
-				// spawn is detached; poll briefly for the marker
+				// spawn is detached; poll briefly for the marker (written whole by the
+				// script's mv, so it never reads empty)
 				const deadline = Date.now() + 2000;
 				while (!existsSync(marker) && Date.now() < deadline) {
 					await new Promise((r) => setTimeout(r, 25));

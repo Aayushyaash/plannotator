@@ -1,18 +1,80 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve as resolvePath, posix as pathPosix } from "node:path";
+import { dirname, isAbsolute, relative, resolve as resolvePath, posix as pathPosix, sep } from "node:path";
 import {
   htmlAssetContentType,
+  refusesHiddenHtmlAssetPath,
   rewriteCssAssetReferences,
   rewriteHtmlAssetReferences,
 } from "./html-assets";
 
 export const MAX_HTML_ASSET_BYTES = 50 * 1024 * 1024;
 
-export function inlineHtmlLocalAssets(html: string, htmlFilePath: string): string {
+/**
+ * Where an HTML document's relative assets are served from. Normally the
+ * document's own folder. In an annotate folder session (`folderPath`) a
+ * document inside the selected folder gets the whole folder as its root, so
+ * `../assets/x.css` from `lessons/page.html` resolves, with `basePath` naming
+ * the document's folder under that root. `docDir` (that folder, absolute)
+ * marks the wider root; `folderSessionAssetAllowed` then decides each asset.
+ * A document that itself sits in a hidden folder (`.drafts/page.html`) is not
+ * widened: its own folder stays its root, as for a single file.
+ */
+export function htmlAssetContext(
+  htmlFilePath: string,
+  folderPath?: string,
+): { root: string; basePath: string; docDir: string | null } {
+  const directory = dirname(resolvePath(htmlFilePath));
+  const ownFolder = { root: directory, basePath: "", docDir: null };
+  if (!folderPath || !isWithinDirectory(htmlFilePath, folderPath)) return ownFolder;
+  const root = realpathSync(folderPath);
+  const documentDirectory = dirname(realpathSync(htmlFilePath));
+  const basePath = relative(root, documentDirectory).split(sep).join("/");
+  if (basePath.split("/").some((segment) => segment.startsWith("."))) return ownFolder;
+  return { root, basePath, docDir: documentDirectory };
+}
+
+/**
+ * A folder session's rule for one asset (the caller has already checked it
+ * stays inside the selected folder `root`): allowed when it resolves inside
+ * the requesting document's own directory, hidden segments included, exactly
+ * as when that directory was the root (v0.28.18); otherwise only when no
+ * segment of its path under the folder, as requested and by realpath, is
+ * hidden or in the dotenv family. A symlink in the document's directory that
+ * leads elsewhere in the folder is judged by the second rule.
+ */
+export function folderSessionAssetAllowed(root: string, docDir: string, assetPath: string): boolean {
+  if (isWithinDirectory(resolvePath(root, assetPath), docDir)) return true;
+  return !htmlAssetPathRefused(root, assetPath, refusesHiddenHtmlAssetPath);
+}
+
+/**
+ * Whether `refuse` rejects an asset, judged on the path as requested AND on
+ * where it really leads under the root, so an innocent name symlinked to a
+ * hidden file is refused too. Shared by the Bun route, the Pi route and the
+ * share-link inliner.
+ */
+export function htmlAssetPathRefused(
+  root: string,
+  assetPath: string,
+  refuse: (relativePath: string) => boolean,
+): boolean {
+  if (refuse(assetPath)) return true;
+  let real = resolvePath(root, assetPath);
+  let realRoot = resolvePath(root);
+  try {
+    real = realpathSync(real);
+    realRoot = realpathSync(realRoot);
+  } catch {
+    // Not on disk: the read answers 404 (the inliner skips it).
+  }
+  return refuse(relative(realRoot, real).split(sep).join("/"));
+}
+
+export function inlineHtmlLocalAssets(html: string, htmlFilePath: string, folderPath?: string): string {
   if (/^https?:\/\//i.test(htmlFilePath)) return html;
 
   try {
-    const root = dirname(resolvePath(htmlFilePath));
+    const { root, basePath, docDir } = htmlAssetContext(htmlFilePath, folderPath);
     const activeCss = new Set<string>();
 
     const dataUrlFor = (assetPath: string): string | null => {
@@ -22,6 +84,7 @@ export function inlineHtmlLocalAssets(html: string, htmlFilePath: string): strin
 
         const resolved = resolvePath(root, assetPath);
         if (!isWithinDirectory(resolved, root)) return null;
+        if (docDir && !folderSessionAssetAllowed(root, docDir, assetPath)) return null;
         if (!existsSync(resolved)) return null;
 
         const stat = statSync(resolved);
@@ -55,7 +118,7 @@ export function inlineHtmlLocalAssets(html: string, htmlFilePath: string): strin
     // a base nothing resolves against, so an embed renders EMPTY on the share
     // portal instead of resolving onto the portal's own catch-all and rendering
     // the app inside the frame (which is exactly the bug this fixes locally).
-    return rewriteHtmlAssetReferences(html, dataUrlFor, { inertBase: true });
+    return rewriteHtmlAssetReferences(html, dataUrlFor, { inertBase: true, assetBasePath: basePath });
   } catch {
     return html;
   }

@@ -719,6 +719,14 @@
     --card-ring: rgba(255, 255, 255, 0.08);
     --card-shadow:
       0 0 0 1px var(--card-ring), 0 1px 3px 0 rgba(0, 0, 0, 0.2), 0 2px 8px -2px rgba(0, 0, 0, 0.3);
+    /* Floating surfaces with no border (the tooltip): a faint ring in the
+     * shadow plus a soft drop. The ink is the background taken toward black in
+     * its own hue (the Inbox's Soft float shadow, same formula). Hosts override
+     * --float-shadow to restyle every borderless float at once. */
+    --float-shadow-ink: var(--background);
+    --float-shadow:
+      0 0 0 1px color-mix(in oklch, var(--foreground) 8%, transparent),
+      0 16px 40px -10px color-mix(in oklch, var(--float-shadow-ink) 70%, transparent);
   }
 
   html {
@@ -760,6 +768,16 @@
     --card-shadow:
       0 0 0 1px var(--card-ring), 0 1px 3px 0 rgba(0, 0, 0, 0.04),
       0 2px 8px -2px rgba(0, 0, 0, 0.06);
+    --float-shadow-ink: var(--foreground);
+    --float-shadow:
+      0 0 0 1px color-mix(in oklch, var(--border) 70%, transparent),
+      0 12px 32px -8px color-mix(in oklch, var(--float-shadow-ink) 22%, transparent);
+  }
+
+  @supports (color: oklch(from red l c h)) {
+    :root:not(.light) {
+      --float-shadow-ink: oklch(from var(--background) calc(l * 0.2) calc(c * 0.5) h);
+    }
   }
 
   * {
@@ -1654,6 +1672,31 @@ body:has([data-popout="true"]) [data-sidebar-tabs="true"] {
   padding-left: 0.6rem;
   color: var(--muted-foreground);
 }
+/* GFM tables in Ask AI answers. The chat panel is narrow, so a wide table
+   scrolls sideways inside itself instead of widening the message. */
+.ai-markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+  font-size: 0.95em;
+}
+.ai-markdown th,
+.ai-markdown td {
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+.ai-markdown th {
+  background: color-mix(in oklab, var(--muted) 55%, transparent);
+  font-weight: 600;
+}
+.ai-markdown th[align="center"],
+.ai-markdown td[align="center"] { text-align: center; }
+.ai-markdown th[align="right"],
+.ai-markdown td[align="right"] { text-align: right; }
 
 /* Annotation highlights — shared by the plan editor and the code-review
    description annotations. (Moved here from packages/editor/index.css so both
@@ -1712,6 +1755,87 @@ body:has([data-popout="true"]) [data-sidebar-tabs="true"] {
 .annotation-highlight:hover {
   filter: brightness(1.2);
   cursor: pointer;
+}
+
+/* Document text size (Settings → Display → Text size, #2066; see
+   utils/documentTextSize). The app sets data-doc-text-size and
+   --doc-text-scale (size / 15) on the document element only away from the
+   default, so at the default none of this applies and the document draws
+   exactly as it always has. Scoped to the blocks of a document container
+   (data-doc-text-root: the Viewer's article and the plan diff's): every block
+   carries data-block-id, the plan diff's blocks data-diff-block-index, the
+   frontmatter card and the raw diff data-doc-text. So the header, panels,
+   badges, menus and popovers keep their size; diagrams draw themselves and the
+   table / diagram popouts are app chrome, so both are left out. Named sizes
+   scale through Tailwind's type scale, the inherited size through each block
+   root, the renderers' fixed sizes one by one (sizes under 12 px, the card's
+   pills and the diff gutters, stay as they are), and the list markers,
+   checkboxes and the question card's controls with the text they sit beside.
+   Unlayered, so it outranks Tailwind's utilities, except the inherited size,
+   which sits in the base layer so a block's own size class still wins. */
+[data-doc-text-size] [data-doc-text-root] :is([data-block-id], [data-diff-block-index], [data-doc-text]):not([data-diagram-block], [data-diagram-block] *, [data-popout], [data-popout] *) {
+  --text-xs: max(11px, calc(0.75rem * var(--doc-text-scale, 1)));
+  --text-sm: calc(0.875rem * var(--doc-text-scale, 1));
+  --text-base: calc(1rem * var(--doc-text-scale, 1));
+  --text-lg: calc(1.0625rem * var(--doc-text-scale, 1));
+  --text-xl: calc(1.1875rem * var(--doc-text-scale, 1));
+  --text-2xl: calc(1.375rem * var(--doc-text-scale, 1));
+  --text-3xl: calc(1.625rem * var(--doc-text-scale, 1));
+  --text-4xl: calc(1.875rem * var(--doc-text-scale, 1));
+  --text-5xl: calc(2rem * var(--doc-text-scale, 1));
+}
+@layer base {
+  /* The size a block inherits (a list row and its marker, an alert's title):
+     only on the outermost block, so a nested one never compounds it. */
+  [data-doc-text-size] [data-doc-text-root] :is([data-block-id], [data-diff-block-index], [data-doc-text]):not([data-diagram-block], [data-diagram-block] *, [data-popout], [data-popout] *):not(:is([data-block-id], [data-diff-block-index], [data-doc-text]) *) {
+    font-size: calc(1em * var(--doc-text-scale, 1));
+  }
+}
+[data-doc-text-size] [data-doc-text-root] :is([data-block-id], [data-diff-block-index], [data-doc-text], [data-block-id] *, [data-diff-block-index] *, [data-doc-text] *):not([data-diagram-block], [data-diagram-block] *, [data-popout], [data-popout] *).text-\[15px\] {
+  font-size: calc(15px * var(--doc-text-scale, 1));
+}
+[data-doc-text-size] [data-doc-text-root] :is([data-block-id], [data-diff-block-index], [data-doc-text], [data-block-id] *, [data-diff-block-index] *, [data-doc-text] *):not([data-diagram-block], [data-diagram-block] *, [data-popout], [data-popout] *).text-\[13\.5px\] {
+  font-size: calc(13.5px * var(--doc-text-scale, 1));
+}
+[data-doc-text-size] [data-doc-text-root] :is([data-block-id], [data-diff-block-index], [data-doc-text], [data-block-id] *, [data-diff-block-index] *, [data-doc-text] *):not([data-diagram-block], [data-diagram-block] *, [data-popout], [data-popout] *).text-\[13px\] {
+  font-size: calc(13px * var(--doc-text-scale, 1));
+}
+[data-doc-text-size] [data-doc-text-root] :is([data-block-id], [data-diff-block-index], [data-doc-text], [data-block-id] *, [data-diff-block-index] *, [data-doc-text] *):not([data-diagram-block], [data-diagram-block] *, [data-popout], [data-popout] *).text-\[12\.5px\] {
+  font-size: calc(12.5px * var(--doc-text-scale, 1));
+}
+/* Fenced code (`pre code.pn-code`, 0.8125rem in the app's stylesheet). */
+[data-doc-text-size] [data-doc-text-root] :is([data-block-id], [data-diff-block-index]):not([data-diagram-block], [data-diagram-block] *, [data-popout], [data-popout] *) pre code.pn-code {
+  font-size: calc(0.8125rem * var(--doc-text-scale, 1));
+}
+/* A question card's context (QuestionContext's own stylesheet). */
+[data-doc-text-size] [data-doc-text-root] [data-block-id] .question-context :is(p, .text-sm) {
+  font-size: calc(13px * var(--doc-text-scale, 1));
+}
+[data-doc-text-size] [data-doc-text-root] [data-block-id] .question-context :is(h1, h2) {
+  font-size: calc(14px * var(--doc-text-scale, 1));
+}
+[data-doc-text-size] [data-doc-text-root] [data-block-id] .question-context h3 {
+  font-size: calc(13.5px * var(--doc-text-scale, 1));
+}
+/* List markers (ListMarker): the numeral's column and the task circle. */
+[data-doc-text-size] [data-doc-text-root] [data-list-numeral] {
+  min-width: calc(1.5rem * var(--doc-text-scale, 1)) !important;
+}
+[data-doc-text-size] [data-doc-text-root] [data-list-check] {
+  width: calc(1rem * var(--doc-text-scale, 1));
+  height: calc(1rem * var(--doc-text-scale, 1));
+  margin-top: calc(3px * var(--doc-text-scale, 1));
+}
+/* A question card's choice controls (QuestionBlock), beside 13.5 px text. */
+[data-doc-text-size] [data-doc-text-root] [data-question-control] {
+  width: calc(15px * var(--doc-text-scale, 1));
+  height: calc(15px * var(--doc-text-scale, 1));
+}
+[data-doc-text-size] [data-doc-text-root] [data-question-control]:is(input) {
+  margin-top: calc(3px * var(--doc-text-scale, 1));
+}
+[data-doc-text-size] [data-doc-text-root] [data-question-control]:not(input) {
+  font-size: calc(11px * var(--doc-text-scale, 1));
 }
 
 /* Reduced motion: Base UI popups (dialogs, menus, popovers, tooltips) animate

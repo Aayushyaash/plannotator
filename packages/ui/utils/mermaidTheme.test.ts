@@ -18,7 +18,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { MERMAID_CONFIG } from './mermaid';
+import { MERMAID_CONFIG, MERMAID_LABEL_WRAP_WIDTH } from './mermaid';
 import { compositeOver, contrastRatio, parseCssColor, relativeLuminance, toHex, type RgbColor } from './cssColor';
 import { DEFAULT_DIAGRAM_SHADOW, DIAGRAM_SHADOW_OPTIONS } from './diagramShadow';
 import {
@@ -355,6 +355,35 @@ describe('contrast guard', () => {
       });
     }
   }
+});
+
+/**
+ * Label wrap width (#2064). Mermaid 12 wraps node labels at 120 px (11 used
+ * 200), which at Plannotator's 16 px labels splits about eight CJK characters
+ * and short Latin labels. 140 is an owner-approved value, pinned on purpose.
+ *
+ * What regresses if these fail: one of the two `initialize` paths (the static
+ * config the lazy loader and a host without theme tokens use, or the themed
+ * config `applyMermaidTheme` passes) loses the width and labels wrap at
+ * Mermaid's default again.
+ */
+describe('label wrap width', () => {
+  test('the owner-approved width is 140 px', () => {
+    expect(MERMAID_LABEL_WRAP_WIDTH).toBe(140);
+  });
+
+  test('the static (host fallback) config wraps flowchart and state labels at it', () => {
+    expect(MERMAID_CONFIG.flowchart?.wrappingWidth).toBe(140);
+    expect(MERMAID_CONFIG.state?.wrappingWidth).toBe(140);
+  });
+
+  test('the themed config keeps it in both modes', () => {
+    for (const [tokens, mode] of [[PLANNOTATOR_DARK, 'dark'], [PLANNOTATOR_LIGHT, 'light']] as const) {
+      const themed = buildMermaidConfig(buildMermaidThemeVariables(tokens, mode));
+      expect(themed.flowchart?.wrappingWidth).toBe(140);
+      expect(themed.state?.wrappingWidth).toBe(140);
+    }
+  });
 });
 
 describe('applyMermaidTheme', () => {

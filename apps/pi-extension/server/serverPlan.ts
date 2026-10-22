@@ -1,11 +1,19 @@
+import { piUpdateAdvert } from "./update-advert.ts";
+import { crossOriginRefusalBody, isSameOriginOrNoOrigin } from "../generated/request-origin.ts";
 import { randomUUID } from "node:crypto";
 import { likelyAppHtmlEncoding, prewarmAppHtml } from "../generated/app-html.ts";
 import { createServer } from "node:http";
 
-import { contentHash, deleteDraft } from "../generated/draft.ts";
+import { contentHash, deleteDraft, loadDraft } from "../generated/draft.ts";
+import { countUnsentDraftComments, hostSessionClosedEvent, type HostCloseOutcome } from "../generated/host-control.ts";
+import { checkServerSession, createServerSessionNonce, serverSessionMismatchBody } from "../generated/server-session.ts";
+import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control.ts";
+import { createRequestHostGuard } from "./request-host-guard.ts";
+import { isSameOriginRequest, refuseCrossOriginWrite } from "./request-origin-guard.ts";
 import {
 	type ArchivedPlan,
 	generateSlug,
+	resolveHistorySlug,
 	getPlanVersion,
 	getPlanVersionPath,
 	getVersionCount,
@@ -42,7 +50,8 @@ import {
 } from "./integrations.ts";
 import { buildAdvertisedUrl, isRemoteSession, listenOnPort } from "./network.ts";
 
-import { loadConfig, saveConfig, detectGitUser, getServerConfig, resolveAIEnabled, resolveFeedbackHistory, resolveSharingEnabled } from "../generated/config.ts";
+import { agentSwitchConfigToSave, agentToolSaveFailed, loadConfig, saveConfig, detectGitUser, getServerConfig, resolveAIEnabled, resolveFeedbackHistory, resolveSharingEnabled } from "../generated/config.ts";
+import { currentPiHost } from "../pi-host.ts";
 import { appendFeedbackRecord, type FeedbackDecision } from "../generated/feedback-archive.ts";
 import { isFaviconStyle, type FaviconStyle } from "../generated/favicon.ts";
 import { readImprovementHook, getImprovementHookExpectedPath } from "../generated/improvement-hooks.ts";
@@ -59,6 +68,7 @@ import {
 import { closeAllFileBrowserWatchers, handleFileBrowserStreamRequest } from "./file-browser-watch.ts";
 import { warmFileListCache } from "../generated/resolve-file.ts";
 import { isArchiveDocumentMutation } from "../generated/archive-mode.ts";
+import type { SessionBridge } from "../generated/ai/session-bridge.ts";
 
 export interface PlanReviewDecision {
 	approved: boolean;
@@ -68,6 +78,22 @@ export interface PlanReviewDecision {
 	permissionMode?: string;
 	/** The reviewer only answered the plan's questions (`answersOnly: true` on /api/deny). */
 	answersOnly?: boolean;
+	/**
+	 * The exact plan text the decision was made on (the revision on screen;
+	 * revisions pushed by `updatePlan` change it). Execution works from this
+	 * snapshot, never from the plan file, which may hold unreviewed edits.
+	 */
+	plan?: string;
+}
+
+/** What `updatePlan` did with a revised plan pushed into the open review. */
+export interface PlanRevisionResult {
+	/** Revision counter the browser tab compares against (0 = the plan the server started with). */
+	revision: number;
+	/** History version number of the plan now under review. */
+	version: number;
+	/** The pushed plan matched the one already under review: nothing changed. */
+	unchanged: boolean;
 }
 
 export interface PlanServerResult {
@@ -77,11 +103,31 @@ export interface PlanServerResult {
 	url: string;
 	waitForDecision: () => Promise<PlanReviewDecision>;
 	onDecision: (listener: (result: PlanReviewDecision) => void | Promise<void>) => () => void;
+	/**
+	 * Push a revised plan into this still-open review (non-blocking Pi plan
+	 * review). Saved to version history like a resubmission; the open tab
+	 * picks it up through `/api/plan/revision`. Returns null once a decision
+	 * has settled (or in archive mode): the caller opens a new review instead.
+	 */
+	updatePlan: (plan: string) => PlanRevisionResult | null;
 	waitForDone?: () => Promise<void>;
 	stop: () => void;
+	/** Host-only status (no close: a plan review ends with the reviewer's decision). */
+	hostControl: HostControl;
+	/**
+	 * In-process only (over HTTP a plan review stays unclosable): the Pi
+	 * session that opened this review is going away (/reload, a session
+	 * switch, leaving plan mode), so nothing could deliver a decision. Tells
+	 * open tabs over the external-annotation stream (`session-closed` with
+	 * `by: "session"`: the tab says the agent session ended and keeps its saved draft)
+	 * and refuses any later decision. The caller stops the server afterwards.
+	 */
+	closeKeepingDraft: () => HostCloseOutcome;
 }
 
 export async function startPlanReviewServer(options: {
+	/** Turns on `/api/host/status` for a caller in another process (never in remote mode or archive mode). */
+	hostControlToken?: string;
 	plan: string;
 	htmlContent: string;
 	origin?: string;
@@ -91,6 +137,20 @@ export async function startPlanReviewServer(options: {
 	pasteApiUrl?: string;
 	mode?: "archive";
 	customPlanPath?: string | null;
+	/** "Ask this session": the in-process bridge to the Pi session that submitted this plan. */
+	sessionBridge?: SessionBridge;
+	/**
+	 * The caller pushes revised plans into this open review (`updatePlan`).
+	 * Advertised to the tab as `planRevision` on /api/plan, which makes it poll
+	 * /api/plan/revision; off by default so a review nobody revises never polls.
+	 */
+	planRevisions?: boolean;
+	/**
+	 * The host delivers notes sent with an approval to the agent. Advertised on
+	 * /api/plan as `approvalNotesSupported` (mirrors the Bun plan server's
+	 * option); absent reads as false in the tab.
+	 */
+	approvalNotesSupported?: boolean;
 }): Promise<PlanServerResult> {
 	const gitUser = detectGitUser();
 	const sharingEnabled =
@@ -121,22 +181,35 @@ export async function startPlanReviewServer(options: {
 	}
 
 	// --- Plan review mode setup (skip in archive mode) ---
+	// The plan under review, its history slot and the version diff are `let`:
+	// a non-blocking Pi plan review stays open while the agent revises, and
+	// `updatePlan` swaps all of them for the revised plan (see below).
+	let currentPlan = options.plan;
+	// Bumped by every accepted `updatePlan`. The tab polls it and echoes the
+	// revision it shows on approve/deny, so a decision on a plan the agent has
+	// since replaced is refused (409) instead of approving unseen text.
+	let planRevision = 0;
 	const repoInfo = options.mode !== "archive" ? getRepoInfo() : null;
-	const slug = options.mode !== "archive" ? generateSlug(options.plan) : "";
+	// `slug` dates the archive files under plans/ (today's date, as always);
+	// `historySlug` keys history/{project}/ and stays on the chain this plan
+	// already started, so a review spanning midnight keeps its version diff
+	// (#1679; the Bun server does the same).
+	let slug = options.mode !== "archive" ? generateSlug(options.plan) : "";
 	const project = options.mode !== "archive" ? detectProjectName() : "";
-	const historyResult =
+	let historySlug = options.mode !== "archive" ? resolveHistorySlug(project, slug) : "";
+	let historyResult =
 		options.mode !== "archive"
-			? saveToHistory(project, slug, options.plan)
+			? saveToHistory(project, historySlug, options.plan)
 			: { version: 0, path: "", isNew: false };
-	const previousPlan =
+	let previousPlan =
 		options.mode !== "archive" && historyResult.version > 1
-			? getPlanVersion(project, slug, historyResult.version - 1)
+			? getPlanVersion(project, historySlug, historyResult.version - 1)
 			: null;
-	const versionInfo =
+	let versionInfo =
 		options.mode !== "archive"
 			? {
 					version: historyResult.version,
-					totalVersions: getVersionCount(project, slug),
+					totalVersions: getVersionCount(project, historySlug),
 					project,
 				}
 			: null;
@@ -162,11 +235,11 @@ export async function startPlanReviewServer(options: {
 			surface: "plan",
 			decision,
 			target: {
-				slug,
+				slug: historySlug,
 				...(version > 0
 					? {
 							planVersion: version,
-							planVersionFile: getPlanVersionPath(project, slug, version) ?? undefined,
+							planVersionFile: getPlanVersionPath(project, historySlug, version) ?? undefined,
 						}
 					: {}),
 			},
@@ -178,17 +251,34 @@ export async function startPlanReviewServer(options: {
 	let resolveDecision!: (result: PlanReviewDecision) => void;
 	const decisionListeners = new Set<(result: PlanReviewDecision) => void | Promise<void>>();
 	let decisionSettled = false;
+	// Set the moment a decision passes the revision check, before its awaits
+	// (note integrations): updatePlan then refuses, so the plan a decision
+	// names cannot be swapped while that decision is still being recorded.
+	let decisionClaimed = false;
+	// Stale-tab guard (packages/core/server-session.ts): advertised on
+	// /api/plan, echoed by every decision; a different nonce (a tab left open
+	// on a port a new server now owns) is refused with 409 session_mismatch.
+	// A body without it (an older client) is accepted.
+	const serverSession = createServerSessionNonce();
 	const decisionPromise = new Promise<PlanReviewDecision>((r) => {
 		resolveDecision = r;
 	});
+	// Set by closeKeepingDraft: the session that opened the review is gone.
+	let closedByHost = false;
 	const publishDecision = (result: PlanReviewDecision): boolean => {
 		if (decisionSettled) return false;
 		decisionSettled = true;
 		resolveDecision(result);
 		for (const listener of decisionListeners) {
-			Promise.resolve(listener(result)).catch((error) => {
-				console.error("[Plan Review] Decision listener failed:", error);
-			});
+			// Each listener runs on a microtask, so a SYNCHRONOUS throw becomes a
+			// rejection the catch below logs. This runs inside an HTTP handler: a
+			// listener that throws there (a replaced Pi runtime's stale-ctx emit,
+			// #1864) must never escape into it, where it kills the Pi process.
+			Promise.resolve()
+				.then(() => listener(result))
+				.catch((error) => {
+					console.error("[Plan Review] Decision listener failed:", error);
+				});
 		}
 		return true;
 	};
@@ -196,16 +286,57 @@ export async function startPlanReviewServer(options: {
 	// Draft key for annotation persistence
 	const draftKey = options.mode !== "archive" ? contentHash(options.plan) : "";
 
+	// Host-only status: mirrors packages/server/index.ts.
+	const hostControlToken = options.mode === "archive" ? undefined : resolveHostControlToken(options.hostControlToken);
+	const hostControl: HostControl = {
+		status: () => ({
+			kind: "plan",
+			documents: [],
+			unsentAnnotations: draftKey ? countUnsentDraftComments(loadDraft(draftKey)) : 0,
+			decided: decisionSettled || decisionClaimed,
+		}),
+	};
+
 	// Editor annotations (in-memory, VS Code integration — skip in archive mode)
 	const editorAnnotations = options.mode !== "archive" ? createEditorAnnotationHandler() : null;
 	const externalAnnotations = options.mode !== "archive" ? createExternalAnnotationHandler("plan") : null;
-	const aiRuntime = options.mode !== "archive" && resolveAIEnabled() ? await createPiAIRuntime() : null;
+	// Set once bound: "Ask this session" answers only a loopback Host with this port.
+	let boundPort: number | undefined;
+	const aiRuntime = options.mode !== "archive" && resolveAIEnabled()
+		? await createPiAIRuntime({ sessionBridge: options.sessionBridge, getServerPort: () => boundPort })
+		: null;
+
+	/**
+	 * A decision body names the revision the tab was showing. A number that
+	 * differs from the live one means the agent revised the plan after the tab
+	 * last loaded it: refuse, so the reviewer sees the new text first. A body
+	 * without the field (an older client, or a host that never revises) passes.
+	 */
+	const isStaleRevision = (body: Record<string, unknown>): boolean =>
+		typeof body.planRevision === "number" && body.planRevision !== planRevision;
+	const refuseClosed = (res: Parameters<typeof json>[0]): void => {
+		json(res, { error: "This review was closed: the session that opened it ended.", code: "already_decided" }, 409);
+	};
+	const refuseStaleRevision = (res: Parameters<typeof json>[0]): void => {
+		json(res, {
+			error: "The plan was revised while you were reviewing it. Review the new version, then decide again.",
+			code: "plan_revised",
+			planRevision,
+		}, 409);
+	};
 
 	// Lazy cache for in-session archive tab
 	let cachedArchivePlans: ArchivedPlan[] | null = null;
 
+	const requestHostGuard = createRequestHostGuard();
 	const server = createServer(async (req, res) => {
+		// Host allowlist first, before any route (request-host-guard.ts).
+		if (requestHostGuard.refuse(req, res)) return;
+		// Then no write from another site, before any route (request-origin-guard.ts).
+		if (refuseCrossOriginWrite(req, res)) return;
 		const url = requestUrl(req);
+
+		if (handleHostControl(req, res, url, { token: hostControlToken, getServerPort: () => boundPort, control: hostControl })) return;
 
 		if (url.pathname === "/api/done" && req.method === "POST") {
 			resolveDone?.();
@@ -244,14 +375,16 @@ export async function startPlanReviewServer(options: {
 				json(res, { error: "Invalid version number" }, 400);
 				return;
 			}
-			const content = getPlanVersion(project, slug, v);
+			const content = getPlanVersion(project, historySlug, v);
 			if (content === null) {
 				json(res, { error: "Version not found" }, 404);
 				return;
 			}
 			json(res, { plan: content, version: v });
+		} else if (url.pathname === "/api/plan/revision" && req.method === "GET" && options.mode !== "archive") {
+			json(res, { revision: planRevision, decided: decisionSettled });
 		} else if (url.pathname === "/api/plan/versions") {
-			json(res, { project, slug, versions: listVersions(project, slug) });
+			json(res, { project, slug: historySlug, versions: listVersions(project, historySlug) });
 		} else if (url.pathname === "/api/plan") {
 			if (options.mode === "archive") {
 				json(res, {
@@ -261,13 +394,18 @@ export async function startPlanReviewServer(options: {
 					archivePlans,
 					sharingEnabled,
 					shareBaseUrl,
-					serverConfig: getServerConfig(gitUser),
+					serverConfig: getServerConfig(gitUser, currentPiHost()),
 				});
 			} else {
 				json(res, {
-					plan: options.plan,
+					plan: currentPlan,
+					// Advertises that this review receives revised plans while open;
+					// the tab then polls /api/plan/revision.
+					...(options.planRevisions ? { planRevision } : {}),
+					serverSession,
 					origin: options.origin ?? "pi",
 					permissionMode: options.permissionMode,
+					approvalNotesSupported: options.approvalNotesSupported === true,
 					previousPlan,
 					versionInfo,
 					sharingEnabled,
@@ -275,7 +413,8 @@ export async function startPlanReviewServer(options: {
 					pasteApiUrl,
 					repoInfo,
 					projectRoot: process.cwd(),
-					serverConfig: getServerConfig(gitUser),
+					serverConfig: getServerConfig(gitUser, currentPiHost()),
+					...piUpdateAdvert(options.origin),
 				});
 			}
 		} else if (url.pathname === "/api/hooks/status" && req.method === "GET") {
@@ -294,18 +433,30 @@ export async function startPlanReviewServer(options: {
 				composedLength: composed?.length ?? null,
 			});
 		} else if (url.pathname === "/api/config" && req.method === "POST") {
+			if (!isSameOriginOrNoOrigin(req.headers.origin ?? null, req.headers.host ?? "", req.headers["sec-fetch-site"])) {
+				json(res, { error: "Cross-origin config writes are not allowed" }, 403);
+				return;
+			}
 			try {
-				const body = (await parseBody(req)) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; conventionalComments?: boolean; conventionalLabels?: unknown[] | null; pfmReminder?: boolean };
+				const body = (await parseBody(req)) as { agentSwitch?: unknown; displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; updateCheck?: unknown; agentTool?: unknown; conventionalComments?: boolean; conventionalLabels?: unknown[] | null; pfmReminder?: boolean };
 				const toSave: Record<string, unknown> = {};
+				// OpenCode's agent switch (#1390): a known shape or nothing is saved.
+				const agentSwitch = agentSwitchConfigToSave(body);
+				if (agentSwitch === null) return json(res, { error: "Invalid agentSwitch" }, 400);
+				if (agentSwitch !== undefined) toSave.agentSwitch = agentSwitch;
 				if (body.displayName !== undefined) toSave.displayName = body.displayName;
 				if (body.diffOptions !== undefined) toSave.diffOptions = body.diffOptions;
 				if (body.theme !== undefined) toSave.theme = body.theme;
 				if (isFaviconStyle(body.favicon)) toSave.favicon = body.favicon;
 				if (typeof body.autoUpdate === "boolean") toSave.autoUpdate = body.autoUpdate;
+				if (typeof body.updateCheck === "boolean") toSave.updateCheck = body.updateCheck;
+				// The agent tool switch: boolean only; it applies to the next session.
+				if (typeof body.agentTool === "boolean") toSave.agentTool = body.agentTool;
 				if (body.conventionalComments !== undefined) toSave.conventionalComments = body.conventionalComments;
 				if (body.conventionalLabels !== undefined) toSave.conventionalLabels = body.conventionalLabels;
 				if (body.pfmReminder !== undefined) toSave.pfmReminder = body.pfmReminder;
 				if (Object.keys(toSave).length > 0) saveConfig(toSave as Parameters<typeof saveConfig>[0]);
+				if (agentToolSaveFailed(toSave)) return json(res, { error: "Could not save the setting to config.json." }, 500);
 				json(res, { ok: true });
 			} catch {
 				json(res, { error: "Invalid request" }, 400);
@@ -345,14 +496,23 @@ export async function startPlanReviewServer(options: {
 			url.pathname === "/api/plan/vscode-diff" &&
 			req.method === "POST"
 		) {
+			// Opens an editor on this machine: another site's page and a stale tab are refused.
+			if (!isSameOriginRequest(req)) {
+				json(res, crossOriginRefusalBody(), 403);
+				return;
+			}
 			try {
 				const body = await parseBody(req);
+				if (checkServerSession(body, serverSession) === "mismatch") {
+					json(res, serverSessionMismatchBody(), 409);
+					return;
+				}
 				const baseVersion = body.baseVersion as number;
 				if (!baseVersion) {
 					json(res, { error: "Missing baseVersion" }, 400);
 					return;
 				}
-				const basePath = getPlanVersionPath(project, slug, baseVersion);
+				const basePath = getPlanVersionPath(project, historySlug, baseVersion);
 				if (!basePath) {
 					json(res, { error: `Version ${baseVersion} not found` }, 404);
 					return;
@@ -380,10 +540,24 @@ export async function startPlanReviewServer(options: {
 		} else if (url.pathname === "/favicon.png") {
 			handleFavicon(res);
 		} else if (url.pathname === "/api/save-notes" && req.method === "POST") {
-			await handleSaveNotesRequest(req, res);
+			await handleSaveNotesRequest(req, res, { serverSession });
 		} else if (url.pathname === "/api/approve" && req.method === "POST") {
+			let body: Record<string, unknown> = {};
+			try {
+				body = await parseBody(req);
+			} catch {
+				body = {};
+			}
+			if (checkServerSession(body, serverSession) === "mismatch") {
+				json(res, serverSessionMismatchBody(), 409);
+				return;
+			}
 			if (decisionSettled) {
 				json(res, { ok: true, duplicate: true });
+				return;
+			}
+			if (closedByHost) {
+				refuseClosed(res);
 				return;
 			}
 			let feedback: string | undefined;
@@ -392,8 +566,12 @@ export async function startPlanReviewServer(options: {
 			let planSaveEnabled = true;
 			let planSaveCustomPath: string | undefined;
 			let draftGeneration: number | undefined;
+			if (isStaleRevision(body)) {
+				refuseStaleRevision(res);
+				return;
+			}
+			decisionClaimed = true;
 			try {
-				const body = await parseBody(req);
 				draftGeneration = readDraftGenerationFromBody(body);
 				if (body.feedback) feedback = body.feedback as string;
 				if (body.agentSwitch) agentSwitch = body.agentSwitch as string;
@@ -447,7 +625,7 @@ export async function startPlanReviewServer(options: {
 				savedPath = saveFinalSnapshot(
 					slug,
 					"approved",
-					options.plan,
+					currentPlan,
 					annotations,
 					planSaveCustomPath,
 				);
@@ -461,6 +639,7 @@ export async function startPlanReviewServer(options: {
 			const effectivePermissionMode = requestedPermissionMode || options.permissionMode;
 			publishDecision({
 				approved: true,
+				plan: currentPlan,
 				feedback,
 				savedPath,
 				agentSwitch,
@@ -468,8 +647,22 @@ export async function startPlanReviewServer(options: {
 			});
 			json(res, { ok: true, savedPath });
 		} else if (url.pathname === "/api/deny" && req.method === "POST") {
+			let body: Record<string, unknown> = {};
+			try {
+				body = await parseBody(req);
+			} catch {
+				body = {};
+			}
+			if (checkServerSession(body, serverSession) === "mismatch") {
+				json(res, serverSessionMismatchBody(), 409);
+				return;
+			}
 			if (decisionSettled) {
 				json(res, { ok: true, duplicate: true });
+				return;
+			}
+			if (closedByHost) {
+				refuseClosed(res);
 				return;
 			}
 			let feedback = "Plan rejected by user";
@@ -477,8 +670,12 @@ export async function startPlanReviewServer(options: {
 			let planSaveCustomPath: string | undefined;
 			let draftGeneration: number | undefined;
 			let answersOnly = false;
+			if (isStaleRevision(body)) {
+				refuseStaleRevision(res);
+				return;
+			}
+			decisionClaimed = true;
 			try {
-				const body = await parseBody(req);
 				draftGeneration = readDraftGenerationFromBody(body);
 				feedback = (body.feedback as string) || feedback;
 				answersOnly = body.answersOnly === true;
@@ -496,7 +693,7 @@ export async function startPlanReviewServer(options: {
 				savedPath = saveFinalSnapshot(
 					slug,
 					"denied",
-					options.plan,
+					currentPlan,
 					feedback,
 					planSaveCustomPath,
 				);
@@ -512,7 +709,9 @@ export async function startPlanReviewServer(options: {
 		}
 	});
 
+	requestHostGuard.attach(server);
 	const { port, portSource } = await listenOnPort(server);
+	boundPort = port;
 	// Remote sessions serve the app page compressed (#1617); start gzip (what
 	// browsers ask for over plain http) now so the first load does not wait.
 	if (isRemoteSession()) prewarmAppHtml(options.htmlContent, likelyAppHtmlEncoding(false));
@@ -526,11 +725,44 @@ export async function startPlanReviewServer(options: {
 		portSource,
 		url: buildAdvertisedUrl(port),
 		waitForDecision: () => decisionPromise,
+		hostControl,
+		closeKeepingDraft: () => {
+			if (decisionSettled || decisionClaimed) return { closed: false, reason: "decided" };
+			if (options.mode === "archive") return { closed: false, reason: "not-closable" };
+			closedByHost = true;
+			// updatePlan refuses from here on, as after a decision.
+			decisionClaimed = true;
+			const unsentAnnotations = draftKey ? countUnsentDraftComments(loadDraft(draftKey)) : 0;
+			externalAnnotations?.broadcast(hostSessionClosedEvent(unsentAnnotations, "session"));
+			return { closed: true, unsentAnnotations };
+		},
 		onDecision: (listener) => {
 			decisionListeners.add(listener);
 			return () => {
 				decisionListeners.delete(listener);
 			};
+		},
+		updatePlan: (plan) => {
+			if (options.mode === "archive" || decisionSettled || decisionClaimed) return null;
+			if (plan === currentPlan) {
+				return { revision: planRevision, version: versionInfo?.version ?? 0, unchanged: true };
+			}
+			// Same bookkeeping a resubmission gets from a fresh server: slug from
+			// the revised heading, a new history version, and the previous
+			// version of that slug as the diff base. A revision that keeps its
+			// heading stays on this session's history chain.
+			slug = generateSlug(plan);
+			historySlug = resolveHistorySlug(project, slug, { current: historySlug });
+			historyResult = saveToHistory(project, historySlug, plan);
+			previousPlan = historyResult.version > 1 ? getPlanVersion(project, historySlug, historyResult.version - 1) : null;
+			versionInfo = {
+				version: historyResult.version,
+				totalVersions: getVersionCount(project, historySlug),
+				project,
+			};
+			currentPlan = plan;
+			planRevision += 1;
+			return { revision: planRevision, version: historyResult.version, unchanged: false };
 		},
 		...(donePromise && { waitForDone: () => donePromise }),
 		stop: () => {

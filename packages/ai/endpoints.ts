@@ -11,12 +11,16 @@
  *   POST /api/ai/abort         — Abort the current query
  *   GET  /api/ai/sessions      — List active sessions
  *   GET  /api/ai/capabilities  — Check if AI features are available
+ *   POST /api/ai/bridge/poll   — "Ask this session" pull bridge: host long-poll (session-bridge-pull.ts)
+ *   POST /api/ai/bridge/event  — "Ask this session" pull bridge: host progress events
  */
 
 import { resolveModelChoice } from "@plannotator/core/model-catalog";
 import type { AIContext, AIMessage, AIProvider, CreateSessionOptions } from "./types.ts";
 import type { ProviderRegistry } from "./provider.ts";
 import type { SessionManager } from "./session-manager.ts";
+import { SessionBridgeProvider, SessionBridgeSession } from "./session-bridge.ts";
+import { SESSION_BRIDGE_EVENT_PATH, SESSION_BRIDGE_POLL_PATH } from "./session-bridge-pull.ts";
 
 /** Canonical paths handled by the shared AI endpoint runtime. */
 export const AI_ENDPOINT_PATHS = [
@@ -26,7 +30,17 @@ export const AI_ENDPOINT_PATHS = [
   "/api/ai/abort",
   "/api/ai/permission",
   "/api/ai/sessions",
+  "/api/ai/bridge/poll",
+  "/api/ai/bridge/event",
 ] as const;
+
+/**
+ * Endpoints whose requests legitimately stay open (SSE answers, the bridge
+ * long-poll): servers with a per-request idle timeout lift it for these.
+ */
+export function isLongLivedAIEndpointPath(path: string): boolean {
+  return path === "/api/ai/query" || path === SESSION_BRIDGE_POLL_PATH;
+}
 
 /** A path handled by the shared AI endpoint runtime. */
 export type AIEndpointPath = (typeof AI_ENDPOINT_PATHS)[number];
@@ -62,8 +76,21 @@ export interface QueryRequest {
   sessionId: string;
   /** The user's prompt/question. */
   prompt: string;
-  /** Optional context update (e.g., new annotations since session was created). */
+  /**
+   * Optional context update (e.g., new annotations since session was created).
+   * Separate-AI providers only: an "Ask this session" question ignores it,
+   * because the session that receives it is the agent the feedback is for and
+   * would read it as instructions (#1748). Drafts go there as `draftAnnotations`.
+   */
   contextUpdate?: string;
+  /** "Ask this session" only: what to do when the host session is busy. */
+  busyPolicy?: "wait" | "interrupt";
+  /**
+   * "Ask this session" only: the reviewer's unsubmitted annotations as a plain
+   * list, framed by the bridge as read-only context (see `AIQueryOptions`).
+   * Ignored by every other provider.
+   */
+  draftAnnotations?: string;
 }
 
 export interface AbortRequest {
@@ -78,6 +105,15 @@ export interface AbortRequest {
 export interface AIEndpointDeps {
   /** Provider registry (one per server or shared). */
   registry: ProviderRegistry;
+  /**
+   * Providers registered ONLY so their model catalogs can be served to the
+   * agent-job launchers (Review Agents, Code Tour, Guided Review), used when a
+   * session bridge makes the bridge the sole Ask AI provider. They never take
+   * an Ask AI session and are never listed under `providers`: a
+   * `?activate=<id>` probe naming one runs its discovery and reports it under
+   * `catalogProviders`, which only the launchers' catalog loader reads.
+   */
+  catalogRegistry?: ProviderRegistry;
   /** Session manager instance (one per server). */
   sessionManager: SessionManager;
   /** Resolve the current working directory for new AI sessions. */
@@ -94,6 +130,35 @@ export interface AIEndpointDeps {
     reason: "session" | "activate",
     requestedModel?: string,
   ) => Promise<void> | void;
+  /**
+   * "Ask this session" only: whether a request may create a session on, or
+   * query, the session-bridge provider (the runtime checks the Host header is
+   * a loopback name with the server's own port, so a DNS-rebinding page cannot
+   * type into the user's agent session). Absent means refuse: the bridge never
+   * answers without a guard. Other providers never consult it.
+   */
+  authorizeSessionBridgeRequest?: (req: Request) => boolean;
+  /**
+   * "Ask this session" pull bridge (session-bridge-pull.ts), present when a
+   * host that runs this server as a separate process handed it a bridge
+   * token. Its two endpoints answer 404 without it, and are also gated by
+   * `authorizeSessionBridgeRequest` (loopback Host) before the token check.
+   */
+  pullBridge?: { handle(req: Request): Promise<Response> | null };
+}
+
+/** Error code for a bridge request refused by `authorizeSessionBridgeRequest`. */
+export const SESSION_BRIDGE_FORBIDDEN_HOST = "session_bridge_forbidden_host";
+
+function sessionBridgeForbidden(): Response {
+  return Response.json(
+    {
+      error:
+        "Ask this session only answers pages opened on this machine (localhost, 127.0.0.1 or [::1] with this server's port).",
+      code: SESSION_BRIDGE_FORBIDDEN_HOST,
+    },
+    { status: 403 },
+  );
 }
 
 const MAX_CLIENT_MAX_TURNS = 99;
@@ -191,11 +256,22 @@ function clampPositiveNumber(value: unknown, max: number): number | undefined {
 export function createAIEndpoints(deps: AIEndpointDeps) {
   const {
     registry,
+    catalogRegistry,
     sessionManager,
     getCwd,
     beforeCapabilities,
     beforeProviderSession,
+    authorizeSessionBridgeRequest,
+    pullBridge,
   } = deps;
+
+  const handlePullBridge = async (req: Request): Promise<Response> => {
+    if (!pullBridge) {
+      return Response.json({ error: "No session bridge on this server.", code: "session_bridge_unavailable" }, { status: 404 });
+    }
+    if (!authorizeSessionBridgeRequest?.(req)) return sessionBridgeForbidden();
+    return (await pullBridge.handle(req)) ?? Response.json({ error: "Not found" }, { status: 404 });
+  };
 
   return {
     "/api/ai/capabilities": async (req: Request) => {
@@ -208,25 +284,27 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
       // on load, and activating there would reintroduce the eager launch this
       // deferral exists to prevent.
       const activateId = new URL(req.url).searchParams.get("activate");
-      if (activateId && registry.get(activateId)) {
+      const catalogOnly = activateId && !registry.get(activateId) ? catalogRegistry?.get(activateId) : undefined;
+      if (activateId && (registry.get(activateId) || catalogOnly)) {
         await beforeProviderSession?.(activateId, "activate");
       }
       const defaultEntry = registry.getDefault();
-      const providerDetails = registry.list().map(id => {
-        const p = registry.get(id)!;
-        return {
-          id,
-          name: p.name,
-          capabilities: p.capabilities,
-          models: p.models ?? [],
-          ...(p.modelsSource ? { modelsSource: p.modelsSource } : {}),
-          ...(p.toolVersion ? { toolVersion: p.toolVersion } : {}),
-        };
+      const describe = (id: string, p: AIProvider) => ({
+        id,
+        name: p.name,
+        capabilities: p.capabilities,
+        models: p.models ?? [],
+        ...(p.modelsSource ? { modelsSource: p.modelsSource } : {}),
+        ...(p.toolVersion ? { toolVersion: p.toolVersion } : {}),
+        ...(p.label ? { label: p.label } : {}),
+        ...(p.sessionBridge ? { sessionBridge: p.sessionBridge } : {}),
       });
+      const providerDetails = registry.list().map(id => describe(id, registry.get(id)!));
       return Response.json({
         available: !!defaultEntry,
         providers: providerDetails,
         defaultProvider: defaultEntry?.id ?? null,
+        ...(activateId && catalogOnly ? { catalogProviders: [describe(activateId, catalogOnly)] } : {}),
       });
     },
 
@@ -256,6 +334,10 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
           { error: providerId ? `Provider "${providerId}" not found` : "No AI provider available" },
           { status: 503 }
         );
+      }
+
+      if (provider instanceof SessionBridgeProvider && !authorizeSessionBridgeRequest?.(req)) {
+        return sessionBridgeForbidden();
       }
 
       try {
@@ -319,6 +401,9 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
 
       const body = (await req.json()) as QueryRequest;
       const { sessionId, prompt, contextUpdate } = body;
+      const busyPolicy =
+        body.busyPolicy === "wait" || body.busyPolicy === "interrupt" ? body.busyPolicy : undefined;
+      const draftAnnotations = typeof body.draftAnnotations === "string" ? body.draftAnnotations : undefined;
 
       if (!sessionId || !prompt) {
         return Response.json(
@@ -335,12 +420,26 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
         );
       }
 
+      if (entry.session instanceof SessionBridgeSession && !authorizeSessionBridgeRequest?.(req)) {
+        return sessionBridgeForbidden();
+      }
+
       sessionManager.touch(sessionId);
 
-      // If context update provided, prepend it to the prompt
-      const effectivePrompt = contextUpdate
+      const isSessionBridge = entry.session instanceof SessionBridgeSession;
+
+      // A separate AI gets the context update in front of the prompt. "Ask
+      // this session" never does: that session is the agent the review is
+      // for, and the update is the feedback export of drafts the reviewer has
+      // not submitted, which it would carry out (#1748). Drafts reach it only
+      // as `draftAnnotations`, inside the bridge's read-only frame.
+      const effectivePrompt = contextUpdate && !isSessionBridge
         ? `[Context update: the user has made changes since this conversation started]\n${contextUpdate}\n\n${prompt}`
         : prompt;
+      const queryOptions = {
+        ...(busyPolicy && { busyPolicy }),
+        ...(isSessionBridge && draftAnnotations !== undefined && { draftAnnotations }),
+      };
 
       // Set label from first query if not already set
       if (!entry.label) {
@@ -352,7 +451,10 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
       const stream = new ReadableStream({
         async start(controller) {
           try {
-            for await (const message of entry.session.query(effectivePrompt)) {
+            const messages = Object.keys(queryOptions).length > 0
+              ? entry.session.query(effectivePrompt, queryOptions)
+              : entry.session.query(effectivePrompt);
+            for await (const message of messages) {
               const data = JSON.stringify(message);
               controller.enqueue(
                 encoder.encode(`data: ${data}\n\n`)
@@ -457,6 +559,9 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
         }))
       );
     },
+
+    [SESSION_BRIDGE_POLL_PATH]: handlePullBridge,
+    [SESSION_BRIDGE_EVENT_PATH]: handlePullBridge,
   } as const;
 }
 

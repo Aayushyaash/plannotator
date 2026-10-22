@@ -538,7 +538,7 @@ function AnnotationRow({ annotation: ann, dismissed, onClick }: {
           <span className="px-1 py-0.5 rounded text-[10px] uppercase tracking-wider bg-muted text-muted-foreground/60">dismissed</span>
         )}
         {!dismissed && copyText && (
-          <span className="ml-auto opacity-0 group-hover/finding:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
+          <span className="ml-auto opacity-0 group-hover/finding:opacity-100 group-focus-within/finding:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
             <CopyButton text={copyText} variant="inline" />
           </span>
         )}

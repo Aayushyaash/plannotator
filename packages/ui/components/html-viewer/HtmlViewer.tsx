@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -14,9 +15,10 @@ import {
   isVimSelectionActionId,
   type VimSelectionHudContext,
 } from "../../shortcuts";
-import type { Annotation, EditorMode, ImageAttachment, InputMethod } from "../../types";
+import type { Annotation, EditorMode, HostDraft, ImageAttachment, InputMethod } from "../../types";
 import { AnnotationType } from "../../types";
 import { copyTextPreservingFocus } from "../../utils/clipboard";
+import { elementIdentityForAskAI } from "../../utils/parser";
 import { getIdentity } from "../../utils/identity";
 import { THUMBS_UP_LABEL } from "../../utils/quickLabels";
 import {
@@ -137,6 +139,14 @@ function parseVimBridgeHelp(value: unknown): boolean | null {
 
 const MAX_VIM_COPY_TEXT_LENGTH = 2 * 1024 * 1024;
 
+/**
+ * The srcdoc frame's sandbox. `allow-modals` lets the page's alert, confirm
+ * and prompt open (#2063: people's own pages and local sites). Never
+ * `allow-same-origin`: the page stays at an opaque origin, away from the
+ * session's API. Live-app mode is unsandboxed and does not use this.
+ */
+export const HTML_VIEWER_SANDBOX = "allow-scripts allow-modals";
+
 /** Default wait for the bridge's `ready` on the `bridgeScriptUrl` path. */
 export const DEFAULT_BRIDGE_READY_TIMEOUT_MS = 5000;
 
@@ -180,6 +190,9 @@ function parseVimBridgeCopy(value: unknown): string | null {
 }
 
 /** Inputs for the sandboxed raw-HTML viewer and its parent-side annotation UI. */
+/** The fewest milliseconds between two honored `step` messages from the page. */
+export const STEP_MESSAGE_MIN_INTERVAL_MS = 150;
+
 export interface HtmlViewerProps {
   rawHtml: string;
   /** Live proxied-app mode: render `src` (no sandbox, no srcdoc) instead of
@@ -227,6 +240,20 @@ export interface HtmlViewerProps {
   /** Mod+Shift+X pressed while focus lived inside the iframe: show/hide the
    *  host's floating tools over the page. The host owns that state. */
   onToolsToggle?: () => void;
+  /** A plain `]` (1) or `[` (-1) pressed inside the page while the surface is
+   *  armed (Annotate) and the page's focus is not in a text field: the host's
+   *  next / previous file (the Inbox steps through a thread's attachments).
+   *  The bridge forwards nothing in Interact, and the page still gets the
+   *  key. Honored only while the frame holds focus, and at most once per
+   *  STEP_MESSAGE_MIN_INTERVAL_MS. Absent: the message is ignored, as before. */
+  onStep?: (dir: 1 | -1) => void;
+  /** Escape pressed inside the page in Interact that the page did not use
+   *  itself (no handler of the page cancelled it or stopped it, and focus was
+   *  not in one of its text fields): the host may close something of its own
+   *  (the Inbox leaves full screen). Never sent in Annotate, whose Escape is
+   *  `onAnnotateModeExit`. Honored only while the frame holds focus, and at
+   *  most once per STEP_MESSAGE_MIN_INTERVAL_MS. Absent: ignored, as before. */
+  onPageEscape?: () => void;
   /** Opt-in Vim-style keyboard selection. Default false for compatibility. */
   vimModeEnabled?: boolean;
   /** Replace the iframe-local compact badge with the shared live key HUD. */
@@ -324,6 +351,27 @@ export interface HtmlViewerProps {
    * warning). Meaningless on the inline path, which never shows a strip.
    */
   bridgeErrorDisplay?: "banner" | "none";
+  /**
+   * Opt-in host capability: the composer handed to the host (see
+   * `HostDraft`). A text selection reports `intent: 'selection'` and a pin
+   * `intent: 'compose'` with the element's label, instead of opening the
+   * toolbar or the composer; the selection clearing reports null. With it the
+   * handle's `stepPin` moves a pinned draft to the element around it or back
+   * in. The host saves the comment and draws it through `annotations` /
+   * `applySharedAnnotations`. Ignored when `readOnly`. Absent → unchanged.
+   */
+  onHostDraft?: (draft: HostDraft | null) => void;
+  /**
+   * Opt-in host capability for a native shell whose web view decides every
+   * navigation itself (the Inbox surface in the iPhone app). A link the
+   * person taps in Interact opens as a new window (`window.open`, the sandbox
+   * gains `allow-popups`) instead of being reported through the frame
+   * protocol (`onOpenLink` does not fire for it); the host's web view hands
+   * that window to its own delegate, which decides it. A scripted click opens
+   * nothing. In-page `#` links still scroll here, and an armed pinpoint tap
+   * still pins. Absent → unchanged.
+   */
+  hostNavigates?: boolean;
 }
 
 /**
@@ -350,6 +398,8 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
       onAnnotateModeExit,
       onAnnotateModeToggle,
       onToolsToggle,
+      onStep,
+      onPageEscape,
       vimModeEnabled = false,
       vimHudEnabled = false,
       vimHudKeyPanelEnabled = true,
@@ -376,6 +426,8 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
       bridgeReadyTimeoutMs = DEFAULT_BRIDGE_READY_TIMEOUT_MS,
       onBridgeUnavailable,
       bridgeErrorDisplay = "banner",
+      onHostDraft,
+      hostNavigates = false,
     },
     ref,
   ) => {
@@ -410,6 +462,15 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
     onAnnotateModeToggleRef.current = onAnnotateModeToggle;
     const onToolsToggleRef = useRef(onToolsToggle);
     onToolsToggleRef.current = onToolsToggle;
+    const onStepRef = useRef(onStep);
+    onStepRef.current = onStep;
+    // The step message is honored only while the host has the surface armed.
+    const annotateModeActiveRef = useRef(annotateModeActive);
+    annotateModeActiveRef.current = annotateModeActive;
+    const lastStepAtRef = useRef(0);
+    const onPageEscapeRef = useRef(onPageEscape);
+    onPageEscapeRef.current = onPageEscape;
+    const lastPageEscapeAtRef = useRef(0);
 
     /** Single choke point for direct-to-bridge posts: live sessions get the
      *  token + concrete targetOrigin, srcdoc keeps "*" and no token. */
@@ -612,6 +673,7 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
       onUnanchoredChange: handleBridgeUnanchored,
       maxAdditionalTargets,
       scrollBehavior,
+      onHostDraft: readOnly ? undefined : onHostDraft,
     });
     createdIdsRef.current = hook.createdAnnotationIds;
 
@@ -674,7 +736,19 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
       }));
     }, [hook.draftTargets]);
 
-    useEffect(() => {
+    // Ask AI from a pinpoint draft: which element(s) the question is about,
+    // in the identity lines the feedback export prints (no outline).
+    const askAIElementDetail = useMemo(
+      () => elementIdentityForAskAI(hook.draftTargets) || undefined,
+      [hook.draftTargets],
+    );
+
+    // Registered in the commit that inserts the iframe (a layout effect), so
+    // the bridge's `ready` can never arrive before anyone listens: a passive
+    // effect can run after a fast srcdoc frame has already posted it, and a
+    // lost ready leaves the bridge unconfigured for good (seen on a Linux
+    // WebKit runner, the Inbox surface's proof).
+    useLayoutEffect(() => {
       function handler(e: MessageEvent<unknown>) {
         if (e.source !== iframeRef.current?.contentWindow) return;
         // Live sessions verify origin + token before reading anything.
@@ -738,6 +812,31 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
         }
         if (isRecord(e.data) && e.data.type === `${PREFIX}tools-toggle`) {
           onToolsToggleRef.current?.();
+          return;
+        }
+        if (isRecord(e.data) && e.data.type === `${PREFIX}step`) {
+          // The page itself can post this message, so it is honored only for
+          // a key the person pressed: the frame holds focus, the surface is
+          // armed, and at most one step per STEP_MESSAGE_MIN_INTERVAL_MS (a
+          // page cannot push itself out of view by posting in a loop).
+          const dir = e.data.dir;
+          if (!annotateModeActiveRef.current || (dir !== 1 && dir !== -1)) return;
+          if (document.activeElement !== iframeRef.current) return;
+          const now = Date.now();
+          if (now - lastStepAtRef.current < STEP_MESSAGE_MIN_INTERVAL_MS) return;
+          lastStepAtRef.current = now;
+          onStepRef.current?.(dir);
+          return;
+        }
+        if (isRecord(e.data) && e.data.type === `${PREFIX}page-escape`) {
+          // Like a step, the page could post this itself: honored only for a
+          // key pressed in the frame, in Interact, at most once per interval.
+          if (annotateModeActiveRef.current) return;
+          if (document.activeElement !== iframeRef.current) return;
+          const now = Date.now();
+          if (now - lastPageEscapeAtRef.current < STEP_MESSAGE_MIN_INTERVAL_MS) return;
+          lastPageEscapeAtRef.current = now;
+          onPageEscapeRef.current?.();
           return;
         }
         const vimCopy = parseVimBridgeCopy(e.data);
@@ -908,6 +1007,12 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
       );
     }, [iframeReadyVersion, annotateModeActive]);
 
+    // A native host decides link navigations itself (`hostNavigates`).
+    useEffect(() => {
+      if (iframeReadyVersion === 0 || !hostNavigates) return;
+      postToBridge({ type: `${PREFIX}set-host-navigates`, active: true });
+    }, [iframeReadyVersion, hostNavigates]);
+
     // Parent-side Esc rung: with focus outside the iframe the bridge never
     // sees the keydown. Any open composer/toolbar/picker still closes first —
     // their state is read from this render's closure, so an Esc that closed
@@ -1004,6 +1109,9 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
       // Shared/draft restores respect the live page filter too.
       applySharedAnnotations: (anns: Annotation[]) =>
         hook.applyAnnotations(forCurrentPage(anns)),
+      stepPin: (direction: "parent" | "child") =>
+        postToBridge({ type: `${PREFIX}step-pin`, direction }),
+      revealPin: () => postToBridge({ type: `${PREFIX}reveal-pin` }),
     }));
 
     const handleGlobalCommentSubmit = useCallback(
@@ -1158,7 +1266,7 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
                 same-origin XHR) and no srcdoc. Srcdoc mode is unchanged. */}
             <iframe
               ref={iframeRef}
-              {...(src ? { src } : { srcDoc: srcdoc, sandbox: "allow-scripts" })}
+              {...(src ? { src } : { srcDoc: srcdoc, sandbox: HTML_VIEWER_SANDBOX + (hostNavigates ? " allow-popups" : "") })}
               style={{
                 width: "100%",
                 height: fullViewport ? "100%" : `${iframeHeight}px`,
@@ -1244,9 +1352,10 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
               draftKey={`html:${hook.commentPopover.draftKey}`}
               onSubmit={hook.handleCommentSubmit}
               mentionSource={mentionSource}
-              // Pinpoint clicks open this composer directly, so it carries
-              // the surface's one-click "Looks good" (the global composer
-              // does not: a document-wide thumbs-up is not a thing).
+              // A pinpoint click opens this composer directly (never the
+              // selection toolbar), so it carries the surface's one-click 👍.
+              // It also shows when the composer opens from a text selection's
+              // Comment button: a harmless duplicate of the toolbar 👍.
               onQuickLookGood={hook.handleCommentLooksGood}
               onClose={hook.handleCommentClose}
               skillReferences
@@ -1255,6 +1364,7 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
                 kind: "selection",
                 label: "Selected HTML",
                 text: hook.commentPopover.selectedText ?? hook.commentPopover.contextText,
+                ...(askAIElementDetail ? { detail: askAIElementDetail } : {}),
               }}
               targetChips={targetChips}
               onRemoveTargetChip={targetChips ? hook.removeDraftTarget : undefined}

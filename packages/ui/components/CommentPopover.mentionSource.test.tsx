@@ -295,3 +295,50 @@ describe.if(hasDom)('CommentPopover mentionSource seam', () => {
     expect(el.value).toBe('ping @Dana Ruiz ');
   });
 });
+
+describe.if(hasDom)('CommentPopover mentionSource: agents, groups and the notice (the Inbox)', () => {
+  const AGENTS: MentionPerson[] = [
+    person({ id: 'cc-2', label: 'Claude Code (another session)', detail: 'billing-api · idle', kind: 'agent', group: 'Claude Code' }),
+    person({ id: 'pi-1', label: 'Pi', detail: 'infra · working', kind: 'agent', group: 'Pi' }),
+    person({ id: 'codex', label: 'Codex', detail: 'docs-site', kind: 'agent', group: 'Reads the Inbox, not woken' }),
+  ];
+
+  test('with kinds agent the agents are offered, under one labelled group each; matchDetail false matches names only; the notice draws the tagged', async () => {
+    const submitted: Submitted = { args: [] };
+    await mountPopover(
+      {
+        people: AGENTS,
+        kinds: ['agent'],
+        matchDetail: false,
+        renderNotice: (tagged) => <p data-test-notice="">{tagged.map((p) => p.label).join(',') || 'none'}</p>,
+      },
+      submitted,
+    );
+    const el = textarea();
+    await type(el, 'ok @');
+    expect(options()).toEqual(['cc-2', 'pi-1', 'codex']);
+    const groups = Array.from(document.querySelectorAll('[data-mention-picker] [role="group"]'));
+    expect(groups.map((g) => g.getAttribute('data-mention-group'))).toEqual(['Claude Code', 'Pi', 'Reads the Inbox, not woken']);
+    // Each group is named by its heading.
+    for (const g of groups) expect(document.getElementById(g.getAttribute('aria-labelledby')!)?.textContent).toBe(g.getAttribute('data-mention-group'));
+    // "infra" is only Pi's detail: with matchDetail false nothing matches, so the picker closes.
+    await type(el, 'ok @infra');
+    expect(picker()).toBeNull();
+    await type(el, 'ok @pi');
+    expect(options()).toEqual(['pi-1']);
+    expect(document.querySelector('[data-test-notice]')?.textContent).toBe('none');
+    await press(el, 'ArrowDown');
+    await press(el, 'Enter');
+    expect(el.value).toBe('ok @Pi ');
+    expect(document.querySelector('[data-test-notice]')?.textContent).toBe('Pi');
+    await press(el, 'Enter', { metaKey: true });
+    expect(submitted.args[2]).toEqual(['pi-1']);
+  });
+
+  test('without group on any person the list is the flat one it always was', async () => {
+    await mountPopover({ people: PEOPLE }, { args: [] });
+    await type(textarea(), 'ping @');
+    expect(document.querySelectorAll('[data-mention-picker] [role="group"]').length).toBe(0);
+    expect(options()).toEqual(['user_1', 'user_2', 'user_3']);
+  });
+});

@@ -8,6 +8,7 @@
  */
 import {
   buildQuestionAnswerAnnotation,
+  canonicalQuestionAnswer,
   indexQuestionBlocks,
   isQuestionAnswerEmpty,
   isQuestionAnswered,
@@ -38,6 +39,27 @@ export const collectQuestionAnswers = (annotations: ReadonlyArray<Annotation>): 
     if (ann.questionAnswer == null) continue;
     const answer = parseQuestionAnswer(ann.questionAnswer);
     if (answer && !out.has(answer.key)) out.set(answer.key, answer);
+  }
+  return out;
+};
+
+/** The answers the cards draw, keyed by question key. A host that keeps its
+ *  answers itself passes them (a Map or a plain object keyed by the
+ *  de-duplicated question key) and they replace the annotation-derived ones
+ *  outright; each entry is validated like any other reader, so a malformed
+ *  one is dropped. Without host answers this is `collectQuestionAnswers`. */
+export const resolveQuestionAnswers = (
+  annotations: ReadonlyArray<Annotation>,
+  hostAnswers?: ReadonlyMap<string, QuestionAnswer> | Readonly<Record<string, QuestionAnswer>> | null,
+): Map<string, QuestionAnswer> => {
+  if (!hostAnswers) return collectQuestionAnswers(annotations);
+  const entries: Array<[string, unknown]> = hostAnswers instanceof Map
+    ? [...hostAnswers.entries()]
+    : Object.entries(hostAnswers);
+  const out = new Map<string, QuestionAnswer>();
+  for (const [key, value] of entries) {
+    const answer = parseQuestionAnswer(value);
+    if (answer) out.set(key, answer);
   }
   return out;
 };
@@ -123,7 +145,8 @@ export const buildQuestionPanelRows = (
   const seen = new Set<string>();
   for (const { blockId, number, line, question } of index) {
     seen.add(question.key);
-    const answer = answers.get(question.key);
+    const stored = answers.get(question.key);
+    const answer = stored && canonicalQuestionAnswer(question, stored);
     const status = questionStatus(question, answer);
     const settledLabels = question.choices.filter((c) => c.settled).map((c) => oneLine(c.label));
     const answerText = status === 'answered' && answer

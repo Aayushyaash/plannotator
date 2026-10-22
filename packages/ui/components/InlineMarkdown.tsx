@@ -7,11 +7,14 @@ import { useFenceTheme } from "../hooks/useFenceTheme";
 import { transformPlainText } from "../utils/inlineTransforms";
 import { hasLinkedDocExtension } from "../utils/markdownExtensions";
 import { getImageSrc } from "./ImageThumbnail";
+import { UNAVAILABLE_IMAGE_CLASS, useImageResolver } from "./ImageResolverContext";
 import { useCodePathValidation, type CodePathValidationContextValue } from "./CodePathValidationContext";
+import { isLocalLinkTarget, isNewTabClick, useLocalLinkResolver } from "./LocalLinkContext";
 import type { ValidationEntry } from "../hooks/useValidatedCodePaths";
 import { CodeFilePicker } from "./CodeFilePicker";
 import { normalizeMathTex, renderMathToHtml } from "../utils/math";
 import { useMathRenderer } from "../hooks/useMathRenderer";
+import { HostTitle } from "./HostTitle";
 
 export interface DocPreviewResult {
   contents?: string;
@@ -471,6 +474,55 @@ function emitPlainTextWithBareUrls(
   }
 }
 
+/** An image a host resolver chose; a load failure shows the placeholder. */
+const HostResolvedImage: React.FC<{
+  src: string;
+  alt: string;
+  onImageClick?: (src: string, alt: string) => void;
+}> = ({ src, alt, onImageClick }) => {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  if (failedSrc === src) {
+    return (
+      <span className={UNAVAILABLE_IMAGE_CLASS} title="Image could not be loaded" data-image-unavailable="">
+        {alt || 'Image'}
+      </span>
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt={alt}
+      className="max-w-full rounded my-2 cursor-zoom-in"
+      loading="lazy"
+      onError={() => setFailedSrc(src)}
+      onClick={(e) => {
+        e.stopPropagation();
+        onImageClick?.(src, alt);
+      }}
+    />
+  );
+};
+
+/**
+ * Whether a digit-only 6/8-digit `#123456` is an issue ref (when a ref link can
+ * be built) rather than a hex swatch. Off by default: every host renders such
+ * values as colours. The Plannotator Inbox turns it on through
+ * `configurePlannotatorUI({ digitHexIssueRefs: true })` (#1932).
+ */
+let digitHexIssueRefs = false;
+
+export function setDigitHexIssueRefs(on: boolean): void {
+  digitHexIssueRefs = on;
+}
+
+export function resetDigitHexIssueRefs(): void {
+  digitHexIssueRefs = false;
+}
+
+export function getDigitHexIssueRefs(): boolean {
+  return digitHexIssueRefs;
+}
+
 /**
  * Scanner that walks a text string and emits React nodes for inline markdown:
  * emphasis (**bold**, *italic*, _italic_, ***both***), `code`, ~~strikethrough~~,
@@ -508,6 +560,8 @@ export const InlineMarkdown: React.FC<{
   repoHost?: string;
 }> = ({ text, onOpenLinkedDoc, resolveLinkedDoc, onOpenCodeFile, onNavigateAnchor, imageBaseDir, onImageClick, githubRepo, repoHost }) => {
   const validation = useCodePathValidation();
+  const resolveLocalLink = useLocalLinkResolver();
+  const resolveImage = useImageResolver();
   const refLinks = forgeRefLinks({ display: githubRepo, host: repoHost });
   const parts: React.ReactNode[] = [];
   let remaining = text;
@@ -812,9 +866,19 @@ export const InlineMarkdown: React.FC<{
     }
 
     // Hex color swatch — 3/4-digit forms need an a-f letter to avoid matching issue refs like #123.
+    // 6/8-digit forms with no letter (#186379) are ambiguous. By default they
+    // stay swatches (greys like #333333 are common in docs; six-digit issues are
+    // rare). A host that opts in with `configurePlannotatorUI({ digitHexIssueRefs:
+    // true })` (the Plannotator Inbox, #1932) gets an issue ref instead, but only
+    // when a ref link can actually be built (`refLinks`: a repo path on a known
+    // forge) and the ref branch below would take it: a word boundary and no
+    // leading zero (issue numbers never start with 0, so #000000 stays a colour).
     match = remaining.match(
       /^(#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{4}|(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{3}))(?![0-9a-fA-F\w])/,
     );
+    if (match && digitHexIssueRefs && refLinks && /^#[1-9]\d*$/.test(match[1]) && !/\w/.test(previousChar)) {
+      match = null;
+    }
     if (match) {
       const hex = match[1];
       parts.push(
@@ -838,8 +902,8 @@ export const InlineMarkdown: React.FC<{
     }
 
     // Issue / PR reference: #123 — only at word boundary, digits only.
-    // Hex-swatch branch above already consumed #fff / #123abc etc., so a bare
-    // #\d+ here is safe to treat as an issue ref.
+    // Hex-swatch branch above already consumed #fff / #123abc etc. (and digit-only
+    // #123456 / #12345678 unless the host opted in), so a bare #\d+ here is an issue ref.
     if (!/\w/.test(previousChar)) {
       match = remaining.match(/^#(\d+)(?!\w)/);
       if (match) {
@@ -966,21 +1030,47 @@ export const InlineMarkdown: React.FC<{
     if (match) {
       const alt = match[1];
       const src = match[2];
-      const imgSrc = /^(https?:\/\/|data:|blob:)/i.test(src)
-        ? src
-        : getImageSrc(src, imageBaseDir);
+      // A host's resolver (RenderedMarkdown `resolveImage`) decides first;
+      // null from it, or no resolver, keeps the default resolution.
+      const resolvedImage = resolveImage ? resolveImage(src) : null;
+      if (resolvedImage?.kind === 'unavailable') {
+        parts.push(
+          <span
+            key={key++}
+            className={UNAVAILABLE_IMAGE_CLASS}
+            title={resolvedImage.title}
+            data-image-unavailable=""
+          >
+            {alt || 'Image'}
+          </span>,
+        );
+        remaining = remaining.slice(match[0].length);
+        previousChar = match[0][match[0].length - 1] || previousChar;
+        continue;
+      }
+      const imgSrc = resolvedImage?.kind === 'src'
+        ? resolvedImage.src
+        : /^(https?:\/\/|data:|blob:)/i.test(src)
+          ? src
+          : getImageSrc(src, imageBaseDir);
       parts.push(
-        <img
-          key={key++}
-          src={imgSrc}
-          alt={alt}
-          className="max-w-full rounded my-2 cursor-zoom-in"
-          loading="lazy"
-          onClick={(e) => {
-            e.stopPropagation();
-            onImageClick?.(imgSrc, alt);
-          }}
-        />,
+        resolveImage ? (
+          // With a host resolver, an image that fails to load becomes the
+          // same placeholder instead of a broken-image icon.
+          <HostResolvedImage key={key++} src={imgSrc} alt={alt} onImageClick={onImageClick} />
+        ) : (
+          <img
+            key={key++}
+            src={imgSrc}
+            alt={alt}
+            className="max-w-full rounded my-2 cursor-zoom-in"
+            loading="lazy"
+            onClick={(e) => {
+              e.stopPropagation();
+              onImageClick?.(imgSrc, alt);
+            }}
+          />
+        ),
       );
       remaining = remaining.slice(match[0].length);
       previousChar = match[0][match[0].length - 1] || previousChar;
@@ -1043,8 +1133,56 @@ export const InlineMarkdown: React.FC<{
       const linkedDocPath = isLocalDoc ? linkUrl.replace(/#.*$/, '') : linkUrl;
       const codeFilePath = isCodeFile ? linkUrl.replace(/#.*$/, '') : linkUrl;
       const isInPageAnchor = safeLinkUrl.startsWith('#');
+      // A host's resolver (Viewer `resolveLocalLink`) decides local paths
+      // first; null from it, or no resolver, keeps the branches below.
+      const localLink = resolveLocalLink && isLocalLinkTarget(linkUrl) ? resolveLocalLink(linkUrl) : null;
 
-      if (isInPageAnchor) {
+      if (localLink?.kind === 'open') {
+        const openLink = localLink.open;
+        const hostHref = localLink.href;
+        parts.push(
+          <HostTitle key={key++} title={localLink.title}>
+          <a
+            href={hostHref ?? safeLinkUrl}
+            onClick={(e) => {
+              // With the host's own address, a new-tab click goes there.
+              if (hostHref && isNewTabClick(e)) return;
+              e.preventDefault();
+              e.stopPropagation();
+              openLink();
+            }}
+            // Without it, a middle click would open the path on the host's own origin.
+            onAuxClick={hostHref ? undefined : (e) => e.preventDefault()}
+            className="text-primary underline underline-offset-2 hover:text-primary/80 inline-flex items-center gap-1 cursor-pointer"
+            data-local-link="open"
+          >
+            {linkText}
+            <svg
+              className="w-3 h-3 opacity-50 flex-shrink-0"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+              aria-hidden="true"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"
+              />
+            </svg>
+          </a>
+          </HostTitle>,
+        );
+      } else if (localLink?.kind === 'unavailable') {
+        parts.push(
+          <HostTitle key={key++} title={localLink.title}>
+            <span className="text-muted-foreground underline decoration-dotted underline-offset-2" data-local-link="unavailable">
+              {linkText}
+            </span>
+          </HostTitle>,
+        );
+      } else if (isInPageAnchor) {
         parts.push(
           <a
             key={key++}

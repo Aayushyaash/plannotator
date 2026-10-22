@@ -1,3 +1,5 @@
+import { piUpdateAdvert } from "./update-advert.ts";
+import { isSameOriginOrNoOrigin } from "../generated/request-origin.ts";
 import { spawn } from "node:child_process";
 import { likelyAppHtmlEncoding, prewarmAppHtml } from "../generated/app-html.ts";
 import { readFileSync, existsSync, statSync } from "node:fs";
@@ -7,10 +9,17 @@ import { basename, resolve as resolvePath } from "node:path";
 
 import { SingleFlight } from "../generated/single-flight.ts";
 import { contentHash } from "../generated/draft.ts";
+import { countUnsentDraftComments, hostSessionClosedEvent } from "../generated/host-control.ts";
+import { checkServerSession, createServerSessionNonce, serverSessionMismatchBody } from "../generated/server-session.ts";
+import { handleHostControl, resolveHostControlToken, type HostControl } from "./host-control.ts";
+import { createRequestHostGuard } from "./request-host-guard.ts";
+import { refuseCrossOriginWrite } from "./request-origin-guard.ts";
 import { createReviewDraftSession, prDraftTargetKey, type ReviewDraftKeys } from "../generated/review-draft.ts";
-import { loadConfig, saveConfig, detectGitUser, getServerConfig, parseReviewAnalysisConfig, resolveAIEnabled, resolveSharingEnabled, resolveClaudeSandbox, resolveCursorSandbox, resolveFeedbackHistory, resolveGuideHistory, resolveGuideShareUrl, resolveGitRemoteCheck, resolveReviewProgress } from "../generated/config.ts";
+import { agentSwitchConfigToSave, agentToolSaveFailed, loadConfig, saveConfig, detectGitUser, getServerConfig, parseReviewAnalysisConfig, resolveAIEnabled, resolveSharingEnabled, resolveClaudeSandbox, resolveCursorSandbox, resolveFeedbackHistory, resolveGuideHistory, resolveGuideShareUrl, resolveGitRemoteCheck, resolveReviewProgress } from "../generated/config.ts";
+import { currentPiHost } from "../pi-host.ts";
 import { appendFeedbackRecord, countChangedFiles, deriveFeedbackProject, type FeedbackDecision, type FeedbackReviewTarget } from "../generated/feedback-archive.ts";
 import { isFaviconStyle, type FaviconStyle } from "../generated/favicon.ts";
+import { getExtraMarkdownExtensions } from "../generated/resolve-file.ts";
 
 export type {
 	DiffOption,
@@ -73,6 +82,10 @@ import {
 	readPRImageSide,
 } from "../generated/review-image.ts";
 import {
+	REVIEW_MARKDOWN_IMAGE_ENDPOINT,
+	handleReviewMarkdownImageRequest,
+} from "../generated/review-markdown-image.ts";
+import {
 	getGitButlerContextRevision,
 	getGitButlerPatchFingerprint,
 } from "../generated/gitbutler-core.ts";
@@ -116,10 +129,10 @@ import {
 import { handleApiNotFound, html, json, parseBody, parseJsonBody, readBody, requestUrl, send } from "./helpers.ts";
 import { captureReviewProgress, handleReviewProgress } from "../generated/review-progress.ts";
 import { createPiAIRuntime, handlePiAIRequest } from "./ai-runtime.ts";
+import type { SessionBridge } from "../generated/ai/session-bridge.ts";
 
 import { buildAdvertisedUrl, isRemoteSession, listenOnPort } from "./network.ts";
-import { getAvailableOpenInApps, openFileInApp } from "./open-in-apps.ts";
-import { resolveOpenInTarget } from "../generated/html-assets-node.ts";
+import { getAvailableOpenInApps, handleOpenInRequest } from "./open-in-apps.ts";
 import {
 	fetchPR,
 	fetchPRContext,
@@ -306,11 +319,29 @@ export interface ReviewServerResult {
 		annotations: unknown[];
 		agentSwitch?: string;
 		exit?: boolean;
+		/** The host closed the session: an `exit` that keeps the draft. */
+		closedBy?: "agent";
+		/** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+		unsentAnnotations?: number;
+		/** The review was posted to the PR platform (`POST /api/pr-action`); `feedback` is only its status line. */
+		platform?: true;
+		/**
+		 * What the decision is about, as the server shows it NOW: the active PR's
+		 * URL (after any in-place `/api/pr-switch`), the workspace root, or the
+		 * working tree the active diff reads. Absent for a static patch.
+		 */
+		target?: string;
 	}>;
 	stop: () => void;
+	/** Host-only status and close (packages/shared/host-control.ts), for Pi to call in-process. */
+	hostControl: HostControl;
 }
 
 export async function startReviewServer(options: {
+	/** "Ask this session": the in-process bridge to the Pi session that opened this review. */
+	sessionBridge?: SessionBridge;
+	/** Turns on `/api/host/status` and `/api/host/close` for a caller in another process (never in remote mode). */
+	hostControlToken?: string;
 	/** Return the active local directory with the decision for cross-directory feedback. */
 	includeReviewDirectory?: boolean;
 	rawPatch: string;
@@ -909,6 +940,17 @@ export async function startReviewServer(options: {
 	// hostname must not break local agent jobs).
 	let serverUrl = "";
 	let agentApiUrl = "";
+	/**
+	 * The review's target as it stands at decision time (named in every
+	 * decision a host delivers): the active PR's URL, the workspace root, or
+	 * the working tree the active diff reads. A static patch has none here.
+	 */
+	function activeReviewTarget(): string | undefined {
+		if (isPRMode) return prMeta?.url;
+		if (isStaticPatchMode) return undefined;
+		if (workspace) return workspace.root;
+		return resolveVcsCwd(currentDiffType as DiffType, options.gitContext?.cwd) ?? options.gitContext?.cwd ?? undefined;
+	}
 	function resolveAgentCwd(): string {
 		if (workspace) return workspace.root;
 		if (options.worktreePool && prMeta) {
@@ -1310,6 +1352,7 @@ export async function startReviewServer(options: {
 		mode: "review",
 		getServerUrl: () => agentApiUrl,
 		getCwd: resolveAgentCwd,
+		getServerSession: () => serverSession,
 
 		async buildCommand(provider, config) {
 			// Snapshot every mutable review selector before any await. A concurrent
@@ -1826,6 +1869,11 @@ export async function startReviewServer(options: {
 	// Session-constant capability advert; rides every diff payload (see the
 	// option's doc). Absent option = false, so old callers advertise honestly.
 	const approvalNotesSupported = options.approvalNotesSupported === true;
+	// Stale-tab guard (packages/core/server-session.ts): advertised beside
+	// approvalNotesSupported on every diff payload and echoed by every
+	// decision; a different nonce is refused with 409 session_mismatch.
+	// Missing is accepted (older clients).
+	const serverSession = createServerSessionNonce();
 	// Static patch mode (`--patch-file`): caller-supplied diff bytes, no repo,
 	// no working tree. Advertised as `sourceKind: "patch"` on every diff payload
 	// (absent reads as "vcs") and enforced by 400ing the endpoints that would
@@ -1837,6 +1885,55 @@ export async function startReviewServer(options: {
 	// no repository, and P4 drops binary files from its patch entirely.
 	const imagePreviewSupported = !isStaticPatchMode;
 	const runImageRead = createConcurrencyLimiter(REVIEW_IMAGE_READ_CONCURRENCY);
+	// Markdown preview capability advert: the preview renders the full file, so
+	// it is offered wherever /api/file-content can read one (never a static
+	// patch). Its images (/api/review-markdown-image) follow imagePreviewSupported.
+	const markdownPreviewSupported = !isStaticPatchMode;
+	// Where the current mode reads one side of a repository path, as bytes:
+	// shared by /api/review-image (#1598) and the Markdown preview's
+	// /api/review-markdown-image, mirroring packages/server/review.ts.
+	const readReviewSide = async (
+		side: DiffSide,
+		filePath: string,
+		oldPath: string | undefined,
+		maxBytes: number,
+		signal?: AbortSignal,
+	): Promise<FileBytesRead> => {
+		if (workspace) return workspace.getFileBytes(filePath, oldPath, side, maxBytes);
+		const prCwd = (options.worktreePool && prMeta) ? options.worktreePool.resolve(prMeta.url) : options.agentCwd;
+		if (isPRMode && currentPRDiffScope === "full-stack" && prCwd && prMeta?.defaultBranch) {
+			const baseRef = await resolvePRFullStackBaseRef(reviewRuntime, prMeta.defaultBranch, prCwd);
+			if (!baseRef) return { kind: "missing" };
+			return getFileBytesForDiffCore(reviewRuntime, "merge-base", baseRef, filePath, oldPath, side, maxBytes, prCwd);
+		}
+		if (hasLocalAccess && !isPRMode) {
+			return getVcsFileBytesForDiff(
+				currentDiffType as DiffType,
+				currentBase,
+				filePath,
+				oldPath,
+				side,
+				maxBytes,
+				options.gitContext?.cwd,
+			);
+		}
+		if (isPRMode && prMeta && prRef) {
+			const ref = prRef;
+			return readPRImageSide({
+				gitRuntime: reviewRuntime,
+				poolCwd: prCwd,
+				oldSha: prMeta.mergeBaseSha ?? prMeta.baseSha,
+				headSha: prMeta.headSha,
+				side,
+				filePath,
+				oldPath,
+				maxBytes,
+				fetchBytes: (sha, path, max) => fetchPRFileBytes(ref, sha, path, max),
+				signal,
+			});
+		}
+		return { kind: "unavailable" };
+	};
 	const sourceKindAdvert = isStaticPatchMode
 		? ({ sourceKind: "patch" } as const)
 		: ({} as Record<string, never>);
@@ -1844,6 +1941,7 @@ export async function startReviewServer(options: {
 		(options.shareBaseUrl ?? process.env.PLANNOTATOR_SHARE_URL) || undefined;
 	const pasteApiUrl =
 		(options.pasteApiUrl ?? process.env.PLANNOTATOR_PASTE_URL) || undefined;
+	let reviewDecided = false;
 	let resolveDecision!: (result: {
 		approved: boolean;
 		feedback: string;
@@ -1851,6 +1949,18 @@ export async function startReviewServer(options: {
 		annotations: unknown[];
 		agentSwitch?: string;
 		exit?: boolean;
+		/** The host closed the session: an `exit` that keeps the draft. */
+		closedBy?: "agent";
+		/** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+		unsentAnnotations?: number;
+		/** The review was posted to the PR platform (`POST /api/pr-action`); `feedback` is only its status line. */
+		platform?: true;
+		/**
+		 * What the decision is about, as the server shows it NOW: the active PR's
+		 * URL (after any in-place `/api/pr-switch`), the workspace root, or the
+		 * working tree the active diff reads. Absent for a static patch.
+		 */
+		target?: string;
 	}) => void;
 	const decisionPromise = new Promise<{
 		approved: boolean;
@@ -1859,14 +1969,66 @@ export async function startReviewServer(options: {
 		annotations: unknown[];
 		agentSwitch?: string;
 		exit?: boolean;
+		/** The host closed the session: an `exit` that keeps the draft. */
+		closedBy?: "agent";
+		/** With `closedBy`: the reviewer's unsent comments kept in the draft. */
+		unsentAnnotations?: number;
+		/** The review was posted to the PR platform (`POST /api/pr-action`); `feedback` is only its status line. */
+		platform?: true;
+		/**
+		 * What the decision is about, as the server shows it NOW: the active PR's
+		 * URL (after any in-place `/api/pr-switch`), the workspace root, or the
+		 * working tree the active diff reads. Absent for a static patch.
+		 */
+		target?: string;
 	}>((r) => {
-		resolveDecision = r;
+		resolveDecision = (result) => {
+			reviewDecided = true;
+			const target = result.target ?? activeReviewTarget();
+			r(target ? { ...result, target } : result);
+		};
 	});
 
-	const aiRuntime = aiEnabled ? await createPiAIRuntime({ getCwd: resolveAgentCwd }) : null;
+	const reviewAlreadyDecided = (res: import("node:http").ServerResponse) =>
+		json(res, { error: "This review session has already been decided." }, 409);
 
+	// Host-only session control: mirrors packages/server/review.ts. Closing is
+	// the reviewer's Close, marked closedBy "agent", WITHOUT settling the draft
+	// or archiving a decision the reviewer never made.
+	const hostControlToken = resolveHostControlToken(options.hostControlToken);
+	const unsentReviewComments = (): number => {
+		const loaded = reviewDrafts.load(currentDraftKeys());
+		return loaded.found ? countUnsentDraftComments(loaded.draft) : 0;
+	};
+	const hostControl: HostControl = {
+		status: () => ({
+			kind: "review",
+			documents: isPRMode && prMeta ? [prMeta.url] : [],
+			unsentAnnotations: unsentReviewComments(),
+			decided: reviewDecided,
+		}),
+		close: () => {
+			if (reviewDecided) return { closed: false, reason: "decided" };
+			const unsentAnnotations = unsentReviewComments();
+			resolveDecision({ approved: false, feedback: "", annotations: [], exit: true, closedBy: "agent", unsentAnnotations });
+			externalAnnotations.broadcast(hostSessionClosedEvent(unsentAnnotations));
+			return { closed: true, unsentAnnotations };
+		},
+	};
+
+	// Set once bound: "Ask this session" answers only a loopback Host with this port.
+	let boundPort: number | undefined;
+	const aiRuntime = aiEnabled ? await createPiAIRuntime({ getCwd: resolveAgentCwd, sessionBridge: options.sessionBridge, getServerPort: () => boundPort }) : null;
+
+	const requestHostGuard = createRequestHostGuard();
 	const server = createServer(async (req, res) => {
+		// Host allowlist first, before any route (request-host-guard.ts).
+		if (requestHostGuard.refuse(req, res)) return;
+		// Then no write from another site, before any route (request-origin-guard.ts).
+		if (refuseCrossOriginWrite(req, res)) return;
 		const url = requestUrl(req);
+
+		if (handleHostControl(req, res, url, { token: hostControlToken, getServerPort: () => boundPort, control: hostControl })) return;
 
 		// API: Get tour result
 		if (url.pathname.match(/^\/api\/tour\/[^/]+$/) && req.method === "GET") {
@@ -1998,7 +2160,7 @@ export async function startReviewServer(options: {
 			return;
 		}
 		if (guideShareMatch && guideShareMatch[2] === "share" && (req.method === "POST" || req.method === "DELETE")) {
-			if (!callFlowInstallOriginAllowed(req.headers.origin ?? null, req.headers.host ?? "")) {
+			if (!callFlowInstallOriginAllowed(req.headers.origin ?? null, req.headers.host ?? "", req.headers["sec-fetch-site"])) {
 				json(res, { error: "Cross-origin share requests are not allowed" }, 403);
 				return;
 			}
@@ -2213,7 +2375,9 @@ export async function startReviewServer(options: {
 				gitContext: hasLocalAccess ? servedGitContext : undefined,
 				sharingEnabled,
 				approvalNotesSupported,
+				serverSession,
 				imagePreviewSupported,
+				markdownPreviewSupported,
 				...sourceKindAdvert,
 				// Mount is the only place the pin matters, so it rides /api/diff
 				// alone (not the switch endpoints).
@@ -2222,6 +2386,9 @@ export async function startReviewServer(options: {
 				pasteApiUrl,
 				repoInfo,
 				isWSL: wslFlag,
+				// config.json `markdownExtensions`: extra extensions the review
+				// UI's Markdown preview treats as Markdown.
+				markdownExtensions: getExtraMarkdownExtensions(),
 				// PR mode advertises the ready PR checkout (null while warming), so
 				// the Open-in button gates correctly from the initial load — not the
 				// launch repo. Non-PR keeps the workspace/local cwd.
@@ -2249,7 +2416,8 @@ export async function startReviewServer(options: {
 				...(servedError && { error: servedError }),
 				semanticDiff: await getSemanticDiffAdvert(servedDiffType as DiffType),
 				callFlow: await getCallFlowAdvert(servedDiffType as DiffType),
-				serverConfig: getServerConfig(gitUser),
+				serverConfig: getServerConfig(gitUser, currentPiHost()),
+				...piUpdateAdvert(options.origin),
 			});
 		} else if (url.pathname === "/api/fetch-base" && req.method === "POST") {
 			// Fetch the remote default branch so the local baseline catches up
@@ -2366,7 +2534,7 @@ export async function startReviewServer(options: {
 			// download and build.
 			// requestUrl() parses against a fixed localhost base, so the real
 			// request authority is the Host header, not url.host.
-			if (!callFlowInstallOriginAllowed(req.headers.origin ?? null, req.headers.host ?? "")) {
+			if (!callFlowInstallOriginAllowed(req.headers.origin ?? null, req.headers.host ?? "", req.headers["sec-fetch-site"])) {
 				json(res, { error: "Cross-origin install requests are not allowed" }, 403);
 				return;
 			}
@@ -2552,7 +2720,9 @@ export async function startReviewServer(options: {
 						gitRef: currentGitRef,
 						snapshotId: currentSnapshotId(),
 						approvalNotesSupported,
+						serverSession,
 						imagePreviewSupported,
+						markdownPreviewSupported,
 						...sourceKindAdvert,
 						diffType: currentDiffType,
 						diffOptions: workspace.diffOptions,
@@ -2704,7 +2874,9 @@ export async function startReviewServer(options: {
 					gitRef: currentGitRef,
 					snapshotId: currentSnapshotId(),
 					approvalNotesSupported,
+					serverSession,
 					imagePreviewSupported,
+					markdownPreviewSupported,
 					...sourceKindAdvert,
 					diffType: currentDiffType,
 					// Echo the base the server actually used. resolveBaseBranch
@@ -2769,7 +2941,9 @@ export async function startReviewServer(options: {
 						snapshotId: currentSnapshotId(),
 						draftState: reviewDrafts.state(currentDraftKeys()),
 						approvalNotesSupported,
+						serverSession,
 						imagePreviewSupported,
+						markdownPreviewSupported,
 						...sourceKindAdvert,
 						prDiffScope: currentPRDiffScope,
 						...(layerPatchIncomplete ? { prPatchIncomplete: true, prPatchUpgradeAvailable: layerUpgradeAvailable } : {}),
@@ -2839,7 +3013,9 @@ export async function startReviewServer(options: {
 						snapshotId: currentSnapshotId(),
 						draftState: reviewDrafts.state(currentDraftKeys()),
 						approvalNotesSupported,
+						serverSession,
 						imagePreviewSupported,
+						markdownPreviewSupported,
 						...sourceKindAdvert,
 						prDiffScope: currentPRDiffScope,
 						...(layerPatchIncomplete ? { prPatchIncomplete: true, prPatchUpgradeAvailable: layerUpgradeAvailable } : {}),
@@ -2883,7 +3059,9 @@ export async function startReviewServer(options: {
 					snapshotId: currentSnapshotId(),
 					draftState: reviewDrafts.state(currentDraftKeys()),
 					approvalNotesSupported,
+					serverSession,
 					imagePreviewSupported,
+					markdownPreviewSupported,
 					...sourceKindAdvert,
 					prDiffScope: currentPRDiffScope,
 					semanticDiff: await getSemanticDiffAdvert(),
@@ -2972,7 +3150,9 @@ export async function startReviewServer(options: {
 					snapshotId: currentSnapshotId(),
 					draftState: reviewDrafts.state(currentDraftKeys()),
 					approvalNotesSupported,
+					serverSession,
 					imagePreviewSupported,
+					markdownPreviewSupported,
 					...sourceKindAdvert,
 					prMetadata: pr.metadata,
 					// The new PR's checkout (null while warming) so Open-in re-roots
@@ -3098,6 +3278,12 @@ export async function startReviewServer(options: {
 			}
 			try {
 				const body = await parseBody(req);
+				// Stale-tab guard: a tab of an earlier session on this port must
+				// not post a review to the platform as if it were this one's.
+				if (checkServerSession(body, serverSession) === "mismatch") {
+					json(res, serverSessionMismatchBody(), 409);
+					return;
+				}
 				const action = parsePRReviewAction(body.action);
 				if (!action) {
 					json(res, { error: "action must be one of approve, comment, request_changes" }, 400);
@@ -3170,52 +3356,31 @@ export async function startReviewServer(options: {
 				console.error("[plannotator] /api/pr-viewed error:", message);
 				json(res, { error: message }, 500);
 			}
+		} else if (url.pathname === REVIEW_MARKDOWN_IMAGE_ENDPOINT && req.method === "GET") {
+			// An image a reviewed Markdown file shows, read at that side's
+			// revision. Mirrors packages/server/review.ts.
+			const requestAbort = new AbortController();
+			res.on("close", () => {
+				if (!res.writableEnded) requestAbort.abort();
+			});
+			const result = await handleReviewMarkdownImageRequest({
+				params: url.searchParams,
+				ifNoneMatch: typeof req.headers["if-none-match"] === "string" ? req.headers["if-none-match"] : null,
+				available: imagePreviewSupported,
+				patch: currentPatch,
+				markdownExtensions: getExtraMarkdownExtensions(),
+				isCurrentSnapshot: (snapshot) => snapshot === currentSnapshotId(),
+				signal: requestAbort.signal,
+				readSide: (side, filePath, oldPath, maxBytes, signal) =>
+					runImageRead(() => readReviewSide(side, filePath, oldPath, maxBytes, signal), signal),
+			});
+			if (requestAbort.signal.aborted) return;
+			res.writeHead(result.status, result.headers);
+			res.end(result.body ?? undefined);
 		} else if (url.pathname === REVIEW_IMAGE_ENDPOINT && req.method === "GET") {
 			// One side of a changed image, as bytes (#1598). Mirrors
 			// packages/server/review.ts: every decision is in the shared handler;
-			// this closure only says where the current mode reads a side from.
-			const readSide = async (
-				side: DiffSide,
-				filePath: string,
-				oldPath: string | undefined,
-				maxBytes: number,
-				signal?: AbortSignal,
-			): Promise<FileBytesRead> => {
-				if (workspace) return workspace.getFileBytes(filePath, oldPath, side, maxBytes);
-				const prCwd = (options.worktreePool && prMeta) ? options.worktreePool.resolve(prMeta.url) : options.agentCwd;
-				if (isPRMode && currentPRDiffScope === "full-stack" && prCwd && prMeta?.defaultBranch) {
-					const baseRef = await resolvePRFullStackBaseRef(reviewRuntime, prMeta.defaultBranch, prCwd);
-					if (!baseRef) return { kind: "missing" };
-					return getFileBytesForDiffCore(reviewRuntime, "merge-base", baseRef, filePath, oldPath, side, maxBytes, prCwd);
-				}
-				if (hasLocalAccess && !isPRMode) {
-					return getVcsFileBytesForDiff(
-						currentDiffType as DiffType,
-						currentBase,
-						filePath,
-						oldPath,
-						side,
-						maxBytes,
-						options.gitContext?.cwd,
-					);
-				}
-				if (isPRMode && prMeta && prRef) {
-					const ref = prRef;
-					return readPRImageSide({
-						gitRuntime: reviewRuntime,
-						poolCwd: prCwd,
-						oldSha: prMeta.mergeBaseSha ?? prMeta.baseSha,
-						headSha: prMeta.headSha,
-						side,
-						filePath,
-						oldPath,
-						maxBytes,
-						fetchBytes: (sha, path, max) => fetchPRFileBytes(ref, sha, path, max),
-						signal,
-					});
-				}
-				return { kind: "unavailable" };
-			};
+			// readReviewSide only says where the current mode reads a side from.
 			// node:http has no request signal: abort when the client closes the
 			// socket before the response is written.
 			const requestAbort = new AbortController();
@@ -3230,7 +3395,7 @@ export async function startReviewServer(options: {
 				isCurrentSnapshot: (snapshot) => snapshot === currentSnapshotId(),
 				signal: requestAbort.signal,
 				readSide: (side, filePath, oldPath, maxBytes, signal) =>
-					runImageRead(() => readSide(side, filePath, oldPath, maxBytes, signal), signal),
+					runImageRead(() => readReviewSide(side, filePath, oldPath, maxBytes, signal), signal),
 			});
 			if (requestAbort.signal.aborted) return;
 			res.writeHead(result.status, result.headers);
@@ -3467,14 +3632,25 @@ export async function startReviewServer(options: {
 				json(res, { error: "File not found" }, 404);
 			}
 		} else if (url.pathname === "/api/config" && req.method === "POST") {
+			if (!isSameOriginOrNoOrigin(req.headers.origin ?? null, req.headers.host ?? "", req.headers["sec-fetch-site"])) {
+				json(res, { error: "Cross-origin config writes are not allowed" }, 403);
+				return;
+			}
 			try {
-				const body = (await parseBody(req)) as { displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; reviewAnalysis?: Record<string, unknown>; conventionalComments?: boolean };
+				const body = (await parseBody(req)) as { agentSwitch?: unknown; displayName?: string; diffOptions?: Record<string, unknown>; theme?: Record<string, unknown>; favicon?: FaviconStyle; autoUpdate?: unknown; updateCheck?: unknown; agentTool?: unknown; reviewAnalysis?: Record<string, unknown>; conventionalComments?: boolean };
 				const toSave: Record<string, unknown> = {};
+				// OpenCode's agent switch (#1390): a known shape or nothing is saved.
+				const agentSwitch = agentSwitchConfigToSave(body);
+				if (agentSwitch === null) return json(res, { error: "Invalid agentSwitch" }, 400);
+				if (agentSwitch !== undefined) toSave.agentSwitch = agentSwitch;
 				if (body.displayName !== undefined) toSave.displayName = body.displayName;
 				if (body.diffOptions !== undefined) toSave.diffOptions = body.diffOptions;
 				if (body.theme !== undefined) toSave.theme = body.theme;
 				if (isFaviconStyle(body.favicon)) toSave.favicon = body.favicon;
 				if (typeof body.autoUpdate === "boolean") toSave.autoUpdate = body.autoUpdate;
+				if (typeof body.updateCheck === "boolean") toSave.updateCheck = body.updateCheck;
+				// The agent tool switch: boolean only; it applies to the next session.
+				if (typeof body.agentTool === "boolean") toSave.agentTool = body.agentTool;
 				if (body.reviewAnalysis !== undefined) {
 					const reviewAnalysis = parseReviewAnalysisConfig(body.reviewAnalysis);
 					if (!reviewAnalysis) return json(res, { error: "Invalid analysis settings" }, 400);
@@ -3483,6 +3659,7 @@ export async function startReviewServer(options: {
 				}
 				if (body.conventionalComments !== undefined) toSave.conventionalComments = body.conventionalComments;
 				if (Object.keys(toSave).length > 0) saveConfig(toSave as Parameters<typeof saveConfig>[0]);
+				if (agentToolSaveFailed(toSave)) return json(res, { error: "Could not save the setting to config.json." }, 500);
 				json(res, { ok: true });
 			} catch {
 				json(res, { error: "Invalid request" }, 400);
@@ -3655,35 +3832,14 @@ export async function startReviewServer(options: {
 				json(res, { ok: false, error: "Open in app is unavailable in remote sessions" }, 400);
 				return;
 			}
-			try {
-				const body = await parseBody(req);
-				const filePath = body.filePath;
-				if (typeof filePath !== "string" || !filePath) {
-					json(res, { ok: false, error: "Missing filePath" }, 400);
-					return;
-				}
-				const appId = typeof body.appId === "string" ? body.appId : undefined;
-				// Resolve repo-relative `git diff` paths against the VCS root
-				// server-side (resolveAgentCwd folds in workspace.root, the PR
-				// local checkout, resolveVcsCwd(gitContext.cwd), and process.cwd())
-				// — not the client `base`, which is wrong when review runs from a
-				// subdirectory — then containment-check.
-				const abs = resolveOpenInTarget(filePath, null, resolveOpenInRoot);
-				if (abs == null) {
-					json(res, { ok: false, error: "Path is outside the allowed directory" }, 403);
-					return;
-				}
-				const result = await openFileInApp(abs, appId);
-				json(res, result, 200);
-			} catch (err) {
-				json(
-					res,
-					{ ok: false, error: err instanceof Error ? err.message : "Failed to open file" },
-					500,
-				);
-			}
+			// Resolve repo-relative `git diff` paths against the VCS root
+			// server-side (resolveAgentCwd folds in workspace.root, the PR
+			// local checkout, resolveVcsCwd(gitContext.cwd), and process.cwd())
+			// — not the client `base`, which is wrong when review runs from a
+			// subdirectory — then containment-check.
+			await handleOpenInRequest(req, res, { serverSession, resolveRoot: resolveOpenInRoot });
 		} else if (url.pathname === "/api/review-progress") {
-			if (req.method === "POST" && !callFlowInstallOriginAllowed(req.headers.origin ?? null, req.headers.host ?? "")) {
+			if (req.method === "POST" && !callFlowInstallOriginAllowed(req.headers.origin ?? null, req.headers.host ?? "", req.headers["sec-fetch-site"])) {
 				json(res, { error: "Cross-origin progress updates are not allowed" }, 403);
 				return;
 			}
@@ -3769,6 +3925,17 @@ export async function startReviewServer(options: {
 			handleApiNotFound(res, url.pathname);
 			return;
 		} else if (url.pathname === "/api/exit" && req.method === "POST") {
+			// Exit posts carry no body: the nonce rides the query string.
+			if (checkServerSession({ serverSession: url.searchParams.get("serverSession") ?? undefined }, serverSession) === "mismatch") {
+				json(res, serverSessionMismatchBody(), 409);
+				return;
+			}
+			// Already decided (the host closed it, or another tab decided):
+			// archiving or settling now would delete a draft the close kept.
+			if (reviewDecided) {
+				reviewAlreadyDecided(res);
+				return;
+			}
 			// Decision-only line: dismissal rate is behavior data, and a
 			// contentless failure must not change the legacy draft behavior.
 			archiveReviewSubmission("", [], "dismissed");
@@ -3778,6 +3945,17 @@ export async function startReviewServer(options: {
 		} else if (url.pathname === "/api/feedback" && req.method === "POST") {
 			try {
 				const body = await parseBody(req);
+				if (checkServerSession(body, serverSession) === "mismatch") {
+					json(res, serverSessionMismatchBody(), 409);
+					return;
+				}
+				// Checked after the body is read: a host close can land while
+				// it streams. A decided session must not archive, delete the
+				// draft, or answer ok for feedback nobody will receive.
+				if (reviewDecided) {
+					reviewAlreadyDecided(res);
+					return;
+				}
 				// Archive BEFORE the draft delete: a failed write keeps the
 				// draft as the reviewer's recovery copy (#678 ordering).
 				// Defensive on the body's own types: a malformed value must
@@ -3801,6 +3979,11 @@ export async function startReviewServer(options: {
 						? { reviewDirectory: resolveAgentCwd() } : {}),
 					annotations: annotationList,
 					agentSwitch: body.agentSwitch as string | undefined,
+					// The platform path's status post marks itself; only a real
+					// boolean true counts, so consumers never infer it from an
+					// empty annotation list (PR description, PR comment and
+					// editor comments ride only in `feedback`).
+					...(body.platform === true && { platform: true as const }),
 				});
 				json(res, { ok: true });
 			} catch (err) {
@@ -3814,7 +3997,9 @@ export async function startReviewServer(options: {
 		}
 	});
 
+	requestHostGuard.attach(server);
 	const { port, portSource } = await listenOnPort(server);
+	boundPort = port;
 	// Remote sessions serve the app page compressed (#1617); start gzip (what
 	// browsers ask for over plain http) now so the first load does not wait.
 	if (isRemoteSession()) prewarmAppHtml(options.htmlContent, likelyAppHtmlEncoding(false));
@@ -3833,6 +4018,7 @@ export async function startReviewServer(options: {
 		url: serverUrl,
 		isRemote,
 		waitForDecision: () => decisionPromise,
+		hostControl,
 		stop: () => {
 			// try/finally: a throwing dispose must never leave the listener bound.
 			try {

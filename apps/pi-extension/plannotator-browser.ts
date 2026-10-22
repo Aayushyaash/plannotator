@@ -19,10 +19,14 @@ import {
 	startPlanReviewServer,
 	startReviewServer,
 	type DiffType,
+	type PlanServerResult,
 	type VcsSelection,
 	unstageFile,
 } from "./server.ts";
 import { BROWSER_SESSION_STOPPED } from "./browser-session-error.ts";
+import type { SessionBridge } from "./generated/ai/session-bridge.ts";
+import type { HostControl } from "./generated/host-control.ts";
+import type { AnnotateBundleFile } from "./generated/annotate-bundle.ts";
 import { openBrowser, isRemoteSession } from "./server/network.ts";
 import { detectProjectName } from "./server/project.ts";
 import { parsePRUrl, checkPRAuth, fetchPR } from "./server/pr.ts";
@@ -58,7 +62,7 @@ export {
 	hasReviewBrowserHtml,
 } from "./plannotator-browser-runtime.ts";
 
-export type AnnotateMode = "annotate" | "annotate-folder" | "annotate-last" | "annotate-app";
+export type AnnotateMode = "annotate" | "annotate-folder" | "annotate-last" | "annotate-app" | "annotate-bundle";
 export interface PlanReviewDecision {
 	approved: boolean;
 	feedback?: string;
@@ -67,15 +71,41 @@ export interface PlanReviewDecision {
 	permissionMode?: string;
 	/** The reviewer only answered the plan's questions (`answersOnly: true` on /api/deny). */
 	answersOnly?: boolean;
+	/** The exact plan text an approval was made on (the revision on screen). */
+	plan?: string;
 }
 
 export interface BrowserDecisionSession<T> {
 	url: string;
 	waitForDecision: () => Promise<T>;
 	stop: () => void;
+	/**
+	 * The server's in-process host control (packages/shared/host-control.ts):
+	 * the `plannotator` tool's list reads `status()`, its close calls `close()`
+	 * (the reviewer's Close marked closedBy "agent", draft kept).
+	 */
+	hostControl?: HostControl;
 }
 
+/** Set on a decision the agent's own close produced (host control), with the unsent count kept in the draft. */
+interface AgentClosedFields {
+	closedBy?: "agent";
+	unsentAnnotations?: number;
+}
+
+export type AnnotateDecision = {
+	feedback: string;
+	annotations?: unknown[];
+	exit?: boolean;
+	approved?: boolean;
+	selectedMessageId?: string;
+	feedbackScope?: "message" | "messages";
+	nothingToSend?: boolean;
+} & AgentClosedFields;
+
 type CodeReviewOptions = {
+	/** "Ask this session": the bridge to the Pi session that opened this review. */
+	sessionBridge?: SessionBridge;
 	cwd?: string;
 	includeReviewDirectory?: boolean;
 	defaultBranch?: string;
@@ -105,16 +135,22 @@ type CodeReviewOptions = {
 	 * `config.gitRemoteCheck`.
 	 */
 	gitRemoteCheck?: boolean;
+	/** The caller shows the URL in its own in-turn message (`sessionOpenedMessage`). */
+	announcedInTurn?: boolean;
 };
 
-type CodeReviewDecision = {
+export type CodeReviewDecision = {
 	approved: boolean;
 	feedback?: string;
 	reviewDirectory?: string;
 	annotations?: unknown[];
 	agentSwitch?: string;
 	exit?: boolean;
-};
+	/** The PR-platform status post (the review went to GitHub/GitLab/Bitbucket); `feedback` is only its status line. */
+	platform?: true;
+	/** What the decision is about as the server shows it at decision time (the active PR URL or working tree). */
+	target?: string;
+} & AgentClosedFields;
 
 const CODE_REVIEW_PROGRESS_STATUS = "plannotator-review";
 // stop -> registration timestamp. The timestamp lets self-preemption skip
@@ -165,6 +201,14 @@ function setCodeReviewProgress(ctx: ExtensionContext, message?: string): void {
 export interface PlanReviewBrowserSession extends BrowserDecisionSession<PlanReviewDecision> {
 	reviewId: string;
 	onDecision: (listener: (result: PlanReviewDecision) => void | Promise<void>) => () => void;
+	/** Push a revised plan into the open tab; null once decided (open a new review). */
+	updatePlan: PlanServerResult["updatePlan"];
+	/**
+	 * The session that opened the review is going away: tell the open tab it
+	 * was closed (draft kept) and refuse later decisions. Call `stop()` after.
+	 * Optional so a host's own session object may omit it.
+	 */
+	closeKeepingDraft?: PlanServerResult["closeKeepingDraft"];
 }
 
 function delay(ms: number): Promise<void> {
@@ -209,12 +253,27 @@ export async function startServerWithSelfPreemption<T>(
 	}
 }
 
-async function openBrowserForServer(serverUrl: string, ctx: ExtensionContext): Promise<void> {
+/**
+ * Open the browser, then tell the person what they need after the turn.
+ *
+ * Slash commands, the `plannotator` tool and plan review show the URL in
+ * their in-turn "opened" message (`sessionOpenedMessage`), so for them this
+ * only speaks up when the launch failed. The archive and the event API have
+ * no in-turn message, so they get the URL here.
+ */
+async function openBrowserForServer(serverUrl: string, ctx: ExtensionContext, announcedInTurn = false): Promise<void> {
 	const browserResult = await openBrowser(serverUrl);
-	if (ctx.mode === "rpc" || isRemoteSession()) {
-		ctx.ui.notify(`[Plannotator] ${serverUrl}`, "info");
-	} else if (!browserResult.opened) {
-		ctx.ui.notify(`Open this URL to review: ${serverUrl}`, "info");
+	// PLANNOTATOR_BROWSER=none is a choice, not a failure: the in-turn message
+	// already said so, and a caller without one says it here.
+	const notOpening = browserResult.notOpening;
+	const failedLocally = !notOpening && !isRemoteSession() && !browserResult.opened;
+	if (!announcedInTurn) {
+		const suffix = notOpening
+			? ` — ${notOpening}`
+			: failedLocally ? " (could not open a browser automatically; open this URL)" : "";
+		ctx.ui.notify(`Plannotator session ready: ${serverUrl}${suffix}`, "info");
+	} else if (failedLocally) {
+		ctx.ui.notify(`Could not open a browser automatically. Open ${serverUrl} to review.`, "info");
 	}
 }
 
@@ -268,10 +327,11 @@ async function waitForDecisionWithCleanup<T>(
 }
 
 export function startBrowserDecisionSession<T>(
-	server: { url: string; stop: () => void },
+	server: { url: string; stop: () => void; hostControl?: HostControl },
 	ctx: ExtensionContext,
 	waitForResult: () => Promise<T>,
 	signal?: AbortSignal,
+	options: { announcedInTurn?: boolean } = {},
 ): BrowserDecisionSession<T> {
 	let stopped = false;
 	let stopReject: ((err: Error) => void) | undefined;
@@ -295,7 +355,7 @@ export function startBrowserDecisionSession<T>(
 		// Nothing may escape: an unhandled rejection here (a launcher that failed,
 		// or a `ctx` invalidated by a session replacement while the browser was
 		// opening) is an uncaught error that kills the whole pi process.
-		void openBrowserForServer(server.url, ctx).catch((err: unknown) => {
+		void openBrowserForServer(server.url, ctx, options.announcedInTurn === true).catch((err: unknown) => {
 			console.error(
 				`Plannotator: could not announce the browser URL ${server.url}: ${err instanceof Error ? err.message : String(err)}`,
 			);
@@ -323,6 +383,7 @@ export function startBrowserDecisionSession<T>(
 			return decisionPromise;
 		},
 		stop,
+		...(server.hostControl ? { hostControl: server.hostControl } : {}),
 	};
 }
 
@@ -330,6 +391,7 @@ export async function startPlanReviewBrowserSession(
 	ctx: ExtensionContext,
 	planContent: string,
 	signal?: AbortSignal,
+	options: { sessionBridge?: SessionBridge; planRevisions?: boolean; announcedInTurn?: boolean } = {},
 ): Promise<PlanReviewBrowserSession> {
 	if (!ctx.hasUI) {
 		throw new Error("Plannotator browser review is unavailable in this session.");
@@ -346,9 +408,16 @@ export async function startPlanReviewBrowserSession(
 		sharingEnabled: resolveSharingEnabled(loadConfig()),
 		shareBaseUrl: process.env.PLANNOTATOR_SHARE_URL || undefined,
 		pasteApiUrl: process.env.PLANNOTATOR_PASTE_URL || undefined,
+		sessionBridge: options.sessionBridge,
+		planRevisions: options.planRevisions,
+		// Pi delivers an approval's notes (deliverPlanDecision's approved-with-
+		// notes prompt; the event API's review result carries `feedback`).
+		approvalNotesSupported: true,
 	}));
 
-	const session = startBrowserDecisionSession(server, ctx, server.waitForDecision, signal);
+	const session = startBrowserDecisionSession(server, ctx, server.waitForDecision, signal, {
+		announcedInTurn: options.announcedInTurn,
+	});
 	server.onDecision(() => {
 		setTimeout(() => session.stop(), 1500);
 	});
@@ -357,6 +426,8 @@ export async function startPlanReviewBrowserSession(
 		...session,
 		reviewId: server.reviewId,
 		onDecision: server.onDecision,
+		updatePlan: server.updatePlan,
+		closeKeepingDraft: server.closeKeepingDraft,
 	};
 }
 
@@ -731,6 +802,7 @@ async function createCodeReviewBrowserSession(
 	}
 
 	const server = await startServerWithSelfPreemption(() => startReviewServer({
+		sessionBridge: options.sessionBridge,
 		rawPatch,
 		gitRef,
 		error: diffError,
@@ -761,7 +833,9 @@ async function createCodeReviewBrowserSession(
 		onCleanup: worktreeCleanup,
 	}));
 
-	return startBrowserDecisionSession(server, ctx, server.waitForDecision);
+	return startBrowserDecisionSession(server, ctx, server.waitForDecision, undefined, {
+		announcedInTurn: options.announcedInTurn,
+	});
 }
 
 export async function openMarkdownAnnotation(
@@ -773,7 +847,7 @@ export async function openMarkdownAnnotation(
 	sourceInfo?: string,
 	sourceConverted?: boolean,
 	gate?: boolean,
-): Promise<{ feedback: string; exit?: boolean; approved?: boolean; selectedMessageId?: string; feedbackScope?: "message" | "messages" }> {
+): Promise<AnnotateDecision> {
 	const session = await startMarkdownAnnotationSession(
 		ctx,
 		filePath,
@@ -804,7 +878,13 @@ export async function startMarkdownAnnotationSession(
 	 * proxy. The bridge sources are loaded here from the vendored
 	 * bridge-script module, mirroring how the Bun CLI supplies them. */
 	liveTargetUrl?: string,
-): Promise<BrowserDecisionSession<{ feedback: string; exit?: boolean; approved?: boolean; selectedMessageId?: string; feedbackScope?: "message" | "messages" }>> {
+	/** "Ask this session": the bridge to the Pi session that opened this annotation. */
+	sessionBridge?: SessionBridge,
+	/** Several files reviewed as one (mode "annotate-bundle"), in review order. */
+	bundleFiles?: AnnotateBundleFile[],
+	/** The caller shows the URL in its own in-turn message (`sessionOpenedMessage`). */
+	announcedInTurn?: boolean,
+): Promise<BrowserDecisionSession<AnnotateDecision>> {
 	if (!ctx.hasUI) {
 		throw new Error("Plannotator annotation browser is unavailable in this session.");
 	}
@@ -842,12 +922,14 @@ export async function startMarkdownAnnotationSession(
 	}
 
 	const server = await startServerWithSelfPreemption(() => startAnnotateServer({
+		sessionBridge,
 		markdown: resolvedMarkdown,
 		filePath,
 		origin: "pi",
 		mode,
 		liveApp,
 		folderPath,
+		bundleFiles,
 		recentMessages,
 		sourceInfo,
 		sourceConverted,
@@ -865,7 +947,7 @@ export async function startMarkdownAnnotationSession(
 		project: detectProjectName(),
 	}));
 
-	return startBrowserDecisionSession(server, ctx, server.waitForDecision);
+	return startBrowserDecisionSession(server, ctx, server.waitForDecision, undefined, { announcedInTurn });
 }
 
 export async function openLastMessageAnnotation(
@@ -873,7 +955,7 @@ export async function openLastMessageAnnotation(
 	lastText: string,
 	gate?: boolean,
 	recentMessages?: { messageId: string; text: string; timestamp?: string }[],
-): Promise<{ feedback: string; exit?: boolean; approved?: boolean; selectedMessageId?: string; feedbackScope?: "message" | "messages" }> {
+): Promise<AnnotateDecision> {
 	const session = await startLastMessageAnnotationSession(ctx, lastText, gate, recentMessages);
 	return session.waitForDecision();
 }
@@ -883,7 +965,10 @@ export async function startLastMessageAnnotationSession(
 	lastText: string,
 	gate?: boolean,
 	recentMessages?: { messageId: string; text: string; timestamp?: string }[],
-): Promise<BrowserDecisionSession<{ feedback: string; exit?: boolean; approved?: boolean; selectedMessageId?: string; feedbackScope?: "message" | "messages" }>> {
+	sessionBridge?: SessionBridge,
+	/** The caller shows the URL in its own in-turn message (`sessionOpenedMessage`). */
+	announcedInTurn?: boolean,
+): Promise<BrowserDecisionSession<AnnotateDecision>> {
 	return startMarkdownAnnotationSession(
 		ctx,
 		"last-message",
@@ -897,6 +982,10 @@ export async function startLastMessageAnnotationSession(
 		undefined,
 		undefined,
 		recentMessages,
+		undefined,
+		sessionBridge,
+		undefined,
+		announcedInTurn,
 	);
 }
 

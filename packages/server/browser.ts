@@ -9,24 +9,23 @@ import path from "node:path";
 import fs from "node:fs";
 import { getPlannotatorDataDir } from "@plannotator/shared/data-dir";
 import { loadConfig, resolveUseGlimpse } from "@plannotator/shared/config";
+import {
+  browserNoneReason,
+  isNoOpBrowserSentinel,
+  resolveBrowserIntent,
+} from "@plannotator/shared/browser-intent";
 
 function ipcRegistryPath(): string {
   return path.join(getPlannotatorDataDir(), "vscode-ipc.json");
 }
 
 /**
- * Common "no-op" values for $BROWSER used by headless/background environments
- * (e.g. Claude Code's agent view sets BROWSER=true) to signal "do not actually
- * launch a browser". Treating these as if the variable were unset prevents
- * silently shelling out to e.g. `true <url>`, which exits 0 without opening
- * anything and leaves the Plannotator server hanging on waitForDecision().
+ * The browser rule lives in @plannotator/shared/browser-intent (shared with
+ * Pi): a "none" value on PLANNOTATOR_BROWSER opens nothing; BROWSER's no-op
+ * values (#756, e.g. Claude Code's agent view sets BROWSER=true) are read as
+ * unset so the default chain still runs.
  */
-const NOOP_BROWSER_VALUES = new Set(["true", "false", "none", ":", "0", "1"]);
-
-export function isNoOpBrowserSentinel(value: string | undefined): boolean {
-  if (!value) return false;
-  return NOOP_BROWSER_VALUES.has(value.trim().toLowerCase());
-}
+export { isNoOpBrowserSentinel };
 
 /**
  * Try opening URL via VS Code extension IPC registry.
@@ -141,14 +140,11 @@ export function isPosixBrowserTarget(value: string): boolean {
  */
 export function shouldTryRemoteBrowserFallback(isRemote: boolean): boolean {
   if (!isRemote) return false;
-  const plannotatorBrowser = process.env.PLANNOTATOR_BROWSER;
-  const browser = process.env.BROWSER;
-  // Treat headless sentinels (e.g. BROWSER=true from Claude Code's agent view)
-  // as if no real browser handler were configured, so the IPC fallback still runs.
-  const hasRealHandler =
-    (plannotatorBrowser && !isNoOpBrowserSentinel(plannotatorBrowser)) ||
-    (browser && !isNoOpBrowserSentinel(browser));
-  return !hasRealHandler;
+  // Only the default chain asks VS Code: an explicit handler runs itself, and
+  // PLANNOTATOR_BROWSER=none opens nothing at all. BROWSER's no-op values
+  // (BROWSER=true from Claude Code's agent view) count as unset, so the IPC
+  // fallback still runs for them.
+  return resolveBrowserIntent(process.env).kind === "default";
 }
 
 function buildGlimpseHtml(url: string): string {
@@ -232,18 +228,26 @@ async function openGlimpse(url: string): Promise<boolean> {
   });
 }
 
+/**
+ * Open a URL in the browser. Returns false when nothing was opened.
+ *
+ * `PLANNOTATOR_BROWSER=none` (any "none" value, see browser-intent) opens
+ * nothing at all and says so in one stderr line.
+ */
 export async function openBrowser(
   url: string,
   options?: { isRemote?: boolean; useGlimpse?: boolean }
 ): Promise<boolean> {
-  const rawPlannotatorBrowser = process.env.PLANNOTATOR_BROWSER;
-  const plannotatorBrowser = isNoOpBrowserSentinel(rawPlannotatorBrowser)
-    ? undefined
-    : rawPlannotatorBrowser;
+  const intent = resolveBrowserIntent(process.env);
+  if (intent.kind === "none") {
+    process.stderr.write(`  ${browserNoneReason(intent)}\n`);
+    return false;
+  }
+  const plannotatorBrowser = intent.kind === "explicit" && intent.source === "PLANNOTATOR_BROWSER"
+    ? intent.browser
+    : undefined;
   try {
-    const rawBrowser = process.env.BROWSER;
-    const envBrowser = isNoOpBrowserSentinel(rawBrowser) ? undefined : rawBrowser;
-    const browser = plannotatorBrowser || envBrowser;
+    const browser = intent.kind === "explicit" ? intent.browser : undefined;
     const isRemote = options?.isRemote ?? false;
     if (shouldTryRemoteBrowserFallback(isRemote)) {
       const openedViaIpc = await tryVscodeIpc(url);

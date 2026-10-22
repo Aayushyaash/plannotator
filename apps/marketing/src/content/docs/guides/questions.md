@@ -29,7 +29,7 @@ Recommended: Local only, purged after 30 days
 ```
 
 - `:::question` asks for one choice. `:::question-multi` accepts any number of choices. `:::question-text` asks for free text.
-- The first line is the question. Other lines before the choices are context.
+- The first line is the question. Other lines before the choices are context. Agents are told never to send a bare question: a sentence or three on what the choice affects, what they know, and why they recommend what they do.
 - `Recommended:` names the agent's recommendation. If it does not match a choice, Plannotator shows it as a suggested answer.
 - `- [x]` marks a choice as already settled. Agents use it when they resubmit a plan with a question you already answered.
 
@@ -80,6 +80,26 @@ You can change the message the agent receives with the `answered` key in `prompt
 
 > [!WARNING]
 > In Claude Code, **Approve** does not send answers or notes to the agent. If you approve with answers, Plannotator warns you first. To send answers, use **Send answers**.
+
+## In the Plannotator Inbox: Stopped and Holds up
+
+In the [Plannotator Inbox](/docs/reference/inbox/), a question block can carry two more lines that sort the thread in your list. They are for the Inbox only; in a plan or document they are ordinary context text.
+
+```markdown
+:::question
+Which database password should I use for staging?
+
+Stopped: can't run the migration without it
+Holds up: staging deploy; release notes
+
+- [ ] The one in 1Password "staging-db"
+- [ ] Make a new one
+:::
+```
+
+- `Stopped: <why>`: the agent cannot go on until you answer. The thread goes first, under **Stopped on you**. Agents are told to write it only when they truly cannot continue.
+- `Holds up: <work>; <work>`: the agent goes on, and the named work waits on your answer. The thread shows under **Holding up work**, unless a question also says `Stopped:`, which wins.
+- A negative value (`no`, `none`, `n/a`, a dash) means no stop: `Stopped: no` is read as if the line were not there, and a `Holds up:` entry `none` holds nothing up.
 
 ## Teaching your agent to ask
 

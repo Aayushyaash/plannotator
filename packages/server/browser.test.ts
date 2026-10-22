@@ -68,10 +68,13 @@ describe("shouldTryRemoteBrowserFallback", () => {
     expect(shouldTryRemoteBrowserFallback(true)).toBe(true);
   });
 
-  test("true for remote sessions when PLANNOTATOR_BROWSER is a no-op sentinel", () => {
+  // PLANNOTATOR_BROWSER=none opens nothing at all, so not VS Code either
+  // (before, #756 read it as unset and the IPC fallback ran).
+  test("false for remote sessions when PLANNOTATOR_BROWSER says none", () => {
     clearEnv();
+    // no-browser-guard: sentinel under test (in process; nothing is launched)
     process.env.PLANNOTATOR_BROWSER = "none";
-    expect(shouldTryRemoteBrowserFallback(true)).toBe(true);
+    expect(shouldTryRemoteBrowserFallback(true)).toBe(false);
   });
 });
 

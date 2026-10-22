@@ -117,6 +117,8 @@ interface SubmittedBody {
   body?: string;
   approved?: boolean;
   feedback?: string;
+  /** /api/feedback only: set by the platform path's status post, never by an agent-path decision. */
+  platform?: unknown;
   annotations?: Array<{
     id?: string;
     type?: string;
@@ -139,6 +141,8 @@ let advertiseApprovalNotes = false;
 /** Extra fields merged into the /api/diff payload — a PR session is entered by
  *  shipping `prMetadata` (+ `platformUser`) exactly the way the server does. */
 let prDiffExtras: Record<string, unknown> | null = null;
+/** What /api/ai/capabilities answers; Ask AI is off unless a test says so. */
+let aiCapabilities: Record<string, unknown> = { available: false, providers: [] };
 
 /** GithubPRMetadata shape the diff payload carries in PR mode. */
 const PR_METADATA = {
@@ -218,7 +222,7 @@ function makeFetch(): typeof fetch {
       return Response.json({ ok: true, submission: { status: "complete" } });
     }
     if (url.pathname === "/api/diff/fresh") return Response.json({ fresh: true });
-    if (url.pathname === "/api/ai/capabilities") return Response.json({ available: false, providers: [] });
+    if (url.pathname === "/api/ai/capabilities") return Response.json(aiCapabilities);
     if (url.pathname === "/api/draft") return Response.json({ error: "Not found" }, { status: 404 });
     if (url.pathname === "/api/feedback") {
       submissions.push({
@@ -343,6 +347,7 @@ afterEach(async () => {
   failFeedbackPosts = 0;
   advertiseApprovalNotes = false;
   prDiffExtras = null;
+  aiCapabilities = { available: false, providers: [] };
   seededExternalAnnotations = [];
   memory.clear();
   resetStorageBackend();
@@ -387,6 +392,9 @@ describe.if(hasDom)("review decision control (agent mode)", () => {
     expect(body.approved).toBe(false);
     expect((body.annotations ?? []).some((a) => a.id === "ext-1")).toBe(true);
     expect(body.feedback).toContain("still drops null");
+    // Agent-path feedback is never marked as the platform status post: a host
+    // that saw the flag would log it instead of delivering it.
+    expect("platform" in body).toBe(false);
   });
 
   test("Request changes… delivers the note as a scope:'general' sentinel annotation and in the export", async () => {
@@ -657,6 +665,51 @@ describe.if(hasDom)("review decision control (agent mode)", () => {
     expect(submissions).toHaveLength(0);
   });
 
+  test("the Ask this session announcement takes the last turn, and Mod+Enter cannot post behind it", async () => {
+    const DIALOG = "[data-ask-session-announcement-dialog]";
+    aiCapabilities = {
+      available: true,
+      providers: [{
+        id: "session-bridge",
+        name: "session-bridge",
+        label: "Ask this session · Claude Code",
+        capabilities: {},
+        models: [],
+        sessionBridge: { host: "claude-code", status: "ready", modes: { turn: true, transient: false } },
+      }],
+      defaultProvider: null,
+    };
+    await mount(() => document.querySelector(DIALOG), () => {
+      seedFirstRunSeen();
+      memory.set("plannotator-token-hover-announcement-seen", "1");
+    });
+
+    expect(document.querySelector(DIALOG)?.getAttribute("data-ask-session-agent")).toBe("claude-code");
+    expect(document.querySelector(`${DIALOG} [data-ask-session-status="connected"]`)).not.toBeNull();
+
+    const gotIt = Array.from(document.querySelectorAll<HTMLButtonElement>(`${DIALOG} button`))
+      .find((button) => button.textContent?.trim() === "Got it");
+    if (!gotIt) throw new Error("Dismiss action did not render");
+    await act(async () => {
+      gotIt.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    });
+    await settle();
+    expect(submissions).toHaveLength(0);
+
+    await act(async () => gotIt.click());
+    await settle();
+    expect(document.querySelector(DIALOG)).toBeNull();
+    expect(memory.get("plannotator-announce-ask-session-seen")).toBe("1");
+    expect(submissions).toHaveLength(0);
+  });
+
+  test("the Ask this session announcement never shares a load with the terminal-tools one", async () => {
+    aiCapabilities = { available: true, providers: [], defaultProvider: null };
+    await mount(() => document.querySelector("[data-terminal-tools-announcement-dialog]"), seedFirstRunSeenExceptTerminalTools);
+    expect(document.querySelector("[data-ask-session-announcement-dialog]")).toBeNull();
+    expect(memory.has("plannotator-announce-ask-session-seen")).toBe(false);
+  });
+
   test("compact touch offers a positive decision row at zero and it posts", async () => {
     // SAFETY: implements the MediaQueryList surface the shell hooks consume;
     // coarse-pointer matches put the app in its compact touch layout.
@@ -777,6 +830,32 @@ describe.if(hasDom)("review decision control (platform mode)", () => {
     expect(posted[0]!.action).toBe("request_changes");
     // GitHub refuses an empty REQUEST_CHANGES body; inline-only gets the placeholder.
     expect(posted[0]!.body?.trim()).toBeTruthy();
+  });
+
+  // The status post that follows a platform submission is the ONLY
+  // /api/feedback body that may carry `platform: true`. Hosts used to infer it
+  // from an empty annotations array, which silently dropped agent-path
+  // feedback made only of PR description / PR comment / editor comments.
+  test("the status post after a platform submission marks itself platform: true", async () => {
+    seedPlatformSession();
+    seededExternalAnnotations = [EXTERNAL_FINDING];
+    await mountReview();
+    await settle();
+    await settle();
+
+    await act(async () => primaryButton()!.click());
+    await settle();
+    const confirm = dialogConfirm("Post Comments");
+    if (!confirm) throw new Error("Post Comments confirm did not render");
+    await act(async () => confirm.click());
+    await settle();
+    await settle();
+
+    expect(submissions.filter((s) => s.endpoint === "pr-action")).toHaveLength(1);
+    const status = submissions.filter((s) => s.endpoint === "feedback");
+    expect(status).toHaveLength(1);
+    expect(status[0]!.platform).toBe(true);
+    expect(status[0]!.annotations).toEqual([]);
   });
 
   test("empty-state Request changes… preselects Request changes and posts it", async () => {
