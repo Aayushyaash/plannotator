@@ -21,7 +21,7 @@
  * (packages/server/inbox-devices.ts), so the checks and headers are one. HTML is drawn through annotate's own serving path: the
  * page with a `<base href>` at `/api/html-assets/<token>/` (one token per
  * folder, packages/server/html-assets.ts), whose answers carry the
- * `sandbox allow-scripts` CSP, inside Plannotator's sandboxed HtmlViewer, so
+ * `sandbox allow-scripts allow-modals` CSP, inside Plannotator's sandboxed HtmlViewer, so
  * its relative images and frames load from the file's own folder and never
  * draw the Inbox inside itself (#1554).
  */

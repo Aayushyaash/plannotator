@@ -10,7 +10,7 @@
  * Decisions page (`#decisions=…`) opens the list.
  */
 
-import type { ActionMark } from './components/ActionCard';
+import type { ActionMark } from './components/ActionChecklist';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ThemeProvider } from '@plannotator/ui/components/ThemeProvider';
 import { TooltipProvider } from '@plannotator/ui/components/Tooltip';

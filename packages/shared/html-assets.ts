@@ -12,13 +12,19 @@ export const HTML_ASSET_ROUTE_PREFIX = "/api/html-assets";
  * They are untrusted author HTML on the Plannotator server's origin, so every
  * HTML response from the asset route carries a CSP `sandbox` that gives it an
  * opaque origin with scripting but NO `allow-same-origin`. Inside the annotate
- * surface the primary document's own `sandbox="allow-scripts"` iframe already
+ * surface the primary document's own `sandbox="allow-scripts allow-modals"` iframe already
  * forces this on every nested browsing context (sandboxing flags are inherited
  * and intersected); the header is what protects a reviewer who opens an asset
  * URL directly in a top-level tab, where no parent sandbox applies.
  */
 export const HTML_ASSET_DOCUMENT_CONTENT_TYPE = "text/html; charset=utf-8";
-export const HTML_ASSET_DOCUMENT_CSP = "sandbox allow-scripts";
+/**
+ * `allow-modals` lets a page's alert/confirm/prompt open (#2063): these are
+ * people's own pages and local sites. It must match the srcdoc frame's
+ * sandbox (`HTML_VIEWER_SANDBOX`), since an embed inside that frame gets the
+ * intersection of both. Never `allow-same-origin`.
+ */
+export const HTML_ASSET_DOCUMENT_CSP = "sandbox allow-scripts allow-modals";
 /** Scripting is pointless in a generated error page, so it gets the tighter policy. */
 export const HTML_ASSET_ERROR_CSP = "sandbox";
 /** Embedded documents honour the same 2MB ceiling single-file annotate reads do. */

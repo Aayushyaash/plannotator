@@ -139,6 +139,14 @@ function parseVimBridgeHelp(value: unknown): boolean | null {
 
 const MAX_VIM_COPY_TEXT_LENGTH = 2 * 1024 * 1024;
 
+/**
+ * The srcdoc frame's sandbox. `allow-modals` lets the page's alert, confirm
+ * and prompt open (#2063: people's own pages and local sites). Never
+ * `allow-same-origin`: the page stays at an opaque origin, away from the
+ * session's API. Live-app mode is unsandboxed and does not use this.
+ */
+export const HTML_VIEWER_SANDBOX = "allow-scripts allow-modals";
+
 /** Default wait for the bridge's `ready` on the `bridgeScriptUrl` path. */
 export const DEFAULT_BRIDGE_READY_TIMEOUT_MS = 5000;
 
@@ -1258,7 +1266,7 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
                 same-origin XHR) and no srcdoc. Srcdoc mode is unchanged. */}
             <iframe
               ref={iframeRef}
-              {...(src ? { src } : { srcDoc: srcdoc, sandbox: "allow-scripts" + (hostNavigates ? " allow-popups" : "") })}
+              {...(src ? { src } : { srcDoc: srcdoc, sandbox: HTML_VIEWER_SANDBOX + (hostNavigates ? " allow-popups" : "") })}
               style={{
                 width: "100%",
                 height: fullViewport ? "100%" : `${iframeHeight}px`,
