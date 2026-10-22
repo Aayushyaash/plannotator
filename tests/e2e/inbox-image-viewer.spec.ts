@@ -14,7 +14,7 @@
  * and opens the version it sent; a typed comment asks before a step; on an
  * iPhone (WebKit) the toolbar's ⋯ opens the peek as a bottom sheet; and plan
  * review's annotate surface gets the light version (full screen, ← →, the
- * peek, no pen).
+ * peek, no pen), whose Actual size shows an image at its real size.
  *
  * Build the binary first (see inbox.spec.ts), then
  * `bunx playwright test -c tests/e2e/playwright.config.ts inbox-image-viewer.spec.ts`.
@@ -482,4 +482,131 @@ test('plan review and annotate get the light version: full screen, ← → acros
       if (child.exitCode === null) child.kill('SIGTERM');
     }
   }
+});
+
+test('Actual size shows an image at its real size: a tall one scrolls, a small one sits centred (#2067)', async ({ browser }) => {
+  const root = join(world.root, 'actual-size');
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, 'tall.png'), await png(browser, screen('Checkout', 'Tall', '#2f6f5e', FIELDS.repeat(30)), 1640, 3470));
+  writeFileSync(join(root, 'small.png'), await png(browser, '<body style="margin:0;background:#2f6f5e"></body>', 160, 100));
+  const doc = join(root, 'PLAN.md');
+  writeFileSync(doc, ['# Sizes', '', '![Tall](tall.png)', '', '![Small](small.png)', ''].join('\n'));
+  const readyFile = join(root, 'ready.jsonl');
+  const env = { PATH: process.env.PATH ?? '', HOME: join(world.root, 'home'), PLANNOTATOR_DATA_DIR: world.dataDir, PLANNOTATOR_READY_FILE: readyFile, PLANNOTATOR_SKIP_BROWSER_OPEN: '1', PLANNOTATOR_REMOTE: '0' };
+  let child: ChildProcess | undefined;
+  let url = '';
+  try {
+    child = spawn(builtBinary, ['annotate', doc], { env, cwd: root, stdio: 'ignore' });
+    await expect.poll(() => (existsSync(readyFile) ? readFileSync(readyFile, 'utf8') : ''), { timeout: 30_000 }).toContain('"url"');
+    url = (JSON.parse(readFileSync(readyFile, 'utf8').trim().split('\n')[0]!) as { url: string }).url;
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    await context.addCookies(
+      [
+        ['plannotator-plan-look-choice-resolved', 'true'],
+        ['plannotator-announce-tui-herdr-seen', '1'],
+        ['plannotator-announce-ask-session-seen', '1'],
+        ['plannotator-announce-agent-tool-seen', '1'],
+      ].map(([name, value]) => ({ name: name!, value: value!, url })),
+    );
+    const page = await context.newPage();
+    await page.goto(url);
+    const images = page.locator('article img.cursor-zoom-in');
+    await expect(images.nth(1)).toBeVisible();
+    await images.nth(0).click();
+    const box = page.locator('[data-image-lightbox-stepping]');
+    const stage = box.locator('[data-lightbox-stage]');
+    const image = box.locator('[data-lightbox-image]');
+    const measure = () =>
+      image.evaluate((img: HTMLImageElement) => {
+        const r = img.getBoundingClientRect();
+        const s = img.parentElement!.getBoundingClientRect();
+        const st = img.parentElement!;
+        return {
+          width: Math.round(r.width),
+          height: Math.round(r.height),
+          naturalWidth: img.naturalWidth,
+          naturalHeight: img.naturalHeight,
+          left: r.left - s.left,
+          right: s.right - r.right,
+          top: r.top - s.top,
+          bottom: s.bottom - r.bottom,
+          scrollHeight: st.scrollHeight,
+          scrollWidth: st.scrollWidth,
+          clientHeight: st.clientHeight,
+          clientWidth: st.clientWidth,
+        };
+      });
+    // Fit: the tall image fits inside the stage.
+    await expect.poll(async () => (await measure()).naturalWidth).toBe(1640);
+    const fitted = await measure();
+    expect(fitted.height).toBeLessThanOrEqual(fitted.clientHeight);
+    await shot(page, '12-actual-size-fit');
+    // Actual size: its own pixels, and the stage scrolls both ways to every edge.
+    await box.locator('[data-lightbox-fit]').click();
+    await expect(stage).toHaveAttribute('data-lightbox-stage', 'actual');
+    const actual = await measure();
+    expect([actual.width, actual.height]).toEqual([1640, 3470]);
+    expect(actual.scrollHeight).toBe(3470);
+    expect(actual.scrollWidth).toBe(1640);
+    expect(actual.top).toBe(0);
+    expect(actual.left).toBe(0);
+    await shot(page, '13-actual-size-tall');
+    await stage.evaluate((el) => el.scrollTo(el.scrollWidth, el.scrollHeight));
+    const end = await measure();
+    expect(Math.round(end.bottom)).toBe(0);
+    expect(Math.round(end.right)).toBe(0);
+    // A small image at Actual size sits in the middle of the stage, not in a corner.
+    await page.keyboard.press('ArrowRight');
+    await box.locator('[data-lightbox-fit]').click();
+    await expect(stage).toHaveAttribute('data-lightbox-stage', 'actual');
+    await expect.poll(async () => (await measure()).naturalWidth).toBe(160);
+    const small = await measure();
+    expect([small.width, small.height]).toEqual([160, 100]);
+    expect(Math.abs(small.left - small.right)).toBeLessThanOrEqual(1);
+    expect(Math.abs(small.top - small.bottom)).toBeLessThanOrEqual(1);
+    await shot(page, '14-actual-size-small');
+    await context.close();
+  } finally {
+    if (url) await fetch(new URL('/api/exit', url), { method: 'POST' }).catch(() => {});
+    if (child && child.exitCode === null) {
+      await new Promise((done) => {
+        const timer = setTimeout(done, 5_000);
+        child!.once('exit', () => {
+          clearTimeout(timer);
+          done(undefined);
+        });
+      });
+      // inbox-guard: own child (the annotate CLI this test spawned, never an Inbox)
+      if (child.exitCode === null) child.kill('SIGTERM');
+    }
+  }
+});
+
+test('the Inbox\'s file viewer at Actual size: an image wider than the stage scrolls to its left edge, not only its right', async ({ browser }) => {
+  const page = world.page;
+  writeFileSync(join(world.project, 'design', 'wide.png'), await png(browser, screen('Checkout', 'Wide', '#2f6f5e', FIELDS), 2400, 1200));
+  const sent = await world.claude.send({ project_path: world.project, subject: 'A wide screen', thread: 'wide-screen', body: ['The wide screen:', '', '![Wide](design/wide.png)'].join('\n') });
+  await page.goto(`${world.url}#thread=${sent.thread_id as string}`);
+  const inline = page.locator('.ib-body img[data-inline-image]').last();
+  await expect(inline).toBeVisible();
+  await inline.click();
+  const stage = pane().locator('.ib-imgstage');
+  await expect(stage).toHaveAttribute('data-fit', 'fit');
+  await pane().locator('.ib-imgbar').getByRole('button', { name: 'Actual size' }).click();
+  await expect(stage).toHaveAttribute('data-fit', 'actual');
+  const measure = () =>
+    stage.evaluate((el) => {
+      const img = el.querySelector('img')!;
+      const r = img.getBoundingClientRect();
+      const s = el.getBoundingClientRect();
+      return { width: Math.round(r.width), height: Math.round(r.height), left: r.left - s.left, right: s.right - r.right, clientWidth: el.clientWidth };
+    });
+  await expect.poll(async () => (await measure()).width).toBe(2400);
+  expect((await measure()).height).toBe(1200);
+  // Scrolled all the way left, the image's left edge is in view (centred, a third of it was cut off with no way to scroll to it).
+  await stage.evaluate((el) => el.scrollTo(0, 0));
+  expect((await measure()).left).toBeGreaterThanOrEqual(0);
+  await shot(page, '15-inbox-actual-size-wide');
+  await stage.evaluate((el) => el.scrollTo(el.scrollWidth, 0));
+  expect((await measure()).right).toBeGreaterThanOrEqual(0);
 });

@@ -258,7 +258,12 @@ export const ImageLightbox: React.FC<{
             src={current.src}
             alt={current.alt}
             draggable={false}
-            className={fit === 'fit' ? 'max-h-full max-w-full rounded-md object-contain shadow-xl' : 'max-w-none rounded-md'}
+            // Actual size: auto margins keep the image from being stretched to
+            // the stage's height (a flex item's default), centre it when it is
+            // smaller than the stage, and resolve to 0 when it is larger, so
+            // the stage scrolls from its top-left edge and every part is
+            // reachable. shrink-0 keeps it at its natural width (#2067).
+            className={fit === 'fit' ? 'max-h-full max-w-full rounded-md object-contain shadow-xl' : 'm-auto max-w-none shrink-0 rounded-md'}
             data-lightbox-image=""
           />
         </div>
