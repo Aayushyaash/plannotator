@@ -155,7 +155,8 @@ async function renderApp(hash: string) {
   return host;
 }
 
-const fileHash = (name: string) => `#thread=${world.openIn.thread}&file=${world.openIn.ids[name]}`;
+/** The file beside the thread (`view=side`), where the pane header holds Open in: a link without it opens HTML full screen. */
+const fileHash = (name: string) => `#thread=${world.openIn.thread}&file=${world.openIn.ids[name]}&view=side`;
 const pane = (el: ParentNode) => el.querySelector('.ib-view .ib-vhead')!;
 const menuOf = (id: string) => document.querySelector<HTMLElement>(`[data-open-in-menu="${id}"]`);
 const itemsOf = (menu: HTMLElement) => [...menu.querySelectorAll<HTMLElement>('[data-open-in-item]')].map((item) => item.getAttribute('data-open-in-item'));

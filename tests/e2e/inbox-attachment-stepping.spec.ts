@@ -30,6 +30,7 @@ import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs
 import { join, resolve } from 'node:path';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
+import { forgetFileViewChoice } from './file-view';
 
 const repo = resolve(__dirname, '../..');
 const builtBinary = resolve(process.env.PLANNOTATOR_E2E_BINARY ?? join(repo, '.local/plannotator'));
@@ -175,6 +176,9 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   };
 });
 
+/** A view pressed in a test is remembered: forgotten after each, so the next opens by today's rule (file-view.ts). */
+test.afterEach(async () => forgetFileViewChoice(world?.page));
+
 test.afterAll(async () => {
   try {
     if (!world) return;
@@ -244,7 +248,7 @@ test('] and › step in thread order, keep the frame, and replace the route; ins
   await expect(htmlFrame().locator('#pay')).toHaveText('Pay now');
   await shot('02-full-html');
   // Beside the thread for the rest: a step keeps that frame too.
-  await page.getByRole('button', { name: 'Exit full screen' }).click();
+  await page.getByRole('button', { name: 'Side by side' }).click();
   await expect(pane()).not.toHaveClass(/ib-full/);
 
   // The page's text field keeps [ and ], armed or not.

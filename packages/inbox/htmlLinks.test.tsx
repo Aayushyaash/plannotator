@@ -57,7 +57,7 @@ function loopback(path: string, method = 'GET', body?: string): Promise<{ status
   });
 }
 
-const TESTS = 9;
+const TESTS = 10;
 
 beforeAll(async () => {
   if (!hasDom) return;
@@ -127,6 +127,8 @@ afterEach(() => {
   globalThis.fetch = savedFetch;
   window.open = savedOpen;
   (globalThis as Record<string, unknown>).EventSource = savedEventSource;
+  // A view switch pressed in a test is remembered (fileView.ts): forgotten, so the next test opens by the rule.
+  document.cookie = 'plannotator-inbox-file-view=; path=/; max-age=0';
 });
 
 async function until(check: () => boolean, what: string) {
@@ -140,7 +142,8 @@ async function until(check: () => boolean, what: string) {
 }
 
 async function renderSheet() {
-  window.location.hash = `#thread=${world.htmlLinks.thread}&file=${world.htmlLinks.ids['SHEET.html']}`;
+  // Beside the thread (`view=side`), where the comments panel is docked: a link without it opens an HTML page full screen.
+  window.location.hash = `#thread=${world.htmlLinks.thread}&file=${world.htmlLinks.ids['SHEET.html']}&view=side`;
   host = document.createElement('div');
   document.body.appendChild(host);
   act(() => {
@@ -192,6 +195,28 @@ test.skipIf(!hasDom)('a sibling page that is not attached opens read-only over t
   await until(() => el.querySelector('[data-linked-page="B-cards.html"]') !== null, 'the linked page again');
   await clickLink(el.querySelector<HTMLIFrameElement>('.ib-linkedframe iframe')!, 'SHEET.html');
   await until(() => el.querySelector('[data-linked-page]') === null, 'home');
+});
+
+test.skipIf(!hasDom)("Back from a linked page after a view switch goes back to the page's entry, in the view the person is in now", async () => {
+  const el = await renderSheet();
+  await clickLink(sheetFrame(el), 'B-cards.html');
+  await until(() => el.querySelector('[data-linked-page="B-cards.html"]') !== null, 'the linked page');
+  const params = () => new URLSearchParams(window.location.hash.slice(1));
+  expect(params().get('view')).toBe('side');
+  const entries = window.history.length;
+  // Full screen, pressed on the linked page: the entry on screen is replaced; the page's entry still names side by side.
+  await act(async () => el.querySelector<HTMLButtonElement>('.ib-vhead [data-full-screen-toggle]')!.click());
+  await until(() => el.querySelector('.ib-view')?.hasAttribute('data-full-view') === true, 'full screen');
+  expect(params().get('view')).toBe('full');
+  expect(window.history.length).toBe(entries);
+  // Back: the browser's Back to the page's entry (no new entry), then that entry takes the view now on screen.
+  await act(async () => el.querySelector<HTMLButtonElement>('[data-linked-back]')!.click());
+  await until(() => el.querySelector('[data-linked-page]') === null, 'back on the attached page');
+  await until(() => params().get('view') === 'full', 'the page in full screen');
+  expect(params().get('linked')).toBeNull();
+  // No new entry (happy-dom drops the entry left by a Back; a browser keeps it for Forward).
+  expect(window.history.length).toBeLessThanOrEqual(entries);
+  expect(el.querySelector('.ib-view')!.hasAttribute('data-full-view')).toBe(true);
 });
 
 test.skipIf(!hasDom)('Back takes focus once it is drawn, even when the next frame comes before React draws it', async () => {

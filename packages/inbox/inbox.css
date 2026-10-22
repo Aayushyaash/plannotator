@@ -3845,6 +3845,14 @@ ol.ib-rl-two .ib-rw-cmd { font-weight: 400; margin-top: 6px; }
 /* After it went into its turn by itself: the check in the delivered tick's colour. */
 .pn-inbox .ib-delivered[data-auto] .ib-dl-main > svg { color: var(--ib-tick-delivered); }
 
+/* ── The view switch (approval "inbox-side-by-side"): "Side by side | Full screen" in the pane header,
+   and full screen's labelled "Side by side" ───────────────────────────────── */
+.pn-inbox .ib-viewseg { flex: none; }
+.pn-inbox .ib-viewseg .ib-seg-o { height: 26px; padding: 0 10px; font-size: var(--ib-fs-12-5, 12.5px); }
+.pn-inbox .ib-viewseg .ib-seg-o:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+.pn-inbox .ib-fvb.ib-fvside { padding: 0 10px 0 8px; gap: 6px; background: var(--muted); color: var(--foreground); font-weight: 550; }
+.pn-inbox .ib-fvb.ib-fvside:hover { background: color-mix(in oklch, var(--muted) 70%, var(--foreground) 12%); }
+
 /* Open questions in one thread (approval "inbox-thread-open-questions", option A): the "N open questions"
    button in the foot's button row and the short list it opens; on a phone the list is a bottom sheet. */
 .pn-inbox .ib-oq-btn { gap: 6px; }
