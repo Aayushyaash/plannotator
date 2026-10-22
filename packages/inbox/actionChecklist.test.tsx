@@ -8,8 +8,12 @@
  * marking Done, or not offering the Undo while its window runs; the next open
  * item not opening after Done; Open dropped when an item also has a command
  * (the old card's bug); the Holds up words dropped; the command cut; Can't do
- * it sent without its reason; a settled row still offering Done; the row's
- * count; an action item reaching the picks or the Send (the api split).
+ * it sent without its reason; a settled row still offering Done; a header
+ * that contradicts its rows when items were replaced ("0 things… 0 of 0
+ * done"); a double-click on the tick doing Done then Undo; the tick dropping
+ * keyboard focus while it saves (disabled) or changing its name; the copy
+ * result not announced; the row's count; an action item reaching the picks
+ * or the Send (the api split).
  *
  * DOM-gated: runs under DOM_TESTS=1 (happy-dom), from the test.yml DOM list.
  */
@@ -114,6 +118,11 @@ function mount(node: React.ReactNode): HTMLElement {
 }
 
 const rerender = (node: React.ReactNode) => act(() => root!.render(node));
+/** A fresh card (its open row is decided when it mounts). */
+const remount = (node: React.ReactNode) => {
+  act(() => root!.render(<></>));
+  act(() => root!.render(node));
+};
 
 async function settle() {
   await act(async () => {
@@ -264,13 +273,78 @@ test.skipIf(!hasDom)("the row's tick is Done; while the window runs the row is s
   expect(el.querySelector('[data-action-progress]')!.textContent).toBe('1 of 2 done');
   expect(el.querySelector('[data-action-badge]')!.textContent).toBe('Holds up 2');
   const undoTick = done.querySelector<HTMLButtonElement>('[data-action-tick]')!;
+  // The same name; aria-pressed carries the state.
+  expect(undoTick.getAttribute('aria-label')).toBe('Done: Set the GitHub App client secret on staging');
   expect(undoTick.getAttribute('aria-pressed')).toBe('true');
   click(done.querySelector('[data-action-undo]')!);
   await settle();
   expect(marks.at(-1)).toEqual({ key: PARSED[0]!.key, mark: null });
+  // The tick undoes too, but not within half a second of Done (the second click of a fast double-click).
+  const before = marks.length;
   click(undoTick);
   await settle();
+  expect(marks.length).toBe(before);
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 520));
+  });
+  click(undoTick);
+  await settle();
+  expect(marks.length).toBe(before + 1);
   expect(marks.at(-1)).toEqual({ key: PARSED[0]!.key, mark: null });
+});
+
+test.skipIf(!hasDom)('a double-click on the tick is Done once: its second click, after Done has landed, never undoes it', async () => {
+  const marks: unknown[] = [];
+  const onMark = async (_a: InboxQuestion, mark: unknown) => (marks.push(mark), true);
+  const el = mount(<ActionChecklist actions={[record(0), record(1)]} agent="Claude Code" onMark={onMark} />);
+  const tick = () => rowOf(el, 0).querySelector<HTMLButtonElement>('[data-action-tick]')!;
+  const press = (detail: number) =>
+    act(() => {
+      tick().dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail }));
+    });
+  press(1);
+  await settle();
+  // Done landed: the row is in its Undo window before the second click arrives.
+  const result = { outcome: 'done' as const, note: null, at: '2026-10-21T15:12:00.000Z', by: 'person' as const };
+  rerender(<ActionChecklist actions={[record(0, { state: 'picked', revision: 1, action_result: result }), record(1)]} agent="Claude Code" onMark={onMark} />);
+  press(2);
+  await settle();
+  // A slow double-click arrives as two single clicks: the half second after Done still holds.
+  press(1);
+  await settle();
+  expect(marks).toEqual([{ outcome: 'done' }]);
+});
+
+test.skipIf(!hasDom)('while a mark saves the tick keeps keyboard focus (aria-disabled, not disabled) and ignores clicks', async () => {
+  const marks: unknown[] = [];
+  let release: (ok: boolean) => void = () => {};
+  const el = mount(
+    <ActionChecklist
+      actions={[record(0), record(1)]}
+      agent="Claude Code"
+      onMark={(_a, mark) => {
+        marks.push(mark);
+        return new Promise<boolean>((resolve) => {
+          release = resolve;
+        });
+      }}
+    />,
+  );
+  const tick = rowOf(el, 0).querySelector<HTMLButtonElement>('[data-action-tick]')!;
+  act(() => tick.focus());
+  click(tick);
+  expect(marks).toEqual([{ outcome: 'done' }]);
+  expect(tick.disabled).toBe(false);
+  expect(tick.getAttribute('aria-disabled')).toBe('true');
+  expect(document.activeElement).toBe(tick);
+  click(tick);
+  expect(marks).toHaveLength(1);
+  await act(async () => {
+    release(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(tick.hasAttribute('aria-disabled')).toBe(false);
+  expect(document.activeElement).toBe(tick);
 });
 
 test.skipIf(!hasDom)("Done from the open row's button moves focus to the next row's toggle", async () => {
@@ -327,6 +401,80 @@ test.skipIf(!hasDom)('settled rows: sent, can\'t do it with its reason, the agen
   expect(cant.querySelector('[data-action-settled]')!.textContent).toBe('Can\'t do it: “No access.” Sent to Claude Code.');
   click(toggleOf(rowOf(el, 2)));
   expect(panelOf(rowOf(el, 2)).querySelector('[data-action-settled]')!.textContent).toMatch(/^Claude Code saw it done, /);
+});
+
+test.skipIf(!hasDom)('replaced items are counted apart: the header never says "0 things… 0 of 0 done"', () => {
+  const superseded = { message_id: 'msg_01M5F3B7KD2WQ9XN4C8VJTR6YZ', key: null };
+  const el = mount(
+    <ActionChecklist
+      actions={[record(0, { state: 'superseded', superseded_by: superseded }), record(1, { state: 'superseded', superseded_by: superseded })]}
+      agent="Claude Code"
+      onMark={async () => true}
+    />,
+  );
+  expect(el.querySelector('[data-action-title]')!.textContent).toBe('2 action items, replaced');
+  expect(el.querySelector('[data-action-progress]')).toBeNull();
+  expect(el.querySelector('[data-action-badge]')).toBeNull();
+  expect(el.querySelector('[data-action-hint]')).toBeNull();
+  // The agent's watch on replaced items is over: no watching line.
+  expect(el.querySelector('[data-action-foot]')).toBeNull();
+  expect([...el.querySelectorAll('[data-action-card] .ib-badge')].map((b) => b.textContent)).toEqual(['Replaced', 'Replaced']);
+  expect(el.querySelector('[data-action-tick]')).toBeNull();
+  rerender(<ActionChecklist actions={[record(0, { state: 'superseded', superseded_by: superseded })]} agent="Claude Code" onMark={async () => true} />);
+  expect(el.querySelector('[data-action-title]')!.textContent).toBe('1 action item, replaced');
+  // Mixed: the open items are the count, the replaced ones said after it.
+  remount(<ActionChecklist actions={[record(0, { state: 'superseded', superseded_by: superseded }), record(1), record(2)]} agent="Claude Code" onMark={async () => true} />);
+  expect(el.querySelector('[data-action-title]')!.textContent).toBe('2 things only you can do');
+  expect(el.querySelector('[data-action-progress]')!.textContent).toBe('0 of 2 done · 1 replaced');
+  // The first OPEN item starts open, not the replaced one.
+  expect(toggleOf(rowOf(el, 1)).getAttribute('aria-expanded')).toBe('true');
+  click(toggleOf(rowOf(el, 0)));
+  expect(panelOf(rowOf(el, 0)).querySelector('[data-action-settled]')!.textContent).toBe('Claude Code replaced this action item.');
+  expect(panelOf(rowOf(el, 0)).querySelector('[data-action-done]')).toBeNull();
+});
+
+test.skipIf(!hasDom)('set aside and closed rows: their chip and line, a dashed mark, no Done; a read-only card takes no Done but still opens', () => {
+  const el = mount(
+    <ActionChecklist
+      actions={[record(0, { state: 'closed', set_aside_at: '2026-10-21T15:20:00.000Z' }), record(1, { state: 'closed' })]}
+      agent="Claude Code"
+      onMark={async () => true}
+    />,
+  );
+  const aside = rowOf(el, 0);
+  const closed = rowOf(el, 1);
+  expect(aside.getAttribute('data-action-state')).toBe('set-aside');
+  expect(closed.getAttribute('data-action-state')).toBe('archived');
+  expect(aside.querySelector('.ib-badge')!.textContent).toBe('Set aside');
+  expect(closed.querySelector('.ib-badge')!.textContent).toBe('Closed');
+  expect(el.querySelector('[data-action-tick]')).toBeNull();
+  expect(el.querySelector('[data-action-progress]')!.textContent).toBe('0 of 2 done');
+  click(toggleOf(aside));
+  expect(panelOf(aside).querySelector('[data-action-settled]')!.textContent).toBe('Set aside when you marked the thread read. Claude Code was told not to wait.');
+  click(toggleOf(closed));
+  expect(panelOf(closed).querySelector('[data-action-settled]')!.textContent).toBe('Closed when the thread was archived.');
+  expect(el.querySelector('[data-action-done]')).toBeNull();
+
+  remount(<ActionChecklist actions={[record(0), record(1)]} agent="Claude Code" readOnly onMark={async () => true} />);
+  expect(el.querySelector('[data-action-tick]')).toBeNull();
+  expect(el.querySelector('[data-action-done]')).toBeNull();
+  expect(el.querySelector('[data-action-hint]')).toBeNull();
+  // Read-only still shows what to do: the open row's why, link and command.
+  expect(panelOf(rowOf(el, 0)).hidden).toBe(false);
+  expect(panelOf(rowOf(el, 0)).querySelector('[data-action-open]')).not.toBeNull();
+  expect(panelOf(rowOf(el, 0)).querySelector('[data-action-cmd]')).not.toBeNull();
+});
+
+test.skipIf(!hasDom)("Copy is named by its visible words, and its result is said in a polite live region", async () => {
+  const el = mount(<ActionChecklist actions={[record(0)]} agent="Claude Code" onMark={async () => true} />);
+  const copy = el.querySelector<HTMLButtonElement>('[data-action-copy]')!;
+  expect(copy.hasAttribute('aria-label')).toBe(false);
+  const status = el.querySelector('[data-action-copy-status]')!;
+  expect(status.getAttribute('role')).toBe('status');
+  expect(status.textContent).toBe('');
+  click(copy);
+  await settle();
+  expect(['Command copied.', "Couldn't copy the command."]).toContain(status.textContent!);
 });
 
 test.skipIf(!hasDom)('the row says "1 action item", or "1 question, 1 action item", as plain text', () => {

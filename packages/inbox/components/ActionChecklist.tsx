@@ -11,7 +11,7 @@
  * 👍 Looks good): nothing is sent inside the window.
  */
 
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type MouseEvent } from 'react';
 import type { InboxQuestion } from '@plannotator/core/inbox-types';
 import { INBOX_ACTION_NOTE_MAX } from '@plannotator/core/inbox-actions';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
@@ -66,8 +66,11 @@ function nextOpen(actions: readonly InboxQuestion[], key: string): string | null
 
 export function ActionChecklist({ actions, agent, readOnly = false, onMark }: ActionChecklistProps) {
   const states = actions.map((a) => actionCardState(a));
-  const live = actions.filter((_, i) => states[i] !== 'replaced');
-  const total = live.length;
+  // Replaced items keep their rows (with a "Replaced" chip) but are counted apart, so the header never
+  // contradicts the rows: "3 things only you can do · 1 of 3 done · 1 replaced", or, all replaced,
+  // "2 action items, replaced".
+  const replaced = states.filter((st) => st === 'replaced').length;
+  const total = actions.length - replaced;
   const done = actions.filter((a, i) => isDoneState(a, states[i]!)).length;
   const openItems = actions.filter((_, i) => states[i] === 'open');
   const stopped = openItems.some((a) => a.stopped !== null);
@@ -77,7 +80,11 @@ export function ActionChecklist({ actions, agent, readOnly = false, onMark }: Ac
     : holds > 0
       ? { label: `Holds up ${holds}`, className: 'ib-badge ib-b-hold' }
       : null;
-  const watching = useMemo(() => [...new Set(actions.map((a) => a.action?.watching).filter((w): w is string => !!w))], [actions]);
+  // What the agent watches, for the items still waiting (open, or inside their Undo window): a settled or replaced item's watch is over.
+  const watching = useMemo(
+    () => [...new Set(actions.filter((_, i) => states[i] === 'open' || states[i] === 'pending').map((a) => a.action?.watching).filter((w): w is string => !!w))],
+    [actions],
+  );
   const hint = !readOnly && openItems.length > 0;
 
   // One row open at a time: the first open item to start with.
@@ -108,12 +115,18 @@ export function ActionChecklist({ actions, agent, readOnly = false, onMark }: Ac
     <div className="ib-chk" role="group" aria-labelledby={headId} data-action-group="" data-action-count={actions.length}>
       <div className="ib-chk-head">
         <Icon name="todo" />
-        <span className="ib-chk-title" id={headId}>
-          {total === 1 ? '1 thing only you can do' : `${total} things only you can do`}
+        <span className="ib-chk-title" id={headId} data-action-title="">
+          {total === 0
+            ? `${replaced === 1 ? '1 action item' : `${replaced} action items`}, replaced`
+            : total === 1
+              ? '1 thing only you can do'
+              : `${total} things only you can do`}
         </span>
-        <span className="ib-chk-count" data-action-progress="">
-          {done} of {total} done
-        </span>
+        {total > 0 && (
+          <span className="ib-chk-count" data-action-progress="">
+            {done} of {total} done{replaced > 0 ? ` · ${replaced} replaced` : ''}
+          </span>
+        )}
         {badge && (
           <span className={badge.className} data-action-badge="">
             {badge.label}
@@ -182,6 +195,8 @@ function ActionRow({ action, state, agent, readOnly, open, onToggle, toggleRef, 
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState<'ok' | 'failed' | null>(null);
   const areaRef = useRef<HTMLTextAreaElement>(null);
+  // When Done was last marked from the tick: a second click of a double-click must not undo it.
+  const tickDoneAt = useRef(0);
   const panelId = useId();
   const noteId = useId();
   useEffect(() => {
@@ -250,7 +265,19 @@ function ActionRow({ action, state, agent, readOnly, open, onToggle, toggleRef, 
     return null;
   })();
 
-  const tickIcon = doneLike ? 'check' : state === 'cant' || (pending && result?.outcome === 'cant') ? 'minus' : state === 'set-aside' ? 'clock' : null;
+  // Uncircled glyphs: the dot is the circle. A set-aside, closed or replaced item is a dashed, empty dot.
+  const tickIcon = doneLike ? 'check' : state === 'cant' || (pending && result?.outcome === 'cant') ? 'x' : null;
+  const onTick = (event: MouseEvent) => {
+    // The second click of a double-click (or one within half a second of Done) never undoes it.
+    if (event.detail > 1) return;
+    if (pending) {
+      if (Date.now() - tickDoneAt.current < 500) return;
+      void mark(null, 'tick');
+      return;
+    }
+    tickDoneAt.current = Date.now();
+    void mark({ outcome: 'done' }, 'tick');
+  };
   const tick =
     !readOnly && (live || pending) ? (
       <button
@@ -258,9 +285,10 @@ function ActionRow({ action, state, agent, readOnly, open, onToggle, toggleRef, 
         className="ib-chk-tick"
         data-action-tick=""
         aria-pressed={pending}
-        aria-label={pending ? `Undo: ${action.prompt}` : `Done: ${action.prompt}`}
-        disabled={busy}
-        onClick={() => void mark(pending ? null : { outcome: 'done' }, 'tick')}
+        aria-label={`Done: ${action.prompt}`}
+        // aria-disabled, not disabled: a disabled button drops keyboard focus to the page. mark() ignores clicks while busy.
+        aria-disabled={busy || undefined}
+        onClick={onTick}
       >
         <span className="ib-chk-dot" aria-hidden="true">
           {tickIcon && <Icon name={tickIcon} />}
@@ -322,7 +350,7 @@ function ActionRow({ action, state, agent, readOnly, open, onToggle, toggleRef, 
         )}
         {live && facts.where_url && (
           <a className="ib-chk-open" href={facts.where_url} target="_blank" rel="noopener noreferrer" data-action-open="">
-            Open {facts.where ?? 'link'}
+            <span className="ib-chk-open-l">Open {facts.where ?? 'link'}</span>
             <Icon name="external" />
           </a>
         )}
@@ -330,10 +358,13 @@ function ActionRow({ action, state, agent, readOnly, open, onToggle, toggleRef, 
           <div className="ib-chk-run" data-action-run="">
             <div className="ib-chk-run-top">
               <span className="ib-chk-run-l">Command</span>
-              <button type="button" className="ib-btn ib-sm" data-action-copy="" onClick={() => void copy()} aria-label="Copy command">
+              <button type="button" className="ib-btn ib-sm" data-action-copy="" onClick={() => void copy()}>
                 <Icon name={copied === 'ok' ? 'check' : 'copy'} />
                 {copied === 'ok' ? 'Copied' : copied === 'failed' ? "Couldn't copy" : 'Copy'}
               </button>
+              <span className="ib-chk-sr" role="status" data-action-copy-status="">
+                {copied === 'ok' ? 'Command copied.' : copied === 'failed' ? "Couldn't copy the command." : ''}
+              </span>
             </div>
             <code className="ib-chk-cmd" data-action-cmd="">
               <span className="ib-chk-ps" aria-hidden="true">
