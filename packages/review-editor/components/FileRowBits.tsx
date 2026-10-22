@@ -22,7 +22,7 @@ export const ViewedControl: React.FC<{
   /** Deprecated no-op — the control is always visible now. */
   forceVisible?: boolean;
 }> = ({ isViewed, onToggle }) => (
-  <Tooltip content={isViewed ? 'Viewed — click to unmark' : 'Mark as viewed'} side="bottom" delayDuration={300}>
+  <Tooltip content={isViewed ? 'Viewed — click to unmark' : 'Mark as viewed'} side="bottom">
     <span
       role="checkbox"
       aria-checked={isViewed}
@@ -73,7 +73,7 @@ export const StageControl: React.FC<{
     );
   }
   return (
-    <Tooltip content="Stage file (git add)" side="bottom" delayDuration={300}>
+    <Tooltip content="Stage file (git add)" side="bottom">
       <span
         role="button"
         // tabIndex + key handling: lives INSIDE the row <button> (a real nested

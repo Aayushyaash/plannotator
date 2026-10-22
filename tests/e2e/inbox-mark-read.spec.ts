@@ -278,6 +278,42 @@ test('a words-only reply left as it is: the questions stay open, and the agent g
   await expect(pane).toHaveCount(0);
 });
 
+test('the foot after a pick: the buttons on the left, the draft status at the row\'s right end; too narrow, the status on its own line above the buttons', async () => {
+  const { page, agents, project } = world;
+  const asked = await agents.pi.send({ project_path: project, subject: 'Refunds page: a few calls', thread: 'refunds', body: INVOICES.replace('invoice list', 'refunds page') });
+  await page.goto(`${world.url}#thread=${asked.thread_id as string}`);
+  const pane = page.locator('section.ib-pane');
+  await expect(pane.getByRole('heading', { name: 'Refunds page: a few calls' })).toBeVisible();
+  await pane.locator('fieldset[data-question-key]').first().locator('[data-question-option]').filter({ hasText: 'A dense table' }).click();
+  const row = page.locator('.ib-pfoot [data-foot-row]');
+  const status = row.locator('[data-foot-status]');
+  await expect(status.locator('[data-draft-foot]')).toContainText('1 pick');
+  await expect(status.locator('[data-skip-chip]')).toContainText('2 questions stay open');
+  const box = async (sel: string) => (await page.locator(sel).first().boundingBox())!;
+  const send = async () => box('.ib-pfoot [data-foot-buttons] .ib-btn.ib-pri');
+  const reask = async () => box('.ib-pfoot [data-foot-buttons] [data-reask]');
+  // Wide: one line. Send first, the status after Re-ask, ending at the row's end.
+  const wide = { row: await box('.ib-pfoot [data-foot-row]'), status: await box('.ib-pfoot [data-foot-status]'), send: await send(), reask: await reask() };
+  expect(Math.abs(wide.status.y + wide.status.height / 2 - (wide.send.y + wide.send.height / 2))).toBeLessThan(2);
+  expect(wide.status.x).toBeGreaterThan(wide.reask.x + wide.reask.width);
+  expect(Math.abs(wide.status.x + wide.status.width - (wide.row.x + wide.row.width))).toBeLessThan(2);
+  await shot('04d-foot-status-right');
+  // A phone: the status takes its own line above the buttons, and every button stays on one line below it.
+  await page.setViewportSize({ width: 390, height: 844 });
+  // Read in one frame (the layout moves while the window settles into the phone's).
+  const narrow = () =>
+    page.evaluate(() => {
+      const r = (sel: string) => document.querySelector(sel)!.getBoundingClientRect();
+      const [row, status, send, reask] = ['[data-foot-row]', '[data-foot-status]', '[data-foot-buttons] .ib-btn.ib-pri', '[data-foot-buttons] [data-reask]'].map((s) => r(`.ib-pfoot ${s}`));
+      return { above: status!.bottom <= send!.top, start: Math.abs(status!.left - row!.left) < 2, oneLine: Math.abs(reask!.top - send!.top) < 2 };
+    });
+  await expect.poll(narrow).toEqual({ above: true, start: true, oneLine: true });
+  await shot('04e-foot-status-above');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(world.url);
+  await expect(pane).toHaveCount(0);
+});
+
 test('Mark read moves the thread to Quiet ("Read"); a new agent message brings it back to the top', async () => {
   const { page, threads } = world;
   await page.locator(`.ib-lbody [data-thread-id="${threads.search}"]`).click();
