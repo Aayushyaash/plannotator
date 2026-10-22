@@ -203,6 +203,10 @@
   --ib-lr-md: 9px;
   --ib-lr-sm: 8px;
   --ib-lr-xs: 7px;
+  /* A phone's bottom sheet: its top corners are the dialog corner (owner, 2026-10-22, design-system ruling q8:
+     "12 in both, the dialog corner"; was 16). Every sheet from the bottom edge reads this, the floating ones
+     (the project menu, search's chip menu) on all four corners. */
+  --ib-sheet-corner: var(--ib-lr-xl);
   --ib-rl-xl-s: var(--ib-soft-shape) var(--ib-lr-xl);
   --ib-rl-lg-s: var(--ib-soft-shape) var(--ib-lr-lg);
   --ib-rl-md-s: var(--ib-soft-shape) var(--ib-lr-md);
@@ -2229,7 +2233,7 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   /* menus are sheets from the bottom edge: New message's sessions, the annotations list */
   .ib-nmpop, .ib-menu.ib-nmpop, .ib-state.ib-nmpop, .ib-annpop {
     position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: auto; max-height: 72%; overflow-y: auto; z-index: 60;
-    border-radius: 16px 16px 0 0; border-bottom: 0; padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    border-radius: var(--ib-sheet-corner, 12px) var(--ib-sheet-corner, 12px) 0 0; border-bottom: 0; padding-bottom: calc(10px + env(safe-area-inset-bottom));
     box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.28);
   }
   .ib-menu.ib-nmpop { padding: 8px 8px calc(10px + env(safe-area-inset-bottom)); }
@@ -2247,7 +2251,7 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   .ib-phone .ib-apanel { display: none; }
   /* the file's own layers (the viewer draws at z-50) stay under the sheet */
   .ib-phone .ib-docarea { isolation: isolate; z-index: 0; }
-  .ib-phone.ib-panel-open .ib-apanel { display: flex; position: absolute; left: 0; right: 0; bottom: 0; height: min(65%, 520px); z-index: 6; border-left: 0; border-top: 1px solid var(--border); border-radius: 16px 16px 0 0; box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.25); padding-bottom: env(safe-area-inset-bottom); }
+  .ib-phone.ib-panel-open .ib-apanel { display: flex; position: absolute; left: 0; right: 0; bottom: 0; height: min(65%, 520px); z-index: 6; border-left: 0; border-top: 1px solid var(--border); border-radius: var(--ib-sheet-corner, 12px) var(--ib-sheet-corner, 12px) 0 0; box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.25); padding-bottom: env(safe-area-inset-bottom); }
   .ib-phone.ib-panel-open .ib-apanel > [data-annotation-panel] { border-radius: 0; }
   .ib-sheet-h { flex: none; display: flex; align-items: center; gap: 8px; height: 52px; padding: 0 4px 0 16px; border-bottom: 1px solid color-mix(in oklch, var(--border) 60%, transparent); font-size: var(--ib-fs-15, 15px); }
   .ib-sheet-h b { font-weight: 600; }
@@ -2358,7 +2362,7 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   .ib-pmore .ib-ic { width: 20px; height: 20px; }
   .ib-pm-scrim { display: block; position: fixed; inset: 0; z-index: 79; background: rgb(0 0 0 / 0.3); }
   .ib-pm-pos[data-phone] { position: fixed !important; left: 8px !important; right: 8px !important; top: auto !important; bottom: calc(8px + env(safe-area-inset-bottom)) !important; transform: none !important; width: auto !important; }
-  .ib-pm-pos[data-phone] .ib-pm { min-width: 0; padding: 6px; border-radius: 12px; animation: ib-pm-up 200ms cubic-bezier(0.23, 1, 0.32, 1); }
+  .ib-pm-pos[data-phone] .ib-pm { min-width: 0; padding: 6px; border-radius: var(--ib-sheet-corner, 12px); animation: ib-pm-up 200ms cubic-bezier(0.23, 1, 0.32, 1); }
   @keyframes ib-pm-up { from { transform: translateY(16px); opacity: 0; } to { transform: none; opacity: 1; } }
   @media (prefers-reduced-motion: reduce) { .ib-pm-pos[data-phone] .ib-pm { animation: none; } }
   .ib-pm-pos[data-phone] .ib-pm-title { display: block; font-size: var(--ib-fs-13, 13px); color: var(--muted-foreground); padding: 6px 10px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -2828,7 +2832,7 @@ dialog.ib-sp::backdrop { background: oklch(0 0 0 / 0.45); }
   dialog.ib-sp[data-phone] .ib-sp-row { min-height: 56px; padding: 8px 8px; }
   dialog.ib-sp[data-phone] .ib-sp-p { font-size: var(--ib-fs-15, 15px); }
   dialog.ib-sp[data-phone] .ib-sp-s { font-size: var(--ib-fs-12-5, 12.5px); }
-  dialog.ib-sp[data-phone] .ib-sp-menu { position: fixed; left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom)); top: auto; max-width: none; max-height: 60vh; padding: 6px; border-radius: 12px; }
+  dialog.ib-sp[data-phone] .ib-sp-menu { position: fixed; left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom)); top: auto; max-width: none; max-height: 60vh; padding: 6px; border-radius: var(--ib-sheet-corner, 12px); }
   dialog.ib-sp[data-phone] .ib-sp-mi { height: 44px; font-size: var(--ib-fs-15, 15px); }
 }
 
@@ -3495,7 +3499,7 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
 @media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
   .pn-inbox .ib-btn { border-radius: var(--ib-bt-r-s, 9px); }
   .pn-inbox .ib-pfoot .ib-btn { border-radius: var(--ib-ft-r-s, 9px); }
-  .ib-annpop, .ib-nmpop { border-radius: 16px 16px 0 0; }
+  .ib-annpop, .ib-nmpop { border-radius: var(--ib-sheet-corner, 12px) var(--ib-sheet-corner, 12px) 0 0; }
   .ib-annpop, .ib-nmpop { box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.28); }
 }
 
