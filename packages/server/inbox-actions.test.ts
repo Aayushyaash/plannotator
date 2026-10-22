@@ -227,6 +227,15 @@ describe("archive holds a pending Done back; Unarchive sends it", () => {
   });
 });
 
+describe("supersedes on a to-do", () => {
+  test("the result names a superseded to-do as a to-do, not a question", async () => {
+    const { send, sent } = await setup();
+    const replaced = await send({ body: "The deploy was promoted by CI; no need.", reply_to: sent.message_id, supersedes: [`${sent.message_id}/${sent.actions![0]!.key}`] });
+    expect(replaced.content[0]!.text).toContain(", superseding 1 earlier to-do (");
+    expect(replaced.content[0]!.text).not.toContain("earlier question");
+  });
+});
+
 describe("the agent marks its own to-do done", () => {
   test("done is recorded, the card reads it, nothing is sent; invalid ids refuse the whole send with invalid_done", async () => {
     const { server, send, sent } = await setup();

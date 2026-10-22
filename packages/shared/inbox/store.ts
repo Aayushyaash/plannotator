@@ -2694,12 +2694,17 @@ export class InboxStore {
         continue;
       }
       const resolved = this.closedByArchive(message);
-      const open = records.filter((r) => isInboxQuestionSupersedable(inboxQuestionState(r, resolved)));
+      // A to-do the person already marked (Done or Can't do it, inside its Undo window) is theirs: it is
+      // never superseded, so their answer goes as they said (a message-wide id leaves it out).
+      const personMarked = (r: InboxQuestionRecord) => r.kind === "action" && inboxQuestionState(r, resolved) === "picked";
+      const open = records.filter((r) => isInboxQuestionSupersedable(inboxQuestionState(r, resolved)) && !personMarked(r));
       if (open.length === 0) {
         problems.push(
-          target.key === null
-            ? `${where} ${ref}: that message has no open question.`
-            : `${where} ${ref} is not open (it is ${inboxQuestionState(records[0]!, resolved)}).`,
+          target.key !== null && personMarked(records[0]!)
+            ? `${where} ${ref}: the person already marked it; their answer reaches you in a few seconds.`
+            : target.key === null
+              ? `${where} ${ref}: that message has no open question.`
+              : `${where} ${ref} is not open (it is ${inboxQuestionState(records[0]!, resolved)}).`,
         );
         continue;
       }

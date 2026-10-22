@@ -685,6 +685,21 @@ export async function sendAgentMessage(
   };
 }
 
+/**
+ * ", superseding 1 earlier question", ", superseding 1 earlier to-do", or
+ * ", superseding 2 earlier questions and 1 to-do", from the superseded ids
+ * (`<message id>/<key>`; a to-do's key starts with `a-`). "" for none.
+ */
+export function supersededWords(ids: readonly string[]): string {
+  const todos = ids.filter((id) => /\/a-[0-9a-f]/.test(id)).length;
+  const questions = ids.length - todos;
+  const parts = [
+    questions > 0 ? `${questions} earlier question${questions === 1 ? "" : "s"}` : "",
+    todos > 0 ? `${todos}${questions > 0 ? "" : " earlier"} to-do${todos === 1 ? "" : "s"}` : "",
+  ].filter(Boolean);
+  return parts.length > 0 ? `, superseding ${parts.join(" and ")}` : "";
+}
+
 /** send_message's (and submit_guide's) one line about naming a thread the person started, or "". */
 export function namingLine(naming: InboxSendResult["naming"] | null | undefined): string {
   if (!naming) return "";
@@ -837,7 +852,7 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
           (sent.questions > 0 ? ` asking ${sent.questions} question${sent.questions === 1 ? "" : "s"}` : "") +
           (sent.attachments > 0 ? ` with ${sent.attachments} attachment${sent.attachments === 1 ? "" : "s"}` : "") +
           (sent.actions > 0 ? `${sent.questions > 0 ? " and" : " with"} ${sent.actions} to-do${sent.actions === 1 ? "" : "s"}` : "") +
-          (sent.superseded > 0 ? `, superseding ${sent.superseded} earlier question${sent.superseded === 1 ? "" : "s"}` : "") +
+          supersededWords(sent.structured.superseded as string[]) +
           (sent.done > 0 ? `, marking ${sent.done} to-do${sent.done === 1 ? "" : "s"} done` : "");
         return ok(
           `${sent.replayed ? "Already sent" : "Sent"} to the Plannotator Inbox${asked} (thread ${sent.structured.thread_id}, ${sent.structured.url}).${namingLine(sent.naming)} ${callerWakes(ctx) ? INBOX_REPLY_ARRIVES_TEXT : "Call wait_for_reply with this thread_id for the answer, or go on and read_thread later."}${imagesNotShownText(sent.imagesNotShown)}`,

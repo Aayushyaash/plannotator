@@ -238,6 +238,24 @@ describe("review fixes", () => {
     expect(second.store.questionsOf(second.asked.id).find((q) => q.kind === "action")!.superseded_by).toEqual({ message_id: by.id, key: expect.stringMatching(/^a-/) });
   });
 
+  test("supersedes never takes a to-do the person marked inside its Undo window: refused by its id, left out of a message-wide id; their answer still goes", () => {
+    const { store, clock, project, asked, action, question } = setup();
+    store.markAction(asked.id, action.key, { outcome: "done", note: "Approved." });
+    const before = store.cursor();
+    expect(() =>
+      store.sendMessage({ project_id: project.id, author: AGENT, reply_to: asked.id, body: "Never mind the deploy.", supersedes: [`${asked.id}/${action.key}`] }),
+    ).toThrow(/the person already marked it; their answer reaches you in a few seconds/);
+    expect(store.cursor()).toBe(before);
+    // A message-wide id supersedes the open question and leaves the marked to-do alone.
+    store.sendMessage({ project_id: project.id, author: AGENT, reply_to: asked.id, body: "Dropping the announcement question.", supersedes: [asked.id] });
+    expect(store.questionsOf(asked.id).find((q) => q.key === question.key)!.state).toBe("superseded");
+    expect(actionOf(store, asked.id)).toMatchObject({ state: "picked", superseded_by: null });
+    clock.now += UNDO_MS;
+    const [reply] = store.settleActions(UNDO_MS);
+    expect(reply!.body).toContain("Done, ");
+    expect(reply!.body).toContain("Note: Approved.");
+  });
+
   test("Done, then Archive, then Unarchive: the Done is held back while archived and goes once the thread is open again", () => {
     const { store, clock, asked, action } = setup();
     store.markAction(asked.id, action.key, { outcome: "done" });
