@@ -1634,7 +1634,7 @@ pre code.pn-code[data-keep-layout] {
 .ib-handle-hit { position: absolute; top: 0; bottom: 0; left: -8px; right: -8px; }
 .ib-edge:focus-visible [data-resize-track] { background-color: var(--ring); }
 .ib-edge-tip-pos { z-index: 50; }
-.ib-edge-tip { background: var(--popover); color: var(--muted-foreground); box-shadow: var(--float-shadow); outline: 1px solid transparent; border-radius: 6px; padding: 4px 8px; font-family: var(--font-sans); font-size: var(--ib-fs-11, 11px); font-weight: 500; }
+.ib-edge-tip { background: var(--popover); color: var(--muted-foreground); box-shadow: var(--ib-float-shadow, var(--float-shadow)); outline: 1px solid transparent; border-radius: 6px; padding: 4px 8px; font-family: var(--font-sans); font-size: var(--ib-fs-11, 11px); font-weight: 500; }
 
 /* attachments of any kind: the image gallery in a message, thumbnail and
    download tiles, and the image and code panes (inbox-attachments design,

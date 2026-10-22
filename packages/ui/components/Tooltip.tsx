@@ -37,13 +37,15 @@ export const TooltipProvider: React.FC<TooltipProviderProps> = ({
   skipDelayDuration,
   disableHoverableContent = false,
   children,
-}) => (
-  <BaseTooltip.Provider delay={delayDuration ?? TOOLTIP_DELAY_MS} timeout={skipDelayDuration ?? TOOLTIP_SKIP_DELAY_MS}>
-    <TooltipProviderContext.Provider value={{ disableHoverablePopup: disableHoverableContent }}>
-      {children}
-    </TooltipProviderContext.Provider>
-  </BaseTooltip.Provider>
-);
+}) => {
+  // One object per setting, so tooltips behind a memo boundary don't re-render with the provider.
+  const value = React.useMemo(() => ({ disableHoverablePopup: disableHoverableContent }), [disableHoverableContent]);
+  return (
+    <BaseTooltip.Provider delay={delayDuration ?? TOOLTIP_DELAY_MS} timeout={skipDelayDuration ?? TOOLTIP_SKIP_DELAY_MS}>
+      <TooltipProviderContext.Provider value={value}>{children}</TooltipProviderContext.Provider>
+    </BaseTooltip.Provider>
+  );
+};
 
 interface TooltipProps {
   content: React.ReactNode;
