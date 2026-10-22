@@ -250,6 +250,18 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
     applyMode(mode, true);
   }, [mode, applyMode]);
 
+  // The host changed how Fit fits (its padding, the fit axis): Fit refits, anything else stays within the new limits.
+  const fitShape = useRef({ padding, fitAxis });
+  useLayoutEffect(() => {
+    if (fitShape.current.padding === padding && fitShape.current.fitAxis === fitAxis) return;
+    fitShape.current = { padding, fitAxis };
+    measure();
+    if (!ready() || !viewRef.current) return;
+    if (modeRef.current === 'fit') applyMode('fit', false);
+    else apply(clampViewport(viewRef.current, dimsRef.current!, boxRef.current!, limits()));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [padding, fitAxis, measure, applyMode, apply]);
+
   // The image's own size, once it has loaded (or at once when it was cached).
   useEffect(() => {
     const img = imgRef.current;

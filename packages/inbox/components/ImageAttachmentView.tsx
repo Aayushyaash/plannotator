@@ -7,6 +7,7 @@ import type { Annotation, ImageAttachment } from '@plannotator/ui/types';
 import { InboxApiError, inboxApi } from '../api';
 import { attachmentImageUrl, imageCommentAnnotation, WIDE_IMAGE_RATIO } from '../attachments';
 import { Icon } from '../icons';
+import { PHONE_QUERY } from '../phone';
 import { Tip } from './Tip';
 import { useConfigValue } from '@plannotator/ui/config';
 import { isCommentSubmitKey } from '@plannotator/ui/utils/commentSubmitKey';
@@ -115,12 +116,19 @@ export function ImageAttachmentView({
   // The stage's own padding (28 px, 12 on a phone) is what Fit leaves around the image.
   const stageRef = useRef<HTMLDivElement>(null);
   const [pad, setPad] = useState<number | null>(null);
+  // Read again when the phone breakpoint is crossed (the padding changes with it).
   useLayoutEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
-    const style = getComputedStyle(stage);
-    const value = parseFloat(style.paddingTop);
-    setPad(Number.isFinite(value) ? value : 0);
+    const read = () => {
+      const value = parseFloat(getComputedStyle(stage).paddingTop);
+      setPad(Number.isFinite(value) ? value : 0);
+    };
+    read();
+    if (typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia(PHONE_QUERY);
+    query.addEventListener?.('change', read);
+    return () => query.removeEventListener?.('change', read);
   }, []);
 
   // Ctrl + wheel (a pinch) and Safari's gesture events over the size bar or the

@@ -302,6 +302,38 @@ describe.if(hasDom)('the Inbox image viewer zooms', () => {
     expect(swipes).toEqual([1]);
   });
 
+  test('the stage padding is read again when the phone breakpoint is crossed, and Fit refits to it', async () => {
+    const listeners: (() => void)[] = [];
+    const realMatch = window.matchMedia;
+    const realStyle = window.getComputedStyle;
+    let padding = '0px';
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: (_: string, fn: () => void) => listeners.push(fn),
+      removeEventListener: () => {},
+    })) as unknown as typeof window.matchMedia;
+    window.getComputedStyle = ((el: Element) => {
+      const style = realStyle(el);
+      if (!(el as HTMLElement).classList?.contains('ib-imgstage')) return style;
+      return new Proxy(style, { get: (target, key) => (key === 'paddingTop' ? padding : Reflect.get(target, key)) });
+    }) as typeof window.getComputedStyle;
+    try {
+      await mount();
+      const { img } = await load();
+      expect(view(img).scale).toBe(0.5);
+      // A phone-sized window: 100 px of padding on every side leaves 800 × 400 for Fit.
+      padding = '100px';
+      await act(async () => {
+        for (const fn of listeners) fn();
+      });
+      expect(view(img)).toEqual({ x: 100, y: 100, scale: 0.4 });
+    } finally {
+      window.matchMedia = realMatch;
+      window.getComputedStyle = realStyle;
+    }
+  });
+
   test('Ctrl + wheel over the size bar never zooms the page', async () => {
     await mount();
     await load();

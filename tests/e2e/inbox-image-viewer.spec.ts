@@ -856,11 +856,22 @@ test('the Inbox\'s file viewer zooms like the lightbox: Ctrl + wheel keeps the p
   await pane().getByRole('button', { name: 'Mark up' }).last().click();
   const canvas = page.locator('[data-pn-image-annotator-stage] canvas').first();
   await expect(canvas).toBeVisible();
+  // The canvas starts at the 300 × 150 default and takes the image's shape once the annotator's image has loaded: draw only then.
+  await expect
+    .poll(async () => {
+      const b = await canvas.boundingBox();
+      return b && b.width > 300 && Math.abs(b.width / b.height - 1200 / 760) < 0.02;
+    })
+    .toBe(true);
+  await expect.poll(() => page.locator('[data-pn-image-annotator-stage] img').first().evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
   const c = (await canvas.boundingBox())!;
+  // A circle around the "Total" field: the annotator centres it between the drag's ends.
+  const target = { u: 0.5, v: 0.22 };
+  const reach = 0.1;
   await page.locator('[data-pn-image-annotator-toolbar] button[title="Circle (3)"]').click();
-  await page.mouse.move(c.x + c.width * 0.36, c.y + c.height * 0.3);
+  await page.mouse.move(c.x + c.width * (target.u - reach), c.y + c.height * target.v);
   await page.mouse.down();
-  await page.mouse.move(c.x + c.width * 0.64, c.y + c.height * 0.5, { steps: 10 });
+  await page.mouse.move(c.x + c.width * (target.u + reach), c.y + c.height * target.v, { steps: 10 });
   await page.mouse.up();
   await page.keyboard.press('Enter');
   await expect(pane().locator('.ib-imgcompose .ib-markup img')).toBeVisible();
@@ -872,15 +883,87 @@ test('the Inbox\'s file viewer zooms like the lightbox: Ctrl + wheel keeps the p
   await drawer.getByText('Circle the total; it should be bigger.').click();
   const overlay = pane().locator('[data-zoom-overlay] img[data-markup-overlay]');
   await expect(overlay).toBeVisible();
+  await expect.poll(() => overlay.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
+  // The kept drawing: where its pixels differ from the image, in the image's own pixels.
+  const ink = await pane().locator('[data-image-zoom-stage]').evaluate(async (el) => {
+    const read = async (src: string) => {
+      const bitmap = await createImageBitmap(await (await fetch(src)).blob());
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(bitmap, 0, 0);
+      return ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+    };
+    const base = await read(el.querySelector<HTMLImageElement>('img[data-lightbox-image]')!.src);
+    const drawn = await read(el.querySelector<HTMLImageElement>('img[data-markup-overlay]')!.src);
+    let minX = Infinity, minY = Infinity, maxX = -1, maxY = -1, r = 0, g = 0, b = 0, n = 0;
+    for (let y = 0; y < base.height; y += 1) {
+      for (let x = 0; x < base.width; x += 1) {
+        const i = (y * base.width + x) * 4;
+        const d = Math.abs(base.data[i]! - drawn.data[i]!) + Math.abs(base.data[i + 1]! - drawn.data[i + 1]!) + Math.abs(base.data[i + 2]! - drawn.data[i + 2]!);
+        if (d < 120) continue;
+        minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        r += drawn.data[i]!; g += drawn.data[i + 1]!; b += drawn.data[i + 2]!; n += 1;
+      }
+    }
+    return { width: base.width, height: base.height, minX, minY, maxX, maxY, color: [r / n, g / n, b / n] };
+  });
+  expect(ink.width).toBe(1200);
+  // The circle's centre is where it was drawn, to within 3 image pixels; its radius is the drag's half-length.
+  expect(Math.abs((ink.minX + ink.maxX) / 2 - target.u * 1200)).toBeLessThan(3);
+  expect(Math.abs((ink.minY + ink.maxY) / 2 - target.v * 760)).toBeLessThan(3);
+  expect(Math.abs((ink.maxX - ink.minX) / 2 - reach * 1200)).toBeLessThan(8);
+
+  /** Where the drawing's colour is on the screen, inside the stage, in page pixels. */
+  const inkOnScreen = async () => {
+    const box = (await pane().locator('[data-image-zoom-stage]').boundingBox())!;
+    const shotPng = await page.screenshot({ clip: box });
+    const found = await page.evaluate(async ({ data, color }) => {
+      // The window's CSP lets images load data: URLs (connect-src does not).
+      const pic = new Image();
+      pic.src = `data:image/png;base64,${data}`;
+      await pic.decode();
+      const bitmap = await createImageBitmap(pic);
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(bitmap, 0, 0);
+      const px = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+      let minX = Infinity, minY = Infinity, maxX = -1, maxY = -1;
+      for (let y = 0; y < bitmap.height; y += 1) {
+        for (let x = 0; x < bitmap.width; x += 1) {
+          const i = (y * bitmap.width + x) * 4;
+          if (Math.abs(px[i]! - color[0]!) + Math.abs(px[i + 1]! - color[1]!) + Math.abs(px[i + 2]! - color[2]!) > 60) continue;
+          minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        }
+      }
+      return { minX, minY, maxX, maxY };
+    }, { data: shotPng.toString('base64'), color: ink.color });
+    return { cx: box.x + (found.minX + found.maxX) / 2, cy: box.y + (found.minY + found.maxY) / 2, radius: (found.maxX - found.minX) / 2 };
+  };
+  /** Where the target is on the screen now, from the image as it is placed on the stage. */
+  const targetOnScreen = async () => {
+    const r = await image.evaluate((img) => img.getBoundingClientRect());
+    return { x: r.left + target.u * r.width, y: r.top + target.v * r.height, scale: r.width / 1200 };
+  };
   const full = (await pane().locator('[data-image-zoom-stage]').boundingBox())!;
-  // Zoom in toward the drawing (the annotator put the circle near the image's top left).
-  const drawn = (await overlay.boundingBox())!;
-  await page.mouse.move(drawn.x + drawn.width * 0.15, drawn.y + drawn.height * 0.2);
-  await page.keyboard.down('Control');
-  for (let i = 0; i < 2; i += 1) await page.mouse.wheel(0, -100);
-  await page.keyboard.up('Control');
-  await expect(pane().locator('[data-image-zoom-stage]')).toHaveAttribute('data-image-zoom-stage', 'zoom');
-  await page.waitForTimeout(300);
+  await page.mouse.move(full.x + 20, full.y + full.height - 20);
+  for (const zoomed of [false, true]) {
+    if (zoomed) {
+      // Zoom in about the circle: it grows on screen and stays on the field.
+      const at = await targetOnScreen();
+      await page.mouse.move(at.x, at.y);
+      await page.keyboard.down('Control');
+      for (let i = 0; i < 2; i += 1) await page.mouse.wheel(0, -100);
+      await page.keyboard.up('Control');
+      await expect(pane().locator('[data-image-zoom-stage]')).toHaveAttribute('data-image-zoom-stage', 'zoom');
+      await page.mouse.move(full.x + 20, full.y + full.height - 20);
+    }
+    await page.waitForTimeout(300);
+    const seen = await inkOnScreen();
+    const want = await targetOnScreen();
+    expect(Math.abs(seen.cx - want.x), `circle across, ${zoomed ? 'zoomed' : 'at Fit'}`).toBeLessThan(4);
+    expect(Math.abs(seen.cy - want.y), `circle down, ${zoomed ? 'zoomed' : 'at Fit'}`).toBeLessThan(4);
+    expect(Math.abs(seen.radius - reach * 1200 * want.scale), `circle size, ${zoomed ? 'zoomed' : 'at Fit'}`).toBeLessThan(6);
+  }
   const aligned = await pane().locator('[data-image-zoom-stage]').evaluate((el) => {
     const img = el.querySelector<HTMLElement>('img[data-lightbox-image]')!;
     const layer = el.querySelector<HTMLElement>('[data-zoom-overlay]')!;
