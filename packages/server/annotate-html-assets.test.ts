@@ -68,7 +68,7 @@ describe("annotate raw HTML assets", () => {
     }
     // The page itself keeps its document policy (scripts run, at an opaque origin).
     const page = new URL(`${base}page.html`, "http://localhost");
-    expect((await assets.handle(new Request(String(page)), page))?.headers.get("content-security-policy")).toBe("sandbox allow-scripts");
+    expect((await assets.handle(new Request(String(page)), page))?.headers.get("content-security-policy")).toBe("sandbox allow-scripts allow-modals");
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -306,7 +306,7 @@ describe("annotate embedded local documents", () => {
     expect(response?.headers.get("content-type")).toContain("text/html");
     // Defense in depth for a reviewer who opens the asset URL in a top-level
     // tab: no allow-same-origin means an opaque origin there too.
-    expect(response?.headers.get("content-security-policy")).toBe("sandbox allow-scripts");
+    expect(response?.headers.get("content-security-policy")).toBe("sandbox allow-scripts allow-modals");
     expect(response?.headers.get("content-security-policy")).not.toContain("allow-same-origin");
     expect(response?.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await response?.text()).toContain("EMBEDDED_SIBLING");
