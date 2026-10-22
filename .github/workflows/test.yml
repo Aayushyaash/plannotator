@@ -385,6 +385,8 @@ jobs:
           packages/ui/components/Settings.annotateParity.test.tsx
           packages/ui/components/Settings.compactDisplay.test.tsx
           packages/ui/components/Settings.customFont.test.tsx
+          packages/ui/components/Settings.documentTextSize.test.tsx
+          packages/ui/config/documentTextSizeSetting.test.ts
           packages/ui/utils/diffFonts.test.ts
           packages/ui/components/Settings.agentTool.test.tsx
           packages/ui/components/settings/QuickLabelsTab.test.tsx
