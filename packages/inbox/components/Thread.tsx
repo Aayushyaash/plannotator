@@ -3386,8 +3386,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             )}
             {/* A phone has no room to float the pill over the messages (it sat on a sender's row): it sits in this
                 row's empty middle, laid over it, so the foot and the thread's view keep their size and Reply stays put.
-                With Send waiting the row has no empty middle, and no pill. */}
-            {showNew && phone && !waiting && newPill}
+                With Send waiting (picks or kept words) the row has no empty middle, and no pill. */}
+            {showNew && phone && !waiting && !draftKept && newPill}
           </div>
           </>
         )}
