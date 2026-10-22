@@ -6,8 +6,10 @@ import {
   DOUBLE_TAP_MS,
   DOUBLE_TAP_SLOP_PX,
   DOUBLE_TAP_ZOOM,
+  fitScale,
   fitViewport,
   overflows,
+  paddingInset,
   panBy,
   TAP_SLOP_MOUSE_PX,
   TAP_SLOP_TOUCH_PX,
@@ -16,10 +18,13 @@ import {
   wheelZoomFactor,
   zoomAt,
   zoomLimits,
+  type FitAxis,
   type ZoomInset,
   type ZoomSize,
   type ZoomViewport,
 } from './imageZoom';
+
+export type { FitAxis } from './imageZoom';
 
 /** Fit (the whole image), Actual size (its own pixels), or anything a gesture left. */
 export type ZoomMode = 'fit' | 'actual' | 'zoom';
@@ -100,6 +105,12 @@ function prefersReducedMotion(): boolean {
  * another image starts at Fit. Discrete jumps (the control, a double click)
  * ease over 180 ms unless the reader prefers reduced motion; gestures never
  * animate.
+ *
+ * Host seams (all optional; the lightbox passes none of them): `fitAxis`
+ * (Fit fills the width or height, the smallest scale stays the whole
+ * image), `padding` (Fit leaves that many pixels on every side), `overlay`
+ * (drawn over the image in the same transform, e.g. a marked-up copy, so it
+ * stays aligned at any zoom), and `onImageLoad` / `onImageError`.
  */
 export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
   src: string;
@@ -110,6 +121,16 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
   onScaleChange?: (scale: number) => void;
   /** The share of the stage Fit may fill on each axis. */
   inset?: ZoomInset;
+  /** Fit leaves this many CSS pixels on every side (wins over `inset`). */
+  padding?: number;
+  /** Which way Fit fits (default: the whole image). */
+  fitAxis?: FitAxis;
+  /** Drawn over the image at its own size, in the image's transform. */
+  overlay?: React.ReactNode;
+  /** The image's own size, once it has loaded. */
+  onImageLoad?: (size: ZoomSize) => void;
+  /** The image failed to load; the host shows its own message (the stage then shows none). */
+  onImageError?: () => void;
   /** A tap (a click that did not pan) beside the image, e.g. to close. */
   onBackgroundTap?: () => void;
   /** The stage's box, its position included (`relative` when absent). */
@@ -120,7 +141,7 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
   stageAttributes?: Record<string, string>;
   /** The stage's accessible name (it takes focus, as a scroller would). */
   label: string;
-}>(function ImageZoomStage({ src, alt, mode, onModeChange, onScaleChange, inset, onBackgroundTap, className, imageClassName, radius = 6, stageAttributes, label }, ref) {
+}>(function ImageZoomStage({ src, alt, mode, onModeChange, onScaleChange, inset, padding, fitAxis, overlay, onImageLoad, onImageError, onBackgroundTap, className, imageClassName, radius = 6, stageAttributes, label }, ref) {
   const stageRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const [dims, setDims] = useState<ZoomSize | null>(null);
@@ -130,13 +151,18 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
 
   const insetRef = useRef(inset);
   insetRef.current = inset;
+  const paddingRef = useRef(padding);
+  paddingRef.current = padding;
+  const axisRef = useRef<FitAxis>(fitAxis ?? 'contain');
+  axisRef.current = fitAxis ?? 'contain';
+  const overlayRef = useRef<HTMLDivElement | null>(null);
   const dimsRef = useRef<ZoomSize | null>(null);
   const boxRef = useRef<StageBox | null>(null);
   const viewRef = useRef<ZoomViewport | null>(null);
   const modeRef = useRef(mode);
   const reportedRef = useRef<ZoomMode>(mode);
-  const callbacks = useRef({ onModeChange, onScaleChange, onBackgroundTap });
-  callbacks.current = { onModeChange, onScaleChange, onBackgroundTap };
+  const callbacks = useRef({ onModeChange, onScaleChange, onBackgroundTap, onImageLoad, onImageError });
+  callbacks.current = { onModeChange, onScaleChange, onBackgroundTap, onImageLoad, onImageError };
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const press = useRef<Press | null>(null);
   const pinch = useRef<{ dist: number; midX: number; midY: number } | null>(null);
@@ -156,28 +182,46 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
     return boxRef.current;
   }, []);
 
-  const limits = () => zoomLimits(dimsRef.current!, boxRef.current!, insetRef.current);
+  const insetNow = (): ZoomInset | undefined => (paddingRef.current !== undefined && boxRef.current ? paddingInset(boxRef.current, paddingRef.current) : insetRef.current);
+  const limits = () => zoomLimits(dimsRef.current!, boxRef.current!, insetNow());
+  /** The Fit scale (the whole image, or its width or height). */
+  const fitNow = () => fitScale(dimsRef.current!, boxRef.current!, insetNow(), axisRef.current);
   const ready = () => !!dimsRef.current && !!boxRef.current && boxRef.current.width > 0 && boxRef.current.height > 0;
+
+  const paint = useCallback(
+    (el: HTMLElement, view: ZoomViewport, animate: boolean) => {
+      el.style.transition = animate && !prefersReducedMotion() ? 'transform 180ms cubic-bezier(0.2, 0, 0, 1)' : 'none';
+      el.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
+      el.style.borderRadius = `${radius / view.scale}px`;
+    },
+    [radius],
+  );
+
+  // The overlay mounts and unmounts on its own (a comment's drawing shown or
+  // not): it takes the image's transform the moment it is attached.
+  const attachOverlay = useCallback(
+    (el: HTMLDivElement | null) => {
+      overlayRef.current = el;
+      if (el && viewRef.current) paint(el, viewRef.current, false);
+    },
+    [paint],
+  );
 
   const apply = useCallback(
     (view: ZoomViewport, animate = false) => {
       viewRef.current = view;
-      const img = imgRef.current;
-      if (img) {
-        img.style.transition = animate && !prefersReducedMotion() ? 'transform 180ms cubic-bezier(0.2, 0, 0, 1)' : 'none';
-        img.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
-        img.style.borderRadius = `${radius / view.scale}px`;
-      }
+      if (imgRef.current) paint(imgRef.current, view, animate);
+      if (overlayRef.current) paint(overlayRef.current, view, animate);
       if (dimsRef.current && boxRef.current) setOverflowing(overflows(view, dimsRef.current, boxRef.current));
       callbacks.current.onScaleChange?.(view.scale);
     },
-    [radius],
+    [paint],
   );
 
   /** A gesture moved the image: report Fit when it is back at the Fit scale, else zoom. */
   const gesture = (view: ZoomViewport) => {
     apply(view);
-    const next: ZoomMode = atFit(view, limits()) ? 'fit' : 'zoom';
+    const next: ZoomMode = atFit(view, fitNow()) ? 'fit' : 'zoom';
     if (next !== reportedRef.current) {
       reportedRef.current = next;
       modeRef.current = next;
@@ -190,8 +234,8 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
       if (!ready()) return;
       const image = dimsRef.current!;
       const box = boxRef.current!;
-      if (next === 'fit') apply(fitViewport(image, box, insetRef.current), animate);
-      else if (next === 'actual') apply(actualViewport(image, box, insetRef.current), animate);
+      if (next === 'fit') apply(fitViewport(image, box, insetNow(), axisRef.current), animate);
+      else if (next === 'actual') apply(actualViewport(image, box, insetNow()), animate);
       else if (viewRef.current) apply(clampViewport(viewRef.current, image, box, limits()), animate);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -209,7 +253,11 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
   // The image's own size, once it has loaded (or at once when it was cached).
   useEffect(() => {
     const img = imgRef.current;
-    if (img && img.complete && img.naturalWidth > 0) setDims({ width: img.naturalWidth, height: img.naturalHeight });
+    if (img && img.complete && img.naturalWidth > 0) {
+      const size = { width: img.naturalWidth, height: img.naturalHeight };
+      setDims(size);
+      callbacks.current.onImageLoad?.(size);
+    }
   }, []);
 
   useLayoutEffect(() => {
@@ -346,14 +394,15 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
   const toggleZoomAt = (px: number, py: number) => {
     if (!ready() || !viewRef.current) return;
     const lim = limits();
-    if (!atFit(viewRef.current, lim)) {
+    const fit = fitNow();
+    if (!atFit(viewRef.current, fit)) {
       reportedRef.current = 'fit';
       modeRef.current = 'fit';
-      apply(fitViewport(dimsRef.current!, boxRef.current!, insetRef.current), true);
+      apply(fitViewport(dimsRef.current!, boxRef.current!, insetNow(), axisRef.current), true);
       callbacks.current.onModeChange('fit');
       return;
     }
-    const target = Math.min(lim.max, lim.min * DOUBLE_TAP_ZOOM);
+    const target = Math.min(lim.max, fit * DOUBLE_TAP_ZOOM);
     const view = zoomAt(viewRef.current, target / viewRef.current.scale, px, py, dimsRef.current!, boxRef.current!, lim);
     reportedRef.current = 'zoom';
     modeRef.current = 'zoom';
@@ -506,9 +555,16 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
         draggable={false}
         onLoad={(e) => {
           const img = e.currentTarget;
-          if (img.naturalWidth > 0) setDims({ width: img.naturalWidth, height: img.naturalHeight });
+          if (img.naturalWidth > 0) {
+            const size = { width: img.naturalWidth, height: img.naturalHeight };
+            setDims(size);
+            callbacks.current.onImageLoad?.(size);
+          }
         }}
-        onError={() => setFailed(true)}
+        onError={() => {
+          setFailed(true);
+          callbacks.current.onImageError?.();
+        }}
         className={imageClassName}
         style={{
           position: 'absolute',
@@ -525,7 +581,16 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
         }}
         data-lightbox-image=""
       />
-      {failed && (
+      {overlay != null && dims && (
+        <div
+          ref={attachOverlay}
+          style={{ position: 'absolute', left: 0, top: 0, width: `${dims.width}px`, height: `${dims.height}px`, transformOrigin: '0 0', pointerEvents: 'none', overflow: 'hidden' }}
+          data-zoom-overlay=""
+        >
+          {overlay}
+        </div>
+      )}
+      {failed && !onImageError && (
         <div className="absolute inset-0 flex items-center justify-center text-sm opacity-70" data-lightbox-failed="">
           This image could not be loaded.
         </div>

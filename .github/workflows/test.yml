@@ -163,6 +163,7 @@ jobs:
           packages/inbox/notifyHook.test.tsx
           packages/inbox/notificationStates.test.tsx
           packages/inbox/attachmentStepping.test.tsx
+          packages/inbox/imageZoom.test.tsx
           packages/inbox/fullView.test.tsx
           packages/inbox/fullScreenThread.test.tsx
           packages/inbox/attachmentSteppingSave.test.tsx

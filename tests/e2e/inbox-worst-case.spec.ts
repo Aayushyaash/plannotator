@@ -514,7 +514,11 @@ test('a panorama keeps a readable height, a 1×1 image stays one pixel, a minifi
     await page.locator(`section.ib-pane [data-gallery-image][data-attachment-name="${world.seed.kinds.pano}"]`).first().click();
     await page.waitForSelector('section.ib-view .ib-imgstage[data-wide="true"] img');
     await page.waitForTimeout(500);
-    const stage = await page.locator('section.ib-view .ib-imgstage').evaluate((el) => ({ scrolls: el.scrollWidth > el.clientWidth, height: el.querySelector('img')!.getBoundingClientRect().height }));
+    // The image is moved with a transform (ui's ImageZoomStage): wider than the stage means there is more to pan to.
+    const stage = await page.locator('section.ib-view .ib-imgstage').evaluate((el) => {
+      const r = el.querySelector('img')!.getBoundingClientRect();
+      return { scrolls: r.width > el.clientWidth, height: r.height };
+    });
     expect(stage.scrolls).toBe(true);
     expect(stage.height).toBeGreaterThanOrEqual(120);
     await shot(page, 'pano-viewer-1440');

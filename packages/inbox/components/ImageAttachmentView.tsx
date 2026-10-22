@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { ImageZoomStage, type FitAxis, type ImageZoomStageHandle, type ZoomMode } from '@plannotator/ui/components/ImageZoomStage';
 import type { InboxAttachmentState } from '@plannotator/core/inbox-types';
 import { ImageAnnotator } from '@plannotator/ui/components/ImageAnnotator';
 import { getImageSrc } from '@plannotator/ui/components/ImageThumbnail';
@@ -19,19 +20,33 @@ function stem(name: string): string {
   return name.replace(/\.[^.]+$/, '') || name;
 }
 
+/** The scale beside Fit / Actual size: "37%", "250%". */
+export function zoomPercent(scale: number): string {
+  return `${Math.round(scale * 100)}%`;
+}
+
 /**
- * An image attachment in the pane: the image on a quiet stage (fit to the
- * pane, a click shows it at its own size), and a comment box under it. "Mark
- * up" opens Plannotator's image annotator (pen, arrow, circle) on the image;
- * the drawing is kept by the Inbox and rides the comment, so the agent can
- * open the marked-up copy. Selecting a comment with a drawing shows it on the
- * stage. The image is drawn only by `<img src>` from the attachment's route.
+ * An image attachment in the pane: the image on a quiet stage, and a comment
+ * box under it. The stage is ui's `ImageZoomStage`, the lightbox's: Ctrl/⌘ +
+ * wheel and a trackpad pinch zoom about the pointer, a plain wheel scrolls an
+ * image larger than the stage (and zooms one that fits), a drag or one finger
+ * pans, two fingers pinch, a double click toggles Fit and 2×, Fit to 800%.
+ * The size bar shows the scale beside Fit / Actual size, which reset it.
+ * Transforms only, so a gesture never lays anything out. "Mark up" opens
+ * Plannotator's image annotator (pen, arrow, circle) on the image; the
+ * drawing is kept by the Inbox and rides the comment, so the agent can open
+ * the marked-up copy. Selecting a comment with a drawing lays the drawing
+ * over the image in the image's own transform, so it stays aligned at any
+ * zoom. The image is drawn only by `<img src>` from the attachment's route.
  *
  * The pane keys it by attachment, so the comment box is never carried to the
- * next file. Stepping: the pane remembers Fit / Actual size per file
- * (`initialFit`, `onFitChange`); an image at its own size that overflows
- * keeps the arrow keys (`data-claims-arrows`); a horizontal swipe on the
- * image shown fitted steps (`onSwipe`), nowhere else.
+ * next file and every file opens at Fit, except one the reader set to Actual
+ * size (the pane remembers that per file: `initialFit`, `onFitChange`; a
+ * gesture's zoom is not remembered). A tall screenshot fits its width (read
+ * from the top) and a panorama its height (read from the left); pinch out
+ * shows the whole image. ← → and ] [ always step files, zoomed or not: the
+ * focused stage takes only ↑ ↓, Page Up / Down, Home / End and Space to pan.
+ * A horizontal swipe on the image shown at Fit steps (`onSwipe`), nowhere else.
  */
 export function ImageAttachmentView({
   attachment,
@@ -58,9 +73,11 @@ export function ImageAttachmentView({
   /** A swipe across the fitted image: 1 next file, -1 previous. */
   onSwipe?: (dir: 1 | -1) => void;
 }) {
-  const [fit, setFit] = useState<'fit' | 'actual'>(initialFit ?? 'fit');
+  const [mode, setMode] = useState<ZoomMode>(initialFit ?? 'fit');
+  const [scale, setScale] = useState<number | null>(null);
   const enterSavesComment = useConfigValue('enterSavesComment');
-  // The pane remembers the size per file: told after each change, never from inside a state update.
+  // The pane remembers Fit / Actual size per file: told after each change, never from inside a state update. A gesture's zoom counts as Fit.
+  const fit: 'fit' | 'actual' = mode === 'actual' ? 'actual' : 'fit';
   const reportedFit = useRef(fit);
   const onFitChangeRef = useRef(onFitChange);
   onFitChangeRef.current = onFitChange;
@@ -76,6 +93,7 @@ export function ImageAttachmentView({
   const [annotating, setAnnotating] = useState(false);
   const [saving, setSaving] = useState(false);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  const zoomRef = useRef<ImageZoomStageHandle>(null);
   const src = attachmentImageUrl(attachment, version);
 
   // Another version of the same file: fitted again.
@@ -83,50 +101,56 @@ export function ImageAttachmentView({
   useEffect(() => {
     if (shownVersion.current === version) return;
     shownVersion.current = version;
-    setFit('fit');
+    setMode('fit');
+    setScale(null);
     setNatural(null);
     setFailed(false);
   }, [version]);
 
-  // A panorama fitted to the pane would be a sliver: it keeps a readable height and scrolls sideways.
+  // A panorama fitted to the pane would be a sliver: Fit keeps a readable height (read from the left); a tall screenshot fits its width (read from the top).
   const wide = natural !== null && natural.width > natural.height * WIDE_IMAGE_RATIO;
-  // At its own size (or a panorama) and larger than the stage, the image scrolls with the arrows (they do not step).
+  const tall = natural !== null && natural.height > natural.width * 2;
+  const fitAxis: FitAxis = wide ? 'height' : tall ? 'width' : 'contain';
+
+  // The stage's own padding (28 px, 12 on a phone) is what Fit leaves around the image.
   const stageRef = useRef<HTMLDivElement>(null);
-  const [overflows, setOverflows] = useState(false);
-  // An image no larger than the stage is shown at its own size either way: nothing to zoom (`.ib-noup`).
-  const [fitsStage, setFitsStage] = useState(false);
+  const [pad, setPad] = useState<number | null>(null);
   useLayoutEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
-    const measure = () => {
-      const style = getComputedStyle(stage);
-      const room = {
-        width: stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
-        height: stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
-      };
-      setFitsStage(natural !== null && room.width > 0 && natural.width <= room.width && natural.height <= room.height);
-      setOverflows((fit === 'actual' || wide) && (stage.scrollWidth > stage.clientWidth + 1 || stage.scrollHeight > stage.clientHeight + 1));
+    const style = getComputedStyle(stage);
+    const value = parseFloat(style.paddingTop);
+    setPad(Number.isFinite(value) ? value : 0);
+  }, []);
+
+  // Ctrl + wheel (a pinch) and Safari's gesture events over the size bar or the
+  // chip must not zoom the page; the stage zooms the image from its own listeners.
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const onWheel = (event: WheelEvent) => {
+      if (event.ctrlKey) event.preventDefault();
     };
-    measure();
-    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
-    observer?.observe(stage);
-    return () => observer?.disconnect();
-  }, [fit, natural, wide]);
+    const onGesture = (event: Event) => event.preventDefault();
+    stage.addEventListener('wheel', onWheel, { passive: false });
+    for (const type of ['gesturestart', 'gesturechange', 'gestureend']) stage.addEventListener(type, onGesture, { passive: false });
+    return () => {
+      stage.removeEventListener('wheel', onWheel);
+      for (const type of ['gesturestart', 'gesturechange', 'gestureend']) stage.removeEventListener(type, onGesture);
+    };
+  }, []);
 
-  // A horizontal swipe on the fitted image: more than 60 px across, less than 40 px up or down (a panorama scrolls instead).
+  // A horizontal swipe on the image at Fit: more than 60 px across, less than 40 px up or down (a panorama pans instead).
   const swipeStart = useRef<{ x: number; y: number } | null>(null);
-  const swipes = onSwipe !== undefined && fit === 'fit' && !wide;
+  const swipes = onSwipe !== undefined && mode === 'fit' && !wide;
 
-  // A selected comment that carries a drawing shows the drawing on the stage.
+  // A selected comment that carries a drawing shows the drawing over the image.
   const selected = selectedId ? annotations.find((a) => a.id === selectedId) : undefined;
   const selectedMarkup = selected?.images?.[0] ?? null;
   const [showOriginal, setShowOriginal] = useState(false);
   useEffect(() => setShowOriginal(false), [selectedId]);
-  const showingMarkup = selectedMarkup !== null && !showOriginal;
-  const stageSrc = showingMarkup ? getImageSrc(selectedMarkup!.path) : src;
-
-  const tall = natural !== null && natural.height > natural.width * 2;
-  const canZoom = natural !== null;
+  const showingMarkup = selectedMarkup !== null && !showOriginal && !failed;
+  const markupSrc = showingMarkup ? getImageSrc(selectedMarkup!.path) : null;
 
   const submit = async () => {
     const words = text.trim();
@@ -150,18 +174,32 @@ export function ImageAttachmentView({
   return (
     <div className="ib-imgview" data-image-view={attachment.id}>
       <div
-        className={`ib-imgstage${swipes ? ' ib-swipes' : ''}`}
+        className="ib-imgstage"
         ref={stageRef}
-        data-fit={fit}
+        data-fit={mode}
         data-tall={tall ? 'true' : 'false'}
         data-wide={wide ? 'true' : undefined}
-        data-src={stageSrc}
-        data-claims-arrows={overflows ? 'true' : undefined}
+        data-src={markupSrc ?? src}
+        onKeyDown={(event) => {
+          // The focused stage pans with the browser's scroll keys; ← → stay stepping.
+          const zoom = zoomRef.current;
+          if (!zoom?.element || event.target !== zoom.element) return;
+          if (event.metaKey || event.ctrlKey || event.altKey || event.nativeEvent.isComposing) return;
+          if (zoom.scrollKey(event.key, event.shiftKey, false)) event.preventDefault();
+        }}
         onTouchStart={
           swipes
             ? (event) => {
                 const touch = event.touches[0];
                 swipeStart.current = event.touches.length === 1 && touch ? { x: touch.clientX, y: touch.clientY } : null;
+              }
+            : undefined
+        }
+        onTouchMove={
+          swipes
+            ? (event) => {
+                // A second finger is a pinch, never a swipe.
+                if (event.touches.length > 1) swipeStart.current = null;
               }
             : undefined
         }
@@ -171,7 +209,7 @@ export function ImageAttachmentView({
                 const start = swipeStart.current;
                 swipeStart.current = null;
                 const touch = event.changedTouches[0];
-                if (!start || !touch) return;
+                if (!start || !touch || event.touches.length > 0) return;
                 const dx = touch.clientX - start.x;
                 const dy = touch.clientY - start.y;
                 if (Math.abs(dx) > 60 && Math.abs(dy) < 40) onSwipe!(dx < 0 ? 1 : -1);
@@ -190,16 +228,23 @@ export function ImageAttachmentView({
         )}
         <div className="ib-imgbar">
           {natural && <span className="ib-imgsize">{`${natural.width} × ${natural.height}`}</span>}
-          <Tip content={fit === 'fit' ? 'Show the image at its own size' : 'Fit the image to the pane'}>
+          {natural && scale !== null && (
+            <span className="ib-imgsize ib-imgzoom" data-image-zoom="">
+              <span className="sr-only">Zoom </span>
+              {zoomPercent(scale)}
+            </span>
+          )}
+          <Tip content={mode === 'fit' ? 'Show the image at its own size' : 'Fit the image to the pane'}>
             <button
               type="button"
               className="ib-btn ib-ghost ib-sm"
-              onClick={() => setFit((v) => (v === 'fit' ? 'actual' : 'fit'))}
-              disabled={!canZoom}
-              aria-pressed={fit === 'actual'}
+              onClick={() => setMode((v) => (v === 'fit' ? 'actual' : 'fit'))}
+              disabled={!natural}
+              aria-pressed={mode !== 'fit'}
+              data-image-fit=""
             >
-              <Icon name={fit === 'fit' ? 'expand' : 'collapse'} size={13} />
-              {fit === 'fit' ? 'Actual size' : 'Fit'}
+              <Icon name={mode === 'fit' ? 'expand' : 'collapse'} size={13} />
+              {mode === 'fit' ? 'Actual size' : 'Fit'}
             </button>
           </Tip>
         </div>
@@ -208,23 +253,29 @@ export function ImageAttachmentView({
             This image could not be shown. Download it from the header to open it elsewhere.
           </div>
         ) : (
-          <img
-            key={stageSrc}
-            className={fit === 'fit' && fitsStage ? 'ib-noup' : undefined}
-            src={stageSrc}
-            alt={showingMarkup ? `${attachment.name}, marked up` : attachment.name}
-            draggable={false}
-            decoding="async"
-            onLoad={(event) => {
-              if (showingMarkup) return;
-              const img = event.currentTarget;
-              setNatural({ width: img.naturalWidth, height: img.naturalHeight });
-            }}
-            onError={() => {
-              if (!showingMarkup) setFailed(true);
-            }}
-            onClick={() => canZoom && setFit((v) => (v === 'fit' ? 'actual' : 'fit'))}
-          />
+          pad !== null && (
+            <ImageZoomStage
+              ref={zoomRef}
+              key={src}
+              src={src}
+              alt={attachment.name}
+              label={`Image: ${attachment.name}`}
+              mode={mode}
+              onModeChange={setMode}
+              onScaleChange={setScale}
+              padding={pad}
+              fitAxis={fitAxis}
+              radius={4}
+              className="ib-zoomstage"
+              imageClassName="ib-zoomimg"
+              stageAttributes={{ 'data-image-zoom-stage': mode }}
+              onImageLoad={setNatural}
+              onImageError={() => setFailed(true)}
+              overlay={
+                markupSrc ? <img className="ib-zoommarkup" src={markupSrc} alt={`${attachment.name}, marked up`} draggable={false} data-markup-overlay="" /> : null
+              }
+            />
+          )
         )}
       </div>
       {!readOnly && (

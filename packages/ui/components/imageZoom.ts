@@ -52,6 +52,14 @@ export const DOUBLE_TAP_SLOP_PX = 24;
 /** A double click at Fit zooms to twice the Fit scale. */
 export const DOUBLE_TAP_ZOOM = 2;
 
+/**
+ * Which way Fit fits: the whole image (`contain`, the default), or its width
+ * (a tall screenshot read from the top) or height (a panorama read from the
+ * left). The smallest scale is always `contain`, so a reader can zoom out to
+ * the whole image from either.
+ */
+export type FitAxis = 'contain' | 'width' | 'height';
+
 const FULL: ZoomInset = { x: 1, y: 1 };
 
 function valid(size: ZoomSize | null | undefined): size is ZoomSize {
@@ -62,10 +70,14 @@ export function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-/** The scale at which the whole image fits the stage, never above 1. */
-export function fitScale(image: ZoomSize, stage: ZoomSize, inset: ZoomInset = FULL): number {
+/** The scale at which the whole image (or its width, or its height) fits the stage, never above 1. */
+export function fitScale(image: ZoomSize, stage: ZoomSize, inset: ZoomInset = FULL, axis: FitAxis = 'contain'): number {
   if (!valid(image) || !valid(stage)) return 1;
-  return Math.min(1, (stage.width * inset.x) / image.width, (stage.height * inset.y) / image.height);
+  const across = (stage.width * inset.x) / image.width;
+  const down = (stage.height * inset.y) / image.height;
+  if (axis === 'width') return Math.min(1, across);
+  if (axis === 'height') return Math.min(1, down);
+  return Math.min(1, across, down);
 }
 
 export function zoomLimits(image: ZoomSize, stage: ZoomSize, inset: ZoomInset = FULL): ZoomLimits {
@@ -88,10 +100,10 @@ export function clampViewport(view: ZoomViewport, image: ZoomSize, stage: ZoomSi
   };
 }
 
-/** Fit: the whole image, centred. */
-export function fitViewport(image: ZoomSize, stage: ZoomSize, inset: ZoomInset = FULL): ZoomViewport {
+/** Fit: the whole image, centred (or its width from the top, or its height from the left). */
+export function fitViewport(image: ZoomSize, stage: ZoomSize, inset: ZoomInset = FULL, axis: FitAxis = 'contain'): ZoomViewport {
   const limits = zoomLimits(image, stage, inset);
-  return clampViewport({ x: 0, y: 0, scale: limits.min }, image, stage, limits);
+  return clampViewport({ x: 0, y: 0, scale: fitScale(image, stage, inset, axis) }, image, stage, limits);
 }
 
 /**
@@ -129,9 +141,16 @@ export function overflows(view: ZoomViewport, image: ZoomSize, stage: ZoomSize):
   return image.width * view.scale > stage.width + 0.5 || image.height * view.scale > stage.height + 0.5;
 }
 
-/** Whether a viewport is at the Fit scale. */
-export function atFit(view: ZoomViewport, limits: ZoomLimits): boolean {
-  return Math.abs(view.scale - limits.min) < 1e-3;
+/** Whether a viewport is at the Fit scale (`limits.min`, or a given Fit scale). */
+export function atFit(view: ZoomViewport, limits: ZoomLimits | number): boolean {
+  const fit = typeof limits === 'number' ? limits : limits.min;
+  return Math.abs(view.scale - fit) < 1e-3;
+}
+
+/** The share of a stage that leaves `padding` CSS pixels on every side (at least a tenth). */
+export function paddingInset(stage: ZoomSize, padding: number): ZoomInset {
+  if (!valid(stage) || padding <= 0) return FULL;
+  return { x: Math.max(0.1, (stage.width - 2 * padding) / stage.width), y: Math.max(0.1, (stage.height - 2 * padding) / stage.height) };
 }
 
 /**

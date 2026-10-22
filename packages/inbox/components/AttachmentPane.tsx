@@ -571,7 +571,7 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
   const stepWhen = (dir: 1 | -1) => (event: KeyboardEvent) => {
     if (!multi) return false;
     const pane = sectionRef.current;
-    // An image at its own size that overflows scrolls with the arrows.
+    // An element that uses the arrows itself (a focused video) keeps them; a zoomed image does not: ← → always step.
     if (event.key.startsWith('Arrow') && pane?.querySelector('[data-claims-arrows="true"]')) return false;
     return stepKeyIntent(event, { full, pane, blocked }) === dir;
   };
