@@ -35,6 +35,7 @@ import {
 } from "./generated/checklist.ts";
 import { loadConfig, resolveAgentTool, resolveUseJina } from "./generated/config.ts";
 import { detectPiHost, setPiHost } from "./pi-host.ts";
+import { importFresh, isPlannotatorUpdatedError, launchFailureText } from "./package-version.ts";
 import { readImprovementHook } from "./generated/improvement-hooks.ts";
 import { composeImproveContext } from "./generated/pfm-reminder.ts";
 import {
@@ -132,7 +133,7 @@ let promptsModulePromise: Promise<PlannotatorPromptsModule> | undefined;
 
 function loadPlannotatorPrompts(): Promise<PlannotatorPromptsModule> {
 	if (!promptsModulePromise) {
-		promptsModulePromise = import("./generated/prompts.ts").catch((error: unknown) => {
+		promptsModulePromise = importFresh(() => import("./generated/prompts.ts")).catch((error: unknown) => {
 			promptsModulePromise = undefined;
 			throw error;
 		});
@@ -141,14 +142,14 @@ function loadPlannotatorPrompts(): Promise<PlannotatorPromptsModule> {
 }
 
 async function loadAnnotateCommandModules() {
-	const [annotateArgs, annotateTarget, annotateBundle, atReference, resolveFile, referenceCommon] = await Promise.all([
+	const [annotateArgs, annotateTarget, annotateBundle, atReference, resolveFile, referenceCommon] = await importFresh(() => Promise.all([
 		import("./generated/annotate-args.ts"),
 		import("./generated/annotate-target.ts"),
 		import("./generated/annotate-bundle.ts"),
 		import("./generated/at-reference.ts"),
 		import("./generated/resolve-file.ts"),
 		import("./generated/reference-common.ts"),
-	]);
+	]));
 	return {
 		parseAnnotateArgs: annotateArgs.parseAnnotateArgs,
 		annotateInputNamesExistingTarget: annotateTarget.annotateInputNamesExistingTarget,
@@ -244,7 +245,7 @@ function reportBackgroundError(ctx: ExtensionContext, message: string, err: unkn
 		safeNotify(ctx, "A Plannotator browser session was closed.", "info", origin);
 		return;
 	}
-	safeNotify(ctx, `${message}: ${detail}`, "error", origin);
+	safeNotify(ctx, launchFailureText(message, err), "error", origin);
 }
 
 function excerptText(text: string, maxChars = 1000): string {
@@ -1001,7 +1002,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		const origin = getPiSessionIdentity(ctx);
 
 		try {
-			const { formatIgnoredReviewWords, parseReviewArgs, resolveReviewTarget, withReviewDirectory } = await import("./generated/review-args.ts");
+			const { formatIgnoredReviewWords, parseReviewArgs, resolveReviewTarget, withReviewDirectory } = await importFresh(() => import("./generated/review-args.ts"));
 			const reviewArgs = parseReviewArgs(args);
 			// Argument-shape failures refuse to start a session (same contract
 			// as the CLI's exit 1), surfaced through Pi's notifier.
@@ -1097,7 +1098,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			});
 			return { ok: true, review };
 		} catch (err) {
-			return { ok: false, error: `Failed to start code review UI: ${getStartupErrorMessage(err)}` };
+			return { ok: false, error: launchFailureText("Failed to start code review UI", err) };
 		}
 	}
 
@@ -1119,6 +1120,16 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	}
 
 	async function launchAnnotate(ctx: ExtensionContext, request: AnnotateRequest, options: LaunchOptions = {}): Promise<LaunchResult> {
+		try {
+			return await launchAnnotateUnchecked(ctx, request, options);
+		} catch (err) {
+			// The package changed under the running host: a lazy import refused (#2085).
+			if (isPlannotatorUpdatedError(err)) return { ok: false, error: err.message };
+			throw err;
+		}
+	}
+
+	async function launchAnnotateUnchecked(ctx: ExtensionContext, request: AnnotateRequest, options: LaunchOptions): Promise<LaunchResult> {
 		const {
 			FILE_BROWSER_EXCLUDED,
 			hasMarkdownFiles,
@@ -1232,7 +1243,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 		// file or folder target silently swallowing it would hide the
 		// flag's typo'd use (same contract as the Bun CLI).
 		if (!isUrl && appFlag) {
-			const { LIVE_APP_REQUIRES_URL_MESSAGE } = await import("./generated/live-probe.ts");
+			const { LIVE_APP_REQUIRES_URL_MESSAGE } = await importFresh(() => import("./generated/live-probe.ts"));
 			return { ok: false, error: LIVE_APP_REQUIRES_URL_MESSAGE };
 		}
 
@@ -1254,7 +1265,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				buildLiveProbeFallbackNotice,
 				classifyLiveAppCandidate,
 				probeLiveAppTarget,
-			} = await import("./generated/live-probe.ts");
+			} = await importFresh(() => import("./generated/live-probe.ts"));
 			const { parsed: parsedUrl, loopback } = classifyLiveAppCandidate(filePath);
 
 			if (appFlag && !loopback) {
@@ -1295,11 +1306,12 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				const useJina = resolveUseJina(noJina, loadConfig());
 				ctx.ui.notify(`Fetching: ${filePath}${useJina ? " (via Jina Reader)" : " (via fetch+Turndown)"}...`, "info");
 				try {
-					const { isConvertedSource, urlToMarkdown } = await import("./generated/url-to-markdown.ts");
+					const { isConvertedSource, urlToMarkdown } = await importFresh(() => import("./generated/url-to-markdown.ts"));
 					const result = await urlToMarkdown(filePath, { useJina });
 					markdown = result.markdown;
 					sourceConverted = isConvertedSource(result.source);
 				} catch (err) {
+					if (isPlannotatorUpdatedError(err)) return { ok: false, error: err.message };
 					return { ok: false, error: `Failed to fetch URL: ${err instanceof Error ? err.message : String(err)}` };
 				}
 				absolutePath = filePath;
@@ -1340,7 +1352,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 					rawHtml = html;
 					markdown = "";
 				} else {
-					const { htmlToMarkdown } = await import("./generated/html-to-markdown.ts");
+					const { htmlToMarkdown } = await importFresh(() => import("./generated/html-to-markdown.ts"));
 					markdown = htmlToMarkdown(html);
 					sourceConverted = true;
 				}
@@ -1445,7 +1457,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			});
 			return { ok: true, review };
 		} catch (err) {
-			return { ok: false, error: `Failed to start annotation UI: ${getStartupErrorMessage(err)}` };
+			return { ok: false, error: launchFailureText("Failed to start annotation UI", err) };
 		}
 	}
 
@@ -1545,7 +1557,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			});
 			return { ok: true, review };
 		} catch (err) {
-			return { ok: false, error: `Failed to start annotation UI: ${getStartupErrorMessage(err)}` };
+			return { ok: false, error: launchFailureText("Failed to start annotation UI", err) };
 		}
 	}
 
@@ -1560,26 +1572,36 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	pi.registerCommand("plannotator-annotate", {
 		description: "Open a file, several files, a URL or a folder in the annotation UI",
 		handler: async (args, ctx) => {
-			const { parseAnnotateArgs } = await import("./generated/annotate-args.ts");
-			// Split known annotate flags from the path. --json is silently
-			// accepted (Pi writes back via sendUserMessage, not stdout).
-			// `rawFilePath` keeps any leading `@` for the literal-@ fallback
-			// (scoped-package-style names). liveFlags: Pi supports live app
-			// sessions, so --app / --static are recognized here.
-			const parsed = parseAnnotateArgs(args ?? "", { liveFlags: true });
-			const launched = await launchAnnotate(ctx, parsed);
-			if (!launched.ok) ctx.ui.notify(launched.error, "error");
+			try {
+				const { parseAnnotateArgs } = await importFresh(() => import("./generated/annotate-args.ts"));
+				// Split known annotate flags from the path. --json is silently
+				// accepted (Pi writes back via sendUserMessage, not stdout).
+				// `rawFilePath` keeps any leading `@` for the literal-@ fallback
+				// (scoped-package-style names). liveFlags: Pi supports live app
+				// sessions, so --app / --static are recognized here.
+				const parsed = parseAnnotateArgs(args ?? "", { liveFlags: true });
+				const launched = await launchAnnotate(ctx, parsed);
+				if (!launched.ok) ctx.ui.notify(launched.error, "error");
+			} catch (err) {
+				if (!isPlannotatorUpdatedError(err)) throw err;
+				ctx.ui.notify(err.message, "error");
+			}
 		},
 	});
 
 	pi.registerCommand("plannotator-last", {
 		description: "Annotate the last assistant message",
 		handler: async (args, ctx) => {
-			// Support --gate on /plannotator-last for the Stop-hook review gate.
-			const { parseAnnotateArgs } = await import("./generated/annotate-args.ts");
-			const { gate } = parseAnnotateArgs(args ?? "");
-			const launched = await launchLastMessage(ctx, gate);
-			if (!launched.ok) ctx.ui.notify(launched.error, "error");
+			try {
+				// Support --gate on /plannotator-last for the Stop-hook review gate.
+				const { parseAnnotateArgs } = await importFresh(() => import("./generated/annotate-args.ts"));
+				const { gate } = parseAnnotateArgs(args ?? "");
+				const launched = await launchLastMessage(ctx, gate);
+				if (!launched.ok) ctx.ui.notify(launched.error, "error");
+			} catch (err) {
+				if (!isPlannotatorUpdatedError(err)) throw err;
+				ctx.ui.notify(err.message, "error");
+			}
 		},
 	});
 
@@ -1671,7 +1693,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			// A list of files is ONE review of all of them (a bundle), in order.
 			const targets = Array.isArray(call.target) ? call.target : undefined;
 			const target = targets ? targets[0]! : (call.target as string);
-			const { stripAtPrefix } = await import("./generated/at-reference.ts");
+			const { stripAtPrefix } = await importFresh(() => import("./generated/at-reference.ts"));
 			launched = await launchAnnotate(
 				ctx,
 				{
@@ -1963,7 +1985,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 					announcedInTurn: true,
 				});
 			} catch (err) {
-				const message = `Failed to start plan review UI: ${getStartupErrorMessage(err)}`;
+				const message = launchFailureText("Failed to start plan review UI", err);
 				ctx.ui.notify(message, "error");
 				return {
 					content: [{ type: "text", text: message }],
