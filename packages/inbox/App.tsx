@@ -13,7 +13,7 @@
 import type { ActionMark } from './components/ActionChecklist';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ThemeProvider } from '@plannotator/ui/components/ThemeProvider';
-import { TooltipProvider } from '@plannotator/ui/components/Tooltip';
+import { TooltipProvider, TOOLTIP_SKIP_DELAY_MS } from '@plannotator/ui/components/Tooltip';
 import { TIP_DELAY_MS } from './components/Tip';
 import { configurePlannotatorUI } from '@plannotator/ui/configure';
 import { selectionToolbarShowing } from './selectionToolbar';
@@ -2585,7 +2585,7 @@ export function InboxApp() {
   return (
     <ThemeProvider defaultTheme="system">
       {/* Every tooltip in the window (Tip): 150 ms to open, and the next one at once within 400 ms. */}
-      <TooltipProvider delayDuration={TIP_DELAY_MS} skipDelayDuration={400} disableHoverableContent>
+      <TooltipProvider delayDuration={TIP_DELAY_MS} skipDelayDuration={TOOLTIP_SKIP_DELAY_MS} disableHoverableContent>
         <Inbox />
       </TooltipProvider>
     </ThemeProvider>

@@ -898,6 +898,16 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
    the skip chip need about 774 px, more than the pane beside the list has under about 1450 px. When
    it fits, nothing moves; when it does not, the chip goes to a second row instead of being cut off. */
 .ib-pfoot > .ib-acts { flex-wrap: wrap; }
+/* The closed foot (approval "thread-foot-status-right", option A): the buttons on the left in today's order,
+   the draft status and the skip chip at the row's right end. Two flex items, so the row breaks only between
+   them: wrap-reverse puts the status's line ABOVE the buttons when the row cannot hold both, and
+   space-between aligns a line holding one item to the start. Direction-aware, so RTL mirrors. */
+.ib-pfoot > .ib-acts.ib-footrow { flex-wrap: wrap-reverse; justify-content: space-between; row-gap: 8px; }
+.ib-footbtns { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.ib-footstatus { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
+.ib-footstatus > * { flex: none; max-width: 100%; }
+.ib-footstatus .ib-draft-foot { margin-right: 0; }
+.ib-error[data-foot-error="above"] { margin: 0 0 8px; }
 .ib-reply-l { font-size: var(--ib-fs-12-5, 12.5px); color: var(--muted-foreground); margin-bottom: 6px; }
 .ib-rbox { border: 1px solid color-mix(in oklch, var(--primary) 60%, transparent); box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 14%, transparent); border-radius: 8px; background: var(--card); margin-bottom: 10px; }
 .ib-rtext, .ib-rmirror { display: block; width: 100%; padding: 10px 12px 6px; font: inherit; font-size: var(--ib-fs-14, 14px); line-height: 1.55; min-height: 52px; max-height: min(240px, 30vh); border: 0; outline: none; resize: none; field-sizing: content; background: transparent; color: var(--foreground); }
@@ -1497,6 +1507,8 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 .ib-pbody { position: relative; z-index: 0; }
 .ib-pfoot { z-index: 1; }
 .ib-pane.ib-withfile .ib-acts .ib-st { display: none; }
+/* Beside a file the status has a line of its own, so its words show ("Draft · 1 pick"). */
+.ib-pane.ib-withfile .ib-footstatus .ib-st { display: inline; }
 
 /* Plannotator's code block, copied from packages/editor/index.css (the Inbox
    does not load that file): message bodies and attached markdown draw their
@@ -1652,7 +1664,7 @@ pre code.pn-code[data-keep-layout] {
 .ib-handle-hit { position: absolute; top: 0; bottom: 0; left: -8px; right: -8px; }
 .ib-edge:focus-visible [data-resize-track] { background-color: var(--ring); }
 .ib-edge-tip-pos { z-index: 50; }
-.ib-edge-tip { background: var(--popover); color: var(--muted-foreground); box-shadow: var(--ib-shadow-tooltip); border-radius: 6px; padding: 4px 8px; font-family: var(--font-sans); font-size: var(--ib-fs-11, 11px); font-weight: 500; }
+.ib-edge-tip { background: var(--popover); color: var(--muted-foreground); box-shadow: var(--ib-float-shadow, var(--float-shadow)); outline: 1px solid transparent; border-radius: 6px; padding: 4px 8px; font-family: var(--font-sans); font-size: var(--ib-fs-11, 11px); font-weight: 500; }
 
 /* attachments of any kind: the image gallery in a message, thumbnail and
    download tiles, and the image and code panes (inbox-attachments design,
@@ -2196,6 +2208,8 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
   .ib-pfoot { padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
   .ib-pfoot > .ib-acts { flex-wrap: wrap; }
   .ib-pfoot > .ib-acts > .ib-btn.ib-pri { flex: 1; justify-content: center; }
+  .ib-pfoot > .ib-acts.ib-footrow > .ib-footbtns { flex: 1 1 auto; }
+  .ib-footbtns > .ib-btn.ib-pri { flex: 1; justify-content: center; }
   .pn-inbox .ib-pfoot [data-new-message] { width: 44px; padding: 0; justify-content: center; margin-left: auto; flex: none; }
   .pn-inbox .ib-pfoot [data-new-message] .ib-btn-l { display: none; }
   .ib-rtext, .ib-rmirror { font-size: var(--ib-fs-16-in, 16px); max-height: min(32vh, 30dvh); }
@@ -3089,9 +3103,9 @@ svg.ib-ic.ib-glyph { stroke: currentColor; fill: none; stroke-width: 1.6; stroke
 .ib-tip-name { font-weight: 600; overflow-wrap: anywhere; }
 .ib-tip-path { font-family: var(--font-mono); font-size: var(--ib-fs-11, 11px); color: var(--muted-foreground); overflow-wrap: anywhere; }
 .ib-tip-fp { font-family: var(--font-mono); font-size: var(--ib-fs-11, 11px); overflow-wrap: anywhere; }
-/* A tooltip (ui's popup, portaled into the window's root) floats like the window's other floating surfaces:
-   with --ib-soft-float on, Soft's shadow and no outline; off, ui's own border and shadow, unchanged. */
-.pn-inbox [data-pn-tooltip] { border-color: var(--ib-float-line-s, var(--border)); box-shadow: var(--ib-float-s, var(--tw-shadow)); }
+/* A tooltip (ui's popup, portaled into the window's root) floats like the window's other floating surfaces. ui
+   draws it borderless with its own float shadow; with --ib-soft-float on it takes the window's float shadow. */
+.pn-inbox [data-pn-tooltip] { box-shadow: var(--ib-float-s, var(--float-shadow)); }
 
 /* Tip: a control that can be disabled hangs its tooltip on this wrapper, since a disabled control takes no
    pointer events; the pointer passes through the disabled control to the wrapper. */

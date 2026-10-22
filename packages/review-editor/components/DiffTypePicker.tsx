@@ -117,7 +117,7 @@ export const DiffTypePicker: React.FC<DiffTypePickerProps> = ({
                 </span>
                 <span className="truncate flex-1">{displayLabel(opt)}</span>
                 {hint && (
-                  <Tooltip content={hint} side="right" delayDuration={200} wide>
+                  <Tooltip content={hint} side="right" wide>
                     <span
                       className="flex-shrink-0 text-muted-foreground hover:text-foreground"
                       onPointerDown={(e) => e.stopPropagation()}

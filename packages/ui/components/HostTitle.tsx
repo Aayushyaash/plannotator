@@ -33,9 +33,6 @@ export function getComponentTooltips(): boolean {
   return componentTooltips;
 }
 
-/** How long the pointer rests before a component tooltip opens. */
-const HOST_TITLE_DELAY_MS = 150;
-
 /**
  * Where a tooltip for `trigger` is portaled: the open native `<dialog>` it
  * sits in (a popup in the body is drawn under the dialog's top layer), else
@@ -83,7 +80,6 @@ export function HostTitle({
       content={title}
       side={side}
       wide
-      delayDuration={HOST_TITLE_DELAY_MS}
       escapePassesThrough
       shouldOpen={(trigger) => {
         if (noHover() || (cut && !isTextCut(trigger))) return false;
