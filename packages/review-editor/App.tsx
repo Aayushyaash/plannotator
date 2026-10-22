@@ -48,6 +48,7 @@ import type { SemanticDiffAdvert } from '@plannotator/shared/semantic-diff-types
 import type { CallFlowAdvert, CallFlowNode } from '@plannotator/shared/call-flow-types';
 import { configStore, useConfigValue, setReviewPanelView } from '@plannotator/ui/config';
 import { loadDiffFont } from '@plannotator/ui/utils/diffFonts';
+import { monoFontStack, normalizeCssFontSize } from '@plannotator/ui/utils/cssFontFamily';
 import { getAgentSwitchSettings, getEffectiveAgentName } from '@plannotator/ui/utils/agentSwitch';
 import { adoptServerSession, noteServerSessionMismatch, withServerSession, withServerSessionQuery } from '@plannotator/ui/utils/serverSession';
 import { ServerSessionReplacedBanner } from '@plannotator/ui/components/ServerSessionReplacedBanner';
@@ -508,14 +509,16 @@ const ReviewApp: React.FC = () => {
 
   // Load custom diff font and override --font-mono for surrounding review elements
   useEffect(() => {
-    if (diffFontFamily) {
+    const diffFontStack = monoFontStack(diffFontFamily);
+    if (diffFontStack) {
       loadDiffFont(diffFontFamily);
-      document.documentElement.style.setProperty('--diff-font-override', `'${diffFontFamily}', monospace`);
+      document.documentElement.style.setProperty('--diff-font-override', diffFontStack);
     } else {
       document.documentElement.style.removeProperty('--diff-font-override');
     }
-    if (diffFontSize) {
-      document.documentElement.style.setProperty('--diff-font-size-override', diffFontSize);
+    const diffFontSizeValue = normalizeCssFontSize(diffFontSize);
+    if (diffFontSizeValue) {
+      document.documentElement.style.setProperty('--diff-font-size-override', diffFontSizeValue);
     } else {
       document.documentElement.style.removeProperty('--diff-font-size-override');
     }
