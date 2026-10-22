@@ -104,9 +104,9 @@ export function DraftHead({
 }
 
 /** The thread's foot while the box is closed and something waits: "Draft · 2 picks". */
-export function DraftFootNote({ unsent }: { unsent: { reply: boolean; picks: number; comments: number } }) {
+export function DraftFootNote({ unsent, id }: { unsent: { reply: boolean; picks: number; comments: number }; id?: string }) {
   return (
-    <span className="ib-draft-foot" data-draft-foot="">
+    <span className="ib-draft-foot" data-draft-foot="" id={id}>
       <span className="ib-draft-pill">Draft</span> <span className="ib-st">{unsentWords(unsent)}</span>
     </span>
   );

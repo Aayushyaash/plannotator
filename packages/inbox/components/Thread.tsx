@@ -2480,6 +2480,18 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     }
   };
 
+  // The error after a failed Send (or Re-ask) sits ABOVE the button row it belongs to (approval
+  // "thread-foot-status-right"), in the two states that have one: the reply box and the closed foot.
+  const errorAbove = !resolved && !(guard && staleQuestions.length > 0) && newMessage?.kind !== 'compose' && !(route.open && asking);
+  const errorLine = (
+    <div className="ib-error" role="alert" data-foot-error={errorAbove ? 'above' : undefined}>
+      {error}
+    </div>
+  );
+  // The closed foot's status (draft note, skip chip) describes Send and Edit draft: read with them, though drawn at the row's end.
+  const draftNoteId = `ib-foot-draft-${thread.thread_id}`;
+  const skipNoteId = `ib-foot-skip-${thread.thread_id}`;
+  const footStatusIds = [draftNoteId, waiting && unanswered.length > 0 ? skipNoteId : null].filter(Boolean).join(' ');
   const routeChoice = asking ? (
     <RouteChoice
       kind={routeFor}
@@ -3289,6 +3301,8 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             {route.open && asking ? (
               routeChoice
             ) : (
+              <>
+              {error && errorLine}
               <div className="ib-acts">
                 <button type="button" className="ib-btn ib-pri" ref={sendRef} onClick={() => void send()} disabled={sending}>
                   <Icon name="send" size={15} />
@@ -3301,60 +3315,74 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                 {/* The in-thread New message button is off (approval "inbox-acknowledge"); its route and code stay. */}
                 {SHOW_NEW_MESSAGE_BUTTON && !archived && <NewMessageButton live={live} mode={newMessage} onClick={() => void pressNewMessage()} />}
               </div>
+              </>
             )}
           </>
         ) : route.open && asking ? (
           routeChoice
         ) : (
           <>
-          <div className="ib-acts">
-            {(waiting || draftKept) && <DraftFootNote unsent={{ reply: draftKept, picks: picksCount, comments: records.length }} />}
-            {(waiting || draftKept) && (
-              <button type="button" className="ib-btn ib-pri" ref={sendRef} onClick={() => void send()} disabled={sending}>
-                <Icon name="send" size={15} />
-                Send
-              </button>
-            )}
-            <button type="button" className="ib-btn" onClick={() => openBox()} data-edit-draft={waiting || draftKept ? '' : undefined}>
-              <Icon name={waiting || draftKept ? 'pen' : 'reply'} size={15} />
-              {waiting || draftKept ? 'Edit draft' : 'Reply'}
-            </button>
-            {/* Re-ask (approval "inbox-reask"): the open questions again, in one message per session. */}
-            {reaskShown && (
-              <Tip content={reaskTooltip(reaskList)}>
-                <button type="button" className="ib-btn" ref={reaskRef} data-reask="" disabled={reasking} onClick={() => void sendReask()}>
-                  <Icon name="refresh" size={15} />
-                  Re-ask
+          {error && errorLine}
+          {/* Buttons on the left in today's order, the draft status and the skip chip at the right end (approval
+              "thread-foot-status-right", option A). Too narrow for one line, the status takes its own line ABOVE the
+              buttons (wrap-reverse; one item per line aligns to the start), so it never wraps between them. */}
+          <div className="ib-acts ib-footrow" data-foot-row="">
+            <div className="ib-footbtns" data-foot-buttons="">
+              {(waiting || draftKept) && (
+                <button type="button" className="ib-btn ib-pri" ref={sendRef} onClick={() => void send()} disabled={sending} aria-describedby={footStatusIds}>
+                  <Icon name="send" size={15} />
+                  Send
                 </button>
-              </Tip>
-            )}
-            {/* 👍 Looks good beside Reply: sent to the agent after the Undo window; hidden while a question waits. */}
-            {ackOffered && !waiting && !draftKept && (
-              <Tip
-                content={
-                  ackOn
-                    ? 'Take back Looks good'
-                    : `Tells ${agentName(ackTarget!.author)} you read it and need nothing more. Moves to Quiet until it writes again.`
-                }
+              )}
+              <button
+                type="button"
+                className="ib-btn"
+                onClick={() => openBox()}
+                data-edit-draft={waiting || draftKept ? '' : undefined}
+                aria-describedby={waiting || draftKept ? footStatusIds : undefined}
               >
-                <button type="button" className="ib-btn ib-ack" data-ack="" aria-pressed={ackOn} onClick={() => onAck!(ackTarget!.id, !ackOn, agentName(ackTarget!.author))}>
-                  <span className="ib-ack-emoji" aria-hidden="true">
-                    👍
+                <Icon name={waiting || draftKept ? 'pen' : 'reply'} size={15} />
+                {waiting || draftKept ? 'Edit draft' : 'Reply'}
+              </button>
+              {/* Re-ask (approval "inbox-reask"): the open questions again, in one message per session. */}
+              {reaskShown && (
+                <Tip content={reaskTooltip(reaskList)}>
+                  <button type="button" className="ib-btn" ref={reaskRef} data-reask="" disabled={reasking} onClick={() => void sendReask()}>
+                    <Icon name="refresh" size={15} />
+                    Re-ask
+                  </button>
+                </Tip>
+              )}
+              {/* 👍 Looks good beside Reply: sent to the agent after the Undo window; hidden while a question waits. */}
+              {ackOffered && !waiting && !draftKept && (
+                <Tip
+                  content={
+                    ackOn
+                      ? 'Take back Looks good'
+                      : `Tells ${agentName(ackTarget!.author)} you read it and need nothing more. Moves to Quiet until it writes again.`
+                  }
+                >
+                  <button type="button" className="ib-btn ib-ack" data-ack="" aria-pressed={ackOn} onClick={() => onAck!(ackTarget!.id, !ackOn, agentName(ackTarget!.author))}>
+                    <span className="ib-ack-emoji" aria-hidden="true">
+                      👍
+                    </span>
+                    Looks good
+                  </button>
+                </Tip>
+              )}
+              {/* The in-thread New message button is off (approval "inbox-acknowledge", 2026-10-15): Reply and compose cover it.
+                  Its route, door row and code stay; turn SHOW_NEW_MESSAGE_BUTTON on to bring it back. */}
+              {SHOW_NEW_MESSAGE_BUTTON && !archived && <NewMessageButton live={live} mode={newMessage} onClick={() => void pressNewMessage()} />}
+            </div>
+            {(waiting || draftKept) && (
+              <div className="ib-footstatus" data-foot-status="">
+                <DraftFootNote id={draftNoteId} unsent={{ reply: draftKept, picks: picksCount, comments: records.length }} />
+                {waiting && unanswered.length > 0 && (
+                  <span className={keepOpen ? 'ib-keep' : undefined}>
+                    <SkipChip id={skipNoteId} count={keepOpen ? unanswered.length : skipIds.size} keepOpen={keepOpen} onToggle={toggleKeepOpen} />
                   </span>
-                  Looks good
-                </button>
-              </Tip>
-            )}
-            {/* The in-thread New message button is off (approval "inbox-acknowledge", 2026-10-15): Reply and compose cover it.
-                Its route, door row and code stay; turn SHOW_NEW_MESSAGE_BUTTON on to bring it back. */}
-            {SHOW_NEW_MESSAGE_BUTTON && !archived && <NewMessageButton live={live} mode={newMessage} onClick={() => void pressNewMessage()} />}
-            {waiting && unanswered.length > 0 && (
-              <>
-                <span className="ib-sp" />
-                <span className={keepOpen ? 'ib-keep' : undefined}>
-                  <SkipChip count={keepOpen ? unanswered.length : skipIds.size} keepOpen={keepOpen} onToggle={toggleKeepOpen} />
-                </span>
-              </>
+                )}
+              </div>
             )}
             {/* A phone has no room to float the pill over the messages (it sat on a sender's row): it sits in this
                 row's empty middle, laid over it, so the foot and the thread's view keep their size and Reply stays put.
@@ -3375,11 +3403,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             onClose={() => setNewMessage(null)}
           />
         )}
-        {error && (
-          <div className="ib-error" role="alert">
-            {error}
-          </div>
-        )}
+        {error && !errorAbove && errorLine}
       </div>
     </section>
     {openAttachment && (
@@ -3444,13 +3468,13 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
  * Skip them"; after Skip them, "↷ 3 questions will be skipped · Keep open",
  * for that one Send. Nothing when none is unanswered.
  */
-function SkipChip({ count, keepOpen, onToggle }: { count: number; keepOpen: boolean; onToggle: () => void }) {
+function SkipChip({ count, keepOpen, onToggle, id }: { count: number; keepOpen: boolean; onToggle: () => void; id?: string }) {
   if (count === 0) return null;
   const them = count === 1 ? 'it' : 'them';
   return (
     <span className="ib-skipchip" data-skip-chip={keepOpen ? 'keep' : 'skip'}>
       {/* The icon and the sentence are one item, so where the chip wraps (a narrow reply box) the icon stays with its words. */}
-      <span className="ib-skip-s">
+      <span className="ib-skip-s" id={id}>
         {!keepOpen && <Icon name="forward" size={14} />}
         {keepOpen ? `${plural(count, 'question')} ${count === 1 ? 'stays' : 'stay'} open` : `${plural(count, 'question')} will be skipped`}
       </span>
