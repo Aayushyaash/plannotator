@@ -1739,6 +1739,55 @@ body:has([data-popout="true"]) [data-sidebar-tabs="true"] {
   cursor: pointer;
 }
 
+/* Document text size (Settings → Display → Text size, #2066; see
+   utils/documentTextSize). The app sets data-doc-text-size and
+   --doc-text-scale (size / 15) on the document element only away from the
+   default, so at the default none of this applies and the document draws
+   exactly as it always has. Scoped to the document's own blocks (every block
+   carries data-block-id; the plan diff's blocks data-diff-block-index; the
+   frontmatter card and the raw diff data-doc-text), so the header, panels,
+   badges, menus and popovers keep their size. Diagrams draw themselves and are
+   left out. Named sizes scale through Tailwind's type scale; the renderers'
+   fixed sizes one by one (sizes under 12 px, the card's pills and gutters,
+   stay as they are). Unlayered, so it outranks Tailwind's utilities. */
+[data-doc-text-size] :is([data-block-id], [data-diff-block-index], [data-doc-text]):not([data-diagram-block]) {
+  --text-xs: max(11px, calc(0.75rem * var(--doc-text-scale, 1)));
+  --text-sm: calc(0.875rem * var(--doc-text-scale, 1));
+  --text-base: calc(1rem * var(--doc-text-scale, 1));
+  --text-lg: calc(1.0625rem * var(--doc-text-scale, 1));
+  --text-xl: calc(1.1875rem * var(--doc-text-scale, 1));
+  --text-2xl: calc(1.375rem * var(--doc-text-scale, 1));
+  --text-3xl: calc(1.625rem * var(--doc-text-scale, 1));
+  --text-4xl: calc(1.875rem * var(--doc-text-scale, 1));
+  --text-5xl: calc(2rem * var(--doc-text-scale, 1));
+}
+[data-doc-text-size] :is([data-block-id], [data-diff-block-index], [data-doc-text], [data-block-id] *, [data-diff-block-index] *, [data-doc-text] *).text-\[15px\] {
+  font-size: calc(15px * var(--doc-text-scale, 1));
+}
+[data-doc-text-size] :is([data-block-id], [data-diff-block-index], [data-doc-text], [data-block-id] *, [data-diff-block-index] *, [data-doc-text] *).text-\[13\.5px\] {
+  font-size: calc(13.5px * var(--doc-text-scale, 1));
+}
+[data-doc-text-size] :is([data-block-id], [data-diff-block-index], [data-doc-text], [data-block-id] *, [data-diff-block-index] *, [data-doc-text] *).text-\[13px\] {
+  font-size: calc(13px * var(--doc-text-scale, 1));
+}
+[data-doc-text-size] :is([data-block-id], [data-diff-block-index], [data-doc-text], [data-block-id] *, [data-diff-block-index] *, [data-doc-text] *).text-\[12\.5px\] {
+  font-size: calc(12.5px * var(--doc-text-scale, 1));
+}
+/* Fenced code (`pre code.pn-code`, 0.8125rem in the app's stylesheet). */
+[data-doc-text-size] :is([data-block-id], [data-diff-block-index]) pre code.pn-code {
+  font-size: calc(0.8125rem * var(--doc-text-scale, 1));
+}
+/* A question card's context (QuestionContext's own stylesheet). */
+[data-doc-text-size] [data-block-id] .question-context :is(p, .text-sm) {
+  font-size: calc(13px * var(--doc-text-scale, 1));
+}
+[data-doc-text-size] [data-block-id] .question-context :is(h1, h2) {
+  font-size: calc(14px * var(--doc-text-scale, 1));
+}
+[data-doc-text-size] [data-block-id] .question-context h3 {
+  font-size: calc(13.5px * var(--doc-text-scale, 1));
+}
+
 /* Reduced motion: Base UI popups (dialogs, menus, popovers, tooltips) animate
    via [data-starting-style]/[data-ending-style] transitions — those attributes
    only exist during the enter/exit phases, so zeroing transitions here makes

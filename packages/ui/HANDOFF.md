@@ -2403,6 +2403,16 @@ Approval "inbox-next-actions" (2026-10-21): the Plannotator Inbox draws an agent
 - **New core subpath `./inbox-actions`** (`packages/core/inbox-actions.ts`): the Inbox-only `:::action` reader (`parseInboxActionBlocks`, `parseInboxActionBlock`, `parseInboxActionWhere`, `inboxActionKey`, `INBOX_ACTION_KEY_RE`), the person's result check (`checkInboxActionResult`, `INBOX_ACTION_NOTE_MAX`), the reply section (`composeInboxActionsReply`, `INBOX_ACTIONS_HEADING`, `inboxActionTime`, `inboxActionResultLine`), `parseInboxDoneRef`, and the agent-facing texts (`INBOX_ACTION_GUIDE`, `INBOX_ACTION_EXAMPLE`, `INBOX_DONE_DESCRIPTION`). Pure, browser-safe.
 - **Widened kinds in `inbox-types`**: `InboxQuestionRecord.kind` and `InboxQuestion.kind` are now **`InboxQuestionKind`** (`QuestionKind | "action"`); read a stored kind with **`readInboxQuestionKind(value)`** (`"unknown"` for a kind this build does not know: never answerable) or **`isInboxAction`**. Additive fields: `InboxActionFacts` / `InboxActionResult` on records and the wire (`action`, `action_result`), `InboxQuestionSummary.actions`, `InboxMessage.done` / `action_report`, `InboxMessageWire.actions` (window-side), `isInboxActionReport`. Code that passes a record's `kind` to `QuestionAnswer` must narrow it first (an action item has no `QuestionAnswer`). `inbox-questions`' `inboxQuestionState` reads an action item's `action_result`; `inboxSkipAnswer` takes a `QuestionKind`; `composeInboxReplyBody` leaves action items out; the set-aside and reopened notes list them as `- A1.`
 
+## Document text size (#2066; next ui release; additive, no core change)
+
+Settings → Display gains a **Text size** row (13 / 15 / 17 / 19 / 21 px of body text, 15 = today). Everything is inert until a host opts in.
+
+- **`utils/documentTextSize`** (new, import-free): `DOCUMENT_TEXT_SIZE_OPTIONS`, `DEFAULT_DOCUMENT_TEXT_SIZE` (15), `isDocumentTextSize`, `documentTextScale`, and **`applyDocumentTextSize(root, size)`**, which sets `data-doc-text-size` and `--doc-text-scale` (size / 15) on `root`, and removes both at the default.
+- **`hooks/useDocumentTextSize()`** (new): applies the setting to the document element while mounted. Plannotator's plan / annotate app calls it; a host that wants the row to work calls it too.
+- **Setting `documentTextSize`** (`config/settings.ts`, cookie-only `plannotator-document-text-size`, default 15).
+- **`theme.css`**: rules gated on `[data-doc-text-size]` scale the document's blocks (`[data-block-id]`, `[data-diff-block-index]`, `[data-doc-text]`; diagrams excluded): Tailwind's `--text-*` scale, the renderers' fixed 12.5–15 px sizes, `pre code.pn-code` and the question context. Without the attribute nothing applies. `Viewer`'s frontmatter card and `PlanRawDiffView` carry `data-doc-text`.
+- **`Settings`** gains **`hideDocumentTextSize?: boolean`** (default false) to hide the row.
+
 ## The law (guardrails for anyone editing `@plannotator/ui`)
 
 These are enforced socially and, where possible, by CI. They exist because a prior from-scratch reimplementation of this UI broke the app and was reverted.
