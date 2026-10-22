@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState, useCallback, type RefObject } from 'react';
 import Highlighter from '@plannotator/web-highlighter';
 import type { Annotation, EditorMode, HostDraft, ImageAttachment } from '../types';
+import { metaWithBelowTitle, metaWithoutBelowTitle, snapRangeOutOfBelowTitle } from '../utils/belowTitleSlot';
 import { AnnotationType } from '../types';
 import type { QuickLabel } from '../utils/quickLabels';
 import {
@@ -1290,7 +1291,12 @@ export function useAnnotationHighlighter({
 
       if (ann.startMeta && ann.endMeta) {
         try {
-          highlighter.fromStore(ann.startMeta, ann.endMeta, ann.originalText, ann.id);
+          highlighter.fromStore(
+            metaWithBelowTitle(containerRef.current, ann.startMeta),
+            metaWithBelowTitle(containerRef.current, ann.endMeta),
+            ann.originalText,
+            ann.id,
+          );
           const restoredDoms = highlighter.getDoms(ann.id);
           if (restoredDoms && restoredDoms.length > 0) {
             const restoredText = paintedTextOf(restoredDoms as HTMLElement[]);
@@ -1512,6 +1518,15 @@ export function useAnnotationHighlighter({
 
     highlighter.on(Highlighter.event.CREATE, ({ sources, type }: { sources: any[]; type?: string }) => {
       if (type === 'from-store') return;
+      // Store positions as if a host's `belowTitle` slot were not there, so
+      // its contents never renumber a comment's parent element (identity
+      // when the document has no slot). See utils/belowTitleSlot.
+      for (const created of sources) {
+        const startMeta = metaWithoutBelowTitle(containerRef.current, created.startMeta, 'start');
+        const endMeta = metaWithoutBelowTitle(containerRef.current, created.endMeta, 'end');
+        if (startMeta !== created.startMeta) created.startMeta = startMeta;
+        if (endMeta !== created.endMeta) created.endMeta = endMeta;
+      }
       if (sources.length > 0) {
         const source = sources[0];
         const doms = highlighter.getDoms(source.id);
@@ -1622,7 +1637,9 @@ export function useAnnotationHighlighter({
         pendingRangeRunsRef.current = null;
         return;
       }
-      if (snapRangeStartPastExcluded(range)) {
+      const snappedOutOfSlot = snapRangeOutOfBelowTitle(container, range);
+      const snappedPastExcluded = snapRangeStartPastExcluded(range);
+      if (snappedOutOfSlot || snappedPastExcluded) {
         selection.removeAllRanges();
         selection.addRange(range);
       }
@@ -1737,6 +1754,7 @@ export function useAnnotationHighlighter({
       // Same fail-closed rule as the pointer-end guard (#881): touch
       // selections settle on block boundaries just as often.
       if (isBlankQuote(sel.toString()) || !isSerializableRange(range)) return false;
+      snapRangeOutOfBelowTitle(containerRef.current, range);
       snapRangeStartPastExcluded(range);
       pendingRangeRunsRef.current = rangeTextPieces(range);
       try {
@@ -1789,6 +1807,7 @@ export function useAnnotationHighlighter({
     // visually hidden type word; snap off it before painting (the caller's own
     // range is left untouched).
     const painted = range.cloneRange();
+    snapRangeOutOfBelowTitle(container, painted);
     snapRangeStartPastExcluded(painted);
     pendingRangeRunsRef.current = rangeTextPieces(painted);
 
