@@ -276,7 +276,7 @@ describe("Inbox Open in: the new-tab page", () => {
     expect(location).toMatch(/^\/api\/html-assets\/[0-9a-f]{16}\/page\.html$/);
     const served = await fetch(`${base}${location}`);
     expect(served.status).toBe(200);
-    expect(served.headers.get("content-security-policy")).toBe("sandbox allow-scripts; connect-src 'none'");
+    expect(served.headers.get("content-security-policy")).toBe("sandbox allow-scripts allow-modals; connect-src 'none'");
     expect(served.headers.get("x-content-type-options")).toBe("nosniff");
     expect(await served.text()).toContain("<h1 id=\"top\">Checkout</h1>");
     const image = await fetch(`${base}${location.replace("page.html", "shot.png")}`);
@@ -315,7 +315,7 @@ describe("Inbox Open in: the new-tab page", () => {
     const sent = await fetch(`http://127.0.0.1:${server.port}/api/inbox/attachments/${ids["page.html"]}/page?version=sent`, { redirect: "manual" });
     expect(sent.status).toBe(200);
     expect(sent.headers.get("content-type")).toContain("text/html");
-    expect(sent.headers.get("content-security-policy")).toBe("sandbox allow-scripts; connect-src 'none'");
+    expect(sent.headers.get("content-security-policy")).toBe("sandbox allow-scripts allow-modals; connect-src 'none'");
     const html = await sent.text();
     expect(html).toContain("Checkout");
     expect(html).not.toContain("Edited later");
@@ -329,7 +329,7 @@ describe("Inbox Open in: the new-tab page", () => {
     const base = `http://127.0.0.1:${server.port}`;
     const hidden = await fetch(`${base}/api/inbox/attachments/${ids[".draft.html"]}/page`, { redirect: "manual" });
     expect(hidden.status).toBe(200);
-    expect(hidden.headers.get("content-security-policy")).toBe("sandbox allow-scripts; connect-src 'none'");
+    expect(hidden.headers.get("content-security-policy")).toBe("sandbox allow-scripts allow-modals; connect-src 'none'");
     expect(await hidden.text()).toContain("draft");
     const page = `${base}/api/inbox/attachments/${ids["page.html"]}/page`;
     expect(await answerOf(await fetch(page, { headers: { "Sec-Fetch-Site": "cross-site" } }))).toEqual([403, "cross_origin"]);
@@ -380,6 +380,6 @@ describe("Inbox Open in: over the tailnet", () => {
     expect(page.status).toBe(303);
     const served = await through(page.headers.get("location")!);
     expect(served.status).toBe(200);
-    expect(served.headers.get("content-security-policy")).toBe("sandbox allow-scripts; connect-src 'none'");
+    expect(served.headers.get("content-security-policy")).toBe("sandbox allow-scripts allow-modals; connect-src 'none'");
   });
 });

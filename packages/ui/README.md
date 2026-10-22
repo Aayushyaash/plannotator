@@ -388,7 +388,7 @@ The engine that lets a browser-integrated agent (Chrome/Edge WebMCP, `document.m
 - `useToolset({ id, active, build, deps, hooks })` attaches a named tool set to the document registry; handlers read through refs, so re-renders never re-register, and `active: false` aborts every registration (what Plannotator's Settings opt-out drives).
 - `AnnotationChangeTracker` / `buildNudges` are pure (no DOM): per-annotation `seq`, tombstones, a per-tab watermark with `since` override, and the nudge vocabulary every response carries.
 - A host with its own document state builds the same adapter-driven catalog Plannotator uses (`packages/editor/webmcp/documentTools.ts`, `buildDocumentTools(adapter, state, options)`) over its own getters and actions; multi-document pages should register one set whose tools take `path` (the folder-session shape) rather than one set per viewer (duplicate names across sets are skipped with a warning, never replaced).
-- Never register tools inside an untrusted iframe: the raw-HTML viewer's `sandbox="allow-scripts"` frame and the live-app frame carry no `allow="tools"`, and that is what keeps a framed page from impersonating the host's tools.
+- Never register tools inside an untrusted iframe: the raw-HTML viewer's `sandbox="allow-scripts allow-modals"` frame and the live-app frame carry no `allow="tools"`, and that is what keeps a framed page from impersonating the host's tools.
 
 The one additive data-model change that rides with it: `Annotation.inReplyTo` (threaded replies; the panel indents them under the parent, the export nests them, share links drop them).
 

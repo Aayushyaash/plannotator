@@ -472,7 +472,7 @@ const FrontmatterCard: React.FC<{ frontmatter: Frontmatter }> = ({ frontmatter }
   if (entries.length === 0) return null;
 
   return (
-    <div className="mt-4 mb-6 p-4 bg-muted/30 border border-border/50 rounded-lg">
+    <div className="mt-4 mb-6 p-4 bg-muted/30 border border-border/50 rounded-lg" data-doc-text="">
       <div className="grid gap-2 text-sm">
         {entries.map(([key, value]) => (
           <FrontmatterRow key={key} field={key} value={value} />
@@ -1508,6 +1508,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
       <article
         ref={containerRef}
         data-print-region="article"
+        data-doc-text-root=""
         data-vim-mode={vimModeActive ? 'enabled' : undefined}
         data-vim-phase={vimModeActive ? vim.state.phase : undefined}
         data-vim-focused={vimModeActive ? String(vim.focused) : undefined}

@@ -8,6 +8,7 @@ import type { TokenHoverDelay } from '@plannotator/core/token-hover';
 import { configStore, useConfigValue, setReviewPanelView, setReviewDefaultDiffType, setReviewAutoViewed } from '../config';
 import { setWebMcpToolsEnabled, useWebMcpToolsEnabled } from '../webmcp/preference';
 import { DIAGRAM_SHADOW_OPTIONS } from '../utils/diagramShadow';
+import { DEFAULT_DOCUMENT_TEXT_SIZE, DOCUMENT_TEXT_SIZE_OPTIONS } from '../utils/documentTextSize';
 import {
   agentToolAppliesWhen,
   agentToolCostNote,
@@ -109,6 +110,13 @@ interface SettingsProps {
    * never wants it offered, passes true.
    */
   hideEnterSavesComment?: boolean;
+  /**
+   * Show Display's Text size row (#2066). Default false: the row does
+   * something only where the page applies the `documentTextSize` setting
+   * (`hooks/useDocumentTextSize`), so a host opts in. Plannotator passes true
+   * in plan review and annotate on a markdown or text document.
+   */
+  showDocumentTextSize?: boolean;
   onUIPreferencesChange?: (prefs: UIPreferences) => void;
   /** Claude Code's permission mode was changed here (plan review). The host
    *  keeps its own copy in step, since its Approve sends the mode and its
@@ -1127,7 +1135,7 @@ const CommentsTab: React.FC = () => {
   );
 };
 
-export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', annotateParity = false, onUIPreferencesChange, onPermissionModeChange, externalOpen, onExternalClose, aiProviders = [], gitUser, autoUpdateSetting, updateCheckSetting, agentToolSetting, onAgentToolChange, sinceBaseUnavailable, isCompactTouchLayout = false, onDetectObsidianVaults, agentTerminalAvailable = false, webmcpAvailable = false, hideEnterSavesComment = false }) => {
+export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', annotateParity = false, onUIPreferencesChange, onPermissionModeChange, externalOpen, onExternalClose, aiProviders = [], gitUser, autoUpdateSetting, updateCheckSetting, agentToolSetting, onAgentToolChange, sinceBaseUnavailable, isCompactTouchLayout = false, onDetectObsidianVaults, agentTerminalAvailable = false, webmcpAvailable = false, hideEnterSavesComment = false, showDocumentTextSize = false }) => {
   const webmcpTools = useWebMcpToolsEnabled();
   const autoUpdate = useConfigValue('autoUpdate');
   const updateChecksOn = updateCheckSetting ? updateCheckSetting.on : true;
@@ -1160,6 +1168,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
   const [activeTab, setActiveTab] = useState<SettingsTab>('general');
   const gridEnabled = useConfigValue('gridEnabled');
   const diagramShadow = useConfigValue('diagramShadow');
+  const documentTextSize = useConfigValue('documentTextSize');
   const vimModeEnabled = useConfigValue('vimModeEnabled');
   const enterSavesComment = useConfigValue('enterSavesComment');
   const vimHudEnabled = useConfigValue('vimHudEnabled');
@@ -1863,6 +1872,36 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
 
                 {activeTab === 'display' && mode !== 'review' && (
                   <>
+                    {/* Text size (#2066): the document only, not the app around it */}
+                    {showDocumentTextSize && (<>
+                    <div className="space-y-3" data-document-text-size-setting>
+                      <div>
+                        <div className="text-sm font-medium" id="document-text-size-label">Text size</div>
+                        <div className="text-xs text-muted-foreground">
+                          {mode === 'annotate' ? 'Body text of the document' : 'Body text of the plan'}, in px ({DEFAULT_DOCUMENT_TEXT_SIZE} is the default)
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 bg-muted/50 rounded-lg p-0.5" role="group" aria-labelledby="document-text-size-label">
+                        {DOCUMENT_TEXT_SIZE_OPTIONS.map((value) => (
+                          <button
+                            key={value}
+                            onClick={() => configStore.set('documentTextSize', value)}
+                            aria-pressed={documentTextSize === value}
+                            className={`flex-1 px-3 py-1.5 text-xs rounded-md transition-colors tabular-nums ${
+                              documentTextSize === value
+                                ? 'bg-background text-foreground shadow-sm font-medium'
+                                : 'text-muted-foreground hover:text-foreground'
+                            }`}
+                          >
+                            {value}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="border-t border-border" />
+                    </>)}
+
                     {/* Auto-open Sidebar */}
                     <div className="flex items-center justify-between">
                       <div>

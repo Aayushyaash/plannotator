@@ -105,6 +105,7 @@ const fakeFetch: typeof fetch = async (input, init) => {
       ],
       filePath: ROOT,
       projectRoot: ROOT,
+      repoInfo: { display: "acme/payments", branch: "main", host: "github.com" },
       documentDrafts: true,
       sharingEnabled: false,
       serverConfig: {},
@@ -457,6 +458,10 @@ describe.if(hasDom)("annotate bundle", () => {
     expect(docRequests()[0]).toBe(BETA);
     expect(switcherText()).toContain("beta.md");
     expect(document.querySelector('[aria-label="Previous file"]')?.hasAttribute("disabled")).toBe(true);
+    // The tab names the open file and its place (#2061); the header names it
+    // once, in the switcher.
+    expect(document.title).toBe("beta.md (1 of 2) · acme/payments");
+    expect(document.querySelector("[data-header-document-name]")).toBeNull();
 
     // The Files tab lists exactly the bundle, unsorted (beta before alpha),
     // labelled relative to the files' common directory.
@@ -480,6 +485,7 @@ describe.if(hasDom)("annotate bundle", () => {
     await waitFor(() => switcherText().includes("2 of 2"), "the second file");
     expect(switcherText()).toContain("alpha.md");
     expect(docRequests()).toContain(ALPHA);
+    expect(document.title).toBe("alpha.md (2 of 2) · acme/payments");
     // Both files' saved comments are in the session now.
     await waitFor(() => !!document.querySelector("[data-decision-primary]")?.textContent?.includes("Send Feedback"), "Send Feedback");
 

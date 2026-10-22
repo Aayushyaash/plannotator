@@ -3,7 +3,7 @@
  * precedent): Plannotator's provider never runs inside a frame it does not
  * own, and neither annotate iframe ever delegates the `tools` permission.
  *
- *  - The srcdoc viewer keeps `sandbox="allow-scripts"` and no `allow`
+ *  - The srcdoc viewer keeps `sandbox="allow-scripts allow-modals"` and no `allow`
  *    attribute, so the framed page has an opaque origin and the WebMCP
  *    `tools` policy (default allowlist 'self') denies it.
  *  - The live-app iframe (cross-origin by port) gets no `allow="tools"`
@@ -15,18 +15,34 @@
 import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { HTML_VIEWER_SANDBOX } from '../components/html-viewer/HtmlViewer';
 
 const UI = join(import.meta.dir, '..');
 const REPO = join(UI, '..', '..');
 const read = (path: string) => readFileSync(path, 'utf8');
 
 describe('iframe isolation', () => {
-  test('the srcdoc iframe keeps sandbox="allow-scripts" and neither iframe delegates tools', () => {
+  // #2063 (owner-approved): a page's alert/confirm/prompt may open, and
+  // nothing else is granted. The srcdoc frame's sandbox and the CSP sandbox
+  // on embedded documents must agree, since an embed gets their intersection.
+  test('the srcdoc sandbox and the embedded-document CSP allow modals and never same-origin', () => {
+    // ui does not depend on shared, so read the CSP constant from source.
+    const csp = read(join(REPO, 'packages/shared/html-assets.ts')).match(/export const HTML_ASSET_DOCUMENT_CSP = "([^"]*)";/);
+    const HTML_ASSET_DOCUMENT_CSP = csp?.[1] ?? '';
+    expect(HTML_VIEWER_SANDBOX.split(' ').sort()).toEqual(['allow-modals', 'allow-scripts']);
+    expect(HTML_ASSET_DOCUMENT_CSP).toBe('sandbox allow-scripts allow-modals');
+    for (const policy of [HTML_VIEWER_SANDBOX, HTML_ASSET_DOCUMENT_CSP]) {
+      expect(policy).toContain('allow-modals');
+      expect(policy).not.toContain('allow-same-origin');
+    }
+  });
+
+  test('the srcdoc iframe uses that sandbox and neither iframe delegates tools', () => {
     const source = read(join(UI, 'components/html-viewer/HtmlViewer.tsx'));
     const iframeStart = source.indexOf('<iframe');
     expect(iframeStart).toBeGreaterThan(0);
     const iframe = source.slice(iframeStart, source.indexOf('/>', iframeStart));
-    expect(iframe).toContain('sandbox: "allow-scripts"');
+    expect(iframe).toContain('sandbox: HTML_VIEWER_SANDBOX');
     expect(iframe).not.toMatch(/\ballow\s*[:=]/);
     // Only one iframe element in the viewer: the srcdoc/src branches share it.
     expect(source.indexOf('<iframe', iframeStart + 1)).toBe(-1);

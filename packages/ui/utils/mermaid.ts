@@ -23,6 +23,16 @@
 import type { Mermaid, MermaidConfig } from 'mermaid';
 
 /**
+ * Width in px at which node labels wrap (#2064). Mermaid 12 lowered the
+ * default from 200 to 120, and at Plannotator's 16 px label text that wraps
+ * after about eight CJK characters and splits short Latin labels. 140 is the
+ * owner-approved middle: long labels still wrap, short ones stay on one line.
+ * The themed path (`buildMermaidConfig`) spreads this config, so both the
+ * themed and the host-fallback `initialize` carry it.
+ */
+export const MERMAID_LABEL_WRAP_WIDTH = 140;
+
+/**
  * Hoisted verbatim from the former module-scope `mermaid.initialize(...)` in
  * MermaidBlock. Nothing in it reads a CSS token or the resolved mode.
  * `securityLevel: 'strict'` is a deliberate security pin (see MermaidBlock.test.ts).
@@ -61,6 +71,14 @@ export const MERMAID_CONFIG: MermaidConfig = {
   flowchart: {
     htmlLabels: true,
     curve: 'basis',
+    wrappingWidth: MERMAID_LABEL_WRAP_WIDTH,
+  },
+  /**
+   * Mermaid 11 drew state labels with the flowchart width; Mermaid 12 gives
+   * state diagrams their own `wrappingWidth`, also 120, so it is pinned too.
+   */
+  state: {
+    wrappingWidth: MERMAID_LABEL_WRAP_WIDTH,
   },
 };
 
