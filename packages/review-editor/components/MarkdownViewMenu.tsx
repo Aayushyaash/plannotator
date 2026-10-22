@@ -122,7 +122,7 @@ export const MarkdownViewMenu: React.FC<MarkdownViewMenuProps> = ({
           <Menu.Popup
             data-markdown-view-popup={touch ? 'sheet' : 'menu'}
             className={touch
-              ? 'w-full rounded-t-2xl border-t border-border bg-popover px-2 pt-2 pb-[max(env(safe-area-inset-bottom),12px)] text-popover-foreground shadow-[0_-12px_40px_-16px_rgba(15,23,42,0.45)] outline-none transition-[transform,opacity] duration-200 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0 motion-safe:data-[ending-style]:translate-y-full motion-safe:data-[starting-style]:translate-y-full'
+              ? 'w-full rounded-t-[12px] border-t border-border bg-popover px-2 pt-2 pb-[max(env(safe-area-inset-bottom),12px)] text-popover-foreground shadow-[0_-12px_40px_-16px_rgba(15,23,42,0.45)] outline-none transition-[transform,opacity] duration-200 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0 motion-safe:data-[ending-style]:translate-y-full motion-safe:data-[starting-style]:translate-y-full'
               : 'w-96 max-w-[calc(100vw-16px)] origin-[var(--transform-origin)] rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-lg outline-none transition-[opacity,scale] duration-150 data-[ending-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:scale-95 data-[starting-style]:opacity-0'}
           >
             {touch && <div aria-hidden="true" className="mx-auto mb-2 h-1 w-9 rounded-full bg-muted-foreground/30" />}
