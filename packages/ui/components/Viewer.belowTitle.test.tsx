@@ -1,0 +1,242 @@
+/**
+ * `Viewer` `belowTitle`: a host's node drawn right under the document title,
+ * driven through the REAL Viewer and web-highlighter (DOM-gated, DOM_TESTS=1).
+ *
+ * Failures to catch: the prop leaks DOM into a Viewer that does not pass it;
+ * the slot lands somewhere other than right after a leading `# title` (or at
+ * the top when there is none); the heading changes; the slot's own elements
+ * renumber web-highlighter's positional metas, so a comment on the paragraph
+ * after the title is stored, or restored, differently with the slot than
+ * without it (two identical paragraphs make a shifted index paint the WRONG
+ * one silently, since the quote still matches); a selection inside the slot
+ * becomes a comment.
+ */
+import { afterEach, describe, expect, test } from 'bun:test';
+import React, { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { AnnotationType, type Annotation, type EditorMode } from '../types';
+
+const hasDom = typeof document !== 'undefined';
+// web-highlighter's UMD bundle reads `window` at module eval; import lazily.
+const viewerModule = hasDom ? await import('./Viewer') : null;
+const parserModule = hasDom ? await import('../utils/parser') : null;
+
+const TITLED = [
+  '# Release plan',
+  '',
+  'Ship the same build twice.',
+  '',
+  'Ship the same build twice.',
+  '',
+  'Then tag it.',
+].join('\n');
+
+/** Host content with `<p>`, `<span>` and `<a>`: the tags a comment's parent
+ *  element usually has, so a slot that counted would shift their indexes. */
+const SLOT = (
+  <div data-testid="refs">
+    <p><span>Pull requests</span> <a href="#pr">#12</a></p>
+    <p><span>Depends on</span> <a href="#dep">Ship the same build twice.</a></p>
+  </div>
+);
+
+let root: Root | null = null;
+let host: HTMLElement | null = null;
+
+afterEach(async () => {
+  if (root) await act(async () => root?.unmount());
+  root = null;
+  host?.remove();
+  host = null;
+  if (hasDom) {
+    document.body.replaceChildren();
+    window.getSelection()?.removeAllRanges();
+  }
+});
+
+const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+
+interface Handle { applySharedAnnotations: (annotations: Annotation[]) => void }
+
+async function mount(options: {
+  markdown?: string;
+  belowTitle?: React.ReactNode;
+  passProp?: boolean;
+  mode?: EditorMode;
+  onAddAnnotation?: (annotation: Annotation) => void;
+} = {}): Promise<{ article: HTMLElement; ref: React.RefObject<Handle | null> }> {
+  const Viewer = viewerModule!.Viewer;
+  const markdown = options.markdown ?? TITLED;
+  const ref = React.createRef<Handle>();
+  host = document.createElement('div');
+  document.body.appendChild(host);
+  const slotProps = options.passProp === false ? {} : { belowTitle: options.belowTitle };
+  await act(async () => {
+    root = createRoot(host!);
+    root.render(
+      <Viewer
+        ref={ref as never}
+        blocks={parserModule!.parseMarkdownToBlocks(markdown)}
+        markdown={markdown}
+        annotations={[]}
+        onAddAnnotation={options.onAddAnnotation ?? (() => {})}
+        onSelectAnnotation={() => {}}
+        selectedAnnotationId={null}
+        mode={options.mode ?? 'selection'}
+        taterMode={false}
+        stickyActions={false}
+        disableCodePathValidation
+        {...slotProps}
+      />,
+    );
+  });
+  await settle();
+  const article = host.querySelector<HTMLElement>('article[data-print-region="article"]');
+  if (!article) throw new Error('Viewer did not render its annotation container');
+  return { article, ref };
+}
+
+async function unmount() {
+  if (root) await act(async () => root?.unmount());
+  root = null;
+  host?.remove();
+  host = null;
+  window.getSelection()?.removeAllRanges();
+}
+
+/** Select `phrase` in the `nth` text node holding it and release the pointer. */
+async function select(scope: HTMLElement, phrase: string, nth = 0) {
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+  const hits: Text[] = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) if (n.textContent?.includes(phrase)) hits.push(n as Text);
+  const node = hits[nth]!;
+  const at = node.textContent!.indexOf(phrase);
+  const range = document.createRange();
+  range.setStart(node, at);
+  range.setEnd(node, at + phrase.length);
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(range);
+  await act(async () => {
+    (node.parentElement!.closest('article') ?? scope).dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+  });
+  await settle();
+}
+
+const paragraphsByText = (article: HTMLElement, text: string) =>
+  [...article.querySelectorAll<HTMLElement>('p[data-block-id]')].filter((p) => p.textContent === text);
+
+describe('Viewer belowTitle: where it renders', () => {
+  test.skipIf(!hasDom)('absent, null, undefined and false draw nothing: the same DOM as without the prop', async () => {
+    const without = (await mount({ passProp: false })).article.outerHTML;
+    await unmount();
+    for (const value of [undefined, null, false, true]) {
+      const { article } = await mount({ belowTitle: value });
+      expect(article.outerHTML).toBe(without);
+      expect(article.querySelector('[data-viewer-below-title]')).toBeNull();
+      await unmount();
+    }
+  });
+
+  test.skipIf(!hasDom)('with a leading # title: right after the heading, which is unchanged', async () => {
+    const plainHeading = (await mount({ passProp: false })).article.querySelector('h1')!.outerHTML;
+    await unmount();
+
+    const { article } = await mount({ belowTitle: SLOT });
+    const heading = article.querySelector('h1')!;
+    expect(heading.outerHTML).toBe(plainHeading);
+    const slot = heading.nextElementSibling as HTMLElement;
+    expect(slot.hasAttribute('data-viewer-below-title')).toBe(true);
+    expect(slot.dataset.placement).toBe('below-title');
+    expect(slot.querySelector('[data-testid="refs"]')).not.toBeNull();
+    // Outside everything that addresses document text.
+    expect(slot.classList.contains('annotation-exclude')).toBe(true);
+    expect(slot.hasAttribute('data-pinpoint-ignore')).toBe(true);
+    expect(slot.hasAttribute('data-print-hide')).toBe(true);
+    expect(slot.hasAttribute('data-block-id')).toBe(false);
+    expect(slot.querySelector('[data-block-id]')).toBeNull();
+    // The body goes on right after it.
+    expect((slot.nextElementSibling as HTMLElement).textContent).toBe('Ship the same build twice.');
+  });
+
+  test.skipIf(!hasDom)('with no leading # title: at the top of the body, before the first block', async () => {
+    for (const markdown of [
+      'Intro first.\n\n# A later title\n\nBody.',
+      '## A second-level heading\n\nBody.',
+    ]) {
+      const { article } = await mount({ markdown, belowTitle: SLOT });
+      const slot = article.querySelector<HTMLElement>('[data-viewer-below-title]')!;
+      expect(slot.dataset.placement).toBe('top');
+      const firstBlock = article.querySelector<HTMLElement>('[data-block-id]')!;
+      expect(slot.compareDocumentPosition(firstBlock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(slot.nextElementSibling).toBe(firstBlock);
+      await unmount();
+    }
+  });
+});
+
+describe('Viewer belowTitle: comment positions ignore the slot', () => {
+  test.skipIf(!hasDom)('a comment made on the paragraph after the title stores the same metas with and without the slot', async () => {
+    const made: Annotation[] = [];
+    // Redline creates the annotation straight from the selection.
+    const plain = await mount({ passProp: false, mode: 'redline', onAddAnnotation: (a) => made.push(a) });
+    await select(plain.article, 'same build', 1);
+    await unmount();
+
+    const slotted = await mount({ belowTitle: SLOT, mode: 'redline', onAddAnnotation: (a) => made.push(a) });
+    // nth 2: the slot's own "Depends on" link holds the phrase first.
+    await select(slotted.article, 'same build', 2);
+    expect(made).toHaveLength(2);
+    const [without, withSlot] = made;
+    expect(withSlot!.originalText).toBe('same build');
+    expect(withSlot!.startMeta).toEqual(without!.startMeta);
+    expect(withSlot!.endMeta).toEqual(without!.endMeta);
+    // ...and that is the SECOND paragraph's index without the slot, which a
+    // counted slot (two <p>) would have pushed past.
+    expect(without!.startMeta!.parentTagName).toBe('P');
+  });
+
+  test.skipIf(!hasDom)('a stored comment on the second of two identical paragraphs restores onto that paragraph with the slot present', async () => {
+    const plain = await mount({ passProp: false });
+    const paragraphs: HTMLElement[] = [...plain.article.getElementsByTagName('p')];
+    const target = paragraphsByText(plain.article, 'Ship the same build twice.')[1]!;
+    const index = paragraphs.indexOf(target);
+    await unmount();
+
+    const draft: Annotation = {
+      id: 'annBelowTitle',
+      blockId: 'any',
+      startOffset: 5,
+      endOffset: 15,
+      type: AnnotationType.COMMENT,
+      text: 'which build?',
+      originalText: 'same build',
+      createdA: 1,
+      startMeta: { parentTagName: 'P', parentIndex: index, textOffset: 9 },
+      endMeta: { parentTagName: 'P', parentIndex: index, textOffset: 19 },
+    };
+
+    for (const props of [{ passProp: false }, { belowTitle: SLOT }] as const) {
+      const { article, ref } = await mount(props);
+      await act(async () => { ref.current!.applySharedAnnotations([draft]); });
+      const marks = [...article.querySelectorAll<HTMLElement>(`[data-highlight-id="${draft.id}"], [data-bind-id="${draft.id}"]`)];
+      expect(marks.map((m) => m.textContent).join('')).toBe('same build');
+      const expected = paragraphsByText(article, 'Ship the same build twice.')[1]!;
+      expect(marks.every((m) => expected.contains(m))).toBe(true);
+      expect(article.querySelector('[data-viewer-below-title] mark')).toBeNull();
+      await unmount();
+    }
+  });
+
+  test.skipIf(!hasDom)('a selection inside the slot makes no comment and opens no toolbar', async () => {
+    const made: Annotation[] = [];
+    const redline = await mount({ belowTitle: SLOT, mode: 'redline', onAddAnnotation: (a) => made.push(a) });
+    await select(redline.article.querySelector('[data-viewer-below-title]')!, 'Pull requests');
+    expect(made).toEqual([]);
+    expect(redline.article.querySelector('[data-viewer-below-title] mark')).toBeNull();
+    await unmount();
+
+    const selection = await mount({ belowTitle: SLOT, mode: 'selection' });
+    await select(selection.article.querySelector('[data-viewer-below-title]')!, 'Depends on');
+    expect(document.querySelector('.annotation-toolbar')).toBeNull();
+  });
+});

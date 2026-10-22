@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState, useCallback, type RefObject } from 'react';
 import Highlighter from '@plannotator/web-highlighter';
 import type { Annotation, EditorMode, HostDraft, ImageAttachment } from '../types';
+import { metaWithBelowTitle, metaWithoutBelowTitle } from '../utils/belowTitleSlot';
 import { AnnotationType } from '../types';
 import type { QuickLabel } from '../utils/quickLabels';
 import {
@@ -1290,7 +1291,12 @@ export function useAnnotationHighlighter({
 
       if (ann.startMeta && ann.endMeta) {
         try {
-          highlighter.fromStore(ann.startMeta, ann.endMeta, ann.originalText, ann.id);
+          highlighter.fromStore(
+            metaWithBelowTitle(containerRef.current, ann.startMeta),
+            metaWithBelowTitle(containerRef.current, ann.endMeta),
+            ann.originalText,
+            ann.id,
+          );
           const restoredDoms = highlighter.getDoms(ann.id);
           if (restoredDoms && restoredDoms.length > 0) {
             const restoredText = paintedTextOf(restoredDoms as HTMLElement[]);
@@ -1512,6 +1518,15 @@ export function useAnnotationHighlighter({
 
     highlighter.on(Highlighter.event.CREATE, ({ sources, type }: { sources: any[]; type?: string }) => {
       if (type === 'from-store') return;
+      // Store positions as if a host's `belowTitle` slot were not there, so
+      // its contents never renumber a comment's parent element (identity
+      // when the document has no slot). See utils/belowTitleSlot.
+      for (const created of sources) {
+        const startMeta = metaWithoutBelowTitle(containerRef.current, created.startMeta);
+        const endMeta = metaWithoutBelowTitle(containerRef.current, created.endMeta);
+        if (startMeta !== created.startMeta) created.startMeta = startMeta;
+        if (endMeta !== created.endMeta) created.endMeta = endMeta;
+      }
       if (sources.length > 0) {
         const source = sources[0];
         const doms = highlighter.getDoms(source.id);

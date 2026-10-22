@@ -238,6 +238,32 @@ exactly. The standalone `StickyHeaderLane` remains supported for Plannotator's
 hidden-at-rest ghost lane, but its always-visible mode is an overlay and is not
 the in-flow host integration.
 
+#### Content under the title (`Viewer.belowTitle`; unreleased)
+
+`belowTitle?: ReactNode` draws a host's node right under the document's
+title, e.g. a references block (pull requests, depends on, links, referenced
+by). Use it instead of inserting into the Viewer's DOM.
+
+- **Where.** When the body's first block is a level-1 heading, right after
+  that heading (`data-placement="below-title"`). Otherwise (a body that opens
+  with a paragraph, a `## heading`, or a `# title` further down) at the top of
+  the body, before the first block and after the frontmatter card
+  (`data-placement="top"`). The heading itself is unchanged.
+- **Outside the document text.** The wrapper `[data-viewer-below-title]` is
+  `annotation-exclude` (no comment starts in it, its text is never searched
+  or quoted), `data-pinpoint-ignore` (pinpoint and Vim skip it),
+  `data-print-hide`, and carries no `data-block-id`; heading slugs, the TOC,
+  exports and share links come from `blocks` and never see it.
+- **Comment positions ignore it.** web-highlighter's `startMeta`/`endMeta`
+  count elements by tag across the whole article, so a `<p>` or `<a>` in the
+  slot would renumber later comments. The highlighter stores and restores
+  positions as if the slot were not there, so the same comment has the same
+  metas with or without the slot, and with any slot contents.
+- **Absent is absent.** `undefined`, `null` and booleans draw no wrapper; the
+  DOM is exactly the one without the prop.
+
+See HANDOFF.md § "Viewer `belowTitle` (unreleased)".
+
 ### Diagram engine (`components/diagram`; 0.41.0)
 
 One renderer slot and one canvas render every Mermaid and Graphviz diagram — the fences in `Viewer` (`MermaidBlock`, `GraphvizBlock`), their popout, and whatever a host renders itself. `DiagramViewer` from `@plannotator/ui/components/diagram` takes `kind`, `source`, `theme` (`{ colorTheme, mode, shadowAmount? }`), `comments: DiagramComment[]` and `onCreateComment(anchor, text, additionalTargets)`; pass `onSave(source) => Promise<{ status: 'ok' } | { status: 'stale', currentSource }>` to get the Source pane (left of the canvas on desktop, under it on the phone; `readOnlySource` shows it without Save), and `sourceOpen` to toggle it. Zoom, pan and fit are the canvas's (wheel, drag, `+` `-` `0`, arrow keys); a click opens the composer at the part beneath while a drag pans (4 px threshold, 10 px for a finger), nothing highlights on a plain mouse-over (the ring under the pointer needs the platform modifier held), every edge carries an invisible 14 px hit path in one top layer and a click is resolved by priority over everything under the pointer (node, then edge, then cluster; an edge label is its edge), a click on no part comments on the whole diagram (kind `diagram`), sequence diagrams are addressable (actors, messages, notes, frames), a saved comment paints a ring and a numbered badge from the array order, and every comment re-resolves against each render through the engine's finder (id, then label, then unanchored — reported through `onUnanchoredChange`). The anchor is `DiagramAnchor` from `@plannotator/core/diagram-anchor` (`{ v: 1, family, kind, id | from + to, label, sourceLine }`, document lines), and Plannotator stores it as `Annotation.diagramAnchor`. Runtime slots: `utils/mermaid` (as before) and `utils/graphviz` (new, same shape, `@viz-js/viz` pinned `3.30.0`), each lazy on first use or filled by the host. `DiagramPopout` is the full-size viewer in the `PopoutDialog` chrome. See HANDOFF.md § "Diagram engine (0.41.0)" for every export, the adapter, the sanitizer and the migration notes.
