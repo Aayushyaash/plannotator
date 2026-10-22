@@ -138,7 +138,7 @@ describe("the person's Done", () => {
     const command = commands[0]!;
     const at = (await actionOf(server, sent.thread_id, sent.message_id)).action_result!.at;
     const body = [
-      "Did 1 action.",
+      "Did 1 action item.",
       "",
       "## Actions you asked for",
       "",
@@ -177,7 +177,7 @@ describe("the person's Done", () => {
     expect(await mark(server, sent.message_id, key, { outcome: "cant", note: "I'm not in the acme team; ask Dana." }).then((r) => r.status)).toBe(200);
     await sleep(DELAY + 250);
     const [command] = await poll(server);
-    expect(command!.body).toBe("Couldn't do 1 action.\n\n## Actions you asked for\n\n0 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nCan't do it: I'm not in the acme team; ask Dana.");
+    expect(command!.body).toBe("Couldn't do 1 action item.\n\n## Actions you asked for\n\n0 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nCan't do it: I'm not in the acme team; ask Dana.");
   });
 
   test("the route's guards: a stale tab, another site, a question's key, an unknown message", async () => {
@@ -206,7 +206,7 @@ describe("archive holds a pending Done back; Unarchive sends it", () => {
     await sleep(100);
     const commands = await poll(server);
     expect(commands).toHaveLength(1);
-    expect(commands[0]!.body.startsWith("Did 1 action.")).toBe(true);
+    expect(commands[0]!.body.startsWith("Did 1 action item.")).toBe(true);
     expect((await actionOf(server, sent.thread_id, sent.message_id)).state).toBe("sent");
   });
 

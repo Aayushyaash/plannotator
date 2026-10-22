@@ -1235,7 +1235,7 @@ curl -sS -X POST "$INBOX/api/inbox/device/messages/msg_01K7000000000000000000002
   -d '{"idempotency_key":"00000000-0000-4000-8000-000000000063","outcome":"done","note":"Approved."}'
 ```
 
-`{ "questions": [ { "key": "a-4f2c19e0", "kind": "action", "state": "picked", "action_result": { "outcome": "done", "note": "Approved.", "at": "…", "by": "person" }, "...": "" } ] }`. The same key again answers the recorded result (`Idempotent-Replayed: true`). Undo inside the window: the same route with `"outcome": null` under a new key. Once the window passes, the Inbox writes the person's reply (`action_report` names the action items it reports; its body starts "Did 1 action." and carries "## Actions you asked for") and delivers it like any reply; the phone's thread sees it as a new person message and the action item as `sent`.
+`{ "questions": [ { "key": "a-4f2c19e0", "kind": "action", "state": "picked", "action_result": { "outcome": "done", "note": "Approved.", "at": "…", "by": "person" }, "...": "" } ] }`. The same key again answers the recorded result (`Idempotent-Replayed: true`). Undo inside the window: the same route with `"outcome": null` under a new key. Once the window passes, the Inbox writes the person's reply (`action_report` names the action items it reports; its body starts "Did 1 action item." and carries "## Actions you asked for") and delivers it like any reply; the phone's thread sees it as a new person message and the action item as `sent`.
 
 Re-ask (7.61) includes the session's open action items with its open questions (owner, #2059): the note's `reask` ids may name `a-…` keys. An action item the person marked inside its Undo window is not open and is left out.
 

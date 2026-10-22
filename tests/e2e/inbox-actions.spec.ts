@@ -203,7 +203,7 @@ test('Done: the toast and the card offer Undo; then the agent gets the reply wit
   const answer = await claude.waitForReply(threads.vercel, 40);
   expect(answer.status).toBe('replied');
   const body = (answer.reply as { body: string }).body;
-  expect(body.startsWith('Did 1 action.\n\n## Actions you asked for\n\n1 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nDone, ')).toBe(true);
+  expect(body.startsWith('Did 1 action item.\n\n## Actions you asked for\n\n1 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nDone, ')).toBe(true);
   expect(body.endsWith('\nNote: Approved. I also fixed the preview env var while I was there.')).toBe(true);
   await expect(card).toHaveAttribute('data-action-state', 'done', { timeout: 20_000 });
   await expect(card.locator('[data-action-settled]')).toContainText('Sent to Claude Code.');

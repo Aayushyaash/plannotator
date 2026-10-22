@@ -166,7 +166,7 @@ describe("what the agent gets", () => {
     const done = record({ revision: 1, action_result: { outcome: "done", note: "Approved. I also fixed the preview env var while I was there.", at: "2026-10-21T15:12:00.000Z", by: "person" } });
     expect(composeInboxActionsReply({ reported: [done], all: [done], timeZone: "UTC" })).toBe(
       [
-        "Did 1 action.",
+        "Did 1 action item.",
         "",
         "## Actions you asked for",
         "",
@@ -183,7 +183,7 @@ describe("what the agent gets", () => {
     const cant = record({ key: "a-2", position: 1, prompt: "Merge PR #12", revision: 1, action_result: { outcome: "cant", note: "I'm not in the acme team; ask Dana.", at: "2026-10-21T15:13:00.000Z", by: "person" } });
     const done = record({ revision: 1, action_result: { outcome: "done", note: null, at: "2026-10-21T15:12:00.000Z", by: "person" } });
     const body = composeInboxActionsReply({ reported: [cant, done], all: [done, cant], timeZone: "UTC" });
-    expect(body.split("\n")[0]).toBe("Did 1 action, couldn't do 1.");
+    expect(body.split("\n")[0]).toBe("Did 1 action item, couldn't do 1.");
     expect(body).toContain("1 of 2 done.");
     expect(body).toContain("### A2. Merge PR #12\nCan't do it: I'm not in the acme team; ask Dana.");
     expect(body.indexOf("### A1.")).toBeLessThan(body.indexOf("### A2."));

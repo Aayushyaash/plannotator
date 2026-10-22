@@ -109,7 +109,7 @@ describe("Done and Can't do it", () => {
     const [reply] = store.settleActions(UNDO_MS);
     expect(reply).toBeDefined();
     expect(reply!).toMatchObject({ author: { kind: "person" }, reply_to: asked.id, action_report: [`${asked.id}/${action.key}`] });
-    expect(reply!.body.startsWith("Did 1 action.\n\n## Actions you asked for\n\n1 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nDone, ")).toBe(true);
+    expect(reply!.body.startsWith("Did 1 action item.\n\n## Actions you asked for\n\n1 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nDone, ")).toBe(true);
     expect(reply!.body.endsWith("\nNote: Approved.")).toBe(true);
     expect(reply!.body).not.toContain(INBOX_ACTIONS_HEADING.toUpperCase());
     expect(actionOf(store, asked.id)).toMatchObject({ state: "sent", sent_reply_id: reply!.id });
@@ -136,7 +136,7 @@ describe("Done and Can't do it", () => {
     clock.now += UNDO_MS;
     const [reply] = store.settleActions(UNDO_MS);
     expect(reply!.body).toBe(
-      "Couldn't do 1 action.\n\n## Actions you asked for\n\n0 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nCan't do it: I'm not in the acme team; ask Dana.",
+      "Couldn't do 1 action item.\n\n## Actions you asked for\n\n0 of 1 done.\n\n### A1. Approve the production deploy on Vercel\nCan't do it: I'm not in the acme team; ask Dana.",
     );
   });
 
@@ -199,7 +199,7 @@ describe("review fixes", () => {
     clock.now += 4_000;
     const replies = store.settleActions(UNDO_MS);
     expect(replies).toHaveLength(1);
-    expect(replies[0]!.body).toContain("Did 2 actions.");
+    expect(replies[0]!.body).toContain("Did 2 action items.");
     expect(replies[0]!.body).toContain("2 of 2 done.");
     expect(replies[0]!.action_report).toHaveLength(2);
   });

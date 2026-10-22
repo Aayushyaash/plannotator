@@ -262,11 +262,11 @@ export function inboxActionTime(at: string, timeZone?: string): string {
   }
 }
 
-const actionsWord = (n: number): string => `${n} action${n === 1 ? "" : "s"}`;
+const actionsWord = (n: number): string => `${n} action item${n === 1 ? "" : "s"}`;
 
 /**
- * The reply a Done or Can't do it sends: "Did 1 action." (or "Couldn't do 1
- * action.", "Did 1 action, couldn't do 1."), then the section listing each
+ * The reply a Done or Can't do it sends: "Did 1 action item." (or "Couldn't do 1
+ * action item.", "Did 1 action item, couldn't do 1."), then the section listing each
  * action item it reports, A-numbered as the card, with "Done, 3:12 PM." and the
  * note, or "Can't do it: <reason>". `all` is the message's action items, for the
  * "x of y done" line (an agent's own `done` counts as done).

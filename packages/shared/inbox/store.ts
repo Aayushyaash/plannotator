@@ -1930,7 +1930,7 @@ export class InboxStore {
 
   /**
    * Send what the person marked once the Undo window passed: one reply per
-   * asking message ("Did 1 action." and the "Actions you asked for"
+   * asking message ("Did 1 action item." and the "Actions you asked for"
    * section), the person's reply like any Send's (delivered by the reply
    * machinery: the wake, wait_for_reply, Send now), the action items marked sent
    * with it first. Returns the replies written.
