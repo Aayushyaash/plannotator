@@ -1352,7 +1352,6 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 .ib-att-t.ib-open-beside { border-color: color-mix(in oklch, var(--primary) 55%, var(--border)); background: color-mix(in oklch, var(--primary) 6%, var(--card)); }
 .ib-view.ib-phone .ib-vbody { grid-template-columns: minmax(0, 1fr); }
 .ib-view.ib-phone .ib-changed { flex-wrap: wrap; padding: 7px 12px; font-size: var(--ib-fs-12-5, 12.5px); }
-.ib-imgstage.ib-swipes { touch-action: pan-y pinch-zoom; }
 @media (prefers-reduced-motion: reduce) { .ib-endnote { transition: none; } }
 .ib-apanel { background: var(--card); border-left: 1px solid color-mix(in oklch, var(--border) 50%, transparent); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 /* A download (a PDF, any other file) takes no comments: no panel unless other files have some (AttachmentPane's hasPanel). */
@@ -1459,6 +1458,9 @@ button.ib-band:hover { background: var(--ib-band-hover-s, var(--ib-band)); }
 .ib-view.ib-fullview.ib-phone .ib-fvchip { bottom: calc(80px + max(var(--ib-fvfoot, 0px), env(safe-area-inset-bottom))); }
 /* the image's size bar moves out from under the toolbar */
 .ib-view.ib-fullview:not(.ib-phone) .ib-imgbar { right: auto; left: 14px; }
+/* and the "Your marked-up copy" chip sits under it */
+.ib-view.ib-fullview:not(.ib-phone) .ib-imgshowing { top: 56px; }
+.ib-view.ib-fullview:not(.ib-phone):has([data-full-view-changed]) .ib-imgshowing { top: 100px; }
 /* The changed chip: the changed line, compact, at the top left. It is a fact about the file, so it does not tuck. */
 .ib-fvver { position: absolute; top: 12px; left: 12px; z-index: 8; display: flex; align-items: center; gap: 8px; min-height: 34px; max-width: calc(100% - 360px); box-sizing: border-box; padding: 6px 12px; border-radius: 10px; background: var(--popover); color: var(--popover-foreground); border: 1px solid color-mix(in oklab, var(--warning) 40%, var(--border)); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28); font-size: var(--ib-fs-13, 13px); line-height: 1.3; }
 :root.light .ib-fvver { box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); }
@@ -1701,19 +1703,11 @@ pre code.pn-code[data-keep-layout] {
 
 /* the image pane: the image on a quiet stage, a composer under it */
 .ib-imgview { position: absolute; inset: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; }
-.ib-imgstage { position: relative; overflow: auto; display: flex; justify-content: center; align-items: flex-start; padding: 28px; background: color-mix(in oklch, var(--muted) 55%, var(--background)); }
-.ib-imgstage img { display: block; border-radius: 4px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 8px 28px rgba(0, 0, 0, 0.14); background: var(--card); }
-.ib-imgstage[data-fit="fit"] { align-items: center; }
-.ib-imgstage[data-fit="fit"] img { max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in; }
-.ib-imgstage[data-fit="fit"][data-tall="true"] { align-items: flex-start; }
-.ib-imgstage[data-fit="fit"][data-tall="true"] img { max-height: none; }
-/* a panorama keeps its height (never more than the pane's) and scrolls sideways from its left edge, rather than fitting to a sliver */
-.ib-imgstage[data-fit="fit"][data-wide="true"] { justify-content: flex-start; }
-.ib-imgstage[data-fit="fit"][data-wide="true"] img { max-width: none; flex: none; }
-/* Actual size: the image's auto margins centre it when it fits; start-aligned, so one wider than the stage overflows to the right only and its left edge stays reachable by scroll (centred, it overflowed both ways). */
-.ib-imgstage[data-fit="actual"] { justify-content: flex-start; }
-.ib-imgstage[data-fit="actual"] img { max-width: none; max-height: none; cursor: zoom-out; margin: auto; }
-.ib-imgstage[data-fit="fit"] img.ib-noup { cursor: default; }
+.ib-imgstage { position: relative; overflow: hidden; display: flex; justify-content: center; align-items: center; padding: 28px; background: color-mix(in oklch, var(--muted) 55%, var(--background)); }
+/* the zoom stage (ui ImageZoomStage) fills the stage; Fit leaves the stage's padding around the image (ImageAttachmentView reads it) */
+.ib-imgstage > .ib-zoomstage { position: absolute; inset: 0; }
+.ib-imgstage .ib-zoomimg { display: block; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 8px 28px rgba(0, 0, 0, 0.14); background: var(--card); }
+.ib-imgstage .ib-zoommarkup { display: block; width: 100%; height: 100%; }
 .ib-imgbar { position: absolute; top: 12px; right: 14px; display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 9px; background: var(--card); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15); z-index: 3; }
 .ib-imgbar .ib-btn { height: 28px; }
 .ib-imgbar .ib-sep { width: 1px; height: 18px; background: var(--border); margin: 0 3px; }
@@ -1784,6 +1778,7 @@ button.ib-vtime:hover { background: color-mix(in oklch, var(--primary) 22%, tran
 .ib-view:not(.ib-phone) .ib-att-t.ib-dlcard { flex-wrap: wrap; }
 .ib-view:not(.ib-phone) .ib-att-t.ib-dlcard .ib-att-text { flex: 1 1 240px; }
 .ib-imgbar .ib-imgsize { font-size: var(--ib-fs-12, 12px); color: var(--muted-foreground); padding: 0 8px; font-variant-numeric: tabular-nums; }
+.ib-imgbar .ib-imgzoom { min-width: 4ch; text-align: right; padding: 0 4px 0 0; }
 
 /* ───────────── Replaced questions (design record, not in this repo; direction A "Quiet") ───────────── */
 /* The old card keeps the answer card's frame (ui QuestionBlock's values) with no controls. */

@@ -762,31 +762,265 @@ test('on an iPhone (WebKit) a tap beside the image closes the single overlay, an
   }
 });
 
-test('the Inbox\'s file viewer at Actual size: an image wider than the stage scrolls to its left edge, not only its right', async ({ browser }) => {
+test('the Inbox\'s file viewer zooms like the lightbox: Ctrl + wheel keeps the pixel under the pointer, drag pans, ← steps while zoomed, a drawing stays on the image', async ({ browser }) => {
   const page = world.page;
+  const zoomShots = resolve(process.env.PLANNOTATOR_E2E_ZOOM_SHOTS ?? join(shotsDir, 'zoom'));
+  mkdirSync(zoomShots, { recursive: true });
+  await page.setViewportSize({ width: 1280, height: 800 });
   writeFileSync(join(world.project, 'design', 'wide.png'), await png(browser, screen('Checkout', 'Wide', '#2f6f5e', FIELDS), 2400, 1200));
-  const sent = await world.claude.send({ project_path: world.project, subject: 'A wide screen', thread: 'wide-screen', body: ['The wide screen:', '', '![Wide](design/wide.png)'].join('\n') });
-  await page.goto(`${world.url}#thread=${sent.thread_id as string}`);
-  const inline = page.locator('.ib-body img[data-inline-image]').last();
-  await expect(inline).toBeVisible();
-  await inline.click();
-  const stage = pane().locator('.ib-imgstage');
-  await expect(stage).toHaveAttribute('data-fit', 'fit');
-  await pane().locator('.ib-imgbar').getByRole('button', { name: 'Actual size' }).click();
-  await expect(stage).toHaveAttribute('data-fit', 'actual');
-  const measure = () =>
-    stage.evaluate((el) => {
-      const img = el.querySelector('img')!;
-      const r = img.getBoundingClientRect();
-      const s = el.getBoundingClientRect();
-      return { width: Math.round(r.width), height: Math.round(r.height), left: r.left - s.left, right: s.right - r.right, clientWidth: el.clientWidth };
+  writeFileSync(join(world.project, 'design', 'summary.png'), await png(browser, screen('Checkout', 'Summary', '#7c3aed', '<h3>Order summary</h3><div class="f">Total · $86</div>'), 1200, 760));
+  const sent = await world.claude.send({
+    project_path: world.project,
+    subject: 'Zoom into the checkout',
+    thread: 'zoom-checkout',
+    body: ['The wide screen and the summary:', '', '![Wide](design/wide.png)', '', '![Summary](design/summary.png)'].join('\n'),
+  });
+  const thread = sent.thread_id as string;
+  await page.goto(`${world.url}#thread=${thread}`);
+  const ids = await page.evaluate(async (id) => {
+    const t = (await (await fetch(`/api/inbox/threads/${id}`)).json()).thread;
+    return Object.fromEntries((t.messages[0].inline_images as { name: string; id: string }[]).map((i) => [i.name, i.id]));
+  }, thread);
+  await page.locator(`.ib-body img[data-inline-image="${ids['summary.png']}"]`).click();
+  await expect(pane()).toHaveAttribute('data-attachment-pane', ids['summary.png']!);
+  // Beside the thread: leave full screen.
+  await page.locator('[data-full-view-exit="exit"]').click();
+  await expect(pane()).not.toHaveClass(/ib-full/);
+  const zoomStage = pane().locator('[data-image-zoom-stage]');
+  const image = zoomStage.locator('img[data-lightbox-image]');
+  await expect(zoomStage).toHaveAttribute('data-image-zoom-stage', 'fit');
+  await expect(pane().locator('[data-image-zoom]')).toHaveText(/^Zoom \d+%$/);
+  // The image's box relative to the stage, so a stage that moves (a layout settling) is not read as a pan.
+  const rect = () =>
+    zoomStage.evaluate((stage) => {
+      const r = stage.querySelector('img[data-lightbox-image]')!.getBoundingClientRect();
+      const s = stage.getBoundingClientRect();
+      return { left: r.left - s.left, top: r.top - s.top, width: r.width, height: r.height, stageWidth: s.width, stageHeight: s.height };
     });
-  await expect.poll(async () => (await measure()).width).toBe(2400);
-  expect((await measure()).height).toBe(1200);
-  // Scrolled all the way left, the image's left edge is in view (centred, a third of it was cut off with no way to scroll to it).
-  await stage.evaluate((el) => el.scrollTo(0, 0));
-  expect((await measure()).left).toBeGreaterThanOrEqual(0);
-  await shot(page, '15-inbox-actual-size-wide');
-  await stage.evaluate((el) => el.scrollTo(el.scrollWidth, 0));
-  expect((await measure()).right).toBeGreaterThanOrEqual(0);
+  // Leaving full screen gives the list (and maybe the sidebar) back with a spring: wait until the stage holds still.
+  const stageBox = async () => JSON.stringify(await zoomStage.boundingBox());
+  await expect
+    .poll(async () => {
+      const first = await stageBox();
+      await page.waitForTimeout(150);
+      return first === (await stageBox());
+    })
+    .toBe(true);
+  const box = (await zoomStage.boundingBox())!;
+  const px = box.x + box.width * 0.55;
+  const py = box.y + box.height * 0.45;
+  await page.mouse.move(px, py);
+  await page.keyboard.down('Control');
+  for (let i = 0; i < 4; i += 1) await page.mouse.wheel(0, -100);
+  await page.keyboard.up('Control');
+  await expect(zoomStage).toHaveAttribute('data-image-zoom-stage', 'zoom');
+  // mouse.wheel returns before the page handles the event: let the notches land.
+  await page.waitForTimeout(300);
+  // One more notch: the image pixel under the pointer stays under it, on both axes.
+  const before = await rect();
+  const u = (px - box.x - before.left) / before.width;
+  const v = (py - box.y - before.top) / before.height;
+  await page.keyboard.down('Control');
+  await page.mouse.wheel(0, -100);
+  await page.keyboard.up('Control');
+  await expect.poll(async () => (await rect()).width).toBeGreaterThan(before.width);
+  await page.waitForTimeout(200);
+  const after = await rect();
+  expect(Math.abs(box.x + after.left + u * after.width - px)).toBeLessThan(1);
+  expect(Math.abs(box.y + after.top + v * after.height - py)).toBeLessThan(1);
+  // The page itself never zoomed.
+  expect(await page.evaluate(() => window.visualViewport?.scale ?? 1)).toBe(1);
+  // A drag pans the image with the pointer. The image never leaves the stage (an edge stops the pan), so the
+  // drag stays within the room the image has on each side.
+  const roomLeft = after.left + after.width - after.stageWidth;
+  const roomUp = after.top + after.height - after.stageHeight;
+  expect(roomLeft).toBeGreaterThan(60);
+  expect(roomUp).toBeGreaterThan(40);
+  const dx = -Math.min(120, Math.floor(roomLeft - 20));
+  const dy = -Math.min(80, Math.floor(roomUp - 20));
+  await page.mouse.down();
+  await page.mouse.move(px + dx, py + dy, { steps: 6 });
+  await page.mouse.up();
+  // The last move can land a frame after mouse.up resolves on a slow machine.
+  await expect.poll(async () => Math.round((await rect()).left - after.left)).toBe(dx);
+  const panned = await rect();
+  expect(panned.left - after.left).toBeCloseTo(dx, 0);
+  expect(panned.top - after.top).toBeCloseTo(dy, 0);
+  await page.mouse.move(box.x + 10, box.y + box.height - 10);
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: join(zoomShots, 'zoomed-beside-thread-1280.png') });
+  // ← steps while zoomed (the image no longer keeps the arrows); the next file opens at Fit.
+  await expect(zoomStage).toBeFocused();
+  await page.keyboard.press('ArrowLeft');
+  await expect(pane()).toHaveAttribute('data-attachment-pane', ids['wide.png']!);
+  await expect(pane().locator('[data-image-zoom-stage]')).toHaveAttribute('data-image-zoom-stage', 'fit');
+  // A panorama at Actual size starts at its left edge and pans to its right.
+  await pane().locator('.ib-imgbar').getByRole('button', { name: 'Actual size' }).click();
+  await expect(pane().locator('[data-image-zoom-stage]')).toHaveAttribute('data-image-zoom-stage', 'actual');
+  const edges = () =>
+    pane().locator('[data-image-zoom-stage]').evaluate((el) => {
+      const r = el.querySelector('img')!.getBoundingClientRect();
+      const s = el.getBoundingClientRect();
+      return { width: Math.round(r.width), left: r.left - s.left, right: s.right - r.right };
+    });
+  await expect.poll(async () => (await edges()).width).toBe(2400);
+  expect(Math.abs((await edges()).left)).toBeLessThan(1);
+  await pane().locator('[data-image-zoom-stage]').hover();
+  await page.mouse.wheel(4000, 0);
+  await expect.poll(async () => Math.abs((await edges()).right)).toBeLessThan(1);
+  await page.keyboard.press('ArrowRight');
+  await expect(pane()).toHaveAttribute('data-attachment-pane', ids['summary.png']!);
+
+  // Full screen, a comment with a drawing selected, zoomed: the drawing lies on the image in its transform.
+  await pane().locator('[data-full-screen-toggle]').click();
+  await expect(pane()).toHaveClass(/ib-full/);
+  await pane().getByRole('button', { name: 'Mark up' }).last().click();
+  const canvas = page.locator('[data-pn-image-annotator-stage] canvas').first();
+  await expect(canvas).toBeVisible();
+  // The canvas starts at the 300 × 150 default and takes the image's shape once the annotator's image has loaded: draw only then.
+  await expect
+    .poll(async () => {
+      const b = await canvas.boundingBox();
+      return b && b.width > 300 && Math.abs(b.width / b.height - 1200 / 760) < 0.02;
+    })
+    .toBe(true);
+  await expect.poll(() => page.locator('[data-pn-image-annotator-stage] img').first().evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
+  const c = (await canvas.boundingBox())!;
+  // A circle around the "Total" field: the annotator centres it between the drag's ends.
+  const target = { u: 0.5, v: 0.22 };
+  const reach = 0.1;
+  await page.locator('[data-pn-image-annotator-toolbar] button[title="Circle (3)"]').click();
+  await page.mouse.move(c.x + c.width * (target.u - reach), c.y + c.height * target.v);
+  await page.mouse.down();
+  await page.mouse.move(c.x + c.width * (target.u + reach), c.y + c.height * target.v, { steps: 10 });
+  await page.mouse.up();
+  await page.keyboard.press('Enter');
+  await expect(pane().locator('.ib-imgcompose .ib-markup img')).toBeVisible();
+  await pane().getByRole('textbox', { name: 'Comment on summary.png' }).fill('Circle the total; it should be bigger.');
+  await pane().getByRole('button', { name: 'Comment', exact: true }).click();
+  await page.locator('[data-full-view-comments]').click();
+  const drawer = pane().locator('[data-comments-drawer="open"]');
+  await expect(drawer).toBeVisible();
+  await drawer.getByText('Circle the total; it should be bigger.').click();
+  const overlay = pane().locator('[data-zoom-overlay] img[data-markup-overlay]');
+  await expect(overlay).toBeVisible();
+  await expect.poll(() => overlay.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
+  // The kept drawing: where its pixels differ from the image, in the image's own pixels.
+  const ink = await pane().locator('[data-image-zoom-stage]').evaluate(async (el) => {
+    const read = async (src: string) => {
+      const bitmap = await createImageBitmap(await (await fetch(src)).blob());
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(bitmap, 0, 0);
+      return ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+    };
+    const base = await read(el.querySelector<HTMLImageElement>('img[data-lightbox-image]')!.src);
+    const drawn = await read(el.querySelector<HTMLImageElement>('img[data-markup-overlay]')!.src);
+    let minX = Infinity, minY = Infinity, maxX = -1, maxY = -1, r = 0, g = 0, b = 0, n = 0;
+    for (let y = 0; y < base.height; y += 1) {
+      for (let x = 0; x < base.width; x += 1) {
+        const i = (y * base.width + x) * 4;
+        const d = Math.abs(base.data[i]! - drawn.data[i]!) + Math.abs(base.data[i + 1]! - drawn.data[i + 1]!) + Math.abs(base.data[i + 2]! - drawn.data[i + 2]!);
+        if (d < 120) continue;
+        minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        r += drawn.data[i]!; g += drawn.data[i + 1]!; b += drawn.data[i + 2]!; n += 1;
+      }
+    }
+    return { width: base.width, height: base.height, minX, minY, maxX, maxY, color: [r / n, g / n, b / n] };
+  });
+  expect(ink.width).toBe(1200);
+  // The circle's centre is where it was drawn, to within 3 image pixels; its radius is the drag's half-length.
+  expect(Math.abs((ink.minX + ink.maxX) / 2 - target.u * 1200)).toBeLessThan(3);
+  expect(Math.abs((ink.minY + ink.maxY) / 2 - target.v * 760)).toBeLessThan(3);
+  expect(Math.abs((ink.maxX - ink.minX) / 2 - reach * 1200)).toBeLessThan(8);
+
+  /** Where the drawing's colour is on the screen, inside the stage, in page pixels. */
+  const inkOnScreen = async () => {
+    const box = (await pane().locator('[data-image-zoom-stage]').boundingBox())!;
+    const shotPng = await page.screenshot({ clip: box });
+    const found = await page.evaluate(async ({ data, color }) => {
+      // The window's CSP lets images load data: URLs (connect-src does not).
+      const pic = new Image();
+      pic.src = `data:image/png;base64,${data}`;
+      await pic.decode();
+      const bitmap = await createImageBitmap(pic);
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(bitmap, 0, 0);
+      const px = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+      let minX = Infinity, minY = Infinity, maxX = -1, maxY = -1;
+      for (let y = 0; y < bitmap.height; y += 1) {
+        for (let x = 0; x < bitmap.width; x += 1) {
+          const i = (y * bitmap.width + x) * 4;
+          if (Math.abs(px[i]! - color[0]!) + Math.abs(px[i + 1]! - color[1]!) + Math.abs(px[i + 2]! - color[2]!) > 60) continue;
+          minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        }
+      }
+      return { minX, minY, maxX, maxY };
+    }, { data: shotPng.toString('base64'), color: ink.color });
+    return { cx: box.x + (found.minX + found.maxX) / 2, cy: box.y + (found.minY + found.maxY) / 2, radius: (found.maxX - found.minX) / 2 };
+  };
+  /** Where the target is on the screen now, from the image as it is placed on the stage. */
+  const targetOnScreen = async () => {
+    const r = await image.evaluate((img) => img.getBoundingClientRect());
+    return { x: r.left + target.u * r.width, y: r.top + target.v * r.height, scale: r.width / 1200 };
+  };
+  const full = (await pane().locator('[data-image-zoom-stage]').boundingBox())!;
+  await page.mouse.move(full.x + 20, full.y + full.height - 20);
+  for (const zoomed of [false, true]) {
+    if (zoomed) {
+      // Zoom in about the circle: it grows on screen and stays on the field.
+      const at = await targetOnScreen();
+      await page.mouse.move(at.x, at.y);
+      await page.keyboard.down('Control');
+      for (let i = 0; i < 2; i += 1) await page.mouse.wheel(0, -100);
+      await page.keyboard.up('Control');
+      await expect(pane().locator('[data-image-zoom-stage]')).toHaveAttribute('data-image-zoom-stage', 'zoom');
+      await page.mouse.move(full.x + 20, full.y + full.height - 20);
+    }
+    await page.waitForTimeout(300);
+    const seen = await inkOnScreen();
+    const want = await targetOnScreen();
+    expect(Math.abs(seen.cx - want.x), `circle across, ${zoomed ? 'zoomed' : 'at Fit'}`).toBeLessThan(4);
+    expect(Math.abs(seen.cy - want.y), `circle down, ${zoomed ? 'zoomed' : 'at Fit'}`).toBeLessThan(4);
+    expect(Math.abs(seen.radius - reach * 1200 * want.scale), `circle size, ${zoomed ? 'zoomed' : 'at Fit'}`).toBeLessThan(6);
+  }
+  const aligned = await pane().locator('[data-image-zoom-stage]').evaluate((el) => {
+    const img = el.querySelector<HTMLElement>('img[data-lightbox-image]')!;
+    const layer = el.querySelector<HTMLElement>('[data-zoom-overlay]')!;
+    const a = img.getBoundingClientRect();
+    const b = layer.getBoundingClientRect();
+    return { same: img.style.transform === layer.style.transform, dx: Math.abs(a.left - b.left) + Math.abs(a.width - b.width), dy: Math.abs(a.top - b.top) + Math.abs(a.height - b.height) };
+  });
+  expect(aligned).toEqual({ same: true, dx: 0, dy: 0 });
+  await page.mouse.move(full.x + 20, full.y + full.height - 20);
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: join(zoomShots, 'full-screen-zoomed-with-drawing-1280.png') });
+  await page.keyboard.press('Escape');
+
+  // On a phone: a double tap zooms, one finger pans it, the size bar says how far.
+  const { defaultBrowserType: _ignored, ...device } = devices['iPhone 15'];
+  const phoneBrowser = await webkit.launch({ args: [] });
+  try {
+    const context = await phoneBrowser.newContext(device);
+    const phone = await context.newPage();
+    await phone.emulateMedia({ reducedMotion: 'reduce' });
+    await phone.goto(`${world.url}#thread=${thread}`);
+    const inline = phone.locator(`.ib-body img[data-inline-image="${ids['summary.png']}"]`);
+    await inline.scrollIntoViewIfNeeded();
+    await inline.click();
+    const stage = phone.locator('[data-attachment-pane] [data-image-zoom-stage]');
+    await expect(stage).toHaveAttribute('data-image-zoom-stage', 'fit');
+    const p = (await stage.boundingBox())!;
+    await phone.touchscreen.tap(p.x + p.width / 2, p.y + p.height / 2);
+    await phone.touchscreen.tap(p.x + p.width / 2, p.y + p.height / 2);
+    await expect(stage).toHaveAttribute('data-image-zoom-stage', 'zoom');
+    await phone.waitForTimeout(300);
+    await phone.screenshot({ path: join(zoomShots, 'phone-zoomed.png') });
+    await context.close();
+  } finally {
+    await phoneBrowser.close();
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  expect(world.errors.filter((e) => !/HTTP 404 \/favicon/.test(e))).toEqual([]);
 });

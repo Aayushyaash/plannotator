@@ -80,7 +80,7 @@ export function stepAnnouncement(steps: readonly AttachmentStep[], index: number
 /** Where focus is a place to type: the shared rule (shortcuts/guards.ts), kept here for the files that import it from stepping. */
 export { isEditableTarget };
 
-/** Elements that use the arrow keys themselves (the diagram canvas pans, a zoomed image scrolls, menus move). */
+/** Elements that use the arrow keys themselves (the diagram canvas pans, a focused video seeks, menus move). */
 const ARROW_OWNERS =
   '[data-claims-arrows="true"], [data-diagram-canvas], [role="menu"], [role="menubar"], [role="listbox"], [role="tablist"], [role="radiogroup"], [role="slider"], [role="tree"], [role="grid"]';
 
