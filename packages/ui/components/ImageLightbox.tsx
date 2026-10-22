@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ImagePeek, type ImagePeekHandle, type ImagePeekRow } from './ImagePeek';
+import { ImageZoomStage, type ZoomMode } from './ImageZoomStage';
 
 /** One image of a document, for the lightbox's stepping (`images`). */
 export interface LightboxImage {
@@ -73,8 +74,15 @@ const ICON = { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke
  * viewer: full screen, `2 of 4 · in “Options”`, ← → (and `]` `[`) through the
  * document's images, stopping at the ends, Actual size, and the same peek
  * from the pill under the image. No pen, no comments: there the person
- * annotates the document itself. Without `images` it is exactly the single
- * image overlay it always was.
+ * annotates the document itself. Without `images` it is the single image
+ * overlay it always was (a click beside the image closes it).
+ *
+ * Both zoom (#2067, `ImageZoomStage`): Ctrl/⌘ + wheel and a trackpad pinch
+ * zoom about the pointer, a plain wheel scrolls an image larger than the
+ * screen and zooms one that fits, drag (or one finger) pans, two fingers
+ * pinch, a double click toggles Fit and 2×, Fit to 800%. The stepping header
+ * shows the scale beside Fit / Actual size, which resets it. No keys were
+ * added; stepping to another image starts at Fit.
  */
 export const ImageLightbox: React.FC<{
   src: string;
@@ -88,7 +96,8 @@ export const ImageLightbox: React.FC<{
   onCloseRef.current = onClose;
   const stepping = !!images && images.length > 1;
   const [index, setIndex] = useState(() => Math.max(0, images?.findIndex((i) => i.src === src) ?? 0));
-  const [fit, setFit] = useState<'fit' | 'actual'>('fit');
+  const [zoomMode, setZoomMode] = useState<ZoomMode>('fit');
+  const [scale, setScale] = useState<number | null>(null);
   const [peekOpen, setPeekOpen] = useState(false);
   const [endNote, setEndNote] = useState<string | null>(null);
   const [announced, setAnnounced] = useState('');
@@ -113,7 +122,8 @@ export const ImageLightbox: React.FC<{
   };
   const go = (next: number) => {
     setIndex(next);
-    setFit('fit');
+    setZoomMode('fit');
+    setScale(null);
     const image = images![next]!;
     setAnnounced(`${next + 1} of ${images!.length}, ${lightboxImageName(image)}${image.section ? `, in “${image.section}”` : ''}`);
   };
@@ -190,17 +200,23 @@ export const ImageLightbox: React.FC<{
         aria-modal="true"
         aria-label={alt || 'Image'}
         data-image-lightbox=""
-        className="fixed inset-0 z-[200] flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm cursor-zoom-out outline-none"
-        onClick={onClose}
+        className="fixed inset-0 z-[200] bg-black/80 text-white backdrop-blur-sm outline-none"
       >
-        <img
+        <ImageZoomStage
+          key={src}
           src={src}
           alt={alt}
-          className="max-w-[90vw] max-h-[85vh] object-contain rounded-lg shadow-2xl"
-          onClick={(e) => e.stopPropagation()}
+          mode={zoomMode}
+          onModeChange={setZoomMode}
+          inset={{ x: 0.9, y: 0.85 }}
+          onBackgroundTap={onClose}
+          className="absolute inset-0"
+          imageClassName="shadow-2xl"
+          radius={8}
+          stageAttributes={{ 'data-lightbox-stage': zoomMode }}
         />
         {alt && (
-          <div className="mt-3 text-sm text-white/70 max-w-[90vw] text-center truncate">{alt}</div>
+          <div className="pointer-events-none absolute inset-x-0 bottom-[2.5vh] mx-auto max-w-[90vw] truncate text-center text-sm text-white/70">{alt}</div>
         )}
       </div>
     );
@@ -231,14 +247,19 @@ export const ImageLightbox: React.FC<{
           </span>
         )}
         <span className="flex-1" />
+        {scale !== null && (
+          <span className="text-[13px] tabular-nums text-muted-foreground" data-lightbox-zoom="">
+            {Math.round(scale * 100)}%
+          </span>
+        )}
         <button
           type="button"
           className="h-9 rounded-md border border-border bg-card px-3 text-[13.5px] hover:bg-muted"
-          onClick={() => setFit((f) => (f === 'fit' ? 'actual' : 'fit'))}
-          aria-pressed={fit === 'actual'}
+          onClick={() => setZoomMode((m) => (m === 'fit' ? 'actual' : 'fit'))}
+          aria-pressed={zoomMode !== 'fit'}
           data-lightbox-fit=""
         >
-          {fit === 'fit' ? 'Actual size' : 'Fit'}
+          {zoomMode === 'fit' ? 'Actual size' : 'Fit'}
         </button>
         <button type="button" className="flex h-9 w-9 items-center justify-center rounded-md border border-border bg-card hover:bg-muted" onClick={onClose} aria-label="Close" data-lightbox-close="">
           <svg {...ICON}>
@@ -252,21 +273,17 @@ export const ImageLightbox: React.FC<{
             <path d="m15.75 19.5-7.5-7.5 7.5-7.5" />
           </svg>
         </button>
-        <div className={`flex min-h-0 min-w-0 flex-1 self-stretch ${fit === 'fit' ? 'items-center justify-center' : 'overflow-auto'}`} data-lightbox-stage={fit}>
-          <img
-            key={current.src}
-            src={current.src}
-            alt={current.alt}
-            draggable={false}
-            // Actual size: auto margins keep the image from being stretched to
-            // the stage's height (a flex item's default), centre it when it is
-            // smaller than the stage, and resolve to 0 when it is larger, so
-            // the stage scrolls from its top-left edge and every part is
-            // reachable. shrink-0 keeps it at its natural width (#2067).
-            className={fit === 'fit' ? 'max-h-full max-w-full rounded-md object-contain shadow-xl' : 'm-auto max-w-none shrink-0 rounded-md'}
-            data-lightbox-image=""
-          />
-        </div>
+        <ImageZoomStage
+          key={current.src}
+          src={current.src}
+          alt={current.alt}
+          mode={zoomMode}
+          onModeChange={setZoomMode}
+          onScaleChange={setScale}
+          className="relative min-h-0 min-w-0 flex-1 self-stretch"
+          imageClassName="shadow-xl"
+          stageAttributes={{ 'data-lightbox-stage': zoomMode }}
+        />
         <button type="button" className={circle} onClick={() => step(1)} aria-label="Next image" aria-disabled={last || undefined} data-lightbox-next="">
           <svg {...ICON}>
             <path d="m8.25 4.5 7.5 7.5-7.5 7.5" />

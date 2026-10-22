@@ -517,11 +517,11 @@ test('Actual size shows an image at its real size: a tall one scrolls, a small o
     const box = page.locator('[data-image-lightbox-stepping]');
     const stage = box.locator('[data-lightbox-stage]');
     const image = box.locator('[data-lightbox-image]');
+    // The image is moved with a transform (zoom, #2067), so its box on screen is what is measured.
     const measure = () =>
       image.evaluate((img: HTMLImageElement) => {
         const r = img.getBoundingClientRect();
         const s = img.parentElement!.getBoundingClientRect();
-        const st = img.parentElement!;
         return {
           width: Math.round(r.width),
           height: Math.round(r.height),
@@ -531,31 +531,33 @@ test('Actual size shows an image at its real size: a tall one scrolls, a small o
           right: s.right - r.right,
           top: r.top - s.top,
           bottom: s.bottom - r.bottom,
-          scrollHeight: st.scrollHeight,
-          scrollWidth: st.scrollWidth,
-          clientHeight: st.clientHeight,
-          clientWidth: st.clientWidth,
+          stageWidth: s.width,
+          stageHeight: s.height,
         };
       });
     // Fit: the tall image fits inside the stage.
     await expect.poll(async () => (await measure()).naturalWidth).toBe(1640);
-    const fitted = await measure();
-    expect(fitted.height).toBeLessThanOrEqual(fitted.clientHeight);
+    await expect.poll(async () => { const m = await measure(); return m.height > 0 && m.height <= m.stageHeight; }).toBe(true);
     await shot(page, '12-actual-size-fit');
-    // Actual size: its own pixels, and the stage scrolls both ways to every edge.
+    // Actual size: its own pixels, read from its top-left corner.
     await box.locator('[data-lightbox-fit]').click();
     await expect(stage).toHaveAttribute('data-lightbox-stage', 'actual');
+    await expect.poll(async () => (await measure()).height).toBe(3470);
     const actual = await measure();
     expect([actual.width, actual.height]).toEqual([1640, 3470]);
-    expect(actual.scrollHeight).toBe(3470);
-    expect(actual.scrollWidth).toBe(1640);
-    expect(actual.top).toBe(0);
-    expect(actual.left).toBe(0);
+    expect(Math.round(actual.top)).toBe(0);
+    expect(Math.round(actual.left)).toBe(0);
+    await expect(box.locator('[data-lightbox-zoom]')).toHaveText('100%');
     await shot(page, '13-actual-size-tall');
-    await stage.evaluate((el) => el.scrollTo(el.scrollWidth, el.scrollHeight));
+    // A plain wheel scrolls it to every edge, as a page scrolls, and never past one.
+    const stageBox = (await stage.boundingBox())!;
+    await page.mouse.move(stageBox.x + stageBox.width / 2, stageBox.y + stageBox.height / 2);
+    await page.mouse.wheel(0, 20_000);
+    await page.mouse.wheel(20_000, 0);
+    await expect.poll(async () => Math.round((await measure()).bottom)).toBe(0);
     const end = await measure();
-    expect(Math.round(end.bottom)).toBe(0);
     expect(Math.round(end.right)).toBe(0);
+    expect(end.height).toBe(3470);
     // A small image at Actual size sits in the middle of the stage, not in a corner.
     await page.keyboard.press('ArrowRight');
     await box.locator('[data-lightbox-fit]').click();
@@ -566,6 +568,115 @@ test('Actual size shows an image at its real size: a tall one scrolls, a small o
     expect(Math.abs(small.left - small.right)).toBeLessThanOrEqual(1);
     expect(Math.abs(small.top - small.bottom)).toBeLessThanOrEqual(1);
     await shot(page, '14-actual-size-small');
+    await context.close();
+  } finally {
+    if (url) await fetch(new URL('/api/exit', url), { method: 'POST' }).catch(() => {});
+    if (child && child.exitCode === null) {
+      await new Promise((done) => {
+        const timer = setTimeout(done, 5_000);
+        child!.once('exit', () => {
+          clearTimeout(timer);
+          done(undefined);
+        });
+      });
+      // inbox-guard: own child (the annotate CLI this test spawned, never an Inbox)
+      if (child.exitCode === null) child.kill('SIGTERM');
+    }
+  }
+});
+
+test('the lightbox zooms: Ctrl + wheel about the pointer, drag pans, a double click toggles Fit and 2×, Fit and stepping reset it (#2067)', async ({ browser }) => {
+  const root = join(world.root, 'zoom');
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, 'wide.png'), await png(browser, screen('Checkout', 'Wide', '#2f6f5e', FIELDS), 2400, 1500));
+  writeFileSync(join(root, 'other.png'), await png(browser, screen('Checkout', 'Other', '#7c3aed', FIELDS), 1200, 800));
+  const doc = join(root, 'PLAN.md');
+  writeFileSync(doc, ['# Zoom', '', '![Wide](wide.png)', '', '![Other](other.png)', ''].join('\n'));
+  const readyFile = join(root, 'ready.jsonl');
+  const env = { PATH: process.env.PATH ?? '', HOME: join(world.root, 'home'), PLANNOTATOR_DATA_DIR: world.dataDir, PLANNOTATOR_READY_FILE: readyFile, PLANNOTATOR_SKIP_BROWSER_OPEN: '1', PLANNOTATOR_BROWSER: NO_BROWSER, NO_BROWSER, PLANNOTATOR_REMOTE: '0' };
+  let child: ChildProcess | undefined;
+  let url = '';
+  try {
+    child = spawn(builtBinary, ['annotate', doc], { env, cwd: root, stdio: 'ignore' });
+    await expect.poll(() => (existsSync(readyFile) ? readFileSync(readyFile, 'utf8') : ''), { timeout: 30_000 }).toContain('"url"');
+    url = (JSON.parse(readFileSync(readyFile, 'utf8').trim().split('\n')[0]!) as { url: string }).url;
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    await context.addCookies(
+      [
+        ['plannotator-plan-look-choice-resolved', 'true'],
+        ['plannotator-announce-tui-herdr-seen', '1'],
+        ['plannotator-announce-ask-session-seen', '1'],
+        ['plannotator-announce-agent-tool-seen', '1'],
+      ].map(([name, value]) => ({ name: name!, value: value!, url })),
+    );
+    const page = await context.newPage();
+    await page.goto(url);
+    const images = page.locator('article img.cursor-zoom-in');
+    await expect(images.nth(1)).toBeVisible();
+    await images.nth(0).click();
+    const box = page.locator('[data-image-lightbox-stepping]');
+    const stage = box.locator('[data-lightbox-stage]');
+    const image = box.locator('[data-lightbox-image]');
+    const zoom = box.locator('[data-lightbox-zoom]');
+    const rect = () =>
+      image.evaluate((img: HTMLImageElement) => {
+        const r = img.getBoundingClientRect();
+        return { left: r.left, top: r.top, width: r.width, height: r.height, naturalWidth: img.naturalWidth };
+      });
+    await expect.poll(async () => (await rect()).naturalWidth).toBe(2400);
+    await expect.poll(async () => Math.round((await rect()).width)).toBeLessThan(2400);
+    const fit = await rect();
+    const fitPct = await zoom.textContent();
+    const pixelRatio = await page.evaluate(() => window.devicePixelRatio);
+    // Ctrl + wheel near the image's top-left corner: the image pixel under the pointer stays under it.
+    const px = Math.round(fit.left + fit.width * 0.2);
+    const py = Math.round(fit.top + fit.height * 0.2);
+    const imageX = ((px - fit.left) / fit.width) * 2400;
+    const imageY = ((py - fit.top) / fit.height) * 1500;
+    await page.mouse.move(px, py);
+    await page.keyboard.down('Control');
+    for (let i = 0; i < 4; i += 1) await page.mouse.wheel(0, -100);
+    await page.keyboard.up('Control');
+    await expect(stage).toHaveAttribute('data-lightbox-stage', 'zoom');
+    const zoomed = await rect();
+    expect(zoomed.width / fit.width).toBeGreaterThan(2.5);
+    expect(Math.abs(zoomed.left + (imageX / 2400) * zoomed.width - px)).toBeLessThanOrEqual(1);
+    expect(Math.abs(zoomed.top + (imageY / 1500) * zoomed.height - py)).toBeLessThanOrEqual(1);
+    expect(await zoom.textContent()).not.toBe(fitPct);
+    await expect(box.locator('[data-lightbox-fit]')).toHaveText('Fit');
+    // The page itself was not zoomed.
+    expect(await page.evaluate(() => window.devicePixelRatio)).toBe(pixelRatio);
+    await shot(page, '15-zoom-ctrl-wheel');
+    // A drag pans.
+    await page.mouse.move(700, 450);
+    await page.mouse.down();
+    await page.mouse.move(600, 400, { steps: 4 });
+    await page.mouse.up();
+    const panned = await rect();
+    expect(Math.round(panned.left - zoomed.left)).toBe(-100);
+    expect(Math.round(panned.top - zoomed.top)).toBe(-50);
+    // A double click on the image goes back to Fit, another zooms to twice Fit.
+    await page.mouse.dblclick(720, 450);
+    await expect(stage).toHaveAttribute('data-lightbox-stage', 'fit');
+    await expect.poll(async () => Math.round((await rect()).width)).toBe(Math.round(fit.width));
+    await page.mouse.dblclick(fit.left + fit.width / 2, fit.top + fit.height / 2);
+    await expect.poll(async () => Math.round((await rect()).width)).toBe(Math.round(fit.width * 2));
+    // Fit resets it; stepping to the next image starts at Fit.
+    await box.locator('[data-lightbox-fit]').click();
+    await expect(stage).toHaveAttribute('data-lightbox-stage', 'fit');
+    await expect.poll(async () => Math.round((await rect()).width)).toBe(Math.round(fit.width));
+    await page.mouse.move(720, 450);
+    await page.keyboard.down('Control');
+    await page.mouse.wheel(0, -100);
+    await page.keyboard.up('Control');
+    await expect(stage).toHaveAttribute('data-lightbox-stage', 'zoom');
+    await page.keyboard.press('ArrowRight');
+    await expect(box.locator('[data-lightbox-count]')).toHaveText('2 of 2');
+    await expect(stage).toHaveAttribute('data-lightbox-stage', 'fit');
+    await expect(box.locator('[data-lightbox-fit]')).toHaveText('Actual size');
+    // Escape still closes it.
+    await page.keyboard.press('Escape');
+    await expect(box).toBeHidden();
     await context.close();
   } finally {
     if (url) await fetch(new URL('/api/exit', url), { method: 'POST' }).catch(() => {});

@@ -146,24 +146,6 @@ describe.if(hasDom)('ImageLightbox: the light version (plan review and annotate)
     expect(closed).toBe(1);
   });
 
-  test('Actual size never stretches the image to the stage (#2067)', async () => {
-    // The stage is a flex row, and a flex item stretches to the row's height
-    // unless something opts it out: the image then showed at the fit size and
-    // barely scrolled. happy-dom lays nothing out, so this checks the opt-out
-    // the layout relies on; tests/e2e/inbox-image-viewer.spec.ts measures the
-    // real sizes in Chromium.
-    const host = await mountStepping(IMAGES[0]!.src, () => {});
-    await act(async () => host.querySelector<HTMLButtonElement>('[data-lightbox-fit]')!.click());
-    expect(host.querySelector('[data-lightbox-stage]')!.getAttribute('data-lightbox-stage')).toBe('actual');
-    const img = host.querySelector('[data-lightbox-image]')!.classList;
-    // Auto margins cancel the stretch (and centre an image smaller than the stage).
-    expect(img.contains('m-auto')).toBe(true);
-    // Not shrunk below its own width, and no max size left over from Fit.
-    expect(img.contains('shrink-0')).toBe(true);
-    expect(img.contains('max-h-full')).toBe(false);
-    expect(img.contains('max-w-full')).toBe(false);
-  });
-
   test('collectDocumentImages reads the zoomable images in order under their headings', () => {
     const article = document.createElement('article');
     article.innerHTML = '<h2>Options</h2><img class="cursor-zoom-in" src="a.png" alt="A"><img src="icon.svg"><h2>Mobile</h2><p><img class="cursor-zoom-in" src="m.png" alt="M"></p><img class="cursor-zoom-in" src="a.png">';
@@ -171,5 +153,170 @@ describe.if(hasDom)('ImageLightbox: the light version (plan review and annotate)
       { src: 'a.png', alt: 'A', section: 'Options' },
       { src: 'm.png', alt: 'M', section: 'Mobile' },
     ]);
+  });
+});
+
+// Zoom (#2067). happy-dom lays nothing out, so the stage's box and the image's
+// own size are given here; tests/e2e/inbox-image-viewer.spec.ts measures the
+// real thing in Chromium.
+const STAGE = { left: 0, top: 0, width: 1000, height: 600 };
+
+/** Give the stage a box and the image a natural size (2000 × 1000), then load it. Fit is then 50%. */
+async function loadImage(host: HTMLElement, width = 2000, height = 1000) {
+  const stage = host.querySelector<HTMLElement>('[data-lightbox-stage]')!;
+  stage.getBoundingClientRect = () =>
+    ({ ...STAGE, right: STAGE.left + STAGE.width, bottom: STAGE.top + STAGE.height, x: STAGE.left, y: STAGE.top, toJSON() {} }) as DOMRect;
+  const img = stage.querySelector<HTMLImageElement>('[data-lightbox-image]')!;
+  Object.defineProperty(img, 'naturalWidth', { configurable: true, value: width });
+  Object.defineProperty(img, 'naturalHeight', { configurable: true, value: height });
+  await act(async () => { img.dispatchEvent(new Event('load')); });
+  return { stage, img };
+}
+
+function view(img: HTMLElement) {
+  const m = /translate\((-?[\d.e-]+)px, (-?[\d.e-]+)px\) scale\(([\d.e-]+)\)/.exec(img.style.transform);
+  if (!m) throw new Error(`no transform: ${img.style.transform}`);
+  return { x: Number(m[1]), y: Number(m[2]), scale: Number(m[3]) };
+}
+
+/** happy-dom's WheelEvent drops some of its init (the pointer, Shift), so they are set on the event. */
+function wheelEvent(deltaY: number, init: WheelEventInit = {}) {
+  const event = new WheelEvent('wheel', { deltaY, bubbles: true, cancelable: true, ...init });
+  Object.defineProperty(event, 'clientX', { value: init.clientX ?? 500 });
+  Object.defineProperty(event, 'clientY', { value: init.clientY ?? 300 });
+  for (const key of ['shiftKey', 'ctrlKey', 'metaKey'] as const) Object.defineProperty(event, key, { value: !!init[key] });
+  return event;
+}
+
+async function wheel(stage: HTMLElement, deltaY: number, init: WheelEventInit = {}) {
+  await act(async () => {
+    stage.dispatchEvent(wheelEvent(deltaY, init));
+  });
+}
+
+async function pointer(stage: HTMLElement, type: string, id: number, x: number, y: number, pointerType = 'mouse') {
+  await act(async () => {
+    stage.dispatchEvent(new PointerEvent(type, { pointerId: id, clientX: x, clientY: y, button: 0, pointerType, bubbles: true, cancelable: true }));
+  });
+}
+
+describe.if(hasDom)('ImageLightbox: zoom (#2067)', () => {
+  const zoomText = (host: HTMLElement) => host.querySelector('[data-lightbox-zoom]')?.textContent ?? null;
+  const fitButton = (host: HTMLElement) => host.querySelector<HTMLButtonElement>('[data-lightbox-fit]')!;
+
+  test('opens at Fit; Ctrl/⌘ + wheel (and a pinch) zooms about the pointer, and the header says how far', async () => {
+    const host = await mountStepping(IMAGES[0]!.src, () => {});
+    const { stage, img } = await loadImage(host);
+    expect(view(img)).toEqual({ x: 0, y: 50, scale: 0.5 });
+    expect(zoomText(host)).toBe('50%');
+    expect(fitButton(host).textContent).toBe('Actual size');
+    // The pixel under the pointer (500, 300) stays under it.
+    const before = view(img);
+    const imageX = (500 - before.x) / before.scale;
+    await wheel(stage, -100, { ctrlKey: true });
+    const after = view(img);
+    expect(after.scale).toBeGreaterThan(0.6);
+    expect(after.x + imageX * after.scale).toBeCloseTo(500, 5);
+    expect(stage.getAttribute('data-lightbox-stage')).toBe('zoom');
+    expect(zoomText(host)).toBe(`${Math.round(after.scale * 100)}%`);
+    expect(fitButton(host).textContent).toBe('Fit');
+    // ⌘ + wheel zooms too, and the event never reaches the browser's page zoom.
+    const event = wheelEvent(-100, { metaKey: true });
+    await act(async () => { stage.dispatchEvent(event); });
+    expect(event.defaultPrevented).toBe(true);
+    expect(view(img).scale).toBeGreaterThan(after.scale);
+  });
+
+  test('zoom stops at Fit and at 800%', async () => {
+    const host = await mountStepping(IMAGES[0]!.src, () => {});
+    const { stage, img } = await loadImage(host);
+    for (let i = 0; i < 10; i += 1) await wheel(stage, 100, { ctrlKey: true });
+    expect(view(img).scale).toBe(0.5);
+    expect(stage.getAttribute('data-lightbox-stage')).toBe('fit');
+    for (let i = 0; i < 40; i += 1) await wheel(stage, -100, { ctrlKey: true });
+    expect(view(img).scale).toBe(8);
+    expect(zoomText(host)).toBe('800%');
+  });
+
+  test('a plain wheel zooms an image that fits, and scrolls one larger than the stage', async () => {
+    const host = await mountStepping(IMAGES[0]!.src, () => {});
+    const { stage, img } = await loadImage(host);
+    await wheel(stage, -100);
+    expect(view(img).scale).toBeGreaterThan(0.5);
+
+    const other = await mountStepping(IMAGES[1]!.src, () => {});
+    const loaded = await loadImage(other);
+    await act(async () => fitButton(other).click());
+    expect(view(loaded.img)).toEqual({ x: 0, y: 0, scale: 1 });
+    await wheel(loaded.stage, 100);
+    expect(view(loaded.img)).toEqual({ x: 0, y: -100, scale: 1 });
+    // Shift turns it sideways; the image never leaves the stage.
+    await wheel(loaded.stage, 5000, { shiftKey: true });
+    expect(view(loaded.img)).toEqual({ x: -1000, y: -100, scale: 1 });
+    // With Ctrl it zooms even there.
+    await wheel(loaded.stage, -100, { ctrlKey: true });
+    expect(view(loaded.img).scale).toBeGreaterThan(1);
+  });
+
+  test('Fit and Actual size reset the zoom; drag pans; stepping to another image starts at Fit', async () => {
+    const host = await mountStepping(IMAGES[0]!.src, () => {});
+    const { stage, img } = await loadImage(host);
+    await act(async () => fitButton(host).click());
+    // Actual size: its own pixels, read from the top-left where it is larger than the stage.
+    expect(view(img)).toEqual({ x: 0, y: 0, scale: 1 });
+    expect(stage.getAttribute('data-lightbox-stage')).toBe('actual');
+    await pointer(stage, 'pointerdown', 1, 500, 300);
+    await pointer(stage, 'pointermove', 1, 400, 250);
+    await pointer(stage, 'pointerup', 1, 400, 250);
+    expect(view(img)).toEqual({ x: -100, y: -50, scale: 1 });
+    await act(async () => fitButton(host).click());
+    expect(view(img)).toEqual({ x: 0, y: 50, scale: 0.5 });
+    await wheel(stage, -100, { ctrlKey: true });
+    expect(view(img).scale).toBeGreaterThan(0.5);
+    await act(async () => { press('ArrowRight'); });
+    const next = await loadImage(host);
+    expect(next.img).not.toBe(img);
+    expect(view(next.img).scale).toBe(0.5);
+    expect(next.stage.getAttribute('data-lightbox-stage')).toBe('fit');
+    expect(fitButton(host).textContent).toBe('Actual size');
+  });
+
+  test('a double click toggles Fit and twice Fit at the point; two fingers pinch', async () => {
+    const host = await mountStepping(IMAGES[0]!.src, () => {});
+    const { stage, img } = await loadImage(host);
+    for (let i = 0; i < 2; i += 1) {
+      await pointer(stage, 'pointerdown', 1, 500, 300);
+      await pointer(stage, 'pointerup', 1, 500, 300);
+    }
+    expect(view(img).scale).toBe(1);
+    for (let i = 0; i < 2; i += 1) {
+      await pointer(stage, 'pointerdown', 1, 500, 300);
+      await pointer(stage, 'pointerup', 1, 500, 300);
+    }
+    expect(view(img).scale).toBe(0.5);
+    // Two fingers 200 px apart spread to 400 px: twice the scale.
+    await pointer(stage, 'pointerdown', 1, 400, 300, 'touch');
+    await pointer(stage, 'pointerdown', 2, 600, 300, 'touch');
+    await pointer(stage, 'pointermove', 1, 300, 300, 'touch');
+    await pointer(stage, 'pointermove', 2, 700, 300, 'touch');
+    await pointer(stage, 'pointerup', 1, 300, 300, 'touch');
+    await pointer(stage, 'pointerup', 2, 700, 300, 'touch');
+    expect(view(img).scale).toBeCloseTo(1, 5);
+  });
+
+  test('the single image overlay zooms too; a tap beside the image closes it, on the image it does not', async () => {
+    let closed = 0;
+    const host = await mount(() => { closed += 1; });
+    const { stage, img } = await loadImage(host, 400, 300);
+    // Fit never enlarges a small image.
+    expect(view(img).scale).toBe(1);
+    await pointer(stage, 'pointerdown', 1, 500, 300);
+    await pointer(stage, 'pointerup', 1, 500, 300);
+    expect(closed).toBe(0);
+    await wheel(stage, -100, { ctrlKey: true });
+    expect(view(img).scale).toBeGreaterThan(1);
+    await pointer(stage, 'pointerdown', 2, 5, 5);
+    await pointer(stage, 'pointerup', 2, 5, 5);
+    expect(closed).toBe(1);
   });
 });
