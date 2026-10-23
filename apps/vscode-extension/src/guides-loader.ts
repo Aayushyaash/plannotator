@@ -79,6 +79,25 @@ interface LoaderWindow {
   registerWebviewViewProvider(id: string, provider: { resolveWebviewView(view: unknown): void }, options?: unknown): Disposable;
 }
 
+/**
+ * Showing the view from the activity bar opens the Guided Reviews dashboard
+ * tab, once per session: on the first change from hidden to visible. A view
+ * VS Code restored as visible at startup does not open it; the next time the
+ * user hides and shows it, it does. (The controller skips it when a
+ * dashboard, guide or run tab is already open.)
+ */
+export function dashboardAutoOpener(initiallyVisible: boolean, open: () => void): (visible: boolean) => void {
+  let wasVisible = initiallyVisible;
+  let opened = false;
+  return (visible) => {
+    if (visible && !wasVisible && !opened) {
+      opened = true;
+      open();
+    }
+    wasVisible = visible;
+  };
+}
+
 export function registerGuidesLoader(
   context: { subscriptions: Disposable[]; extensionPath: string },
   log: { error(message: string): void },
@@ -125,18 +144,14 @@ export function registerGuidesLoader(
   const view = win.createTreeView(GUIDES_TREE_VIEW, { treeDataProvider, showCollapseAll: true, manageCheckboxStateManually: true });
   treeView = view;
   context.subscriptions.push(view);
-  // Showing the view from the activity bar opens the Guided Reviews dashboard tab, once per session
-  // (not when VS Code restores the view at startup, and not when a guided review tab is already open).
-  let autoOpened = view.visible === true;
-  const visibility = view.onDidChangeVisibility?.((e) => {
-    if (!e.visible || autoOpened) return;
-    autoOpened = true;
+  const onVisible = dashboardAutoOpener(view.visible === true, () => {
     try {
       void load().runCommand("plannotator.guides.openHome", [{ auto: true }]);
     } catch (err) {
       log.error(`[guides] openHome: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
     }
   });
+  const visibility = view.onDidChangeVisibility?.((e) => onVisible(e.visible));
   if (visibility) context.subscriptions.push(visibility);
   context.subscriptions.push(
     win.registerWebviewViewProvider(GUIDES_CHAPTER_VIEW, { resolveWebviewView: (view) => safe(() => load().resolveChapterView(view), undefined) }, { webviewOptions: { retainContextWhenHidden: true } }),

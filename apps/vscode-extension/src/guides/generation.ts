@@ -186,8 +186,12 @@ export class GuideGeneration {
   private readonly toolTitles = new Map<string, string>();
   private nextPermission = 1;
   private readonly permissionWaiters = new Map<number, { request: RequestPermissionRequest; resolve: (r: RequestPermissionResponse) => void }>();
-  /** Turned down requests and blocked tools this run, for the end-of-run advice. */
-  private blocked = 0;
+  /**
+   * Requests the user turned down this run, for the end-of-run advice.
+   * Tools the agent's own settings blocked are not counted: automatic
+   * approval does not lift a deny rule, so resuming with it would not help.
+   */
+  private turnedDown = 0;
   private readonly blockedTools = new Map<string, string[]>();
   /** Whether the agent ever reached the builder's MCP server (an agent that drops the client's MCP servers never does). */
   private builderReached = false;
@@ -367,10 +371,10 @@ export class GuideGeneration {
           title: `${this.input.agent.label} never reached the guide's tools`,
           detail: this.deps.agent.note ?? `The guide is written through Plannotator's own MCP server (plannotator-guide). ${this.input.agent.label} may not accept MCP servers from an ACP client, or its settings may turn MCP servers off.`,
         });
-      } else if (this.blocked > 0 && !this.state.autoApprove) {
+      } else if (this.turnedDown > 0 && !this.state.autoApprove) {
         this.addBottleneck({
           key: "ended-blocked",
-          title: "The run ended after requests were turned down or blocked",
+          title: "The run ended after requests were turned down",
           detail: "Resume it with automatic approval to let the agent's requests through.",
           action: "resumeWithApproval",
         });
@@ -694,7 +698,6 @@ export class GuideGeneration {
     if (!cause) return;
     const tool = this.toolTitles.get(toolCallId) ?? "a tool";
     const label = this.input.agent.label;
-    this.blocked++;
     const tools = [...(this.blockedTools.get(cause) ?? []), tool].filter((t, i, all) => all.indexOf(t) === i);
     this.blockedTools.set(cause, tools);
     this.addBottleneck({
@@ -758,7 +761,7 @@ export class GuideGeneration {
     entry.status = allowed ? "completed" : "failed";
     entry.detail = chosen ? chosen.name : "Cancelled";
     if (chosen && !allowed) {
-      this.blocked++;
+      this.turnedDown++;
       this.addBottleneck({
         key: "turned-down",
         title: `You turned down ${title}`,

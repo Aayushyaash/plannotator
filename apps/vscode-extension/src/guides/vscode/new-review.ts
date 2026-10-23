@@ -10,7 +10,7 @@ import * as vscode from "vscode";
 import type { ConfigChoice } from "../acp/client";
 import { canStart, pickDefault, type AgentDescriptor, type AgentOptionsCache, type AgentStatus } from "../acp/agents";
 import type { DashboardModel } from "../dashboard";
-import { ghRepoArg, parsePullRequestRef, parsePullRequestUrl, repoKeyForGhRepo, type PullRequestRow } from "../sources/github";
+import { ghRepoArg, isOpenRepository, parsePullRequestRef, parsePullRequestUrl, type PullRequestRow } from "../sources/github";
 import type { RepoInfo } from "../sources/git";
 import type { LocalChangesMode } from "../sources/git";
 import type { AgentChoiceRecord } from "../store";
@@ -27,7 +27,7 @@ export function pullRequestChoice(text: string, repo: RepoInfo | null): SourceCh
   const url = parsePullRequestUrl(text);
   if (url) {
     const ghRepo = ghRepoArg(url);
-    if (repo && repoKeyForGhRepo(ghRepo) === repo.repoKey) return { kind: "pr", number: url.number };
+    if (isOpenRepository(repo, url)) return { kind: "pr", number: url.number };
     return { kind: "pr", number: url.number, repo: ghRepo };
   }
   if (!repo) return null;

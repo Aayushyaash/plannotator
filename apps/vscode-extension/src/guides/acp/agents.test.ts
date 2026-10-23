@@ -189,3 +189,19 @@ describe("cheap defaults", () => {
     }
   });
 });
+
+describe("installing an agent on Windows", () => {
+  it("types the documented PowerShell command, the same npm command, or nothing (the docs instead)", async () => {
+    const { installCommandFor } = await import("./agents");
+    const win = (a: AgentDescriptor) => installCommandFor(a.installCommand, a.installCommandWindows, "win32");
+    expect(win(CURSOR)).toBe("irm 'https://cursor.com/install?win32=true' | iex");
+    expect(win(OPENCODE)).toBe("npm install -g opencode-ai");
+    expect(win(COPILOT)).toBe("npm install -g @github/copilot");
+    expect(win(KILO)).toBe("npm install -g @kilocode/cli");
+    expect(win(KIRO)).toBeNull();
+    for (const a of KNOWN_AGENTS) expect(win(a) ?? "").not.toContain("| bash");
+    expect(installCommandFor(CURSOR.installCommand, CURSOR.installCommandWindows, "darwin")).toBe(CURSOR.installCommand);
+    const kiro = resolveAgentLaunch(KIRO, {}, () => null, () => null, "win32");
+    expect(!kiro.ok && kiro.message).toBe("Kiro CLI is not installed: `kiro-cli` is not on PATH. Install it as its docs say (https://kiro.dev/docs/cli/acp/), then try again.");
+  });
+});

@@ -9,7 +9,7 @@ import { basename, dirname } from "node:path";
 import type { DashboardModel } from "../dashboard";
 import type { GenerationState } from "../generation";
 import type { ReaderModel } from "../reader-model";
-import type { PullRequestRow, WaitingRow } from "../sources/github";
+import { isOpenRepository, parsePullRequestUrl, type PullRequestRow, type WaitingRow } from "../sources/github";
 import type { RecentEntry } from "../store";
 import { chapterColorId } from "./intel";
 
@@ -219,7 +219,8 @@ export function getTreeItem(data: TreeData, node: TreeNode): vscode.TreeItem {
       t.tooltip = new vscode.MarkdownString(`**#${p.number} ${escapeMd(p.title)}**\n\n${p.baseRefName} ← ${p.headRefName} · ${p.changedFiles} files · +${p.additions} −${p.deletions}`);
       t.contextValue = "pn.pr";
       // Opens its guided review when one exists for the PR's head, else starts one. Never the browser.
-      t.command = { command: "plannotator.guides.openPullRequest", title: "Open the guided review", arguments: [{ number: p.number, url: p.url }] };
+      // A row of this repository's own PR list: always the open repository, so only its number is passed.
+      t.command = { command: "plannotator.guides.openPullRequest", title: "Open the guided review", arguments: [p.number] };
       return t;
     }
     case "recent": {
@@ -243,7 +244,8 @@ export function getTreeItem(data: TreeData, node: TreeNode): vscode.TreeItem {
       const w = node.row;
       const t = item(`#${w.number} ${w.title}`);
       t.iconPath = new vscode.ThemeIcon("git-pull-request", new vscode.ThemeColor("charts.yellow"));
-      const inRepo = !!d?.repo?.github && w.repo.toLowerCase() === d.repo.displayName.toLowerCase();
+      const ref = parsePullRequestUrl(w.url);
+      const inRepo = !!ref && isOpenRepository(d?.repo, ref);
       t.description = `${w.repo} · @${w.author}`;
       t.contextValue = "pn.waiting";
       t.command = { command: "plannotator.guides.openPullRequest", title: "Open the guided review", arguments: [{ number: w.number, url: w.url }] };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadDashboard } from "./dashboard";
@@ -212,7 +212,38 @@ describe("with no folder open", () => {
 });
 
 describe("a pull request of a repository that is not open", () => {
-  it("is cloned once into the extension's storage (blobless, no checkout) and its shelf matches a local checkout's", async () => {
+  /** The rules for a repository at `root` whose origin is `remote`. */
+  const repoRules = (root: string, remote: string): Rule[] => [
+    [/git .*rev-parse --show-toplevel/, ok(`${root}\n`)],
+    [/git .*rev-parse --abbrev-ref HEAD/, ok("main\n")],
+    [/git .*rev-parse HEAD$/, ok("abc\n")],
+    [/git .*remote get-url origin/, ok(`${remote}\n`)],
+    [/git .*symbolic-ref/, ok("refs/remotes/origin/main\n")],
+    [/git .*show-ref/, ok("")],
+  ];
+
+  it("treats the open repository's own PRs as its own, whatever shape its remote has", async () => {
+    const { getRepoInfo } = await import("./sources/git");
+    const { isOpenRepository, parsePullRequestUrl } = await import("./sources/github");
+    const { pullRequestChoice } = await import("./vscode/new-review");
+    const table: Array<[string, string, boolean]> = [
+      ["git@github-work:org/repo.git", "https://github.com/org/repo/pull/7", true],
+      ["https://github.com/Org/Repo.git", "https://github.com/org/repo/pull/7", true],
+      ["ssh://git@ssh.github.com:443/org/repo.git", "https://github.com/org/repo/pull/7", true],
+      ["git@github.com:org/repo.git", "https://github.com/ORG/REPO/pull/7", true],
+      ["git@github.com:org/repo.git", "https://github.com/org/other/pull/7", false],
+      ["git@github.com:org/repo.git", "https://github.corp.example/org/repo/pull/7", false],
+      ["https://github.corp.example/org/repo.git", "https://github.corp.example/Org/Repo/pull/7", true],
+    ];
+    for (const [remote, url, same] of table) {
+      const repo = await getRepoInfo(scripted(repoRules("/r", remote)), "/r");
+      const ref = parsePullRequestUrl(url)!;
+      expect([remote, url, isOpenRepository(repo, ref)]).toEqual([remote, url, same]);
+      expect([remote, url, pullRequestChoice(url, repo)]).toEqual([remote, url, same ? { kind: "pr", number: 7 } : { kind: "pr", number: 7, repo: ref.host === "github.com" ? `${ref.owner}/${ref.repo}` : `${ref.host}/${ref.owner}/${ref.repo}` }]);
+    }
+  });
+
+  it("is cloned once into the extension's storage (blobless, no checkout), with gh as the clone's own credential helper", async () => {
     const { ensureRepoClone, ghRepoOfKey, repoClonePath, repoKeyForGhRepo } = await import("./sources/github");
     const { mkdirSync: mkdir, rmSync } = await import("node:fs");
     expect(repoKeyForGhRepo("northwind/ledger-ui")).toBe("github.com__northwind__ledger-ui");
@@ -225,20 +256,90 @@ describe("a pull request of a repository that is not open", () => {
     const path = repoClonePath(storage, "github.com__northwind__ledger-ui");
     const calls: string[] = [];
     const runner = scripted([
-      [/^gh repo clone /, (line) => { mkdir(join(path, ".git"), { recursive: true }); return ok(line); }],
-      [/git .*rev-parse --show-toplevel/, ok(`${path}\n`)],
-      [/git .*rev-parse --abbrev-ref HEAD/, ok("main\n")],
-      [/git .*rev-parse HEAD$/, ok("abc\n")],
-      [/git .*remote get-url origin/, ok("https://github.com/northwind/ledger-ui.git\n")],
-      [/git .*symbolic-ref/, ok("refs/remotes/origin/main\n")],
-      [/git .*show-ref/, ok("")],
+      [/^gh repo clone /, (line) => { mkdir(join(line.split(" ")[4], ".git"), { recursive: true }); return ok(""); }],
+      [/^git --no-pager config --local /, ok("")],
+      ...repoRules(path, "https://github.com/northwind/ledger-ui.git"),
     ], calls);
     try {
-      const repo = await ensureRepoClone(runner, "northwind/ledger-ui", storage);
+      const repo = await ensureRepoClone(runner, "northwind/ledger-ui", storage, () => {}, { ghPath: "/opt/gh bin/gh" });
       expect(repo.repoKey).toBe("github.com__northwind__ledger-ui");
-      expect(calls.filter((c) => c.startsWith("gh repo clone"))).toEqual([`gh repo clone northwind/ledger-ui ${path} -- --filter=blob:none --no-checkout --quiet`]);
+      const clone = calls.filter((c) => c.startsWith("gh repo clone"));
+      expect(clone).toHaveLength(1);
+      expect(clone[0]).toMatch(new RegExp(`^gh repo clone northwind/ledger-ui ${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.cloning-\\d+-\\d+ -- --filter=blob:none --no-checkout --quiet$`));
+      expect(calls.filter((c) => c.startsWith("git --no-pager config"))).toEqual([
+        "git --no-pager config --local credential.https://github.com.helper ",
+        'git --no-pager config --local --add credential.https://github.com.helper !"/opt/gh bin/gh" auth git-credential',
+      ]);
+      expect(readdirSync(storage, { recursive: true }).some((n) => String(n).includes(".cloning-"))).toBe(false);
       await ensureRepoClone(runner, "northwind/ledger-ui", storage);
       expect(calls.filter((c) => c.startsWith("gh repo clone"))).toHaveLength(1);
+    } finally {
+      rmSync(storage, { recursive: true, force: true });
+    }
+  });
+
+  it("makes one clone for callers at the same time, and never deletes another window's clone", async () => {
+    const { ensureRepoClone, repoClonePath } = await import("./sources/github");
+    const { mkdirSync: mkdir, rmSync, existsSync: exists, writeFileSync: write } = await import("node:fs");
+    const storage = mkdtempSync(join(tmpdir(), "pn-clone-race-"));
+    const path = repoClonePath(storage, "github.com__northwind__ledger-ui");
+    const calls: string[] = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const runner: Runner = async (command, args) => {
+      const line = `${command} ${args.join(" ")}`;
+      calls.push(line);
+      if (line.startsWith("gh repo clone")) {
+        await gate;
+        mkdir(join(args[3], ".git"), { recursive: true });
+        return ok("");
+      }
+      for (const [re, res] of repoRules(path, "https://github.com/northwind/ledger-ui.git")) if (re.test(line)) return typeof res === "function" ? res(line) : res;
+      return ok("");
+    };
+    try {
+      const a = ensureRepoClone(runner, "northwind/ledger-ui", storage);
+      const b = ensureRepoClone(runner, "northwind/ledger-ui", storage);
+      // Another window finishes its clone first: its folder is moved in while ours is still cloning.
+      mkdir(join(path, ".git"), { recursive: true });
+      write(join(path, ".git", "theirs"), "");
+      release();
+      const [ra, rb] = await Promise.all([a, b]);
+      expect(ra.root).toBe(path);
+      expect(rb.root).toBe(path);
+      // One clone for both callers; it lost the race to the other window, so its own copy went and theirs stayed.
+      expect(calls.filter((c) => c.startsWith("gh repo clone"))).toHaveLength(1);
+      expect(exists(join(path, ".git", "theirs"))).toBe(true);
+      expect(readdirSync(storage, { recursive: true }).some((n) => String(n).includes(".cloning-"))).toBe(false);
+    } finally {
+      rmSync(storage, { recursive: true, force: true });
+    }
+  });
+
+  it("moves its clone in when it finishes first, and sweeps clones a closed window left behind", async () => {
+    const { ensureRepoClone, repoClonePath } = await import("./sources/github");
+    const { mkdirSync: mkdir, rmSync, existsSync: exists, utimesSync } = await import("node:fs");
+    const storage = mkdtempSync(join(tmpdir(), "pn-clone-stale-"));
+    const path = repoClonePath(storage, "github.com__northwind__ledger-ui");
+    const stale = `${path}.cloning-1-1`;
+    const fresh = `${path}.cloning-2-2`;
+    mkdir(stale, { recursive: true });
+    mkdir(fresh, { recursive: true });
+    utimesSync(stale, new Date(Date.now() - 2 * 3600_000), new Date(Date.now() - 2 * 3600_000));
+    const calls: string[] = [];
+    const runner = scripted([
+      [/^gh repo clone /, (line) => { mkdir(join(line.split(" ")[4], ".git"), { recursive: true }); return ok(""); }],
+      ...repoRules(path, "https://github.com/northwind/ledger-ui.git"),
+    ], calls);
+    try {
+      const [ra, rb] = await Promise.all([ensureRepoClone(runner, "northwind/ledger-ui", storage), ensureRepoClone(runner, "northwind/ledger-ui", storage)]);
+      expect(ra.root).toBe(path);
+      expect(rb.root).toBe(path);
+      expect(calls.filter((c) => c.startsWith("gh repo clone"))).toHaveLength(1);
+      expect(exists(join(path, ".git"))).toBe(true);
+      expect(exists(stale)).toBe(false);
+      // Still in progress in another window: left alone.
+      expect(exists(fresh)).toBe(true);
     } finally {
       rmSync(storage, { recursive: true, force: true });
     }

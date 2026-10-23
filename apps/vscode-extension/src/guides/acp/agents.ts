@@ -36,6 +36,12 @@ export interface AgentDescriptor {
   /** How to install it, as the agent's docs say (for an npm adapter: a global install of the pinned version). */
   installCommand: string;
   /**
+   * The Windows (PowerShell) install command the agent's docs give, when
+   * `installCommand` is a shell script; null when the docs give none (the
+   * install button then opens the docs). An npm command needs none.
+   */
+  installCommandWindows?: string | null;
+  /**
    * The npm package that is the agent's ACP adapter. Guided Reviews installs
    * this exact version into its own storage when the adapter is missing.
    */
@@ -66,6 +72,13 @@ export interface AgentDescriptor {
   signIn?: { command?: string; args: readonly string[] };
 }
 
+/**
+ * `npm install --before` for every pinned adapter: the pins were chosen on
+ * 2026-10-23, so the adapter and every package it pulls in are ones published
+ * at least 7 days before (the repo's release-age rule).
+ */
+export const ADAPTER_PIN_BEFORE = "2026-10-16";
+
 /** Claude Code through its ACP adapter. Source: https://github.com/agentclientprotocol/claude-agent-acp */
 export const CLAUDE_CODE: AgentDescriptor = {
   id: "claude-code",
@@ -75,7 +88,7 @@ export const CLAUDE_CODE: AgentDescriptor = {
   args: [],
   installCommand: "npm install -g @agentclientprotocol/claude-agent-acp@0.91.0",
   // 0.91.0 was published 2026-10-15 (the repo installs nothing published in the last 7 days).
-  adapter: { package: "@agentclientprotocol/claude-agent-acp", version: "0.91.0", bin: "claude-agent-acp" },
+  adapter: { package: "@agentclientprotocol/claude-agent-acp", version: "0.91.0", bin: "claude-agent-acp", before: ADAPTER_PIN_BEFORE },
   docsUrl: "https://github.com/agentclientprotocol/claude-agent-acp",
   defaultModel: /sonnet/i,
   defaultEffort: /^low$/i,
@@ -93,7 +106,7 @@ export const CODEX: AgentDescriptor = {
   args: [],
   installCommand: "npm install -g @agentclientprotocol/codex-acp@2.2.2",
   // 2.2.2 was published 2026-10-10; it brings the Codex CLI with it (@openai/codex).
-  adapter: { package: "@agentclientprotocol/codex-acp", version: "2.2.2", bin: "codex-acp" },
+  adapter: { package: "@agentclientprotocol/codex-acp", version: "2.2.2", bin: "codex-acp", before: ADAPTER_PIN_BEFORE },
   docsUrl: "https://github.com/agentclientprotocol/codex-acp",
   defaultEffort: /^low$/i,
   // codex-acp's `agent` mode ("Auto review") writes in the workspace without asking; `agent-full-access` asks even less; `read-only` asks first.
@@ -108,6 +121,8 @@ export const OPENCODE: AgentDescriptor = {
   command: "opencode",
   args: ["acp"],
   installCommand: "curl -fsSL https://opencode.ai/install | bash",
+  // https://opencode.ai/docs/ lists npm for Windows (also choco and scoop).
+  installCommandWindows: "npm install -g opencode-ai",
   docsUrl: "https://opencode.ai/docs/acp/",
   signIn: { args: ["auth", "login"] },
 };
@@ -136,6 +151,8 @@ export const CURSOR: AgentDescriptor = {
   altCommands: ["agent"],
   args: ["acp"],
   installCommand: "curl https://cursor.com/install -fsS | bash",
+  // https://cursor.com/docs/cli/installation, "Windows (native, PowerShell)".
+  installCommandWindows: "irm 'https://cursor.com/install?win32=true' | iex",
   docsUrl: "https://cursor.com/docs/cli/acp",
   signIn: { args: ["login"] },
 };
@@ -148,6 +165,8 @@ export const KIRO: AgentDescriptor = {
   command: "kiro-cli",
   args: ["acp"],
   installCommand: "curl -fsSL https://cli.kiro.dev/install | bash",
+  // Kiro's docs list Windows 11 (PowerShell) as supported but give no command for it.
+  installCommandWindows: null,
   docsUrl: "https://kiro.dev/docs/cli/acp/",
 };
 
@@ -182,7 +201,7 @@ export const PI: AgentDescriptor = {
   args: [],
   installCommand: "npm install -g pi-acp@0.0.34",
   // 0.0.34 was published 2026-09-24. pi-acp runs the `pi` program, which must be installed itself.
-  adapter: { package: "pi-acp", version: "0.0.34", bin: "pi-acp" },
+  adapter: { package: "pi-acp", version: "0.0.34", bin: "pi-acp", before: ADAPTER_PIN_BEFORE },
   requires: { command: "pi", label: "Pi", installCommand: "npm install -g @earendil-works/pi-coding-agent", docsUrl: "https://github.com/svkozak/pi-acp" },
   docsUrl: "https://github.com/svkozak/pi-acp",
   note: "Can't write guides yet: pi-acp does not pass MCP servers on to Pi (its README says they are \"accepted … but not wired through to pi\"), so Pi cannot reach the guide's tools.",
@@ -252,6 +271,7 @@ export function resolveAgentLaunch(
   override: CommandOverride = {},
   find: (name: string) => string | null = findExecutable,
   managed: (agent: AgentDescriptor) => ManagedLaunch | null = () => null,
+  platform: NodeJS.Platform = process.platform,
 ): AdapterResolution {
   const configured = override.command?.trim();
   if (configured) {
@@ -277,13 +297,29 @@ export function resolveAgentLaunch(
       message: `${agent.label}'s ACP adapter is not installed. Guided Reviews installs ${agent.adapter.package}@${agent.adapter.version} into its own storage when you start a guide; or run \`${agent.installCommand}\` yourself.`,
     };
   }
+  const install = installCommandFor(agent.installCommand, agent.installCommandWindows, platform);
   return {
     ok: false,
     reason: agent.installCommand ? "agent" : "setting",
-    message: agent.installCommand
-      ? `${agent.label} is not installed: \`${agent.command}\` is not on PATH. Install it with \`${agent.installCommand}\`, then try again.`
-      : `\`${agent.command}\` is not on PATH.`,
+    message: !agent.installCommand
+      ? `\`${agent.command}\` is not on PATH.`
+      : install
+        ? `${agent.label} is not installed: \`${agent.command}\` is not on PATH. Install it with \`${install}\`, then try again.`
+        : `${agent.label} is not installed: \`${agent.command}\` is not on PATH. Install it as its docs say (${agent.docsUrl}), then try again.`,
   };
+}
+
+/**
+ * The command to type into a terminal to install something on this platform:
+ * on Windows the documented PowerShell command, or the same npm command; null
+ * when there is none to give (a bash script with no Windows equivalent), so
+ * the caller shows the docs instead.
+ */
+export function installCommandFor(command: string, windows: string | null | undefined, platform: NodeJS.Platform = process.platform): string | null {
+  if (!command) return null;
+  if (platform !== "win32") return command;
+  if (windows !== undefined) return windows;
+  return /^npm\s/.test(command) ? command : null;
 }
 
 /** An agent as the picker shows it. */

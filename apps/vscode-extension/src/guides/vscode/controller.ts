@@ -19,6 +19,7 @@ import {
   detectAgents,
   engineLabel,
   findAgent,
+  installCommandFor,
   KNOWN_AGENTS,
   readAgentOptions,
   resolveAgentLaunch,
@@ -42,6 +43,7 @@ import { buildLocalChangesPatch, changedFilesFromPatch, getRepoInfo, type LocalC
 import {
   ensureRepoClone,
   ghRepoArg,
+  isOpenRepository,
   ghRepoOfKey,
   parseGhRepoArg,
   parsePullRequestUrl,
@@ -114,6 +116,11 @@ export class GuidesController implements vscode.Disposable {
     const ghPath = command === "gh" ? vscode.workspace.getConfiguration("plannotator.guides").get<string>("ghPath")?.trim() : "";
     return defaultRunner(ghPath || command, args, options);
   };
+  /** The absolute path of `gh` (the setting, else on PATH), for the credential helper a storage clone gets. */
+  private ghPath(): string | null {
+    const set = vscode.workspace.getConfiguration("plannotator.guides").get<string>("ghPath")?.trim();
+    return findExecutable(set || "gh");
+  }
   private readonly disposables: vscode.Disposable[] = [];
   private dashboard: DashboardModel | null = null;
   private loading: Promise<void> | null = null;
@@ -243,7 +250,10 @@ export class GuidesController implements vscode.Disposable {
         number: w.number,
         title: w.title,
         sub: `${w.repo} · @${w.author}`,
-        inThisRepo: !!d?.repo?.github && w.repo.toLowerCase() === d.repo.displayName.toLowerCase(),
+        inThisRepo: (() => {
+          const ref = parsePullRequestUrl(w.url);
+          return !!ref && isOpenRepository(d?.repo, ref);
+        })(),
       })),
       notes: d?.notes ?? [],
     };
@@ -438,7 +448,7 @@ export class GuidesController implements vscode.Disposable {
       const ref = parsePullRequestUrl(url);
       if (!ref) return number !== undefined && open ? { kind: "pr", number } : null;
       const ghRepo = ghRepoArg(ref);
-      return open && repoKeyForGhRepo(ghRepo) === open.repoKey ? { kind: "pr", number: ref.number } : { kind: "pr", number: ref.number, repo: ghRepo };
+      return isOpenRepository(open, ref) ? { kind: "pr", number: ref.number } : { kind: "pr", number: ref.number, repo: ghRepo };
     };
     if (typeof arg === "number") return open ? { kind: "pr", number: arg } : null;
     if (typeof arg === "string") return /^\d+$/.test(arg) ? (open ? { kind: "pr", number: Number(arg) } : null) : fromUrl(arg);
@@ -459,12 +469,13 @@ export class GuidesController implements vscode.Disposable {
   private async openPullRequest(target: Extract<SourceChoice, { kind: "pr" }>): Promise<void> {
     const open = this.dashboard?.repo ?? null;
     const repoKey = target.repo ? repoKeyForGhRepo(target.repo) : open?.repoKey;
-    const ghRepo = target.repo ?? (open?.github ? ghRepoArg(open.github) : null);
+
     const live = this.run && isLive(this.run.gen.state) ? this.run.gen.state : null;
     if (live && live.repoKey === repoKey && live.source.pr?.number === target.number) return this.showGeneration(live.id);
     if (repoKey) {
       const known = !target.repo ? this.dashboard?.prs.find((p) => p.number === target.number)?.headRefOid : undefined;
-      const head = known || (ghRepo ? await pullRequestHead(this.runner, ghRepo, target.number) : null);
+      // The open repository's PR is asked in its own folder (gh reads its remotes, SSH host aliases included).
+      const head = known || (target.repo ? await pullRequestHead(this.runner, target.repo, target.number) : open ? await pullRequestHead(this.runner, null, target.number, open.root) : null);
       const id = guideForPullRequest(repoKey, target.number, head);
       if (id) return this.openGuide(id);
     }
@@ -641,7 +652,9 @@ export class GuidesController implements vscode.Disposable {
   private async showMissing(status: AgentStatus): Promise<AgentStatus | null> {
     const { agent, launch } = status;
     if (launch.ok) return status;
-    const installAgent = launch.reason === "agent" && agent.installCommand ? `Install ${agent.label}` : launch.reason === "requires" && agent.requires ? `Install ${agent.requires.label}` : null;
+    // The command for this platform (on Windows the documented PowerShell one); none: the docs instead.
+    const installCmd = launch.reason === "agent" ? installCommandFor(agent.installCommand, agent.installCommandWindows) : launch.reason === "requires" && agent.requires ? installCommandFor(agent.requires.installCommand, undefined) : null;
+    const installAgent = installCmd ? (launch.reason === "requires" && agent.requires ? `Install ${agent.requires.label}` : `Install ${agent.label}`) : null;
     const buttons = [
       ...(launch.reason === "adapter" ? ["Install adapter", "Copy command"] : []),
       ...(installAgent ? [installAgent] : []),
@@ -660,11 +673,10 @@ export class GuidesController implements vscode.Disposable {
     }
     if (choice === "Copy command") void vscode.env.clipboard.writeText(agent.installCommand);
     if (choice && choice === installAgent) {
-      const command = launch.reason === "requires" && agent.requires ? agent.requires.installCommand : agent.installCommand;
       const terminal = vscode.window.createTerminal({ name: choice });
       terminal.show();
       // Typed in, not run: the user reads it and presses Enter.
-      terminal.sendText(command, false);
+      terminal.sendText(installCmd!, false);
     }
     if (choice === "Open docs") void vscode.env.openExternal(vscode.Uri.parse(launch.reason === "requires" && agent.requires ? agent.requires.docsUrl : agent.docsUrl));
     if (choice === "Open settings") {
@@ -784,7 +796,7 @@ export class GuidesController implements vscode.Disposable {
     try {
       return await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Preparing ${ghRepo}#${number}` }, async (progress) => {
         const step = (m: string) => progress.report({ message: m });
-        const repo = await ensureRepoClone(this.runner, ghRepo, storage, step);
+        const repo = await ensureRepoClone(this.runner, ghRepo, storage, step, { ghPath: this.ghPath() });
         const pr = await viewPullRequest(this.runner, repo.root, number, ghRepo);
         const wt = await preparePullRequestWorktree(this.runner, repo, pr, storage, step);
         return {
@@ -1190,7 +1202,7 @@ export class GuidesController implements vscode.Disposable {
     const ghRepo = ghRepoOfKey(repoKey);
     if (!ghRepo) return null;
     try {
-      return (await ensureRepoClone(this.runner, ghRepo, storage, onStep)).root;
+      return (await ensureRepoClone(this.runner, ghRepo, storage, onStep, { ghPath: this.ghPath() })).root;
     } catch (err) {
       this.log.warn(`[guides] ${err instanceof Error ? err.message : String(err)}`);
       return null;

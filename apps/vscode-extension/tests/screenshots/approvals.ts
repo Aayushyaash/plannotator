@@ -130,7 +130,7 @@ const shots: Array<{ name: string; state: GeneratingViewState; element?: string 
       ],
       bottlenecks: [
         { key: "turned-down", title: "You turned down Run npm test -- retryPolicy", detail: "Claude Code will try another way. Approve automatically to let its requests through for the rest of this run.", action: "approveRun" },
-        { key: "ended-blocked", title: "The run ended after requests were turned down or blocked", detail: "Resume it with automatic approval to let the agent's requests through.", action: "resumeWithApproval" },
+        { key: "ended-blocked", title: "The run ended after requests were turned down", detail: "Resume it with automatic approval to let the agent's requests through.", action: "resumeWithApproval" },
       ],
     },
   },

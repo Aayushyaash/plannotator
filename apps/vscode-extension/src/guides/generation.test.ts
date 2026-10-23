@@ -533,6 +533,16 @@ describe("your agent, your config: Guides never blocks it", () => {
     expect(gen.state.bottlenecks[0].action).toBeUndefined();
   });
 
+  it("does not advise resuming with automatic approval when only a deny rule blocked the agent", async () => {
+    // The run ends without the guide; the only blocks came from the agent's own settings.
+    const w = world([{ tool: { title: "Bash", kind: "execute", fail: true, output: "Permission to use Bash has been denied." } }, header]);
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    expect(gen.state.status).not.toBe("finished");
+    expect(gen.state.bottlenecks.map((b) => b.key)).toEqual(["blocked:settings"]);
+    expect(gen.state.bottlenecks.some((b) => b.action === "resumeWithApproval")).toBe(false);
+  });
+
   it("never reads a tool's own failure as the agent's config", async () => {
     const outputs = [
       "cat: secrets.txt: Permission denied",

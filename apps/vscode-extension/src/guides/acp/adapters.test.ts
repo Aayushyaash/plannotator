@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Runner } from "../sources/runner";
-import { adaptersRoot, hasManagedCopy, installAdapter, managedDir, managedLaunch, manualInstallCommand, npmCommand, npmReason } from "./adapters";
+import { adaptersRoot, hasManagedCopy, installAdapter, managedDir, managedLaunch, manualInstallCommand, npmCommand, npmReason, satisfiesNodeRange, sweepCopies } from "./adapters";
 import { ensureAgentLaunch } from "./ensure-launch";
 import { CLAUDE_CODE, CODEX, COPILOT, CURSOR, KILO, KIRO, KNOWN_AGENTS, OPENCODE, PI, canStart, detectAgents, resolveAgentLaunch, type AgentDescriptor } from "./agents";
 
@@ -20,11 +20,10 @@ afterEach(() => {
 const FOUND = (names: string[]) => (name: string) => (names.includes(name) ? `/bin/${name}` : null);
 
 /** A scripted npm: records every call and, when `ok`, writes the package the way npm would. */
-function fakeNpm(opts: { ok?: boolean; stderr?: string; nodeVersion?: string; engines?: string } = {}) {
+function fakeNpm(opts: { ok?: boolean; stderr?: string; engines?: string } = {}) {
   const calls: Array<{ command: string; args: string[] }> = [];
   const runner: Runner = async (command, args) => {
     calls.push({ command, args });
-    if (args[0] === "--version") return { code: 0, stdout: opts.nodeVersion ?? "v22.4.0\n", stderr: "" };
     if (opts.ok === false) return { code: 1, stdout: "", stderr: opts.stderr ?? "npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/nope\nnpm error A complete log of this run can be found in: /x" };
     const prefix = args[args.indexOf("--prefix") + 1];
     const spec = args[args.length - 1];
@@ -43,9 +42,9 @@ function fakeNpm(opts: { ok?: boolean; stderr?: string; nodeVersion?: string; en
 
 describe("which agents have an npm adapter Guided Reviews installs", () => {
   it("pins Claude Code, Codex and Pi to exact versions, and never the agents that are their own program", () => {
-    expect(CLAUDE_CODE.adapter).toEqual({ package: "@agentclientprotocol/claude-agent-acp", version: "0.91.0", bin: "claude-agent-acp" });
-    expect(CODEX.adapter).toEqual({ package: "@agentclientprotocol/codex-acp", version: "2.2.2", bin: "codex-acp" });
-    expect(PI.adapter).toEqual({ package: "pi-acp", version: "0.0.34", bin: "pi-acp" });
+    expect(CLAUDE_CODE.adapter).toEqual({ package: "@agentclientprotocol/claude-agent-acp", version: "0.91.0", bin: "claude-agent-acp", before: "2026-10-16" });
+    expect(CODEX.adapter).toEqual({ package: "@agentclientprotocol/codex-acp", version: "2.2.2", bin: "codex-acp", before: "2026-10-16" });
+    expect(PI.adapter).toEqual({ package: "pi-acp", version: "0.0.34", bin: "pi-acp", before: "2026-10-16" });
     for (const a of [OPENCODE, COPILOT, CURSOR, KIRO, KILO]) expect(a.adapter).toBeUndefined();
     for (const a of KNOWN_AGENTS) {
       if (!a.adapter) continue;
@@ -57,16 +56,16 @@ describe("which agents have an npm adapter Guided Reviews installs", () => {
 });
 
 describe("resolution order: setting, PATH, the installed copy, then install now", () => {
-  const managedHere = (root: string) => (a: AgentDescriptor) => (a.adapter ? managedLaunch(root, a.id, a.adapter, a.args, { findNode: () => "/bin/node" }) : null);
+  const managedHere = (root: string) => (a: AgentDescriptor) => (a.adapter ? managedLaunch(root, a.id, a.adapter, a.args, { findNode: () => "/bin/node", nodeVersion: () => "v22.4.0" }) : null);
 
   it("prefers the setting, then PATH, then the copy Guided Reviews installed", async () => {
     const root = tempRoot();
     const { runner } = fakeNpm();
-    expect((await installAdapter(root, "claude-code", "Claude Code", CLAUDE_CODE.adapter!, { runner, findExecutable: FOUND(["npm", "node"]) })).ok).toBe(true);
+    expect((await installAdapter(root, "claude-code", "Claude Code", CLAUDE_CODE.adapter!, { runner, findExecutable: FOUND(["npm", "node"]), stamp: "c1" })).ok).toBe(true);
     const managed = managedHere(root);
     expect(resolveAgentLaunch(CLAUDE_CODE, { command: "mine" }, FOUND(["mine", "claude-agent-acp"]), managed)).toMatchObject({ ok: true, command: "/bin/mine", source: "setting" });
     expect(resolveAgentLaunch(CLAUDE_CODE, {}, FOUND(["claude-agent-acp"]), managed)).toMatchObject({ ok: true, command: "/bin/claude-agent-acp", source: "path" });
-    const entry = join(managedDir(root, "claude-code"), "node_modules", "@agentclientprotocol", "claude-agent-acp", "dist", "index.js");
+    const entry = join(managedDir(root, "claude-code"), "c1", "node_modules", "@agentclientprotocol", "claude-agent-acp", "dist", "index.js");
     expect(resolveAgentLaunch(CLAUDE_CODE, {}, FOUND([]), managed)).toEqual({ ok: true, command: "/bin/node", args: [entry], source: "managed" });
   });
 
@@ -107,26 +106,82 @@ describe("installing an adapter", () => {
     const root = tempRoot();
     const { runner, calls } = fakeNpm();
     const result = await installAdapter(root, "claude-code", "Claude Code", CLAUDE_CODE.adapter!, { runner, findExecutable: FOUND(["npm", "node"]), stamp: "t" });
-    expect(result).toEqual({ ok: true, dir: managedDir(root, "claude-code") });
+    const copy = join(managedDir(root, "claude-code"), "t");
+    expect(result).toEqual({ ok: true, dir: copy });
     const install = calls.find((c) => c.args.includes("install"))!;
     expect(install.command).toBe("/bin/npm");
     expect(install.args).toEqual([
-      "install", "--prefix", `${managedDir(root, "claude-code")}.installing-t`, "--ignore-scripts", "--no-audit", "--no-fund", "--save-exact", "--loglevel=error",
+      "install", "--prefix", copy, "--ignore-scripts", "--before=2026-10-16", "--no-audit", "--no-fund", "--save-exact", "--loglevel=error",
       "@agentclientprotocol/claude-agent-acp@0.91.0",
     ]);
     expect(install.args).not.toContain("-g");
     expect(install.args).not.toContain("--global");
     expect(calls.some((c) => /npx/.test(c.command))).toBe(false);
-    expect(existsSync(`${managedDir(root, "claude-code")}.installing-t`)).toBe(false);
-    expect(JSON.parse(readFileSync(join(managedDir(root, "claude-code"), "plannotator-adapter.json"), "utf8"))).toEqual({ package: "@agentclientprotocol/claude-agent-acp", version: "0.91.0", runtime: "node" });
+    expect(JSON.parse(readFileSync(join(managedDir(root, "claude-code"), "current.json"), "utf8"))).toEqual({ package: "@agentclientprotocol/claude-agent-acp", version: "0.91.0", copy: "t" });
   });
 
-  it("runs the adapter with VS Code's own runtime when the node on PATH is older than the package needs", async () => {
+  it("keeps every dependency to versions published by the pin date (npm --before), not only the adapter", async () => {
+    for (const a of KNOWN_AGENTS) {
+      if (!a.adapter) continue;
+      const { runner, calls } = fakeNpm();
+      await installAdapter(tempRoot(), a.id, a.label, a.adapter, { runner, findExecutable: FOUND(["npm", "node"]) });
+      expect(calls[0].args).toContain(`--before=${a.adapter.before}`);
+      // The pin date is at least 7 days before the pins were chosen (2026-10-23).
+      expect(Date.parse(a.adapter.before)).toBeLessThanOrEqual(Date.parse("2026-10-16"));
+    }
+  });
+
+  it("chooses the runtime at each launch: node on PATH when it satisfies the package's engines, else VS Code's", async () => {
     const root = tempRoot();
-    const { runner } = fakeNpm({ nodeVersion: "v20.11.0", engines: ">=22" });
-    await installAdapter(root, "claude-code", "Claude Code", CLAUDE_CODE.adapter!, { runner, findExecutable: FOUND(["npm", "node"]) });
-    const launch = managedLaunch(root, "claude-code", CLAUDE_CODE.adapter!, [], { findNode: () => "/bin/node", execPath: "/vscode/Code Helper" });
-    expect(launch).toMatchObject({ command: "/vscode/Code Helper", env: { ELECTRON_RUN_AS_NODE: "1" } });
+    await installAdapter(root, "claude-code", "Claude Code", CLAUDE_CODE.adapter!, { runner: fakeNpm({ engines: ">=22" }).runner, findExecutable: FOUND(["npm", "node"]) });
+    const at = (version: string | null, node: string | null = "/bin/node") => managedLaunch(root, "claude-code", CLAUDE_CODE.adapter!, [], { findNode: () => node, nodeVersion: () => version, execPath: "/vscode/Code Helper" });
+    expect(at("v22.4.0")?.command).toBe("/bin/node");
+    expect(at("v20.11.0")).toMatchObject({ command: "/vscode/Code Helper", env: { ELECTRON_RUN_AS_NODE: "1" } });
+    expect(at(null)?.command).toBe("/vscode/Code Helper");
+    expect(at("v24.0.0", null)?.command).toBe("/vscode/Code Helper");
+  });
+
+  it("reads the common engines ranges", () => {
+    const table: Array<[string, string | undefined, boolean]> = [
+      ["v22.4.0", undefined, true], ["v18.0.0", "", true], ["v18.0.0", "*", true],
+      ["v22.4.0", ">=22", true], ["v20.11.0", ">=22", false], ["v22.0.0", ">=22.0.0", true],
+      ["v20.9.0", ">=18.17.0 <23", true], ["v23.1.0", ">=18.17.0 <23", false], ["v18.16.0", ">= 18.17.0", false],
+      ["v20.10.0", "^20.9.0 || >=22", true], ["v21.0.0", "^20.9.0 || >=22", false], ["v24.1.0", "^20.9.0 || >=22", true],
+      ["v20.1.5", "~20.1", true], ["v20.2.0", "~20.1", false], ["v20.5.0", "20.x", true], ["v21.0.0", "20", false],
+      ["v18.5.0", "18 - 20", true], ["v21.0.0", "18 - 20", false], ["v19.0.0", ">18", true], ["v18.9.0", ">18", false],
+      ["v22.4.0", "node >= 22", false], ["junk", ">=1", false],
+    ];
+    for (const [version, range, want] of table) expect([version, range, satisfiesNodeRange(version, range)]).toEqual([version, range, want]);
+  });
+
+  it("updates into a new copy and switches to it, leaving the copy a run may still use", async () => {
+    const root = tempRoot();
+    const deps = (stamp: string) => ({ runner: fakeNpm().runner, findExecutable: FOUND(["npm", "node"]), stamp });
+    await installAdapter(root, "codex", "Codex", CODEX.adapter!, deps("a"));
+    const before = managedLaunch(root, "codex", CODEX.adapter!, [], { findNode: () => null, execPath: "/vs" })!;
+    await installAdapter(root, "codex", "Codex", CODEX.adapter!, deps("b"));
+    const after = managedLaunch(root, "codex", CODEX.adapter!, [], { findNode: () => null, execPath: "/vs" })!;
+    expect(after.dir).toBe(join(managedDir(root, "codex"), "b"));
+    expect(existsSync(before.args[0])).toBe(true);
+  });
+
+  it("removes copies no longer current and unfinished installs once they are hours old, never the current one", async () => {
+    const root = tempRoot();
+    const agentDir = managedDir(root, "codex");
+    await installAdapter(root, "codex", "Codex", CODEX.adapter!, { runner: fakeNpm().runner, findExecutable: FOUND(["npm", "node"]), stamp: "now" });
+    const make = (path: string) => mkdirSync(path, { recursive: true });
+    make(join(agentDir, "old-copy"));
+    make(join(agentDir, "fresh-copy"));
+    make(`${agentDir}.installing-1-2`);
+    const hoursAgo = (path: string, h: number) => utimesSync(path, new Date(Date.now() - h * 3600_000), new Date(Date.now() - h * 3600_000));
+    hoursAgo(join(agentDir, "old-copy"), 7);
+    hoursAgo(`${agentDir}.installing-1-2`, 7);
+    hoursAgo(join(agentDir, "now"), 30);
+    sweepCopies(root, agentDir, Date.now());
+    expect(existsSync(join(agentDir, "old-copy"))).toBe(false);
+    expect(existsSync(`${agentDir}.installing-1-2`)).toBe(false);
+    expect(existsSync(join(agentDir, "fresh-copy"))).toBe(true);
+    expect(existsSync(join(agentDir, "now"))).toBe(true);
   });
 
   it("fails with one line: the reason and the manual command, and keeps the copy it had", async () => {
