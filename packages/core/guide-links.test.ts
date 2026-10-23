@@ -28,6 +28,9 @@ describe("parseGuideLink", () => {
       ["code:a.ts#24", /#L24/],
       ["code:a.ts#L0", /numbered from 1/],
       ["code:a.ts#L20-L10", /ends before it starts/],
+      ["code:src\\a.ts", /not \\/],
+      ["code:src/a%0Ab.ts", /control character/],
+      ["code:src/a%00.ts", /control character/],
     ];
     for (const [href, message] of cases) {
       const parsed = parseGuideLink(href);
@@ -44,6 +47,8 @@ describe("parseGuideLink", () => {
     });
     expect(parseGuideLink("symbol:")?.ok).toBe(false);
     expect(parseGuideLink("symbol:/x.ts#a")?.ok).toBe(false);
+    expect(parseGuideLink("symbol:a%0Ab")?.ok).toBe(false);
+    expect(parseGuideLink("symbol:src\\x.ts#a")?.ok).toBe(false);
   });
 
   test("chapter links are 1-based numbers", () => {
@@ -68,6 +73,15 @@ describe("findGuideLinks", () => {
       { href: "code:src/a.ts#L2", label: "the line" },
       { href: "chapter:3", label: "ch" },
     ]);
+  });
+
+  test("markdown: balanced parentheses stay in the target (Next.js route groups)", () => {
+    const text = "See [the page](code:app/(shop)/[id]/page.tsx#L4) and [the layout](code:app/(shop)/layout.tsx).";
+    expect(findGuideLinks(text, "markdown").map((l) => l.href)).toEqual(["code:app/(shop)/[id]/page.tsx#L4", "code:app/(shop)/layout.tsx"]);
+    const parsed = parseGuideLink("code:app/(shop)/[id]/page.tsx#L4");
+    expect(parsed?.ok && parsed.link).toMatchObject({ kind: "code", path: "app/(shop)/[id]/page.tsx", startLine: 4 });
+    // An unbalanced parenthesis still ends the link, as in markdown.
+    expect(findGuideLinks("[x](code:a.ts) (aside)", "markdown").map((l) => l.href)).toEqual(["code:a.ts"]);
   });
 
   test("mermaid: click lines, quoted, with or without href", () => {

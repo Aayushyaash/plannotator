@@ -462,9 +462,19 @@ async function checkCodePath(
       out.problems.push(`\`${href}\`: \`${path}\` is deleted in this change, so it has no lines at the head. Link the file without a line.`);
       return;
     }
+    const last = endLine ?? startLine;
     if (file.status === "added") {
       const lines = file.hunks.reduce((n, h) => Math.max(n, h.newStart + h.newCount - 1), 0);
-      if ((endLine ?? startLine) > lines) out.problems.push(`\`${href}\`: \`${path}\` has ${plural(lines, "line")} at the head.`);
+      if (last > lines) out.problems.push(`\`${href}\`: \`${path}\` has ${plural(lines, "line")} at the head.`);
+      return;
+    }
+    // Modified or renamed: the patch shows only the hunks, so the file's
+    // length at the head comes from the host when it can tell.
+    if (hooks?.resolveFile) {
+      const found = await hooks.resolveFile({ path });
+      if (found.exists && found.lineCount !== undefined && last > found.lineCount) {
+        out.problems.push(`\`${href}\`: \`${path}\` has ${plural(found.lineCount, "line")} at the head.`);
+      }
     }
     return;
   }
@@ -569,7 +579,10 @@ function dropDanglingChapterLinks(text: string, source: GuideLinkSource, count: 
       })
       .join("\n");
   }
-  return text.replace(/\s(?:href|xlink:href)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi, (whole, a?: string, b?: string) => (danglingChapter(a ?? b ?? "", count) ? "" : whole));
+  return text.replace(
+    /\s(?:href|xlink:href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+))/gi,
+    (whole, a?: string, b?: string, c?: string) => (danglingChapter(a ?? b ?? c ?? "", count) ? "" : whole),
+  );
 }
 
 const MERMAID_DIAGRAM_TYPES = [
@@ -715,6 +728,10 @@ export async function guideSetOverview(draft: GuideDraft, args: GuideSetOverview
       const sanitized = await hooks.sanitizeHtml(source);
       const html = sanitized.html.trim();
       if (html.length === 0) return refuse(draft, "Nothing was left of the HTML diagram after sanitizing it.");
+      const storedBytes = utf8Bytes(html);
+      if (storedBytes > GUIDE_OVERVIEW_DIAGRAM_MAX_BYTES) {
+        return refuse(draft, `The sanitized HTML is ${Math.ceil(storedBytes / 1024)} KB; keep it under ${GUIDE_OVERVIEW_DIAGRAM_MAX_BYTES / 1024} KB.`);
+      }
       if (sanitized.removed.length > 0) removedNotes.push(`Removed from the HTML: ${sanitized.removed.join(", ")}.`);
       diagram = { kind, source: html };
     }
@@ -814,6 +831,46 @@ export interface GuideMoveChapterArgs {
   readonly position: number;
 }
 
+/** Every prose and diagram text of the draft that can hold `chapter:` links, with where it is. */
+function linkTexts(draft: GuideDraft, chapters: readonly GuideDraftChapter[]): Array<{ text: string; source: GuideLinkSource; where: string }> {
+  const out: Array<{ text: string; source: GuideLinkSource; where: string }> = [];
+  if (draft.overview) {
+    out.push({ text: draft.overview.text, source: "markdown", where: "the overview" });
+    if (draft.overview.diagram) {
+      out.push({ text: draft.overview.diagram.source, source: draft.overview.diagram.kind === "mermaid" ? "mermaid" : "html", where: "the overview diagram" });
+    }
+  }
+  for (const c of chapters) out.push({ text: c.overview, source: "markdown", where: `the overview of ${c.id}` });
+  return out;
+}
+
+/**
+ * `chapter:N` links follow reading order, so moving or removing a chapter
+ * re-points them. Names each link whose target changed, so the agent can fix
+ * the ones it did not mean to move.
+ */
+function chapterLinkShifts(draft: GuideDraft, next: readonly GuideDraftChapter[]): string[] {
+  const notes: string[] = [];
+  const seen = new Set<string>();
+  for (const { text, source, where } of linkTexts(draft, next)) {
+    for (const occurrence of findGuideLinks(text, source)) {
+      const parsed = parseGuideLink(occurrence.href);
+      if (!parsed?.ok || parsed.link.kind !== "chapter") continue;
+      const n = parsed.link.chapter;
+      const before = draft.chapters[n - 1];
+      const after = next[n - 1];
+      if (before?.id === after?.id) continue;
+      const key = `${where}|${n}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const now = after ? `${after.id} "${after.title}"` : "no chapter";
+      const was = before ? `${before.id} "${before.title}"` : "no chapter";
+      notes.push(`\`chapter:${n}\` in ${where} now points at ${now} (was ${was}).`);
+    }
+  }
+  return notes;
+}
+
 function orderLine(draft: GuideDraft): string {
   return `Order: ${draft.chapters.map((c, i) => `${i + 1}. ${c.id} "${c.title}"`).join(", ")}.`;
 }
@@ -831,7 +888,7 @@ export async function guideMoveChapter(draft: GuideDraft, args: GuideMoveChapter
   const [moved] = chapters.splice(found.index, 1);
   chapters.splice(position - 1, 0, moved);
   const next = { ...draft, chapters };
-  return commit(next, hooks, [`Moved ${moved.id} to position ${position}.`, orderLine(next as GuideDraft)]);
+  return commit(next, hooks, [`Moved ${moved.id} to position ${position}.`, orderLine(next as GuideDraft), ...chapterLinkShifts(draft, chapters)]);
 }
 
 export interface GuideRemoveChapterArgs {
@@ -847,6 +904,7 @@ export async function guideRemoveChapter(draft: GuideDraft, args: GuideRemoveCha
   return commit({ ...draft, chapters }, hooks, [
     `Removed ${describeChapter(draft, found.index)} "${removed.title}".`,
     removed.files.length > 0 && `${plural(removed.files.length, "file is", "files are")} back to not placed: ${removed.files.map((f) => `\`${f.file}\``).join(", ")}.`,
+    ...chapterLinkShifts(draft, chapters),
   ]);
 }
 
@@ -980,8 +1038,11 @@ export async function guideUnplaceFile(draft: GuideDraft, args: GuideUnplaceFile
   const chapters = existing
     ? draft.chapters.map((c, i) => (i === existing.index ? { ...c, files: c.files.filter((f) => f.file !== path) } : c))
     : draft.chapters;
-  const alreadyLeftOut = draft.unplaced.some((u) => u.file === path);
-  const entry: GuideDraftUnplaced = reason ? { file: path, reason } : { file: path };
+  const earlier = draft.unplaced.find((u) => u.file === path);
+  const alreadyLeftOut = earlier !== undefined;
+  // No new reason keeps the one recorded earlier.
+  const keptReason = reason ?? earlier?.reason;
+  const entry: GuideDraftUnplaced = keptReason ? { file: path, reason: keptReason } : { file: path };
   const unplaced = alreadyLeftOut ? draft.unplaced.map((u) => (u.file === path ? entry : u)) : [...draft.unplaced, entry];
   return commit({ ...draft, chapters, unplaced }, hooks, [
     existing
@@ -1186,7 +1247,11 @@ export async function guideSaveAsIs(draft: GuideDraft, hooks?: GuideBuilderHooks
     unplaced: [...draft.unplaced, ...remaining.map((file) => ({ file }))],
   };
   const result = await finish(adjusted, hooks, { allowEmptyIntent: true });
-  if ("error" in result) return result;
+  if (!result.ok) {
+    // Refused: nothing was saved, so the caller's draft stays exactly as it was.
+    const lines = result.text.split("\n");
+    return refuse(draft, ...lines.slice(0, -1));
+  }
   return {
     ...result,
     draft: adjusted,

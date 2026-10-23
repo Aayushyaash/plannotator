@@ -197,6 +197,27 @@ describe("chapters", () => {
     expect(same.changed).toBe(false);
   });
 
+  test("moving or removing a chapter names the chapter: links it re-points", async () => {
+    let d = await twoChapters();
+    d = ok(await guideAddChapter(d, { title: "Glue", overview: "Wiring, after [the tests](chapter:2)." }, hooks));
+    d = ok(await guideSetOverview(d, { text: "Start at [budget](chapter:1), then [tests](chapter:2).", diagram: { kind: "mermaid", source: 'flowchart LR\n  a --> b\n  click b "chapter:2"' } }, hooks));
+    const moved = await guideMoveChapter(d, { chapter: "c2", position: 1 }, hooks);
+    expect(moved.text).toContain('`chapter:1` in the overview now points at c2 "Tests" (was c1 "Retry budget").');
+    expect(moved.text).toContain('`chapter:2` in the overview now points at c1 "Retry budget" (was c2 "Tests").');
+    expect(moved.text).toContain('`chapter:2` in the overview diagram now points at c1 "Retry budget"');
+    expect(moved.text).toContain('`chapter:2` in the overview of c3 now points at c1 "Retry budget"');
+    const removed = await guideRemoveChapter(d, { chapter: "c1" }, hooks);
+    expect(removed.text).toContain('`chapter:1` in the overview now points at c2 "Tests" (was c1 "Retry budget").');
+    expect(removed.text).toContain('`chapter:2` in the overview now points at c3 "Glue" (was c2 "Tests").');
+    // A move that changes no link target says nothing about links.
+    let e = await twoChapters();
+    e = ok(await guideAddChapter(e, { title: "Glue", overview: "Wiring." }, hooks));
+    e = ok(await guideSetOverview(e, { text: "Start at [budget](chapter:1)." }, hooks));
+    const quiet = await guideMoveChapter(e, { chapter: "c3", position: 2 }, hooks);
+    expect(quiet.ok).toBe(true);
+    expect(quiet.text).not.toContain("now points at");
+  });
+
   test("remove sends its files back to not placed", async () => {
     let d = await twoChapters();
     d = ok(await guidePlaceFile(d, { file: "src/webhooks/deliver.test.ts", chapter: "c2", summary: "A test." }, hooks));
@@ -267,6 +288,15 @@ describe("files", () => {
     expect(a.draft.chapters[1].files).toEqual([]);
     const notPlaced = await guideMoveFile(d, { file: "src/old.ts", chapter: "c1" });
     expect(notPlaced.text).toContain("`src/old.ts` is not in a chapter yet. Use guide_place_file to place it.");
+  });
+
+  test("unplacing again without a reason keeps the earlier reason", async () => {
+    let d = await twoChapters();
+    d = ok(await guideUnplaceFile(d, { file: "src/old.ts", reason: "dead code" }, hooks));
+    const again = await guideUnplaceFile(d, { file: "src/old.ts" }, hooks);
+    expect(again.draft.unplaced).toEqual([{ file: "src/old.ts", reason: "dead code" }]);
+    const replaced = await guideUnplaceFile(d, { file: "src/old.ts", reason: "generated" }, hooks);
+    expect(replaced.draft.unplaced).toEqual([{ file: "src/old.ts", reason: "generated" }]);
   });
 
   test("unplace takes a file out of its chapter; placing it later brings it back", async () => {
@@ -346,6 +376,17 @@ describe("guide_set_overview", () => {
     expect((await guideSetOverview(d, { text: "[x](symbol:src/webhooks/backoff.ts#computeBackoff)" }, lsp)).ok).toBe(true);
   });
 
+  test("lines in a modified file are checked against its length at the head when the host knows it", async () => {
+    const d = await twoChapters();
+    // Without the hook only the hunks are known, so a line past them is accepted.
+    expect((await guideSetOverview(d, { text: "[x](code:src/webhooks/deliver.ts#L90)" }, hooks)).ok).toBe(true);
+    const fs: GuideBuilderHooks = { ...hooks, resolveFile: ({ path }) => (path === "src/webhooks/deliver.ts" ? { exists: true, lineCount: 50 } : { exists: false }) };
+    const past = await guideSetOverview(d, { text: "[x](code:src/webhooks/deliver.ts#L40-L90)" }, fs);
+    expect(past.ok).toBe(false);
+    expect(past.text).toContain("`code:src/webhooks/deliver.ts#L40-L90`: `src/webhooks/deliver.ts` has 50 lines at the head.");
+    expect((await guideSetOverview(d, { text: "[x](code:src/webhooks/deliver.ts#L50)" }, fs)).ok).toBe(true);
+  });
+
   test("code links outside the change: checked by the host, or noted", async () => {
     const d = await twoChapters();
     const noted = await guideSetOverview(d, { text: "[cfg](code:config/app.yml#L3)" }, hooks);
@@ -385,6 +426,11 @@ describe("guide_set_overview", () => {
     expect(a.ok).toBe(true);
     expect(a.text).toContain("Removed from the HTML: a <script> element.");
     expect(a.draft.overview?.diagram?.source).not.toContain("<script>");
+    // The cap applies to what is stored too: a sanitizer may grow its input (entity escaping).
+    const growing: GuideBuilderHooks = { ...hooks, sanitizeHtml: () => ({ html: `<svg>${"x".repeat(70 * 1024)}</svg>`, removed: [] }) };
+    const grown = await guideSetOverview(d, { text: "x", diagram: { kind: "html", source: "<svg>small</svg>" } }, growing);
+    expect(grown.ok).toBe(false);
+    expect(grown.text).toMatch(/The sanitized HTML is \d+ KB; keep it under 64 KB\./);
     const broken = await guideSetOverview(d, { text: "x", diagram: { kind: "html", source: '<a href="code:missing/file.tsx">x</a>' } }, sanitize);
     expect(broken.ok).toBe(true); // outside the change, no resolveFile hook: noted, not refused
     expect(broken.text).toContain("not checked");
@@ -519,10 +565,29 @@ describe("save as is", () => {
     expect(s.guide.unplacedFiles?.sort()).toEqual(["src/old.ts", "src/webhooks/backoff.ts", "src/webhooks/deliver.test.ts"]);
   });
 
-  test("a draft with no files placed at all cannot be saved", async () => {
-    const a = await guideSaveAsIs(newDraft(), hooks);
+  test("HTML links to dropped chapters lose their href, quoted or not", async () => {
+    const html: GuideBuilderHooks = { ...hooks, sanitizeHtml: (source) => ({ html: source, removed: [] }) };
+    let d = newDraft();
+    d = ok(await guideAddChapter(d, { title: "Core", overview: "The core." }, hooks));
+    d = ok(await guideAddChapter(d, { title: "Later", overview: "Empty." }, hooks));
+    d = ok(await guideSetOverview(d, { text: "Picture.", diagram: { kind: "html", source: '<svg><a href=chapter:2><rect/></a><a href="chapter:1"><rect/></a><a xlink:href=\'chapter:2\'><rect/></a></svg>' } }, html));
+    d = ok(await guidePlaceFile(d, { file: "src/old.ts", chapter: "c1", summary: "Gone." }, hooks));
+    const a = await guideSaveAsIs(d, html);
+    expect(a.ok).toBe(true);
+    expect(a.snapshot!.guide.overview?.diagram?.source).toBe('<svg><a><rect/></a><a href="chapter:1"><rect/></a><a><rect/></a></svg>');
+  });
+
+  test("a refused save leaves the caller's draft exactly as it was", async () => {
+    // An empty chapter would be dropped by the save; the refusal must not hand back that rewritten draft.
+    let d = newDraft();
+    d = ok(await guideAddChapter(d, { title: "Empty", overview: "Nothing placed." }, hooks));
+    const a = await guideSaveAsIs(d, hooks);
     expect(a.ok).toBe(false);
+    expect(a.changed).toBe(false);
+    expect(a.draft).toBe(d);
+    expect(a.draft.chapters.map((c) => c.id)).toEqual(["c1"]);
     expect(a.text).toContain("The guide has no chapters.");
+    expect(lastLine(a.text)).toBe(guideDraftProgress(d).line);
   });
 });
 
