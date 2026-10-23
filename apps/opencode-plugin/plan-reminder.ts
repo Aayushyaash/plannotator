@@ -28,7 +28,12 @@
  * every request. Order: OpenCode's Plan hook finds its reminder by exact text
  * to decide whether to add one; it is a built-in registered before package
  * plugins, so it reads the history before this rewrite, and the stored message
- * is never changed (only the request's copy).
+ * is never changed (only the request's copy). This depends on that order
+ * (PluginSupervisor: built-ins, then packages). If OpenCode ever ran package
+ * hooks first, its Plan hook would not find its own reminder, add a raw one
+ * after our rewrite on every request and persist it, so the bug would return
+ * and the history would grow: re-check this when OpenCode's plugin loading
+ * changes.
  *
  * OpenCode 1 is not handled here: its plugin (index.ts) rewrites OpenCode 1's
  * "STRICTLY FORBIDDEN" reminder itself, unchanged.
