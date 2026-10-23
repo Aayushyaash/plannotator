@@ -64,37 +64,33 @@ export function threadOpenQuestions(
 }
 
 /**
- * Whether the button is shown. Two or more open questions: always. One:
- * only where it adds something, i.e. when its card may be out of sight: its
- * message is folded (or hidden in the middle fold), or the thread is
- * long (`OPEN_QUESTIONS_LONG_THREAD` messages or more, where a card scrolls
- * off and the fold starts folding).
- * One open question in a short, unfolded thread sits on screen with the
- * thread's own controls, so the button would only repeat it.
+ * Whether the button is shown: whenever a question waits (owner, 2026-10-23:
+ * the list now also holds Re-ask, so it must never be out of reach), or Re-ask
+ * is offered with no question listed (only action items wait).
  */
-export const OPEN_QUESTIONS_LONG_THREAD = 4;
-
-export function openQuestionsShown(questions: readonly OpenQuestion[], options: { messageCount: number; folded: (messageId: string) => boolean }): boolean {
-  if (questions.length === 0) return false;
-  if (questions.length >= 2) return true;
-  const only = questions[0]!;
-  return options.folded(only.messageId) || options.messageCount >= OPEN_QUESTIONS_LONG_THREAD;
+export function openQuestionsShown(questions: readonly OpenQuestion[], reaskShown = false): boolean {
+  return questions.length > 0 || reaskShown;
 }
 
-/** "5 open questions" / "1 open question". */
-export function openQuestionsLabel(n: number): string {
-  return `${formatCount(n)} open question${n === 1 ? '' : 's'}`;
+/** "5 open questions" / "1 open question"; `noun` "action item" when only action items wait. */
+export function openQuestionsLabel(n: number, noun: OpenQuestionsNoun = 'question'): string {
+  return `${formatCount(n)} open ${noun}${n === 1 ? '' : 's'}`;
 }
 
-/** The list's heading: "5 open questions in this thread". */
-export function openQuestionsHeading(n: number): string {
-  return `${openQuestionsLabel(n)} in this thread`;
+/** What the button counts: questions, or action items when no question waits. */
+export type OpenQuestionsNoun = 'question' | 'action item';
+
+/** The list's accessible name: "5 open questions in this thread" (not drawn). */
+export function openQuestionsHeading(n: number, noun: OpenQuestionsNoun = 'question'): string {
+  return `${openQuestionsLabel(n, noun)} in this thread`;
 }
 
-/** The muted line beside the heading: "1 in your draft · 1 replaced, left out" (nothing when both are zero). */
-export function openQuestionsSub(questions: readonly OpenQuestion[], replaced: number): string {
-  const drafts = questions.filter((q) => q.picked).length;
-  return [drafts > 0 ? `${formatCount(drafts)} in your draft` : '', replaced > 0 ? `${formatCount(replaced)} replaced, left out` : ''].filter(Boolean).join(' · ');
+/**
+ * The Re-ask item at the list's foot (owner, 2026-10-23): "Re-ask in a new
+ * message" when it asks for one thing again, else "Re-ask in one new message".
+ */
+export function reaskItemLabel(asked: number): string {
+  return asked === 1 ? 'Re-ask in a new message' : 'Re-ask in one new message';
 }
 
 /** Where a question's card sits, as a row says it. */

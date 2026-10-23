@@ -286,3 +286,14 @@ export function createMockExtensionContext(
     workspaceState: { get: () => undefined, update: async () => {} },
   };
 }
+
+export enum QuickPickItemKind {
+  Separator = -1,
+  Default = 0,
+}
+
+export enum ProgressLocation {
+  SourceControl = 1,
+  Window = 10,
+  Notification = 15,
+}

@@ -291,8 +291,8 @@ test('the foot after a pick: the buttons on the left, the draft status at the ro
   await expect(status.locator('[data-skip-chip]')).toContainText('2 questions stay open');
   const box = async (sel: string) => (await page.locator(sel).first().boundingBox())!;
   const send = async () => box('.ib-pfoot [data-foot-buttons] .ib-btn.ib-pri');
-  const reask = async () => box('.ib-pfoot [data-foot-buttons] [data-reask]');
-  // Wide: one line. Send first, the status after Re-ask, ending at the row's end. Since the "N open questions"
+  const reask = async () => box('.ib-pfoot [data-foot-buttons] [data-open-questions]');
+  // Wide: one line. Send first, the status after the last button ("N open questions", which holds Re-ask), ending at the row's end. Since the "N open questions"
   // button joined the row (approval "inbox-thread-open-questions"), one line needs a window this wide; at 1440 the
   // status sits on its own line above, as the approved mock draws it.
   await page.setViewportSize({ width: 1920, height: 1000 });
@@ -308,7 +308,7 @@ test('the foot after a pick: the buttons on the left, the draft status at the ro
   const narrow = () =>
     page.evaluate(() => {
       const r = (sel: string) => document.querySelector(sel)!.getBoundingClientRect();
-      const [row, status, send, reask] = ['[data-foot-row]', '[data-foot-status]', '[data-foot-buttons] .ib-btn.ib-pri', '[data-foot-buttons] [data-reask]'].map((s) => r(`.ib-pfoot ${s}`));
+      const [row, status, send, reask] = ['[data-foot-row]', '[data-foot-status]', '[data-foot-buttons] .ib-btn.ib-pri', '[data-foot-buttons] [data-open-questions]'].map((s) => r(`.ib-pfoot ${s}`));
       return { above: status!.bottom <= send!.top, start: Math.abs(status!.left - row!.left) < 2, oneLine: Math.abs(reask!.top - send!.top) < 2 };
     });
   await expect.poll(narrow).toEqual({ above: true, start: true, oneLine: true });

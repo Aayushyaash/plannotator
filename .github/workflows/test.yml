@@ -199,6 +199,7 @@ jobs:
           packages/inbox/listLabels.test.tsx
           packages/inbox/listRowMemo.test.tsx
           packages/inbox/rowTicks.test.tsx
+          packages/inbox/guideDiffStyle.test.tsx
           packages/inbox/componentTooltips.test.tsx
           packages/inbox/toast.test.tsx
           packages/inbox/attachmentsHeader.test.tsx
@@ -326,6 +327,7 @@ jobs:
           packages/editor/App.planRevision.test.tsx
           packages/editor/App.liveVersion.test.tsx
           packages/editor/askSessionDrafts.test.tsx
+          packages/editor/askDocumentLatch.test.tsx
           packages/review-editor/App.decisionControl.test.tsx
           packages/ui/components/TerminalToolsAnnouncementDialog.test.tsx
           packages/editor/App.terminalToolsAnnouncement.test.tsx

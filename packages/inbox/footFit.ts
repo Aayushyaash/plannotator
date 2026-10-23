@@ -6,8 +6,8 @@
  * "6" (the question icon and the count). A phone never takes the long form.
  * Before a form gives way to a shorter one, the row tries it tightened: the
  * buttons' side padding and the gaps get smaller and the button drops its
- * chevron (`data-fit-tight`, inbox.css), as a phone with Send, Edit draft and
- * Re-ask needs.
+ * chevron (`data-fit-tight`, inbox.css), as a phone with Send and Edit draft
+ * needs.
  * And on a phone the "↓ N new" pill, laid over the middle of the row, moves
  * above the foot when a button sits under that middle.
  *
@@ -20,10 +20,10 @@ export type OpenQuestionsLabelForm = 'full' | 'short' | 'count';
 export const OPEN_QUESTIONS_LABEL_FORMS: readonly OpenQuestionsLabelForm[] = ['full', 'short', 'count'];
 
 /** The visible words of each form: "6 open questions" / "6 open" / "6". */
-export function openQuestionsFormText(n: number, form: OpenQuestionsLabelForm): string {
+export function openQuestionsFormText(n: number, form: OpenQuestionsLabelForm, noun: 'question' | 'action item' = 'question'): string {
   if (form === 'count') return String(n);
   if (form === 'short') return `${n} open`;
-  return `${n} open question${n === 1 ? '' : 's'}`;
+  return `${n} open ${noun}${n === 1 ? '' : 's'}`;
 }
 
 /** One way to draw the button: a label form, on the row's usual spacing or the tight one. */

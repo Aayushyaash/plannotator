@@ -547,6 +547,14 @@ export interface InboxReplyCommand {
    * older connection ignores it and words every Re-ask as questions.
    */
   reask_items?: 'actions' | 'both'
+  /**
+   * On a Re-ask note that lists exactly one question or action item (owner,
+   * 2026-10-23: Re-ask shows for one question too): the wake words it in the
+   * singular (`inboxReaskInstruction`). Absent when the note lists more, so
+   * those wakes stay as they were; an older connection ignores it and words
+   * the wake in the plural, while the body still names the one question.
+   */
+  reask_one?: boolean
 }
 
 /**
@@ -656,9 +664,14 @@ export function inboxReaskItemsOf(ids: readonly string[] | undefined): InboxReas
 
 /**
  * The Re-ask wake's second line, naming only what the note lists. With only
- * questions it is INBOX_REASK_INSTRUCTION byte for byte.
+ * questions, more than one, it is INBOX_REASK_INSTRUCTION byte for byte.
+ * `one`: the note lists a single question or action item.
  */
-export function inboxReaskInstruction(items: InboxReaskItems): string {
+export function inboxReaskInstruction(items: InboxReaskItems, one = false): string {
+  if (one && items !== 'both') {
+    const what = items === 'actions' ? 'action item' : 'question'
+    return `The person asked, from the Plannotator Inbox, for the open ${what} in this thread to be asked again, in one new message. The ${what} and what to do with it follow. Answer in the same thread: plannotator_inbox send_message with reply_to set to the id in parentheses on the line above.`
+  }
   if (items !== 'actions' && items !== 'both') return INBOX_REASK_INSTRUCTION
   const { what, they } = reaskWords(items)
   return `The person asked, from the Plannotator Inbox, for the ${what} in this thread to be asked again, together in one new message. ${they} and what to do with each follow. Answer in the same thread: plannotator_inbox send_message with reply_to set to the id in parentheses on the line above.`
@@ -669,7 +682,11 @@ export function inboxReaskInstruction(items: InboxReaskItems): string {
  * session because the session that asked had ended: the questions are
  * another session's, and this one takes them over.
  */
-export function inboxReaskRedirectedLine(asker: string, id: string, items?: InboxReaskItems): string {
+export function inboxReaskRedirectedLine(asker: string, id: string, items?: InboxReaskItems, one = false): string {
+  if (one && items !== 'both') {
+    const what = items === 'actions' ? 'This action item' : 'This question'
+    return `${what} was asked by another ${asker} session, which has ended; the person picked you to take it over. Read the thread first with read_thread (message_id ${id}), then ask it again as below if it is still needed.`
+  }
   const these = items === 'actions' ? 'These action items' : items === 'both' ? 'These questions and action items' : 'These questions'
   return `${these} were asked by another ${asker} session, which has ended; the person picked you to take them over. Read the thread first with read_thread (message_id ${id}), then ask the ones still needed again as below.`
 }
@@ -747,6 +764,7 @@ export function inboxWakeText(
     also_tagged?: unknown
     reask?: boolean
     reask_items?: unknown
+    reask_one?: unknown
   },
 ): string {
   if (typeof command.ack_of === 'string' && command.ack_of !== '') {
@@ -767,20 +785,21 @@ export function inboxWakeText(
     : []
   const also = others.length > 0 ? `\n${inboxAlsoTaggedLine(others)}` : ''
   const reaskItems: InboxReaskItems = command.reask_items === 'actions' || command.reask_items === 'both' ? command.reask_items : undefined
+  const reaskOne = command.reask_one === true
   const instruction =
     command.type === 'message'
       ? command.new_thread === true
         ? INBOX_NEW_THREAD_INSTRUCTION
         : INBOX_MESSAGE_INSTRUCTION
       : command.reask === true
-        ? inboxReaskInstruction(reaskItems)
+        ? inboxReaskInstruction(reaskItems, reaskOne)
         : INBOX_WAKE_INSTRUCTION
   const asker =
     command.type !== 'message' && typeof command.redirected_from === 'string' && command.redirected_from.trim() !== ''
       ? wakeName(command.redirected_from) || 'agent'
       : ''
   const redirected = asker
-    ? `\n${command.reask === true ? inboxReaskRedirectedLine(asker, command.id, reaskItems) : inboxRedirectedLine(asker, command.id)}`
+    ? `\n${command.reask === true ? inboxReaskRedirectedLine(asker, command.id, reaskItems, reaskOne) : inboxRedirectedLine(asker, command.id)}`
     : command.continues_thread === true
       ? `\n${inboxContinuesLine(command.id)}`
       : ''

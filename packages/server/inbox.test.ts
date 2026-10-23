@@ -791,6 +791,55 @@ describe("the window's routes: settings, restart, favicon", () => {
     }
   });
 
+  test("the guided review's diff layout saves into config.json `diffOptions.diffStyle`, shared with code review", async () => {
+    const root = tempRoot();
+    const dataDir = join(root, "data");
+    const previous = process.env.PLANNOTATOR_DATA_DIR;
+    process.env.PLANNOTATOR_DATA_DIR = dataDir;
+    try {
+      mkdirSync(dataDir, { recursive: true });
+      // Code review's other diff options are already there; a style no build writes reads as never chosen.
+      writeFileSync(join(dataDir, "config.json"), JSON.stringify({ diffOptions: { diffStyle: "sideways", overflow: "wrap", fontSize: "13" } }));
+      const server = await start(dataDir);
+      const read = async () => (await (await fetch(`http://127.0.0.1:${server.port}/api/inbox/settings`)).json()).diff_style;
+      const onDisk = () => JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")) as { diffOptions?: Record<string, unknown>; theme?: unknown };
+      expect(await read()).toBeNull();
+      for (const bad of ["", "Split", "both", 1, null, true, { style: "split" }]) {
+        const refused = await post(server, "/api/inbox/settings", { serverSession: server.serverSession, diff_style: bad });
+        expect(refused.status).toBe(422);
+        expect((await refused.json()).field).toBe("diff_style");
+      }
+      // A refused part saves nothing, the valid parts beside it included.
+      const mixed = await post(server, "/api/inbox/settings", { serverSession: server.serverSession, theme: { mode: "light" }, diff_style: "both" });
+      expect(mixed.status).toBe(422);
+      expect(onDisk().theme).toBeUndefined();
+      // Another site's page and a stale tab write nothing.
+      const cross = await post(server, "/api/inbox/settings", { diff_style: "unified" }, { Origin: "https://evil.example" });
+      expect(cross.status).toBe(403);
+      expect((await cross.json()).code).toBe("cross_origin");
+      const crossSite = await post(server, "/api/inbox/settings", { diff_style: "unified" }, { "Sec-Fetch-Site": "same-site" });
+      expect(crossSite.status).toBe(403);
+      const stale = await post(server, "/api/inbox/settings", { serverSession: "not-this-one", diff_style: "unified" });
+      expect(stale.status).toBe(409);
+      expect(onDisk().diffOptions?.diffStyle).toBe("sideways");
+
+      for (const style of ["unified", "split", "unified"]) {
+        const saved = await post(server, "/api/inbox/settings", { serverSession: server.serverSession, diff_style: style });
+        expect(saved.status).toBe(200);
+        expect((await saved.json()).diff_style).toBe(style);
+        expect(onDisk().diffOptions).toEqual({ diffStyle: style, overflow: "wrap", fontSize: "13" });
+        expect(await read()).toBe(style);
+      }
+      // Another setting's save keeps the layout and answers it.
+      const other = await post(server, "/api/inbox/settings", { serverSession: server.serverSession, text_size: 13 });
+      expect((await other.json()).diff_style).toBe("unified");
+      expect(onDisk().diffOptions?.diffStyle).toBe("unified");
+    } finally {
+      if (previous === undefined) delete process.env.PLANNOTATOR_DATA_DIR;
+      else process.env.PLANNOTATOR_DATA_DIR = previous;
+    }
+  });
+
   test("the two writing routes refuse a foreign Host before anything is written or stopped", async () => {
     const root = tempRoot();
     const dataDir = join(root, "data");

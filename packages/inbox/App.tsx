@@ -87,7 +87,8 @@ import { installPlainTextPaste } from '@plannotator/ui/utils/pasteInsert';
 import { LIST_MIN_WIDTH, THREAD_BESIDE_FILE_WIDTH, paneGutters, useStack } from './stack';
 import { backTo, pushScreen } from './history';
 import { parseFileView, sameScreenAnyView } from './fileView';
-import { adoptSavedTheme, inboxThemeSync } from './theme';
+import { adoptSavedTheme, inboxServerSync } from './theme';
+import { adoptSavedDiffStyle } from './diffStyle';
 import { adoptSavedTextSize, applyRememberedTextSize } from './textSize';
 import { parseSettingsHash, settingsHash, type SettingsSection } from './settingsRoute';
 import { ComposeDialog, type ComposeRequest, type ComposeSent } from './compose/ComposeDialog';
@@ -107,7 +108,7 @@ import { inboxTabCount, useTabCount } from './tabCount';
 applyRememberedTextSize();
 
 configurePlannotatorUI({
-  serverSync: inboxThemeSync,
+  serverSync: inboxServerSync,
   // ui's own hover text (annotation panel and toolbar, question cards, links to attachments) as ui's Tooltip,
   // never a native title (the owner, 2026-10-17).
   componentTooltips: true,
@@ -761,6 +762,7 @@ function Inbox() {
       const next = await inboxApi.settings();
       adoptSavedTheme(next.theme);
       adoptSavedTextSize(next.text_size);
+      adoptSavedDiffStyle(next.diff_style);
       setSettings(next);
     } catch (cause) {
       setSettingsError(cause instanceof Error ? cause.message : String(cause));
