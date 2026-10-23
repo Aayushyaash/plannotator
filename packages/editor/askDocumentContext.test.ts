@@ -14,10 +14,10 @@ const file = (path: string, content = `# ${path}\n\nBody of ${path}.\n`, extra: 
 
 /** Ask one question per document, as the editor does: each question's note is
  *  delivered, so the latch moves on to what it named. */
-function askAlong(docs: AskDocument[], includeContent = true): string[] {
+function askAlong(docs: AskDocument[], sessionBridge = false): string[] {
   let latch: AskDocumentLatch = EMPTY_ASK_DOCUMENT_LATCH;
   return docs.map((doc, i) => {
-    const plan = planAskDocumentContext(latch, doc, { freshSession: i === 0, includeContent });
+    const plan = planAskDocumentContext(latch, doc, { freshSession: i === 0, sessionBridge });
     latch = plan.next;
     return plan.preamble;
   });
@@ -113,7 +113,7 @@ describe('planAskDocumentContext', () => {
 
   test('"Ask this session" never gets a pasted text', () => {
     const url = describeAskDocument({ kind: 'document', path: 'https://example.com/a', content: 'Page text' });
-    const notes = askAlong([file('/w/a.md'), url], false);
+    const notes = askAlong([file('/w/a.md'), url], true);
     expect(notes[1]).toContain('https://example.com/a');
     expect(notes[1]).not.toContain('Page text');
   });
@@ -135,6 +135,41 @@ describe('planAskDocumentContext', () => {
     expect(notes[2]).toBe('');
   });
 
+  test('"Ask this session": a revision names the plan\'s own file, never the history copy', () => {
+    const plan = (version: number) => describeAskDocument({
+      kind: 'plan', path: `/data/.plannotator/history/p/s/00${version}.md`, ownPath: '/home/me/.claude/plans/rollout.md',
+      version, content: `# Plan v${version}`,
+    });
+    const notes = askAlong([plan(1), plan(2)], true);
+    expect(notes[1]).toContain('The plan was revised to version 2: /home/me/.claude/plans/rollout.md.');
+    expect(notes[1]).not.toContain('.plannotator');
+    expect(notes[1]).not.toContain('read the file');
+    expect(notes[1]).toContain('Viewed earlier in this chat, most recent first: the plan (version 1).');
+    expect(notes[1]).not.toContain('# Plan v2');
+  });
+
+  test('"Ask this session": with no own plan file, a revision only says it was revised', () => {
+    const plan = (version: number) => describeAskDocument({
+      kind: 'plan', path: `/data/.plannotator/history/p/s/00${version}.md`, version, content: `# Plan v${version}`,
+    });
+    const notes = askAlong([plan(1), plan(2), plan(2)], true);
+    expect(notes[1]).toContain('The plan was revised to version 2. This replaces the plan shown earlier in this chat.');
+    expect(notes[1]).not.toContain('.plannotator');
+    expect(notes[1]).not.toContain('read the file');
+    expect(notes[1]).not.toContain('# Plan v2');
+    expect(notes[2]).toBe('');
+  });
+
+  test('a separate AI keeps the history copy even when the plan has its own file', () => {
+    const plan = (version: number) => describeAskDocument({
+      kind: 'plan', path: `/data/.plannotator/history/p/s/00${version}.md`, ownPath: '/home/me/.claude/plans/rollout.md',
+      version, content: `# Plan v${version}`,
+    });
+    const notes = askAlong([plan(1), plan(2)]);
+    expect(notes[1]).toContain('The plan was revised to version 2: /data/.plannotator/history/p/s/002.md.');
+    expect(notes[1]).toContain('read the file for its current text');
+  });
+
   test('a plan with no known file carries its revised text once', () => {
     const plan = (version: number) => describeAskDocument({ kind: 'plan', version, content: `# Plan text v${version}` });
     const notes = askAlong([plan(1), plan(2)]);
@@ -150,8 +185,8 @@ describe('planAskDocumentContext', () => {
   });
 
   test('a new session (provider switch, New chat) starts over with no note', () => {
-    const a = planAskDocumentContext(EMPTY_ASK_DOCUMENT_LATCH, file('/w/a.md'), { freshSession: true, includeContent: true });
-    const b = planAskDocumentContext(a.next, file('/w/b.md'), { freshSession: true, includeContent: true });
+    const a = planAskDocumentContext(EMPTY_ASK_DOCUMENT_LATCH, file('/w/a.md'), { freshSession: true, sessionBridge: false });
+    const b = planAskDocumentContext(a.next, file('/w/b.md'), { freshSession: true, sessionBridge: false });
     expect(b.preamble).toBe('');
     expect(b.next.history).toEqual([]);
   });

@@ -8,7 +8,7 @@
  * `planRevision` and its tab polls for nothing.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startPlannotatorServer } from "./index";
@@ -79,6 +79,31 @@ describe("plan server revisions (Bun)", () => {
       expect(ok.status).toBe(200);
       expect(await server.waitForDecision()).toMatchObject({ approved: false, feedback: "Split it." });
       expect(server.updatePlan(`${v2}\nMore.\n`)).toBeNull();
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("the plan's own file is advertised as planFilePath only while its text is the plan (#1001)", async () => {
+    const { v1, v2 } = planPair();
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "plannotator-plan-own-file-")));
+    tempDirs.push(dir);
+    const own = join(dir, "rollout.md");
+    writeFileSync(own, v1);
+    const server = await startPlannotatorServer({ plan: v1, htmlContent: MINIMAL_HTML, origin: "claude-code", planRevisions: true, planFilePath: own });
+    try {
+      const first = (await (await fetch(`${server.url}/api/plan`)).json()) as Record<string, any>;
+      expect(first.planFilePath).toBe(own);
+      // A revision whose text the file does not hold drops it.
+      server.updatePlan(v2);
+      const stale = (await (await fetch(`${server.url}/api/plan`)).json()) as Record<string, any>;
+      expect("planFilePath" in stale).toBe(false);
+      // The agent rewrote its file with the next revision: advertised again.
+      const v3 = `${v2}\n- [ ] Third step.\n`;
+      writeFileSync(own, v3);
+      server.updatePlan(v3);
+      const fresh = (await (await fetch(`${server.url}/api/plan`)).json()) as Record<string, any>;
+      expect(fresh.planFilePath).toBe(own);
     } finally {
       await server.stop();
     }

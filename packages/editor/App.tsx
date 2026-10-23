@@ -757,6 +757,10 @@ const App: React.FC = () => {
   // Plan review: the history file holding the exact plan on screen (absolute),
   // so Ask AI can name the plan by path instead of pasting it.
   const [planPath, setPlanPath] = useState<string | undefined>(undefined);
+  // Plan review: the plan's own file (the agent's, e.g. ~/.claude/plans/x.md),
+  // when its text is the plan on screen. "Ask this session" is named this
+  // one, never the history copy, which is outside its project.
+  const [planOwnFilePath, setPlanOwnFilePath] = useState<string | undefined>(undefined);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
@@ -3820,7 +3824,7 @@ const App: React.FC = () => {
         if (!res.ok) throw new Error('Not in API mode');
         return res.json();
       })
-      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'annotate-app' | 'annotate-bundle' | 'archive' | 'goal-setup'; bundle?: unknown; goalSetup?: GoalSetupBundle; filePath?: string; appUrl?: string; targetUrl?: string; liveToken?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; approvalNotesSupported?: boolean; clientLease?: AnnotateClientLeaseConfig; renderAs?: DocumentRenderAs; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; liveVersions?: boolean; planRevision?: number; serverSession?: string; archivePlans?: ArchivedPlan[]; projectRoot?: string; planDir?: string; planPath?: string; isWSL?: boolean; markdownExtensions?: string[]; documentDrafts?: boolean; serverConfig?: { displayName?: string; gitUser?: string; autoUpdate?: boolean; autoUpdateEnv?: boolean; updateCheck?: boolean; updateCheckEnv?: boolean }; autoUpdateNotice?: unknown; updateAvailable?: unknown; autoUpdateSupported?: boolean; autoUpdateActive?: boolean; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; feedbackTemplates?: AnnotateFeedbackTemplates }) => {
+      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'annotate-app' | 'annotate-bundle' | 'archive' | 'goal-setup'; bundle?: unknown; goalSetup?: GoalSetupBundle; filePath?: string; appUrl?: string; targetUrl?: string; liveToken?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; approvalNotesSupported?: boolean; clientLease?: AnnotateClientLeaseConfig; renderAs?: DocumentRenderAs; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; liveVersions?: boolean; planRevision?: number; serverSession?: string; archivePlans?: ArchivedPlan[]; projectRoot?: string; planDir?: string; planPath?: string; planFilePath?: string; isWSL?: boolean; markdownExtensions?: string[]; documentDrafts?: boolean; serverConfig?: { displayName?: string; gitUser?: string; autoUpdate?: boolean; autoUpdateEnv?: boolean; updateCheck?: boolean; updateCheckEnv?: boolean }; autoUpdateNotice?: unknown; updateAvailable?: unknown; autoUpdateSupported?: boolean; autoUpdateActive?: boolean; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; feedbackTemplates?: AnnotateFeedbackTemplates }) => {
         // Initialize config store with server-provided values (config file > cookie > default)
         configStore.init(data.serverConfig);
         // Stale-tab guard: every decision echoes this server's nonce.
@@ -3945,6 +3949,7 @@ const App: React.FC = () => {
         }
         setPlanDir(data.planDir ?? undefined);
         setPlanPath(data.mode === undefined && typeof data.planPath === 'string' ? data.planPath : undefined);
+        setPlanOwnFilePath(data.mode === undefined && typeof data.planFilePath === 'string' ? data.planFilePath : undefined);
         if (data.sharingEnabled !== undefined) {
           setSharingEnabled(data.sharingEnabled);
         }
@@ -4321,6 +4326,7 @@ const App: React.FC = () => {
     setPreviousPlan(snapshot.previousPlan);
     setVersionInfo(snapshot.versionInfo);
     setPlanPath(snapshot.planPath ?? undefined);
+    setPlanOwnFilePath(snapshot.planFilePath ?? undefined);
     setAppliedPlanRevision(snapshot.planRevision);
     setIsPlanDiffActive(false);
     const remapped = applyEditedDocument(normalized);
@@ -5430,6 +5436,7 @@ const App: React.FC = () => {
       return describeAskDocument({
         kind: 'plan',
         path: planPath,
+        ownPath: planOwnFilePath,
         version: versionInfo?.version,
         content: markdown,
       });
@@ -5445,7 +5452,7 @@ const App: React.FC = () => {
       position: aiContext.annotate.bundlePosition,
       content: aiContext.annotate.content,
     });
-  }, [aiContext, aiDocumentPath, aiRenderAs, aiSourceConverted, aiSourceInfo, annotateSource, linkedDocHook.isActive, liveApp, markdown, planPath, versionInfo]);
+  }, [aiContext, aiDocumentPath, aiRenderAs, aiSourceConverted, aiSourceInfo, annotateSource, linkedDocHook.isActive, liveApp, markdown, planOwnFilePath, planPath, versionInfo]);
   // What the agent was last told about the document, recorded once a question
   // carrying it reached the session.
   const askDocumentLatchRef = useRef<AskDocumentLatch>(EMPTY_ASK_DOCUMENT_LATCH);

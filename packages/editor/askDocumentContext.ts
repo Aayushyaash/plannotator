@@ -18,8 +18,14 @@ export interface AskDocument {
   key: string;
   /** `plan` is the plan under review; everything else is a document. */
   kind: 'plan' | 'document';
-  /** Absolute path of a file on this computer the agent can read. */
+  /** Absolute path of a file on this computer the agent can read. For the
+   *  plan, the history copy of this exact version (a separate AI's file). */
   path?: string;
+  /** The plan's own file (the agent's, e.g. `~/.claude/plans/x.md`), when its
+   *  text is the plan. "Ask this session" is named this one, never `path`:
+   *  the history copy is outside its project (a permission prompt) and it
+   *  wrote the revision itself. */
+  ownPath?: string;
   /** Where a document without a file came from (a URL), when known. */
   url?: string;
   /** What to call a document without a path or URL ("your last message"). */
@@ -84,6 +90,7 @@ function hashText(text: string): string {
 export function describeAskDocument(input: {
   kind: 'plan' | 'document';
   path?: string | null;
+  ownPath?: string | null;
   sourceUrl?: string | null;
   label?: string;
   renderAs?: string;
@@ -101,6 +108,7 @@ export function describeAskDocument(input: {
     ...(input.converted ? { converted: true } : {}),
     ...(input.version ? { version: input.version } : {}),
     ...(input.position ? { position: input.position } : {}),
+    ...(input.kind === 'plan' && isReadableDocumentPath(input.ownPath) ? { ownPath: input.ownPath } : {}),
   };
   if (readable) {
     return { ...base, key: `${input.kind}|file|${readable}|${input.renderAs ?? ''}|${input.converted ? 'c' : ''}`, path: readable };
@@ -114,7 +122,17 @@ export function describeAskDocument(input: {
   };
 }
 
-function nameOf(doc: AskDocument): string {
+/** The path a note may point this agent at: "Ask this session" gets the
+ *  plan's own file or none, a separate AI the history copy it can read. */
+function pathFor(doc: AskDocument, sessionBridge: boolean): string | undefined {
+  return doc.kind === 'plan' && sessionBridge ? doc.ownPath : doc.path;
+}
+
+function nameOf(doc: AskDocument, sessionBridge: boolean): string {
+  if (doc.kind === 'plan' && sessionBridge) {
+    // An earlier version: its own file now holds the newer text.
+    return doc.version ? `the plan (version ${doc.version})` : 'the plan';
+  }
   const where = doc.path ?? doc.url ?? doc.label ?? (doc.kind === 'plan' ? 'the plan' : 'a document');
   return doc.kind === 'plan' && doc.version ? `${where} (plan version ${doc.version})` : where;
 }
@@ -127,24 +145,32 @@ function detailsOf(doc: AskDocument): string {
   return parts.length > 0 ? ` (${parts.join('; ')})` : '';
 }
 
-function currentLine(doc: AskDocument, earlier: AskDocument[]): string {
+function currentLine(doc: AskDocument, earlier: AskDocument[], sessionBridge: boolean): string {
   const returning = earlier.some(e => e.key === doc.key);
   if (doc.kind === 'plan') {
+    const path = pathFor(doc, sessionBridge);
     const lastPlan = earlier.find(e => e.kind === 'plan');
     if (lastPlan && lastPlan.key !== doc.key) {
       const version = doc.version ? ` to version ${doc.version}` : '';
-      return doc.path
-        ? `The plan was revised${version}: ${doc.path}. This replaces the plan shown earlier in this chat; read the file for its current text.`
+      if (sessionBridge) {
+        // The session wrote the revision: name its own file, never ask it to
+        // read the history copy.
+        return path
+          ? `The plan was revised${version}: ${path}. This replaces the plan shown earlier in this chat.`
+          : `The plan was revised${version}. This replaces the plan shown earlier in this chat.`;
+      }
+      return path
+        ? `The plan was revised${version}: ${path}. This replaces the plan shown earlier in this chat; read the file for its current text.`
         : `The plan was revised${version}. This replaces the plan shown earlier in this chat.`;
     }
-    const where = doc.path ? `: ${doc.path}` : '';
+    const where = path ? `: ${path}` : '';
     return `The reviewer is ${returning ? 'back on' : 'now looking at'} the plan${where}.`;
   }
   const verb = returning ? 'is back on' : 'is now looking at';
   if (doc.path) {
     return `The reviewer ${verb} ${doc.path}${detailsOf(doc)}. This replaces the document named earlier in this chat; read the file for its contents.`;
   }
-  return `The reviewer ${verb} ${nameOf(doc)}${detailsOf(doc)}. This replaces the document named earlier in this chat.`;
+  return `The reviewer ${verb} ${nameOf(doc, sessionBridge)}${detailsOf(doc)}. This replaces the document named earlier in this chat.`;
 }
 
 /**
@@ -155,15 +181,15 @@ function currentLine(doc: AskDocument, earlier: AskDocument[]): string {
  * - The same document as the last note adds nothing.
  * - A different document gets one short note: its path (and how it is shown),
  *   plus the documents viewed earlier in this chat, most recent first. A
- *   document with no readable path also carries its text, unless
- *   `includeContent` is false ("Ask this session": the agent wrote the plan or
- *   the message, or can open the URL itself, and a pasted copy would stay in
- *   its context window).
+ *   document with no readable path also carries its text, except for "Ask
+ *   this session" (`sessionBridge`): the agent wrote the plan or the message,
+ *   or can open the URL itself, and a pasted copy would stay in its context
+ *   window. That agent is also never pointed at the plan's history copy.
  */
 export function planAskDocumentContext(
   latch: AskDocumentLatch,
   doc: AskDocument,
-  options: { freshSession: boolean; includeContent: boolean; maxHistory?: number },
+  options: { freshSession: boolean; sessionBridge: boolean; maxHistory?: number },
 ): { preamble: string; next: AskDocumentLatch } {
   if (options.freshSession) return { preamble: '', next: { current: doc, history: [] } };
   if (latch.current?.key === doc.key) return { preamble: '', next: latch };
@@ -179,15 +205,15 @@ export function planAskDocumentContext(
   }
 
   const earlier = [latch.current, ...latch.history].filter((e): e is AskDocument => !!e);
-  const lines = [`[Plannotator] ${currentLine(doc, earlier)}`];
+  const lines = [`[Plannotator] ${currentLine(doc, earlier, options.sessionBridge)}`];
   if (history.length > 0) {
     // Distinct names only: two texts of one agent message read the same.
-    const names = [...new Set(history.map(nameOf))];
+    const names = [...new Set(history.map(h => nameOf(h, options.sessionBridge)))];
     lines.push(`Viewed earlier in this chat, most recent first: ${names.join(', ')}.`);
   }
   // A text already sent in this chat (the reviewer came back to it) is not sent again.
   const sentBefore = earlier.some(e => e.key === doc.key);
-  if (!doc.path && options.includeContent && !sentBefore && doc.content?.trim()) {
+  if (!doc.path && !options.sessionBridge && !sentBefore && doc.content?.trim()) {
     let text = doc.content;
     if (text.length > MAX_ASK_DOCUMENT_CONTENT_CHARS) {
       text = `${text.slice(0, MAX_ASK_DOCUMENT_CONTENT_CHARS)}\n\n... [truncated for context window]`;
@@ -217,9 +243,7 @@ export function askDocumentParams(
     // A question that creates the session needs no note: the session is made
     // from the document on screen.
     freshSession: !options.hasSession,
-    // "Ask this session" reads files itself and wrote the plan or message; a
-    // pasted copy would stay in its context window for good.
-    includeContent: !options.sessionBridge,
+    sessionBridge: options.sessionBridge,
   });
   return {
     ...(plan.preamble ? { contextPreamble: plan.preamble } : {}),
