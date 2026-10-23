@@ -39,6 +39,7 @@ import {
   type InboxWorld,
 } from "../../tests/helpers/inbox-world";
 import { expectMeasuredCost } from "../../tests/helpers/inbox-tool-cost";
+import { openCode2PlanReminder } from "./plan-reminder";
 import { lastMessage, messageText, startScriptedModel, type ScriptedModel, type ScriptedRequest, type ScriptedTurn } from "../../tests/helpers/scripted-model";
 
 const opencodeBin = process.env.OPENCODE2_BIN;
@@ -90,7 +91,11 @@ interface OpenCodeHost {
 }
 
 /** `opencode2 serve` in the world, with the packed plugin installed through a throwaway registry and the scripted model as its provider. */
-async function openOpenCode(w: InboxWorld, m: ScriptedModel): Promise<OpenCodeHost> {
+async function openOpenCode(
+  w: InboxWorld,
+  m: ScriptedModel,
+  setup: { pluginOptions?: Record<string, unknown>; env?: Record<string, string> } = {},
+): Promise<OpenCodeHost> {
   const npmRegistry = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -118,6 +123,7 @@ async function openOpenCode(w: InboxWorld, m: ScriptedModel): Promise<OpenCodeHo
     env: {
       ...process.env,
       ...worldEnv(w),
+      ...setup.env,
       XDG_CONFIG_HOME: path.join(xdg, "config"),
       XDG_DATA_HOME: path.join(xdg, "data"),
       XDG_CACHE_HOME: path.join(xdg, "cache"),
@@ -127,7 +133,7 @@ async function openOpenCode(w: InboxWorld, m: ScriptedModel): Promise<OpenCodeHo
       NPM_CONFIG_REGISTRY: registryUrl,
       npm_config_registry: registryUrl,
       OPENCODE_CONFIG_CONTENT: JSON.stringify({
-        plugins: [{ package: `${packageJson.name}@${packageJson.version}`, options: { workflow: "manual" } }],
+        plugins: [{ package: `${packageJson.name}@${packageJson.version}`, options: setup.pluginOptions ?? { workflow: "manual" } }],
         providers: {
           scripted: {
             package: "@opencode/ai/providers/openai-compatible",
@@ -551,5 +557,49 @@ describe.skipIf(!opencodeBin || !tarball)("OpenCode 2 ↔ Plannotator Inbox (the
     expect(named).toBe("Relay retry budget");
     expect((await thread(w, rootId)).subject).toBe("Idea: a retry budget for the relay");
     w.proof(`the wake:\n${wake}\n\nthe agent's reply named the thread "${named}"`);
+  }, 900_000);
+  test("the plan agent under workflow plan-agent: OpenCode 2's Plan mode reminder reaches the model rewritten to ask for submit_plan, and the model's submit_plan opens a review whose approval comes back (#2101)", async () => {
+    const w = createInboxWorld("plannotator-plan-oc2-", "08-plan-mode-reminder", "opencode2");
+    worlds.push(w);
+    const planPort = await freePort();
+    const m = model((request) => {
+      const last = lastMessage(request);
+      if (last.role === "user" && last.text === "Create an execution plan for the refund retries." && request.tools.includes("submit_plan")) {
+        return { toolCall: { name: "submit_plan", arguments: { edits: [{ start: 1, content: "# Refund retries\n\n1. Reuse the idempotency key." }] } } };
+      }
+      return null;
+    });
+    const host = await openOpenCode(w, m, {
+      pluginOptions: { workflow: "plan-agent" },
+      env: { PLANNOTATOR_PORT: String(planPort), PLANNOTATOR_PLAN_TIMEOUT_SECONDS: "600" },
+    });
+    const session = (await host.api<{ data: { id: string } }>("POST", "/api/session", { agent: "plan" })).data.id;
+    await type(host, session, "Create an execution plan for the refund retries.");
+    const asked = await waitFor(
+      "the plan agent's request",
+      () => m.requests.find((request) => request.tools.includes("submit_plan") && lastMessage(request).text === "Create an execution plan for the refund retries."),
+      60_000,
+    );
+    const userTexts = asked.messages.filter((message) => message.role === "user").map((message) => messageText(message.content));
+    const reminder = openCode2PlanReminder(path.join(w.home, ".opencode", "plan"));
+    expect(userTexts).toContain(reminder);
+    expect(userTexts.join("\n")).not.toContain("Discuss the plan with the user directly");
+    expect(userTexts.join("\n")).not.toContain("Do not create or update plan files");
+    w.proof(`the plan agent's request carried, before the prompt:\n${reminder}`);
+
+    await waitFor("the plan review server", async () => (await fetch(`http://127.0.0.1:${planPort}/api/plan`).catch(() => null))?.ok, 60_000);
+    const approved = await fetch(`http://127.0.0.1:${planPort}/api/approve`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(approved.ok).toBe(true);
+    const result = await waitFor(
+      "the submit_plan result at the model",
+      () => m.requests.map((request) => lastMessage(request)).find((message) => message.role === "tool" && /approved/i.test(message.text)),
+      60_000,
+    );
+    await idle(host, session);
+    w.proof(`submit_plan opened the review on port ${planPort}; after Approve the model got:\n${result.text}`);
+
+    // Prompt caching: every later plan-agent request carries the same reminder bytes.
+    const later = m.requests.filter((request) => request.tools.includes("submit_plan")).map((request) => request.messages.filter((message) => message.role === "user").map((message) => messageText(message.content)).filter((text) => text.includes("Plan Mode - System Reminder")));
+    for (const reminders of later) expect(reminders).toEqual([reminder]);
   }, 900_000);
 });

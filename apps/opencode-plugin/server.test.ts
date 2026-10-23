@@ -216,6 +216,47 @@ describe("OpenCode V2 server plugin", () => {
     expect(strippedSystemText.join("\n")).not.toContain("undefined");
   });
 
+  test("rewrites OpenCode 2's Plan mode reminder in the plan agent's history so the model submits with submit_plan (#2101)", async () => {
+    const enter = `<system-reminder>
+You are in Plan mode. Discuss the plan with the user directly in the conversation. Do not create or update plan files unless the user explicitly asks you to; when they do, write them only in:
+/home/dev/.opencode/plan
+
+Do not modify any other files or ask a subagent to do so.
+
+You remain in Plan mode until the user switches agents. If the user asks you to implement changes, do not do so. Tell them they need to switch agents.
+</system-reminder>`;
+    const testContext = createContext({ workflow: "plan-agent" });
+    await serverPlugin.setup(testContext.context as never);
+    const request = () => ({
+      agent: "plan",
+      system: [{ type: "text" as const, text: "Base system prompt" }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: enter }] },
+        { role: "user", content: [{ type: "text", text: "Create an execution plan for the cache." }] },
+      ] as unknown[],
+      tools: { submit_plan: { description: "Submit", input: {} } },
+    });
+    const first = request();
+    await testContext.runContextHooks(first);
+    const reminder = (first.messages[0] as { content: Array<{ text: string }> }).content[0]!.text;
+    expect(reminder).toContain("submit it with the submit_plan tool");
+    expect(reminder).not.toContain("Discuss the plan with the user directly");
+    expect((first.messages[1] as { content: Array<{ text: string }> }).content[0]!.text).toBe("Create an execution plan for the cache.");
+    expect(first.tools.submit_plan).toBeDefined();
+    expect(first.system[0]!.text).toContain("## Plannotator");
+
+    // Prompt caching: the next request with the same history carries the same bytes.
+    const second = request();
+    await testContext.runContextHooks(second);
+    expect(JSON.stringify(second.messages)).toBe(JSON.stringify(first.messages));
+    expect(JSON.stringify(second.system)).toBe(JSON.stringify(first.system));
+
+    // Another agent under plan-agent: the history is left as OpenCode sent it.
+    const build = { ...request(), agent: "build" };
+    await testContext.runContextHooks(build);
+    expect((build.messages[0] as { content: Array<{ text: string }> }).content[0]!.text).toBe(enter);
+  });
+
   test("keeps all-agents mode scoped to primary agents by default", async () => {
     delete process.env.PLANNOTATOR_ALLOW_SUBAGENTS;
     const testContext = createContext(
