@@ -42,6 +42,7 @@
     "./inbox-actions": "./inbox-actions.ts",
     "./inbox-search": "./inbox-search.ts",
     "./diagram-anchor": "./diagram-anchor.ts",
+    "./image-region": "./image-region.ts",
     "./open-in-apps": "./open-in-apps.ts",
     "./project": "./project.ts",
     "./source-save": "./source-save.ts",

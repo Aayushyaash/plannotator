@@ -8,6 +8,7 @@ import {
   DOUBLE_TAP_ZOOM,
   fitScale,
   fitViewport,
+  naturalBoxFromPoints,
   overflows,
   paddingInset,
   panBy,
@@ -17,14 +18,24 @@ import {
   wheelTravel,
   wheelZoomFactor,
   zoomAt,
+  viewportForBox,
+  visibleNaturalBox,
   zoomLimits,
   type FitAxis,
+  type NaturalBox,
   type ZoomInset,
   type ZoomSize,
   type ZoomViewport,
 } from './imageZoom';
 
-export type { FitAxis } from './imageZoom';
+export type { FitAxis, NaturalBox } from './imageZoom';
+
+/** A box being drawn in Region mode (#2100), in the image's own pixels. */
+export interface ZoomDraw {
+  /** The box so far (`move`), the box drawn (`end`), or null on `cancel`. */
+  box: NaturalBox | null;
+  phase: 'move' | 'end' | 'cancel';
+}
 
 /** Fit (the whole image), Actual size (its own pixels), or anything a gesture left. */
 export type ZoomMode = 'fit' | 'actual' | 'zoom';
@@ -40,6 +51,10 @@ export interface ImageZoomStageHandle {
    * was one of them (the host then prevents its default).
    */
   scrollKey(key: string, shiftKey: boolean, arrowsSideways: boolean): boolean;
+  /** Show a box (in the image's own pixels) large and centred (#2100). */
+  zoomTo(box: NaturalBox, animate?: boolean): void;
+  /** The part of the image on screen now, in its own pixels; null before it loads. */
+  visibleBox(): NaturalBox | null;
 }
 
 /** One arrow key's travel, as a browser scrolls a page by a line. */
@@ -69,7 +84,12 @@ interface Press {
   lastY: number;
   slop: number;
   moved: boolean;
+  /** Region mode: this press draws a box instead of panning. */
+  draw?: boolean;
 }
+
+/** A drawn box smaller than this on screen (either side) is a tap, not a box. */
+export const MIN_DRAW_SCREEN_PX = 6;
 
 function prefersReducedMotion(): boolean {
   return typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -111,6 +131,14 @@ function prefersReducedMotion(): boolean {
  * image), `padding` (Fit leaves that many pixels on every side), `overlay`
  * (drawn over the image in the same transform, e.g. a marked-up copy, so it
  * stays aligned at any zoom), and `onImageLoad` / `onImageError`.
+ *
+ * Region comments (#2100) add three more, also optional: `drawing` (a
+ * primary press and drag draws a box, reported through `onDraw` in the
+ * image's own pixels, instead of panning; two fingers still pinch and pan,
+ * and a second finger cancels the box), `onViewChange` (every viewport, so a
+ * host can draw boxes in stage pixels at a constant stroke), and `children`
+ * (drawn over the stage, untransformed). The handle's `zoomTo` shows a box
+ * large and centred, and `visibleBox` is the part of the image on screen.
  */
 export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
   src: string;
@@ -141,7 +169,17 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
   stageAttributes?: Record<string, string>;
   /** The stage's accessible name (it takes focus, as a scroller would). */
   label: string;
-}>(function ImageZoomStage({ src, alt, mode, onModeChange, onScaleChange, inset, padding, fitAxis, overlay, onImageLoad, onImageError, onBackgroundTap, className, imageClassName, radius = 6, stageAttributes, label }, ref) {
+  /** A longer description of the stage (its `aria-describedby` text), e.g. how Region mode draws. */
+  description?: string;
+  /** Region mode: a primary drag draws a box (`onDraw`) instead of panning. */
+  drawing?: boolean;
+  /** The box being drawn, its end, or its cancel (Region mode). */
+  onDraw?: (draw: ZoomDraw) => void;
+  /** Every viewport the image takes, with the stage's size; `eased` when the image moves there over 180 ms (draw boxes the same way). */
+  onViewChange?: (view: ZoomViewport, stage: ZoomSize, eased: boolean) => void;
+  /** Drawn over the stage, untransformed, in stage pixels (after the image). */
+  children?: React.ReactNode;
+}>(function ImageZoomStage({ src, alt, mode, onModeChange, onScaleChange, inset, padding, fitAxis, overlay, onImageLoad, onImageError, onBackgroundTap, className, imageClassName, radius = 6, stageAttributes, label, description, drawing = false, onDraw, onViewChange, children }, ref) {
   const stageRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const [dims, setDims] = useState<ZoomSize | null>(null);
@@ -161,8 +199,11 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
   const viewRef = useRef<ZoomViewport | null>(null);
   const modeRef = useRef(mode);
   const reportedRef = useRef<ZoomMode>(mode);
-  const callbacks = useRef({ onModeChange, onScaleChange, onBackgroundTap, onImageLoad, onImageError });
-  callbacks.current = { onModeChange, onScaleChange, onBackgroundTap, onImageLoad, onImageError };
+  const callbacks = useRef({ onModeChange, onScaleChange, onBackgroundTap, onImageLoad, onImageError, onDraw, onViewChange });
+  callbacks.current = { onModeChange, onScaleChange, onBackgroundTap, onImageLoad, onImageError, onDraw, onViewChange };
+  const drawingRef = useRef(drawing);
+  drawingRef.current = drawing;
+  const descriptionId = React.useId();
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const press = useRef<Press | null>(null);
   const pinch = useRef<{ dist: number; midX: number; midY: number } | null>(null);
@@ -214,6 +255,7 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
       if (overlayRef.current) paint(overlayRef.current, view, animate);
       if (dimsRef.current && boxRef.current) setOverflowing(overflows(view, dimsRef.current, boxRef.current));
       callbacks.current.onScaleChange?.(view.scale);
+      if (boxRef.current) callbacks.current.onViewChange?.(view, { width: boxRef.current.width, height: boxRef.current.height }, animate && !prefersReducedMotion());
     },
     [paint],
   );
@@ -398,6 +440,23 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
         if (ready() && viewRef.current) gesture(panBy(viewRef.current, dx, dy, dimsRef.current!, boxRef.current!, limits()));
         return true;
       },
+      zoomTo(box: NaturalBox, animate = true) {
+        measure();
+        if (!ready()) return;
+        const view = viewportForBox(box, dimsRef.current!, boxRef.current!, limits());
+        apply(view, animate);
+        const next: ZoomMode = atFit(view, fitNow()) ? 'fit' : 'zoom';
+        if (next !== reportedRef.current) {
+          reportedRef.current = next;
+          modeRef.current = next;
+          callbacks.current.onModeChange(next);
+        }
+      },
+      visibleBox() {
+        measure();
+        if (!ready() || !viewRef.current) return null;
+        return visibleNaturalBox(viewRef.current, dimsRef.current!, boxRef.current!);
+      },
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [measure],
@@ -468,7 +527,14 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
     }
     if (pointers.current.size === 2) {
       pinch.current = pinchState();
-      if (press.current) press.current.moved = true;
+      if (press.current) {
+        // A second finger turns a box being drawn into a pinch.
+        if (press.current.draw) {
+          press.current.draw = false;
+          callbacks.current.onDraw?.({ box: null, phase: 'cancel' });
+        }
+        press.current.moved = true;
+      }
       return;
     }
     if (pointers.current.size > 2) return;
@@ -480,7 +546,18 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
       lastY: event.clientY,
       slop: event.pointerType === 'touch' ? TAP_SLOP_TOUCH_PX : TAP_SLOP_MOUSE_PX,
       moved: false,
+      draw: drawingRef.current,
     };
+  };
+
+  /** The box a draw press spans now, in the image's own pixels (null off the image or too small). */
+  const drawnBox = (p: Press, clientX: number, clientY: number): NaturalBox | null => {
+    const box = boxRef.current;
+    const view = viewRef.current;
+    const image = dimsRef.current;
+    if (!box || !view || !image) return null;
+    if (Math.abs(clientX - p.startX) < MIN_DRAW_SCREEN_PX || Math.abs(clientY - p.startY) < MIN_DRAW_SCREEN_PX) return null;
+    return naturalBoxFromPoints(view, { x: p.startX - box.left, y: p.startY - box.top }, { x: clientX - box.left, y: clientY - box.top }, image);
   };
 
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -503,7 +580,11 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
     if (!p.moved) {
       if (Math.hypot(event.clientX - p.startX, event.clientY - p.startY) < p.slop) return;
       p.moved = true;
-      if (overflows(viewRef.current, image, box)) setPanning(true);
+      if (!p.draw && overflows(viewRef.current, image, box)) setPanning(true);
+    }
+    if (p.draw) {
+      callbacks.current.onDraw?.({ box: drawnBox(p, event.clientX, event.clientY), phase: 'move' });
+      return;
     }
     const dx = event.clientX - p.lastX;
     const dy = event.clientY - p.lastY;
@@ -531,6 +612,11 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
     if (!p || p.id !== event.pointerId) return;
     press.current = null;
     setPanning(false);
+    if (p.draw && p.moved) {
+      const drawn = cancelled ? null : drawnBox(p, event.clientX, event.clientY);
+      callbacks.current.onDraw?.(drawn ? { box: drawn, phase: 'end' } : { box: null, phase: 'cancel' });
+      return;
+    }
     if (!cancelled && !p.moved) tap(event.clientX, event.clientY);
   };
 
@@ -544,7 +630,7 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
     callbacks.current.onBackgroundTap();
   };
 
-  const cursor = panning ? 'grabbing' : overflowing ? 'grab' : onBackgroundTap ? 'zoom-out' : 'default';
+  const cursor = drawing ? 'crosshair' : panning ? 'grabbing' : overflowing ? 'grab' : onBackgroundTap ? 'zoom-out' : 'default';
   return (
     <div
       ref={stageRef}
@@ -553,6 +639,7 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
       tabIndex={0}
       role="group"
       aria-label={label}
+      aria-describedby={description ? descriptionId : undefined}
       onClick={onClick}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -589,7 +676,7 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
           transformOrigin: '0 0',
           opacity: dims ? 1 : 0,
           // Beside the image a click closes (zoom-out); on it, a click does nothing.
-          cursor: onBackgroundTap && !overflowing ? 'default' : undefined,
+          cursor: drawing ? 'crosshair' : onBackgroundTap && !overflowing ? 'default' : undefined,
         }}
         data-lightbox-image=""
       />
@@ -601,6 +688,12 @@ export const ImageZoomStage = forwardRef<ImageZoomStageHandle, {
         >
           {overlay}
         </div>
+      )}
+      {children}
+      {description && (
+        <span id={descriptionId} hidden>
+          {description}
+        </span>
       )}
       {failed && !onImageError && (
         <div className="absolute inset-0 flex items-center justify-center text-sm opacity-70" data-lightbox-failed="">

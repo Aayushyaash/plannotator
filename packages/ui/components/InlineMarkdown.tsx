@@ -506,8 +506,10 @@ function emitPlainTextWithBareUrls(
 const HostResolvedImage: React.FC<{
   src: string;
   alt: string;
+  /** The src as written in the markdown (`data-image-src`, read by the image viewer's region comments). */
+  writtenSrc?: string;
   onImageClick?: (src: string, alt: string) => void;
-}> = ({ src, alt, onImageClick }) => {
+}> = ({ src, alt, writtenSrc, onImageClick }) => {
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
   if (failedSrc === src) {
     return (
@@ -520,6 +522,7 @@ const HostResolvedImage: React.FC<{
     <img
       src={src}
       alt={alt}
+      data-image-src={writtenSrc}
       className="max-w-full rounded my-2 cursor-zoom-in"
       loading="lazy"
       onError={() => setFailedSrc(src)}
@@ -1085,12 +1088,13 @@ export const InlineMarkdown: React.FC<{
         resolveImage ? (
           // With a host resolver, an image that fails to load becomes the
           // same placeholder instead of a broken-image icon.
-          <HostResolvedImage key={key++} src={imgSrc} alt={alt} onImageClick={onImageClick} />
+          <HostResolvedImage key={key++} src={imgSrc} alt={alt} writtenSrc={src} onImageClick={onImageClick} />
         ) : (
           <img
             key={key++}
             src={imgSrc}
             alt={alt}
+            data-image-src={src}
             className="max-w-full rounded my-2 cursor-zoom-in"
             loading="lazy"
             onClick={(e) => {
