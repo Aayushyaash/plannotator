@@ -34,31 +34,35 @@ Review code changes with a full diff viewer, file tree, inline annotations, and 
 
 ## Guided Reviews
 
-The **Guides** view (its own icon in the activity bar) turns a change into a guided review: a title, an intent, an overview with a diagram, and a few chapters in reading order, each with the files it covers. Pick this branch's pull request, another open PR, or your local changes, then the agent that writes the guide, with your own setup and sign-in, and watch it build. Then read it chapter by chapter in VS Code's own diff editor, with go to definition on the real files and ticks per chapter and file.
+The **Guided Reviews** view (its own icon in the activity bar) turns a change into a guided review: a title, an intent, an overview with a diagram, and a few chapters in reading order, each with the files it covers. Pick this branch's pull request, another open PR, or your local changes, then the agent that writes the guide, with your own setup and sign-in, and watch it build. Then read it chapter by chapter in VS Code's own diff editor, with go to definition on the real files and ticks per chapter and file.
 
-The agent runs over the [Agent Client Protocol](https://agentclientprotocol.com). Guides finds these on your PATH and shows how to install the ones you don't have (it never installs anything itself):
+The agent runs over the [Agent Client Protocol](https://agentclientprotocol.com). Guided Reviews looks for each agent in your settings first, then on your PATH.
 
-| Agent | Started as | Install |
+**Claude Code, Codex and Pi** speak ACP through a separate npm adapter. When the adapter is not in your settings or on your PATH, Guided Reviews installs it for you the first time you pick the agent ("Installing Claude Code's ACP adapter…"): the exact version below, into the extension's own storage, with `npm install --ignore-scripts`. Nothing is installed globally and nothing needs `sudo`; the copy is reused next time, and **Guided Reviews: Update Agent Adapters** installs it again. This needs npm. When npm is missing or the install fails, you see why, the command to run yourself, and **Retry**. Turn it off with `plannotator.guides.installAdapters`.
+
+**The other agents are their own program**, and Guided Reviews never installs them: **Install &lt;agent&gt;** opens a terminal with the official install command typed in, for you to run.
+
+| Agent | Started as | Installed by |
 |---|---|---|
-| Claude Code | `claude-agent-acp` | `npm install -g @agentclientprotocol/claude-agent-acp` |
-| OpenCode | `opencode acp` | `curl -fsSL https://opencode.ai/install \| bash` |
-| Codex | `codex-acp` | `npm install -g @agentclientprotocol/codex-acp` |
-| GitHub Copilot CLI | `copilot --acp --stdio` | `npm install -g @github/copilot` |
-| Cursor | `cursor-agent acp` (or `agent acp`) | `curl https://cursor.com/install -fsS \| bash` |
-| Kiro CLI | `kiro-cli acp` | `curl -fsSL https://cli.kiro.dev/install \| bash` |
-| Kilo Code | `kilo acp` (or `kilocode acp`) | `npm install -g @kilocode/cli` |
-| Pi | `pi-acp` | `npm install -g pi-acp` |
+| Claude Code | `claude-agent-acp` | Guided Reviews (`@agentclientprotocol/claude-agent-acp@0.91.0`), or `npm install -g @agentclientprotocol/claude-agent-acp@0.91.0` |
+| Codex | `codex-acp` | Guided Reviews (`@agentclientprotocol/codex-acp@2.2.2`, which brings the Codex CLI), or `npm install -g @agentclientprotocol/codex-acp@2.2.2` |
+| Pi | `pi-acp` | Guided Reviews (`pi-acp@0.0.34`); Pi itself: `npm install -g @earendil-works/pi-coding-agent` |
+| OpenCode | `opencode acp` | you: `curl -fsSL https://opencode.ai/install \| bash` |
+| GitHub Copilot CLI | `copilot --acp --stdio` | you: `npm install -g @github/copilot` |
+| Cursor | `cursor-agent acp` (or `agent acp`) | you: `curl https://cursor.com/install -fsS \| bash` |
+| Kiro CLI | `kiro-cli acp` | you: `curl -fsSL https://cli.kiro.dev/install \| bash` |
+| Kilo Code | `kilo acp` (or `kilocode acp`) | you: `npm install -g @kilocode/cli` |
 
-Pi can't write guides yet: `pi-acp` does not pass MCP servers on to Pi, so Pi cannot reach the guide's tools. Any other ACP agent works through `plannotator.guides.customAgent.command` (and `.args`, `.label`). `plannotator.guides.agentCommands` overrides how a listed agent is started (`plannotator.guides.claudeCode.command` still works for Claude Code). These settings, `plannotator.guides.autoApprove` and `plannotator.guides.ghPath` can only be set in your user settings, never by a workspace.
+Pi can't write guides yet: `pi-acp` does not pass MCP servers on to Pi, so Pi cannot reach the guide's tools. Any other ACP agent works through `plannotator.guides.customAgent.command` (and `.args`, `.label`). `plannotator.guides.agentCommands` overrides how a listed agent is started (`plannotator.guides.claudeCode.command` still works for Claude Code). These settings, `plannotator.guides.installAdapters`, `plannotator.guides.autoApprove` and `plannotator.guides.ghPath` can only be set in your user settings, never by a workspace.
 
-**Guides runs your agent with your own configuration and permissions.** What the agent may do is governed by your agent's settings, exactly as when you run it yourself. Guides adds only what a guide needs: its own tool server (the guide's builder tools, which change nothing but the draft), the model and effort you pick, and the prompt.
+**Guided Reviews run your agent with your own configuration and permissions.** What the agent may do is governed by your agent's settings, exactly as when you run it yourself. Plannotator adds only what a guide needs: its own tool server (the guide's builder tools, which change nothing but the draft), the model and effort you pick, and the prompt.
 
 - **Approvals.** When the agent asks before doing something, the request waits in the guide's view, with every option the agent offers ("allow once", "always allow", "reject", …), and in a notification. Your answer goes back to the agent as it is. The guide's own builder tools are approved without asking.
-- **Approve automatically (opt-in).** You can let the agent work without asking: when you start a guide, at the first request ("Approve all for this run" or "Always approve during guides"), or with the `plannotator.guides.autoApprove` setting. Every request the agent asks about is then approved, and where the agent has a mode that does not ask, Guides switches to it and says so in the run's header (Claude Code: `acceptEdits`; Codex: `agent`). Off by default.
+- **Approve automatically (opt-in).** You can let the agent work without asking: when you start a guide, at the first request ("Approve all for this run" or "Always approve during guides"), or with the `plannotator.guides.autoApprove` setting. Every request the agent asks about is then approved, and where the agent has a mode that does not ask, Plannotator switches to it and says so in the run's header (Claude Code: `acceptEdits`; Codex: `agent`; a session already in a mode that asks as little or less is left as it is). Off by default.
 - **When your setup holds the run back,** the guide's view says so plainly and the run goes on. It names a request you turned down, a tool your agent's settings or sandbox blocked, and an agent that never reached the guide's tools. Where there is a way through, it offers it in one click: "Approve automatically for this run", or "Resume with automatic approval".
 - **Pull requests** need the GitHub CLI (`gh`). Each PR opens in a git worktree of its own in the extension's storage, so your checkout is never touched. Like any checkout, it may carry its own agent config (hooks, allow rules, MCP servers), and your agent loads it as it would anywhere.
 - **The agent inherits VS Code's environment,** including any credentials in it.
-- Guides are saved where Plannotator's web app finds them: open and export them from either side.
+- Guided reviews are saved where Plannotator's web app finds them: open and export them from either side.
 
 ## Features
 

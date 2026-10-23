@@ -8,7 +8,7 @@
 
 import * as vscode from "vscode";
 import type { ConfigChoice } from "../acp/client";
-import { pickDefault, type AgentDescriptor, type AgentOptionsCache, type AgentStatus } from "../acp/agents";
+import { canStart, pickDefault, type AgentDescriptor, type AgentOptionsCache, type AgentStatus } from "../acp/agents";
 import type { DashboardModel } from "../dashboard";
 import { parsePullRequestRef, type PullRequestRow } from "../sources/github";
 import type { LocalChangesMode } from "../sources/git";
@@ -103,6 +103,11 @@ export async function pickPullRequest(model: DashboardModel): Promise<SourceChoi
   return choice;
 }
 
+/** Whether a run approves automatically: exactly what the start flow's toggle ended on (it starts from the setting). */
+export function autoApproveChoice(picked: AgentPickResult): boolean {
+  return picked.autoApprove === true;
+}
+
 export interface AgentPickResult {
   agent: AgentChoiceRecord;
   instructions?: string;
@@ -120,23 +125,38 @@ export interface RememberedChoice {
   effort?: string;
 }
 
-/** The agent step's rows: installed agents first (the remembered one active), then the ones to install. Every installed agent can be picked. */
-export function agentRows(agents: readonly AgentStatus[], remembered?: string): Array<{ status: AgentStatus; label: string; description: string; detail?: string; active: boolean }> {
+/**
+ * The agent step's rows: agents ready to start first (the remembered one
+ * active), then the ones to install. Ready means installed, or an agent whose
+ * ACP adapter Guided Reviews installs on first use (`installAdapters`).
+ */
+export function agentRows(agents: readonly AgentStatus[], remembered?: string, installAdapters = false): Array<{ status: AgentStatus; label: string; description: string; detail?: string; active: boolean; ready: boolean }> {
   const rows = agents.map((status) => {
     const { agent, launch } = status;
-    const installed = launch.ok;
+    const ready = canStart(launch, installAdapters);
+    const willInstall = !launch.ok && ready;
+    const source = launch.ok ? (launch.source === "setting" ? "installed · command from settings" : launch.source === "managed" ? "installed by Guided Reviews" : "installed") : "";
     return {
       status,
-      label: `${installed ? "$(check)" : "$(cloud-download)"} ${agent.label}`,
-      description: installed
-        ? [launch.source === "setting" ? "installed · command from settings" : "installed", agent.note ? "can't write guides yet" : ""].filter(Boolean).join(" · ")
-        : agent.installCommand ? "not installed" : "not found",
-      detail: agent.note ?? (installed ? "Runs with your own settings and permissions." : agent.installCommand ? `Install: ${agent.installCommand}` : launch.message),
+      ready,
+      label: `${launch.ok ? "$(check)" : willInstall ? "$(arrow-circle-down)" : "$(cloud-download)"} ${agent.label}`,
+      description: launch.ok
+        ? [source, agent.note ? "can't write guides yet" : ""].filter(Boolean).join(" · ")
+        : willInstall
+          ? ["installs its ACP adapter on first use", agent.note ? "can't write guides yet" : ""].filter(Boolean).join(" · ")
+          : launch.reason === "requires" ? `needs ${agent.requires?.label ?? "a program"}` : agent.installCommand ? "not installed" : "not found",
+      detail:
+        agent.note ??
+        (launch.ok
+          ? "Runs with your own settings and permissions."
+          : willInstall && agent.adapter
+            ? `Installs ${agent.adapter.package}@${agent.adapter.version} into Guided Reviews' own storage. Runs with your own settings and permissions.`
+            : launch.reason === "requires" || launch.reason === "setting" ? launch.message : agent.installCommand ? `Install: ${agent.installCommand}` : launch.message),
       active: false,
     };
   });
-  const firstInstalled = rows.find((r) => r.status.launch.ok);
-  const target = rows.find((r) => r.status.agent.id === remembered && r.status.launch.ok) ?? firstInstalled;
+  const firstReady = rows.find((r) => r.ready);
+  const target = rows.find((r) => r.status.agent.id === remembered && r.ready) ?? firstReady;
   if (target) target.active = true;
   return rows;
 }
@@ -150,7 +170,10 @@ export async function pickAgentAndEffort(input: {
   agents: readonly AgentStatus[];
   optionsFor: (agentId: string) => AgentOptionsCache | null;
   loadOptions: (agent: AgentDescriptor) => Promise<AgentOptionsCache | null>;
-  onMissing: (status: AgentStatus) => Promise<void>;
+  /** A missing agent was picked: show how to get it. Answers the agent ready to start when that happened now (its adapter was installed), else null. */
+  onMissing: (status: AgentStatus) => Promise<AgentStatus | null>;
+  /** `plannotator.guides.installAdapters`: an agent whose adapter is missing can be picked, and its adapter is installed on first use. */
+  installAdapters?: boolean;
   remembered?: RememberedChoice;
   standingInstructions: string;
   /** Only the defaults (the Change defaults command): no instructions step. */
@@ -169,22 +192,23 @@ export async function pickAgentAndEffort(input: {
     aq.totalSteps = total;
     aq.placeholder = "Which agent writes the guide? It runs with your own setup, settings and sign-in.";
     aq.matchOnDetail = true;
-    const rows = agentRows(input.agents, input.remembered?.agent);
+    const rows = agentRows(input.agents, input.remembered?.agent, input.installAdapters);
     const items: Array<Item<AgentStatus>> = [];
-    const installed = rows.filter((r) => r.status.launch.ok);
-    const missing = rows.filter((r) => !r.status.launch.ok);
-    if (installed.length) items.push({ label: "Installed", kind: vscode.QuickPickItemKind.Separator });
+    const installed = rows.filter((r) => r.ready);
+    const missing = rows.filter((r) => !r.ready);
+    if (installed.length) items.push({ label: "Ready", kind: vscode.QuickPickItemKind.Separator });
     for (const r of installed) items.push({ label: r.label, description: r.description, detail: r.detail, value: r.status });
     if (missing.length) items.push({ label: "Not installed: pick one to see how to install it", kind: vscode.QuickPickItemKind.Separator });
     for (const r of missing) items.push({ label: r.label, description: r.description, detail: r.detail, value: r.status });
     aq.items = items;
     const active = items.find((i) => i.value && rows.find((r) => r.active)?.status === i.value);
     if (active) aq.activeItems = [active];
-    const status = await pick(aq);
+    let status = await pick(aq);
     if (!status) return undefined;
-    if (!status.launch.ok) {
-      await input.onMissing(status);
-      continue;
+    if (!canStart(status.launch, input.installAdapters ?? false)) {
+      const now = await input.onMissing(status);
+      if (!now) continue;
+      status = now;
     }
     const picked = await pickModelAndEffort({ ...input, agent: status.agent, title, total, offset, remembered: input.remembered?.agent === status.agent.id ? input.remembered : undefined });
     if (picked === BACK) continue;

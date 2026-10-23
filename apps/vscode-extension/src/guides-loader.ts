@@ -34,6 +34,7 @@ export const GUIDE_COMMANDS = [
   "plannotator.guides.nextFile",
   "plannotator.guides.toggleFileReviewed",
   "plannotator.guides.changeDefaults",
+  "plannotator.guides.updateAdapters",
   "plannotator.guides.openPullRequestOnGitHub",
 ] as const;
 

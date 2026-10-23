@@ -101,7 +101,7 @@ function renderHome(s: HomeViewState): HTMLElement {
   const recent = h("section", { class: "pn-col" },
     h("div", { class: "pn-section-head" }, h("span", {}, "Recent guides")),
     s.recent.length === 0
-      ? h("div", { class: "pn-empty" }, "No guides for this repo yet. Guides made in Plannotator's web app show here too.")
+      ? h("div", { class: "pn-empty" }, "No guided reviews for this repo yet. Guided reviews made in Plannotator's web app show here too.")
       : h("div", { class: "pn-rows" }, ...s.recent.map((r) =>
           h("button", { class: "pn-row", onclick: () => command(r.kind === "draft" ? "resumeDraft" : "openGuide", r.id) },
             h("div", { class: "pn-row-main" }, h("div", { class: "pn-row-title" }, r.title), h("div", { class: "pn-row-sub" }, r.sub, r.note ? h("span", { class: r.warn ? "pn-warn" : "pn-muted" }, ` · ${r.note}`) : null)),

@@ -65,128 +65,133 @@
       {
         "command": "plannotator.guides.newReview",
         "title": "New Guided Review",
-        "category": "Plannotator",
+        "category": "Guided Reviews",
         "icon": "$(add)"
       },
       {
         "command": "plannotator.guides.openHome",
-        "title": "Open Guided Reviews",
-        "category": "Plannotator",
+        "title": "Open Home",
+        "category": "Guided Reviews",
         "icon": "$(home)"
       },
       {
         "command": "plannotator.guides.refresh",
-        "title": "Refresh Guides",
-        "category": "Plannotator",
+        "title": "Refresh",
+        "category": "Guided Reviews",
         "icon": "$(refresh)"
       },
       {
         "command": "plannotator.guides.guideLocal",
-        "title": "Guide Local Changes",
-        "category": "Plannotator",
+        "title": "Guided Review: Local Changes",
+        "category": "Guided Reviews",
         "icon": "$(sparkle)"
       },
       {
         "command": "plannotator.guides.guidePullRequest",
-        "title": "Guide Pull Request",
-        "category": "Plannotator",
+        "title": "Guided Review: Pull Request…",
+        "category": "Guided Reviews",
         "icon": "$(sparkle)"
       },
       {
         "command": "plannotator.guides.openGuide",
-        "title": "Open Guide",
-        "category": "Plannotator"
+        "title": "Open Guided Review",
+        "category": "Guided Reviews"
       },
       {
         "command": "plannotator.guides.closeGuide",
-        "title": "Close Guide",
-        "category": "Plannotator",
+        "title": "Close Guided Review",
+        "category": "Guided Reviews",
         "icon": "$(close)"
       },
       {
         "command": "plannotator.guides.resumeDraft",
-        "title": "Resume Draft Guide",
-        "category": "Plannotator",
+        "title": "Resume Draft",
+        "category": "Guided Reviews",
         "icon": "$(debug-continue)"
       },
       {
         "command": "plannotator.guides.saveDraftAsIs",
-        "title": "Save Draft Guide As Is",
-        "category": "Plannotator",
+        "title": "Save Draft As Is",
+        "category": "Guided Reviews",
         "icon": "$(save)"
       },
       {
         "command": "plannotator.guides.deleteDraft",
-        "title": "Delete Draft Guide",
-        "category": "Plannotator",
+        "title": "Delete Draft",
+        "category": "Guided Reviews",
         "icon": "$(trash)"
       },
       {
         "command": "plannotator.guides.deleteGuide",
-        "title": "Delete Guide",
-        "category": "Plannotator",
+        "title": "Delete Guided Review",
+        "category": "Guided Reviews",
         "icon": "$(trash)"
       },
       {
         "command": "plannotator.guides.exportGuide",
-        "title": "Download Portable Guide",
-        "category": "Plannotator",
+        "title": "Download Portable Guided Review",
+        "category": "Guided Reviews",
         "icon": "$(cloud-download)"
       },
       {
         "command": "plannotator.guides.showGeneration",
-        "title": "Show Guide Being Built",
-        "category": "Plannotator"
+        "title": "Show Guided Review Being Built",
+        "category": "Guided Reviews"
       },
       {
         "command": "plannotator.guides.cancelGeneration",
-        "title": "Cancel Guide Being Built",
-        "category": "Plannotator",
+        "title": "Cancel Guided Review Being Built",
+        "category": "Guided Reviews",
         "icon": "$(debug-stop)"
       },
       {
         "command": "plannotator.guides.openChapter",
         "title": "Open Chapter",
-        "category": "Plannotator"
+        "category": "Guided Reviews"
       },
       {
         "command": "plannotator.guides.nextChapter",
         "title": "Next Chapter",
-        "category": "Plannotator",
+        "category": "Guided Reviews",
         "icon": "$(arrow-right)"
       },
       {
         "command": "plannotator.guides.markChapterReviewed",
         "title": "Mark Chapter Reviewed",
-        "category": "Plannotator",
+        "category": "Guided Reviews",
         "icon": "$(check)"
       },
       {
         "command": "plannotator.guides.openFile",
-        "title": "Open Guide File",
-        "category": "Plannotator"
+        "title": "Open File",
+        "category": "Guided Reviews"
       },
       {
         "command": "plannotator.guides.nextFile",
-        "title": "Next File in Guide",
-        "category": "Plannotator",
+        "title": "Next File",
+        "category": "Guided Reviews",
         "icon": "$(arrow-down)"
       },
       {
         "command": "plannotator.guides.toggleFileReviewed",
         "title": "Mark File Reviewed",
-        "category": "Plannotator",
+        "category": "Guided Reviews",
         "icon": "$(check)"
       },
       {
         "command": "plannotator.guides.changeDefaults",
-        "title": "Change Guide Defaults (Agent, Model, Effort)",
-        "category": "Plannotator"
+        "title": "Change Defaults (Agent, Model, Effort)",
+        "category": "Guided Reviews"
+      },
+      {
+        "command": "plannotator.guides.updateAdapters",
+        "title": "Update Agent Adapters",
+        "category": "Guided Reviews"
       },
       {
         "command": "plannotator.guides.openPullRequestOnGitHub",
         "title": "Open on GitHub",
-        "category": "Plannotator",
+        "category": "Guided Reviews",
         "icon": "$(link-external)"
       }
     ],
@@ -413,6 +418,12 @@
           "scope": "machine",
           "markdownDescription": "Any other ACP agent for Guided Reviews: the program that starts it in ACP mode on stdio. When set, it is offered as a choice beside the known agents. Like every agent, it runs with its own settings and permissions."
         },
+        "plannotator.guides.installAdapters": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "markdownDescription": "Install a missing ACP adapter automatically. Claude Code, Codex and Pi speak ACP through a separate npm adapter (`@agentclientprotocol/claude-agent-acp`, `@agentclientprotocol/codex-acp`, `pi-acp`). When it is not set in `#plannotator.guides.agentCommands#` and not on PATH, Guided Reviews installs the exact pinned version into the extension's own storage with npm (no global install, no install scripts), and reuses it. Needs npm. Agents that are their own program (OpenCode, Copilot CLI, Cursor, Kiro CLI, Kilo Code) are never installed for you."
+        },
         "plannotator.guides.autoApprove": {
           "type": "string",
           "enum": [
@@ -454,7 +465,7 @@
       "activitybar": [
         {
           "id": "plannotator-guides",
-          "title": "Guides",
+          "title": "Guided Reviews",
           "icon": "images/guides.svg"
         }
       ]
@@ -476,7 +487,7 @@
     "viewsWelcome": [
       {
         "view": "plannotator.guides.tree",
-        "contents": "Loading guides\u2026"
+        "contents": "Loading guides…"
       }
     ]
   },

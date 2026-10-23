@@ -2,10 +2,12 @@
  * Which agents can write a guide, and how to start them over ACP.
  *
  * A small, bundled list: every entry's launch command and install command come
- * from the agent's own documentation (the source is linked on each entry), and
- * the extension never installs or downloads anything itself (no `npx`, no
- * registry fetch at runtime). Any other ACP agent can be started with the
- * custom agent settings.
+ * from the agent's own documentation (the source is linked on each entry). An
+ * agent that speaks ACP through a separate npm adapter names it (`adapter`,
+ * pinned to one version); Guided Reviews installs that adapter into its own
+ * storage when it is missing (see `adapters.ts`). It never installs an agent
+ * itself, never runs `npx` and never installs globally. Any other ACP agent
+ * can be started with the custom agent settings.
  *
  * Guides runs the agent with the user's own configuration and permissions,
  * exactly as they set it up: no mode is forced, no tool is added or removed,
@@ -16,6 +18,7 @@
  */
 
 import { findExecutable } from "../sources/runner";
+import type { ManagedAdapterSpec, ManagedLaunch } from "./adapters";
 import { readEffortSelect, readModelSelect, type ConfigChoice, type ConfigSelect } from "./client";
 import type { AuthMethod, SessionConfigOption } from "@agentclientprotocol/sdk";
 
@@ -30,16 +33,25 @@ export interface AgentDescriptor {
   altCommands?: readonly string[];
   /** Arguments that start its ACP server on stdio. */
   args: readonly string[];
-  /** How to install it, as the agent's docs say. */
+  /** How to install it, as the agent's docs say (for an npm adapter: a global install of the pinned version). */
   installCommand: string;
+  /**
+   * The npm package that is the agent's ACP adapter. Guided Reviews installs
+   * this exact version into its own storage when the adapter is missing.
+   */
+  adapter?: ManagedAdapterSpec;
+  /** A program the adapter runs, which must be installed for it to work (Pi's `pi`). */
+  requires?: { command: string; label: string; installCommand: string; docsUrl: string };
   docsUrl: string;
   /** Cheap defaults: matched against the agent's own option values and names. */
   defaultModel?: RegExp;
   defaultEffort?: RegExp;
   /**
-   * The agent's own modes that let it act without asking, in order of
-   * preference. Used only when the user opts in to automatic approval;
-   * otherwise the session stays in whatever mode the user's config starts it in.
+   * The agent's own modes that let it act without asking: the first is the
+   * one Guides switches to, the rest are at least as permissive (a session
+   * already in any of them is left alone, never downgraded). Used only when
+   * the user opts in to automatic approval; otherwise the session stays in
+   * whatever mode the user's config starts it in.
    */
   permissiveModes?: readonly string[];
   /**
@@ -47,8 +59,11 @@ export interface AgentDescriptor {
    * being picked or started.
    */
   note?: string;
-  /** Sign in in a terminal when the agent lists no terminal sign-in of its own. */
-  signIn?: { command: string; args: readonly string[] };
+  /**
+   * Sign in in a terminal when the agent lists no terminal sign-in of its own.
+   * Without `command`, the program that starts the agent (as resolved) runs `args`.
+   */
+  signIn?: { command?: string; args: readonly string[] };
 }
 
 /** Claude Code through its ACP adapter. Source: https://github.com/agentclientprotocol/claude-agent-acp */
@@ -58,11 +73,14 @@ export const CLAUDE_CODE: AgentDescriptor = {
   engine: "claude",
   command: "claude-agent-acp",
   args: [],
-  installCommand: "npm install -g @agentclientprotocol/claude-agent-acp",
+  installCommand: "npm install -g @agentclientprotocol/claude-agent-acp@0.91.0",
+  // 0.91.0 was published 2026-10-15 (the repo installs nothing published in the last 7 days).
+  adapter: { package: "@agentclientprotocol/claude-agent-acp", version: "0.91.0", bin: "claude-agent-acp" },
   docsUrl: "https://github.com/agentclientprotocol/claude-agent-acp",
   defaultModel: /sonnet/i,
   defaultEffort: /^low$/i,
-  permissiveModes: ["acceptEdits"],
+  // claude-agent-acp's modes (src/permissions/modes.ts): acceptEdits, auto and bypassPermissions ask less than default and plan.
+  permissiveModes: ["acceptEdits", "auto", "bypassPermissions"],
   signIn: { command: "claude", args: ["/login"] },
 };
 
@@ -73,11 +91,13 @@ export const CODEX: AgentDescriptor = {
   engine: "codex",
   command: "codex-acp",
   args: [],
-  installCommand: "npm install -g @agentclientprotocol/codex-acp",
+  installCommand: "npm install -g @agentclientprotocol/codex-acp@2.2.2",
+  // 2.2.2 was published 2026-10-10; it brings the Codex CLI with it (@openai/codex).
+  adapter: { package: "@agentclientprotocol/codex-acp", version: "2.2.2", bin: "codex-acp" },
   docsUrl: "https://github.com/agentclientprotocol/codex-acp",
   defaultEffort: /^low$/i,
-  // codex-acp's `agent` mode ("Auto review") writes in the workspace without asking; `read-only` asks first.
-  permissiveModes: ["agent"],
+  // codex-acp's `agent` mode ("Auto review") writes in the workspace without asking; `agent-full-access` asks even less; `read-only` asks first.
+  permissiveModes: ["agent", "agent-full-access"],
 };
 
 /** OpenCode's `opencode acp`. Source: https://opencode.ai/docs/acp/ */
@@ -89,7 +109,7 @@ export const OPENCODE: AgentDescriptor = {
   args: ["acp"],
   installCommand: "curl -fsSL https://opencode.ai/install | bash",
   docsUrl: "https://opencode.ai/docs/acp/",
-  signIn: { command: "opencode", args: ["auth", "login"] },
+  signIn: { args: ["auth", "login"] },
 };
 
 /** GitHub Copilot CLI's ACP server. Source: https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server */
@@ -117,7 +137,7 @@ export const CURSOR: AgentDescriptor = {
   args: ["acp"],
   installCommand: "curl https://cursor.com/install -fsS | bash",
   docsUrl: "https://cursor.com/docs/cli/acp",
-  signIn: { command: "agent", args: ["login"] },
+  signIn: { args: ["login"] },
 };
 
 /** Kiro CLI's ACP server. Source: https://kiro.dev/docs/cli/acp/ */
@@ -145,7 +165,7 @@ export const KILO: AgentDescriptor = {
   args: ["acp"],
   installCommand: "npm install -g @kilocode/cli",
   docsUrl: "https://kilo.ai/docs/code-with-ai/platforms/cli",
-  signIn: { command: "kilo", args: ["auth", "login"] },
+  signIn: { args: ["auth", "login"] },
 };
 
 /**
@@ -160,7 +180,10 @@ export const PI: AgentDescriptor = {
   engine: "pi",
   command: "pi-acp",
   args: [],
-  installCommand: "npm install -g pi-acp",
+  installCommand: "npm install -g pi-acp@0.0.34",
+  // 0.0.34 was published 2026-09-24. pi-acp runs the `pi` program, which must be installed itself.
+  adapter: { package: "pi-acp", version: "0.0.34", bin: "pi-acp" },
+  requires: { command: "pi", label: "Pi", installCommand: "npm install -g @earendil-works/pi-coding-agent", docsUrl: "https://github.com/svkozak/pi-acp" },
   docsUrl: "https://github.com/svkozak/pi-acp",
   note: "Can't write guides yet: pi-acp does not pass MCP servers on to Pi (its README says they are \"accepted … but not wired through to pi\"), so Pi cannot reach the guide's tools.",
 };
@@ -197,8 +220,18 @@ export function engineLabel(engine: string | undefined): string {
 }
 
 export type AdapterResolution =
-  | { ok: true; command: string; args: string[]; source: "setting" | "path" }
-  | { ok: false; message: string };
+  | { ok: true; command: string; args: string[]; env?: Record<string, string>; source: "setting" | "path" | "managed" }
+  | {
+      ok: false;
+      message: string;
+      /**
+       * `adapter`: the agent's npm adapter is missing and Guided Reviews can install it;
+       * `agent`: the agent's own CLI is missing (the user installs it);
+       * `requires`: a program the adapter runs is missing (Pi's `pi`);
+       * `setting`: the command set in settings was not found.
+       */
+      reason: "adapter" | "agent" | "requires" | "setting";
+    };
 
 /** A command override from settings: replaces the program and, when given, its arguments. */
 export interface CommandOverride {
@@ -207,24 +240,46 @@ export interface CommandOverride {
 }
 
 /**
- * The command to start: the override when it names a program (its args, else
- * the agent's own), else the agent's program on PATH (or one of its other
- * names). The same for a local run and a pull request run.
+ * The command to start, in this order: the override when it names a program
+ * (its args, else the agent's own); the agent's program on PATH (or one of
+ * its other names); the adapter copy Guided Reviews installed (`managed`).
+ * When none is there, the answer says whether Guided Reviews can install the
+ * adapter now (`reason: "adapter"`) or the user must install the agent. The
+ * same for a local run and a pull request run.
  */
-export function resolveAgentLaunch(agent: AgentDescriptor, override: CommandOverride = {}, find: (name: string) => string | null = findExecutable): AdapterResolution {
+export function resolveAgentLaunch(
+  agent: AgentDescriptor,
+  override: CommandOverride = {},
+  find: (name: string) => string | null = findExecutable,
+  managed: (agent: AgentDescriptor) => ManagedLaunch | null = () => null,
+): AdapterResolution {
   const configured = override.command?.trim();
   if (configured) {
     const found = find(configured);
-    if (!found) return { ok: false, message: `The configured command for ${agent.label}, \`${configured}\`, was not found.` };
+    if (!found) return { ok: false, reason: "setting", message: `The configured command for ${agent.label}, \`${configured}\`, was not found.` };
     const args = override.args && override.args.length > 0 ? override.args : [...agent.args];
     return { ok: true, command: found, args, source: "setting" };
+  }
+  if (agent.requires && !find(agent.requires.command)) {
+    const r = agent.requires;
+    return { ok: false, reason: "requires", message: `${r.label} is not installed: \`${r.command}\` is not on PATH. Install it with \`${r.installCommand}\`, then try again.` };
   }
   for (const name of [agent.command, ...(agent.altCommands ?? [])]) {
     const found = find(name);
     if (found) return { ok: true, command: found, args: [...agent.args], source: "path" };
   }
+  const copy = agent.adapter ? managed(agent) : null;
+  if (copy) return { ok: true, command: copy.command, args: copy.args, ...(copy.env && { env: copy.env }), source: "managed" };
+  if (agent.adapter) {
+    return {
+      ok: false,
+      reason: "adapter",
+      message: `${agent.label}'s ACP adapter is not installed. Guided Reviews installs ${agent.adapter.package}@${agent.adapter.version} into its own storage when you start a guide; or run \`${agent.installCommand}\` yourself.`,
+    };
+  }
   return {
     ok: false,
+    reason: agent.installCommand ? "agent" : "setting",
     message: agent.installCommand
       ? `${agent.label} is not installed: \`${agent.command}\` is not on PATH. Install it with \`${agent.installCommand}\`, then try again.`
       : `\`${agent.command}\` is not on PATH.`,
@@ -238,9 +293,21 @@ export interface AgentStatus {
 }
 
 /** Every known agent (and the custom one when set), installed ones first, each group in the list's order. */
-export function detectAgents(overrides: (id: string) => CommandOverride, custom: AgentDescriptor | null, find: (name: string) => string | null = findExecutable): AgentStatus[] {
-  const all = [...KNOWN_AGENTS, ...(custom ? [custom] : [])].map((agent) => ({ agent, launch: resolveAgentLaunch(agent, agent.id === CUSTOM_AGENT_ID ? {} : overrides(agent.id), find) }));
-  return [...all.filter((s) => s.launch.ok), ...all.filter((s) => !s.launch.ok)];
+export function detectAgents(
+  overrides: (id: string) => CommandOverride,
+  custom: AgentDescriptor | null,
+  find: (name: string) => string | null = findExecutable,
+  managed: (agent: AgentDescriptor) => ManagedLaunch | null = () => null,
+  installAdapters = false,
+): AgentStatus[] {
+  const all = [...KNOWN_AGENTS, ...(custom ? [custom] : [])].map((agent) => ({ agent, launch: resolveAgentLaunch(agent, agent.id === CUSTOM_AGENT_ID ? {} : overrides(agent.id), find, managed) }));
+  const ready = (s: AgentStatus) => s.launch.ok || (installAdapters && s.launch.reason === "adapter");
+  return [...all.filter(ready), ...all.filter((s) => !ready(s))];
+}
+
+/** Ready to pick: installed, or its adapter is one Guided Reviews installs on first use. */
+export function canStart(launch: AdapterResolution, installAdapters: boolean): boolean {
+  return launch.ok || (installAdapters && launch.reason === "adapter");
 }
 
 export interface AgentOptionsCache {

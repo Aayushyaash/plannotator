@@ -516,21 +516,99 @@ describe("your agent, your config: Guides never blocks it", () => {
     expect(w.log().find((e) => e.event === "permission")?.outcome).toEqual({ outcome: "selected", optionId: "reject-once" });
   });
 
-  it("names a tool the agent's sandbox or settings blocked, and goes on", async () => {
+  it("names tools the agent's settings denied (its own wording only), in one notice, and goes on", async () => {
     const w = world([
-      { tool: { title: "Run npm test", kind: "execute", fail: true, output: "sandbox: operation not permitted (read-only sandbox)" } },
       { tool: { title: "Bash", kind: "execute", fail: true, output: "Permission to use Bash has been denied." } },
+      { tool: { title: "WebFetch", kind: "fetch", fail: true, output: "Permission to use WebFetch with url https://x.dev has been denied." } },
       { tool: { title: "Read missing.ts", kind: "read", fail: true, output: "ENOENT: no such file" } },
       ...fullGuide,
     ]);
     const gen = new GuideGeneration(w.input, w.deps);
     await gen.run();
     expect(gen.state.status).toBe("finished");
-    const keys = gen.state.bottlenecks.map((b) => b.key);
-    expect(keys).toEqual(["blocked:sandbox:Run npm test", "blocked:settings:Bash"]);
-    expect(gen.state.bottlenecks[0].title).toBe("Claude Code's sandbox blocked Run npm test");
-    expect(gen.state.bottlenecks[1].detail).toContain("the guide can still be written without it");
-    expect(gen.state.bottlenecks[1].action).toBe("approveRun");
+    expect(gen.state.bottlenecks).toHaveLength(1);
+    expect(gen.state.bottlenecks[0].key).toBe("blocked:settings");
+    expect(gen.state.bottlenecks[0].title).toBe("Claude Code's settings denied Bash, WebFetch");
+    expect(gen.state.bottlenecks[0].detail).toContain("does not lift a deny rule");
+    expect(gen.state.bottlenecks[0].action).toBeUndefined();
+  });
+
+  it("never reads a tool's own failure as the agent's config", async () => {
+    const outputs = [
+      "cat: secrets.txt: Permission denied",
+      "fatal: Unable to create '/repo/.git/index.lock': Permission denied",
+      "npm ERR! code EACCES",
+      "HTTP 405 Method Not Allowed",
+      "fatal: 'my branch' is not a valid branch name: Spaces are not allowed in branch names",
+      "FAIL src/sandbox.test.ts",
+      "rm: build: Operation not permitted",
+      "error: cannot open .git/FETCH_HEAD: Read-only file system",
+    ];
+    const w = world([...outputs.map((output, i) => ({ tool: { title: `Run ${i}`, kind: "execute", fail: true, output } })), header]);
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    expect(gen.state.bottlenecks.filter((b) => b.key.startsWith("blocked"))).toEqual([]);
+    // Nothing was blocked, so the end of the run does not blame the user's setup.
+    expect(gen.state.bottlenecks.some((b) => b.key === "ended-blocked")).toBe(false);
+  });
+
+  it("never downgrades a session already in a mode as permissive as the target", async () => {
+    for (const startMode of ["auto", "bypassPermissions", "acceptEdits"]) {
+      const w = world([header], { script: { startMode, modes: [{ id: "default", name: "Default" }, { id: "acceptEdits", name: "Accept" }, { id: "auto", name: "Auto" }, { id: "bypassPermissions", name: "Bypass" }] } });
+      w.input.autoApprove = true;
+      const gen = new GuideGeneration(w.input, w.deps);
+      await gen.run();
+      expect(modeChanges(w.log())).toEqual([]);
+      expect(gen.state.permissiveMode).toBe(startMode);
+    }
+    const codex = world([header], { agent: CODEX, script: { startMode: "agent-full-access", modes: [{ id: "read-only", name: "RO" }, { id: "agent", name: "Auto" }, { id: "agent-full-access", name: "Full" }] } });
+    codex.input.autoApprove = true;
+    await new GuideGeneration(codex.input, codex.deps).run();
+    expect(modeChanges(codex.log())).toEqual([]);
+  });
+
+  it("'Approve all' from a notification whose request was already answered still turns automatic approval on", async () => {
+    const w = world([{ sleep: 400 }, { permission: { title: "Run npm test", kind: "execute" } }, header], { choose: "never" });
+    const gen = new GuideGeneration(w.input, w.deps);
+    const running = gen.run();
+    await new Promise<void>((resolve) => {
+      const off = gen.onChange((s) => {
+        if (s.status === "running") {
+          off();
+          resolve();
+        }
+      });
+    });
+    gen.answerPermission(999, { approve: "run" }); // no such pending request any more
+    await running;
+    expect(gen.state.autoApprove).toBe(true);
+    expect(w.permissions).toEqual([]); // the later request was approved without asking
+    expect(w.log().find((e) => e.event === "permission")?.outcome).toEqual({ outcome: "selected", optionId: "allow-once" });
+    // Once a run ended, a late "Approve all" changes nothing.
+    const ended = world([header]);
+    const after = new GuideGeneration(ended.input, ended.deps);
+    await after.run();
+    after.answerPermission(1, { approve: "run" });
+    expect(after.state.autoApprove).toBe(false);
+  });
+
+  it("leaves a request with no allow option with the user when 'Approve all' is pressed", async () => {
+    const w = world([{ permission: { title: "Pick one", kind: "other", options: [{ optionId: "no", name: "No", kind: "reject_once" }] } }, header], { choose: "never" });
+    const gen = new GuideGeneration(w.input, w.deps);
+    const running = gen.run();
+    await new Promise<void>((resolve) => {
+      const off = gen.onChange((s) => {
+        if (s.pendingPermissions.length) {
+          off();
+          resolve();
+        }
+      });
+    });
+    gen.approveAutomatically();
+    expect(gen.state.pendingPermissions).toHaveLength(1); // still waiting for the user
+    gen.answerPermission(gen.state.pendingPermissions[0].id, { optionId: "no" });
+    await running;
+    expect(w.log().find((e) => e.event === "permission")?.outcome).toEqual({ outcome: "selected", optionId: "no" });
   });
 
   it("says so when the agent never reaches the guide's tools", async () => {

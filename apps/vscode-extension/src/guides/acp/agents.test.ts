@@ -111,19 +111,20 @@ describe("the agent registry", () => {
 
   it("carries nothing that changes the user's agent config: no extra arguments, environment or session _meta", () => {
     for (const a of KNOWN_AGENTS) {
-      const r = resolveAgentLaunch(a, {}, FOUND([a.command]));
+      const r = resolveAgentLaunch(a, {}, FOUND([a.command, ...(a.requires ? [a.requires.command] : [])]));
       expect(r).toEqual({ ok: true, command: `/bin/${a.command}`, args: [...a.args], source: "path" });
       expect(Object.keys(a).sort()).not.toContain("readOnly");
     }
   });
 
   it("uses an agent's own permissive mode only for automatic approval: Claude Code acceptEdits, Codex agent", () => {
-    expect(CLAUDE_CODE.permissiveModes).toEqual(["acceptEdits"]);
-    expect(CODEX.permissiveModes).toEqual(["agent"]);
+    // The first is the mode Guides switches to; the rest are at least as permissive and are never downgraded.
+    expect(CLAUDE_CODE.permissiveModes).toEqual(["acceptEdits", "auto", "bypassPermissions"]);
+    expect(CODEX.permissiveModes).toEqual(["agent", "agent-full-access"]);
   });
 
   it("starts Pi like any other agent, with its capability gap as a note", () => {
-    expect(resolveAgentLaunch(PI, {}, FOUND(["pi-acp"]))).toEqual({ ok: true, command: "/bin/pi-acp", args: [], source: "path" });
+    expect(resolveAgentLaunch(PI, {}, FOUND(["pi-acp", "pi"]))).toEqual({ ok: true, command: "/bin/pi-acp", args: [], source: "path" });
     expect(PI.note).toContain("Can't write guides yet");
     expect(PI.note).toContain("MCP");
   });
@@ -136,13 +137,13 @@ describe("starting an agent", () => {
   });
 
   it("says how to install a missing agent", () => {
-    expect(resolveAgentLaunch(OPENCODE, {}, FOUND([]))).toEqual({ ok: false, message: "OpenCode is not installed: `opencode` is not on PATH. Install it with `curl -fsSL https://opencode.ai/install | bash`, then try again." });
+    expect(resolveAgentLaunch(OPENCODE, {}, FOUND([]))).toEqual({ ok: false, reason: "agent", message: "OpenCode is not installed: `opencode` is not on PATH. Install it with `curl -fsSL https://opencode.ai/install | bash`, then try again." });
   });
 
   it("uses a command override with its own args, or the agent's", () => {
     expect(resolveAgentLaunch(OPENCODE, { command: "/opt/oc" }, FOUND([]))).toEqual({ ok: true, command: "/opt/oc", args: ["acp"], source: "setting" });
     expect(resolveAgentLaunch(CODEX, { command: "/opt/codex-acp", args: ["--x"] }, FOUND([]))).toEqual({ ok: true, command: "/opt/codex-acp", args: ["--x"], source: "setting" });
-    expect(resolveAgentLaunch(CODEX, { command: "nope" }, FOUND([]))).toEqual({ ok: false, message: "The configured command for Codex, `nope`, was not found." });
+    expect(resolveAgentLaunch(CODEX, { command: "nope" }, FOUND([]))).toEqual({ ok: false, reason: "setting", message: "The configured command for Codex, `nope`, was not found." });
   });
 
   it("lists installed agents first, then the rest, and the custom agent when set", () => {

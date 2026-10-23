@@ -14,7 +14,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { Readable, Writable } from "node:stream";
 import {
@@ -74,6 +74,9 @@ export const CLIENT_CAPABILITIES = {
   auth: { terminal: true },
 } as const;
 
+/** The largest file `fs/read_text_file` reads (10 MB). */
+export const MAX_CLIENT_READ_BYTES = 10 * 1024 * 1024;
+
 function notOffered(method: string): never {
   throw RequestError.methodNotFound(`${method} (not offered by this client: the agent's own tools do this)`);
 }
@@ -81,6 +84,9 @@ function notOffered(method: string): never {
 /** `fs/read_text_file`: the file's text, from `line` (1-based) for `limit` lines when given. */
 export async function readTextFileForAgent(params: { path: string; line?: number | null; limit?: number | null }): Promise<{ content: string }> {
   if (!isAbsolute(params.path)) throw RequestError.invalidParams(undefined, "path must be absolute");
+  const info = await stat(params.path);
+  if (!info.isFile()) throw RequestError.invalidParams(undefined, `${params.path} is not a file`);
+  if (info.size > MAX_CLIENT_READ_BYTES) throw RequestError.invalidParams(undefined, `${params.path} is ${info.size} bytes; the client reads files up to ${MAX_CLIENT_READ_BYTES} bytes`);
   const text = await readFile(params.path, "utf8");
   if (params.line == null && params.limit == null) return { content: text };
   const lines = text.split("\n");

@@ -19,6 +19,7 @@ import {
   detectAgents,
   engineLabel,
   findAgent,
+  KNOWN_AGENTS,
   readAgentOptions,
   resolveAgentLaunch,
   type AdapterResolution,
@@ -29,6 +30,8 @@ import {
   type LoginCommand,
 } from "../acp/agents";
 import { planSpawn } from "../acp/spawn-plan";
+import { adaptersRoot, hasManagedCopy, installAdapter, managedLaunch, type InstallResult } from "../acp/adapters";
+import { ensureAgentLaunch, type ReadyLaunch } from "../acp/ensure-launch";
 import { parseGuideLink } from "../core/adapter";
 import { loadDashboard, type DashboardModel } from "../dashboard";
 import { GuideGeneration, type GenerationState, type PendingPermission, type PermissionAnswer } from "../generation";
@@ -55,7 +58,7 @@ import {
 } from "../store";
 import type { ChapterViewState, GeneratingViewState, GuideViewState, HomeViewState } from "../webview-protocol";
 import { chapterColorCss, linkInfo, locateLink, resolveSymbolForBuilder } from "./intel";
-import { pickAgentAndEffort, pickPullRequest, pickSource, type RememberedChoice, type SourceChoice } from "./new-review";
+import { autoApproveChoice, pickAgentAndEffort, pickPullRequest, pickSource, type RememberedChoice, type SourceChoice } from "./new-review";
 import { ReaderUi } from "./reader-ui";
 import { getChildren, getParent, getTreeItem, nodeId, relativeTime, type TreeData, type TreeNode } from "./tree";
 import { GuideContentProvider, GUIDE_SCHEME, baseUri, headPathOf, headUri } from "./uris";
@@ -272,7 +275,7 @@ export class GuidesController implements vscode.Disposable {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.log.error(`[guides] ${id}: ${err instanceof Error ? err.stack ?? err.message : err}`);
-      void vscode.window.showErrorMessage(`Guides: ${message}`);
+      void vscode.window.showErrorMessage(`Guided Reviews: ${message}`);
       return undefined;
     }
   }
@@ -365,6 +368,8 @@ export class GuidesController implements vscode.Disposable {
         return this.toggleFileReviewed(str(args[0]) ?? (args[0] && typeof args[0] === "object" && "path" in (args[0] as object) ? (args[0] as { path: string }).path : undefined));
       case "changeDefaults":
         return this.changeDefaults();
+      case "updateAdapters":
+        return this.updateAdapters();
       case "signIn":
         return this.signIn(str(args[0]));
       case "answerPermission": {
@@ -438,11 +443,88 @@ export class GuidesController implements vscode.Disposable {
   }
 
   private agentStatuses(): AgentStatus[] {
-    return detectAgents((id) => this.agentOverride(id), this.customAgent());
+    return detectAgents((id) => this.agentOverride(id), this.customAgent(), findExecutable, this.managedFor, this.installAdaptersSetting());
   }
 
+  /** Resolution order: the command in settings, the agent on PATH, the adapter Guided Reviews installed. */
   private launchFor(agent: AgentDescriptor): AdapterResolution {
-    return resolveAgentLaunch(agent, agent.id === CUSTOM_AGENT_ID ? {} : this.agentOverride(agent.id));
+    return resolveAgentLaunch(agent, agent.id === CUSTOM_AGENT_ID ? {} : this.agentOverride(agent.id), findExecutable, this.managedFor);
+  }
+
+  private readonly managedFor = (agent: AgentDescriptor) => (agent.adapter ? managedLaunch(this.adaptersRoot(), agent.id, agent.adapter, agent.args) : null);
+
+  private adaptersRoot(): string {
+    return adaptersRoot(this.context.globalStorageUri.fsPath);
+  }
+
+  /** `plannotator.guides.installAdapters` (default on): install a missing npm ACP adapter into the extension's storage. */
+  private installAdaptersSetting(): boolean {
+    return vscode.workspace.getConfiguration("plannotator.guides").get<boolean>("installAdapters") ?? true;
+  }
+
+  private readonly adapterInstalls = new Map<string, Promise<InstallResult>>();
+
+  /** Install (or reinstall) the agent's pinned adapter, with a progress notification. One install per agent at a time. */
+  private installAdapterNow(agent: AgentDescriptor): Promise<InstallResult> {
+    const spec = agent.adapter;
+    if (!spec) return Promise.resolve({ ok: false, message: `${agent.label} has no ACP adapter to install.` });
+    const running = this.adapterInstalls.get(agent.id);
+    if (running) return running;
+    const job = Promise.resolve(
+      vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Installing ${agent.label}'s ACP adapter…` }, async (progress) => {
+        progress.report({ message: `${spec.package}@${spec.version}` });
+        const result = await installAdapter(this.adaptersRoot(), agent.id, agent.label, spec, { runner: this.runner });
+        this.log.info(result.ok ? `[guides] installed ${spec.package}@${spec.version} in ${result.dir}` : `[guides] ${result.message}`);
+        return result;
+      }),
+    ).finally(() => this.adapterInstalls.delete(agent.id));
+    this.adapterInstalls.set(agent.id, job);
+    return job;
+  }
+
+  /**
+   * The command to start the agent, installing its adapter first when it is
+   * missing and the setting allows. When the agent cannot be started, says
+   * why (with Retry for a failed install, or how to install the agent) and
+   * answers null.
+   */
+  private ensureLaunch(agent: AgentDescriptor): Promise<ReadyLaunch | null> {
+    return ensureAgentLaunch(agent, {
+      resolve: (a) => this.launchFor(a),
+      installAdapters: this.installAdaptersSetting(),
+      install: (a) => this.installAdapterNow(a),
+      installFailed: async (a, message) => {
+        const choice = await vscode.window.showErrorMessage(message, "Retry", "Copy command", "Open docs");
+        if (choice === "Copy command") void vscode.env.clipboard.writeText(a.installCommand);
+        if (choice === "Open docs") void vscode.env.openExternal(vscode.Uri.parse(a.docsUrl));
+        return choice === "Retry" ? "retry" : "stop";
+      },
+      missing: async (a, launch) => {
+        const now = await this.showMissing({ agent: a, launch });
+        return now?.launch.ok ? now.launch : null;
+      },
+    });
+  }
+
+  /** "Guided Reviews: Update Agent Adapters": reinstall every adapter Guided Reviews installed, at the pinned version. */
+  private async updateAdapters(): Promise<void> {
+    const root = this.adaptersRoot();
+    const agents = KNOWN_AGENTS.filter((a) => a.adapter && hasManagedCopy(root, a.id));
+    if (agents.length === 0) {
+      void vscode.window.showInformationMessage("Guided Reviews has not installed any agent adapter yet. It installs one when a guide starts with an agent that needs it.");
+      return;
+    }
+    const done: string[] = [];
+    for (const agent of agents) {
+      const result = await this.installAdapterNow(agent);
+      if (!result.ok) {
+        const choice = await vscode.window.showErrorMessage(result.message, "Retry");
+        if (choice === "Retry") return this.updateAdapters();
+        continue;
+      }
+      done.push(`${agent.label} (${agent.adapter!.package}@${agent.adapter!.version})`);
+    }
+    if (done.length) void vscode.window.showInformationMessage(`Updated the ACP adapters for ${done.join(", ")}.`);
   }
 
   /** `plannotator.guides.autoApprove`: the user opted in to approving the agent's requests automatically during guides. */
@@ -452,15 +534,13 @@ export class GuidesController implements vscode.Disposable {
 
   /** Start the agent once, read its config options, stop it. Nothing is prompted. */
   private async probeAgentOptions(agent: AgentDescriptor): Promise<AgentOptionsCache | null> {
-    const launch = this.launchFor(agent);
-    if (!launch.ok) {
-      this.showAdapterMissing(agent, launch.message);
-      return null;
-    }
+    const launch = await this.ensureLaunch(agent);
+    if (!launch) return null;
     const cwd = this.dashboard?.repo?.root ?? this.cwd() ?? this.context.globalStorageUri.fsPath;
+    mkdirSync(cwd, { recursive: true });
     let client: AcpClient | null = null;
     try {
-      client = await AcpClient.start({ command: launch.command, args: launch.args, cwd }, {
+      client = await AcpClient.start({ command: launch.command, args: launch.args, cwd, ...(launch.env && { env: launch.env }) }, {
         onUpdate: () => {},
         requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
         onStderr: (t) => this.log.info(`[agent] ${t.trimEnd()}`),
@@ -480,24 +560,47 @@ export class GuidesController implements vscode.Disposable {
     }
   }
 
-  private showAdapterMissing(agent: AgentDescriptor, message: string): void {
-    const buttons = [...(agent.installCommand ? ["Copy install command"] : []), "Open docs", "Open settings"];
-    void vscode.window.showErrorMessage(message, ...buttons).then((choice) => this.onMissingChoice(agent, choice));
-  }
-
-  private onMissingChoice(agent: AgentDescriptor, choice: string | undefined): void {
-    if (choice === "Copy install command") void vscode.env.clipboard.writeText(agent.installCommand);
-    if (choice === "Open docs") void vscode.env.openExternal(vscode.Uri.parse(agent.docsUrl));
-    if (choice === "Open settings") void vscode.commands.executeCommand("workbench.action.openSettings", agent.id === CUSTOM_AGENT_ID ? "plannotator.guides.customAgent" : "plannotator.guides.agentCommands");
-  }
-
-  /** A missing agent picked in the agent step: how to install it, then back to the list. */
-  private async agentMissing(status: AgentStatus): Promise<void> {
+  /**
+   * Why the agent cannot start, with what fixes it: install its adapter now
+   * (when auto-install is off), "Install <agent>" (a terminal with the
+   * agent's official install command typed in, for the user to run), its
+   * docs, or settings. Answers the agent's new status when its adapter was
+   * installed here, else null.
+   */
+  private async showMissing(status: AgentStatus): Promise<AgentStatus | null> {
     const { agent, launch } = status;
-    const message = launch.ok ? "" : launch.message;
-    const buttons = [...(agent.installCommand ? ["Copy install command"] : []), "Open docs", "Open settings"];
-    const choice = await vscode.window.showInformationMessage(`${message} Guides never installs anything itself.`, { modal: false }, ...buttons);
-    this.onMissingChoice(agent, choice);
+    if (launch.ok) return status;
+    const installAgent = launch.reason === "agent" && agent.installCommand ? `Install ${agent.label}` : launch.reason === "requires" && agent.requires ? `Install ${agent.requires.label}` : null;
+    const buttons = [
+      ...(launch.reason === "adapter" ? ["Install adapter", "Copy command"] : []),
+      ...(installAgent ? [installAgent] : []),
+      "Open docs",
+      ...(launch.reason === "setting" || launch.reason === "adapter" ? ["Open settings"] : []),
+    ];
+    const choice = await vscode.window.showErrorMessage(launch.message, ...buttons);
+    if (choice === "Install adapter") {
+      const result = await this.installAdapterNow(agent);
+      if (!result.ok) {
+        const again = await vscode.window.showErrorMessage(result.message, "Retry");
+        return again === "Retry" ? this.showMissing({ agent, launch: this.launchFor(agent) }) : null;
+      }
+      const now = this.launchFor(agent);
+      return now.ok ? { agent, launch: now } : null;
+    }
+    if (choice === "Copy command") void vscode.env.clipboard.writeText(agent.installCommand);
+    if (choice && choice === installAgent) {
+      const command = launch.reason === "requires" && agent.requires ? agent.requires.installCommand : agent.installCommand;
+      const terminal = vscode.window.createTerminal({ name: choice });
+      terminal.show();
+      // Typed in, not run: the user reads it and presses Enter.
+      terminal.sendText(command, false);
+    }
+    if (choice === "Open docs") void vscode.env.openExternal(vscode.Uri.parse(launch.reason === "requires" && agent.requires ? agent.requires.docsUrl : agent.docsUrl));
+    if (choice === "Open settings") {
+      const key = agent.id === CUSTOM_AGENT_ID ? "plannotator.guides.customAgent" : launch.reason === "adapter" ? "plannotator.guides.installAdapters" : "plannotator.guides.agentCommands";
+      void vscode.commands.executeCommand("workbench.action.openSettings", key);
+    }
+    return null;
   }
 
   private pickerInput(remembered: RememberedChoice | undefined) {
@@ -505,7 +608,8 @@ export class GuidesController implements vscode.Disposable {
       agents: this.agentStatuses(),
       optionsFor: (id: string) => this.agentOptions(id),
       loadOptions: (agent: AgentDescriptor) => this.probeAgentOptions(agent),
-      onMissing: (status: AgentStatus) => this.agentMissing(status),
+      onMissing: (status: AgentStatus) => this.showMissing(status),
+      installAdapters: this.installAdaptersSetting(),
       remembered: remembered ? { agent: remembered.agent ?? CLAUDE_CODE.id, model: remembered.model, effort: remembered.effort } : undefined,
     };
   }
@@ -540,7 +644,8 @@ export class GuidesController implements vscode.Disposable {
     const picked = await pickAgentAndEffort({ ...this.pickerInput(remembered), standingInstructions: readGuideInstructions(), autoApprove: this.autoApproveSetting() });
     if (!picked) return;
     await this.context.workspaceState.update(`plannotator.guides.choices:${model.repo.root}`, { agent: picked.agent.id, model: picked.agent.model?.id, effort: picked.agent.effort?.id });
-    await this.startRun(source, picked.agent, picked.instructions);
+    // The start flow's toggle (seeded from the setting) decides, for this run.
+    await this.startRun(source, picked.agent, picked.instructions, undefined, autoApproveChoice(picked));
   }
 
   private async prepareSource(choice: SourceChoice): Promise<{ source: ReviewSourceRecord; rawPatch: string } | null> {
@@ -602,11 +707,11 @@ export class GuidesController implements vscode.Disposable {
   private async startRun(choice: SourceChoice, agent: AgentChoiceRecord, instructions?: string, resume?: DraftRecord, autoApprove = this.autoApproveSetting()): Promise<void> {
     const descriptor = this.agentById(agent.id);
     if (!descriptor) {
-      void vscode.window.showErrorMessage(agent.id === CUSTOM_AGENT_ID ? "This guide was started with the custom agent, which is no longer set (plannotator.guides.customAgent.command)." : `Guides does not know the agent ${agent.label}.`);
+      void vscode.window.showErrorMessage(agent.id === CUSTOM_AGENT_ID ? "This guide was started with the custom agent, which is no longer set (plannotator.guides.customAgent.command)." : `Plannotator does not know the agent ${agent.label}.`);
       return;
     }
-    const available = this.launchFor(descriptor);
-    if (!available.ok) return this.showAdapterMissing(descriptor, available.message);
+    const available = await this.ensureLaunch(descriptor);
+    if (!available) return;
     let prepared: { source: ReviewSourceRecord; rawPatch: string } | null;
     if (resume) prepared = { source: resume.source, rawPatch: resume.draft.review.rawPatch };
     else prepared = await this.prepareSource(choice);
@@ -621,7 +726,7 @@ export class GuidesController implements vscode.Disposable {
       {
         relay,
         agent: descriptor,
-        agentLaunch: (cwd) => ({ command: launch.command, args: launch.args, cwd }),
+        agentLaunch: (cwd) => ({ command: launch.command, args: launch.args, cwd, ...(launch.env && { env: launch.env }) }),
         mcpServer: {
           command: process.execPath,
           args: [vscode.Uri.joinPath(this.context.extensionUri, "dist", "guide-mcp.cjs").fsPath],
@@ -789,9 +894,11 @@ export class GuidesController implements vscode.Disposable {
       args = [...launch.args, ...login.args];
     } else {
       const fallback = agent.signIn;
-      const found = fallback ? findExecutable(fallback.command) : null;
+      // No command of its own: the agent's sign-in is a subcommand of the program that starts it (`cursor-agent login` or `agent login`).
+      const found = fallback ? (fallback.command ? findExecutable(fallback.command) : launch.ok ? launch.command : null) : null;
       if (!fallback || !found) {
-        void vscode.window.showErrorMessage(fallback ? `Run \`${[fallback.command, ...fallback.args].join(" ")}\` in a terminal to sign in, then resume the guide.` : `Sign in to ${agent.label} in a terminal (see ${agent.docsUrl}), then resume the guide.`);
+        const shown = fallback ? [fallback.command ?? agent.command, ...fallback.args].join(" ") : "";
+        void vscode.window.showErrorMessage(fallback ? `Run \`${shown}\` in a terminal to sign in, then resume the guide.` : `Sign in to ${agent.label} in a terminal (see ${agent.docsUrl}), then resume the guide.`);
         return;
       }
       command = found;
@@ -809,7 +916,7 @@ export class GuidesController implements vscode.Disposable {
       shellPath: plan.command,
       shellArgs: plan.args,
       cwd: state?.source.repoRoot ?? this.cwd(),
-      env: { ...plan.env, ...login?.env },
+      env: { ...plan.env, ...(launch.ok && login ? launch.env : undefined), ...login?.env },
     });
     terminal.show();
   }
@@ -1216,7 +1323,7 @@ export class GuidesController implements vscode.Disposable {
     if (this.context.globalState.get<boolean>("plannotator.guides.askedDiffCodeLens")) return;
     await this.context.globalState.update("plannotator.guides.askedDiffCodeLens", true);
     const choice = await vscode.window.showInformationMessage(
-      "Guides put a line at the top of each diff: its chapter, Mark reviewed and Next file. VS Code hides such lines in diffs unless CodeLens in the diff editor is on. Turn it on?",
+      "Guided reviews put a line at the top of each diff: its chapter, Mark reviewed and Next file. VS Code hides such lines in diffs unless CodeLens in the diff editor is on. Turn it on?",
       "Turn on",
       "Not now",
     );

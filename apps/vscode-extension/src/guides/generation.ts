@@ -188,6 +188,7 @@ export class GuideGeneration {
   private readonly permissionWaiters = new Map<number, { request: RequestPermissionRequest; resolve: (r: RequestPermissionResponse) => void }>();
   /** Turned down requests and blocked tools this run, for the end-of-run advice. */
   private blocked = 0;
+  private readonly blockedTools = new Map<string, string[]>();
   /** Whether the agent ever reached the builder's MCP server (an agent that drops the client's MCP servers never does). */
   private builderReached = false;
   private messageEntry: ActivityEntry | null = null;
@@ -364,7 +365,7 @@ export class GuideGeneration {
         this.addBottleneck({
           key: "no-builder",
           title: `${this.input.agent.label} never reached the guide's tools`,
-          detail: this.deps.agent.note ?? `The guide is written through Guides' own MCP server (plannotator-guide). ${this.input.agent.label} may not accept MCP servers from an ACP client, or its settings may turn MCP servers off.`,
+          detail: this.deps.agent.note ?? `The guide is written through Plannotator's own MCP server (plannotator-guide). ${this.input.agent.label} may not accept MCP servers from an ACP client, or its settings may turn MCP servers off.`,
         });
       } else if (this.blocked > 0 && !this.state.autoApprove) {
         this.addBottleneck({
@@ -456,7 +457,7 @@ export class GuideGeneration {
     this.state.status = "finished";
     this.state.endedAt = this.now();
     const notes = [this.history ? "Saved." : "Done. Not saved: guide history is off, so this guide is kept only until VS Code closes."];
-    if (this.state.diagramUnchecked) notes.push("The overview diagram was not render-checked (no Guides tab was open); it is checked when the guide opens.");
+    if (this.state.diagramUnchecked) notes.push("The overview diagram was not render-checked (no Guided Review tab was open); it is checked when the guide opens.");
     this.state.statusMessage = notes.join(" ");
     if (this.history) deleteDraftRecord(this.input.repoKey, this.state.id);
     this.emit();
@@ -579,7 +580,7 @@ export class GuideGeneration {
       this.addActivity({ kind: "builder", title: name, detail: this.history ? "saved" : "done (not saved: guide history is off)", status: "completed" });
       if (this.state.diagramUnchecked) this.addActivity({ kind: "info", title: "The overview diagram was not render-checked here; it is checked when the guide opens." });
       this.emit();
-      const unchecked = this.state.diagramUnchecked ? "\nThe overview diagram could not be render-checked (no Guides tab is open); the reader checks it when the guide opens." : "";
+      const unchecked = this.state.diagramUnchecked ? "\nThe overview diagram could not be render-checked (no Guided Review tab is open); the reader checks it when the guide opens." : "";
       return { text: `${answer.text}${unchecked}\nThe reader opens the guide now; end your turn.`, isError: false };
     }
     this.addActivity({
@@ -682,31 +683,32 @@ export class GuideGeneration {
   }
 
   /**
-   * A tool call failed. When its output reads like the agent's settings or
-   * sandbox refused it, say so plainly with the way through; the run goes on.
+   * A tool call failed. When its output carries the agent's own wording for
+   * a settings refusal, say so plainly; the run goes on. One notice per
+   * cause, updated with each tool it blocks. (codex-acp reports a declined or
+   * sandbox-failed command only as status `failed`, with nothing to tell it
+   * from an ordinary error, so it is not guessed at.)
    */
   private explainFailure(toolCallId: string, output: string): void {
     const cause = blockedCause(output);
     if (!cause) return;
-    const title = this.toolTitles.get(toolCallId) ?? "A tool";
+    const tool = this.toolTitles.get(toolCallId) ?? "a tool";
     const label = this.input.agent.label;
     this.blocked++;
+    const tools = [...(this.blockedTools.get(cause) ?? []), tool].filter((t, i, all) => all.indexOf(t) === i);
+    this.blockedTools.set(cause, tools);
     this.addBottleneck({
-      key: `blocked:${cause}:${title}`,
-      title: cause === "sandbox" ? `${label}'s sandbox blocked ${title}` : `${label}'s settings blocked ${title}`,
-      detail: [
-        `"${output.trim().split("\n")[0].slice(0, 200)}"`,
-        cause === "sandbox"
-          ? `The guide can still be written without it.${this.state.autoApprove ? "" : ` Approving automatically switches ${label} to a mode that lets it run, where it has one.`}`
-          : `Your ${label} settings deny or ask about it; the guide can still be written without it.`,
-      ].join(" "),
-      ...(!this.state.autoApprove && { action: "approveRun" as const }),
+      key: `blocked:${cause}`,
+      title: `${label}'s settings denied ${tools.join(", ")}`,
+      detail: `"${output.trim().split("\n")[0].slice(0, 200)}" A deny rule in your ${label} settings blocks it; the guide can still be written without it. Automatic approval answers only what the agent asks about, so it does not lift a deny rule.`,
     });
   }
 
+  /** Add a notice, or update the one with the same key (one notice per cause). */
   private addBottleneck(b: Bottleneck): void {
-    if (this.state.bottlenecks.some((x) => x.key === b.key)) return;
-    this.state.bottlenecks.push(b);
+    const at = this.state.bottlenecks.findIndex((x) => x.key === b.key);
+    if (at >= 0) this.state.bottlenecks[at] = b;
+    else this.state.bottlenecks.push(b);
     this.addActivity({ kind: "info", title: b.title, ...(b.detail && { detail: b.detail }), isError: true });
     this.emit();
   }
@@ -770,13 +772,14 @@ export class GuideGeneration {
 
   /** The user answered a pending permission (from the run view or the notification). The first answer wins. */
   answerPermission(id: number, answer: PermissionAnswer): void {
-    const waiter = this.permissionWaiters.get(id);
-    if (!waiter) return;
+    // "Approve all" holds for the run even from a notification whose request was already answered.
     if ("approve" in answer) {
       if (answer.approve === "always") this.deps.approveAlways?.();
-      this.approveAutomatically();
+      if (this.isRunLive()) this.approveAutomatically();
       return;
     }
+    const waiter = this.permissionWaiters.get(id);
+    if (!waiter) return;
     if (!waiter.request.options.some((o) => o.optionId === answer.optionId)) return;
     this.settlePermission(id, { outcome: { outcome: "selected", optionId: answer.optionId } });
   }
@@ -798,10 +801,15 @@ export class GuideGeneration {
       }
     }
     for (const [id, waiter] of [...this.permissionWaiters]) {
+      // A request with no allow option stays with the user ("cancelled" would abort the agent's tool).
       const allow = allowOption(waiter.request);
-      this.settlePermission(id, allow ? { outcome: { outcome: "selected", optionId: allow.optionId } } : { outcome: { outcome: "cancelled" } });
+      if (allow) this.settlePermission(id, { outcome: { outcome: "selected", optionId: allow.optionId } });
     }
     this.emit();
+  }
+
+  private isRunLive(): boolean {
+    return this.state.status === "starting" || this.state.status === "running" || this.state.status === "finishing";
   }
 
   private settlePermission(id: number, response: RequestPermissionResponse): void {
@@ -856,11 +864,17 @@ export function toolOutputText(content: unknown, rawOutput: unknown): string {
   return parts.join("\n");
 }
 
-/** Whether a failed tool's output reads like the agent's settings or sandbox refused it. */
-export function blockedCause(output: string): "sandbox" | "settings" | null {
+/**
+ * Whether a failed tool's output is the agent's own wording for a settings
+ * refusal. Only wording the adapters write: Claude Code's deny rules
+ * ("Permission to use Bash has been denied", also "… with command … has been
+ * denied"). Generic errors that merely mention permissions ("cat: x:
+ * Permission denied", npm EACCES, "405 Method Not Allowed", "Operation not
+ * permitted") are the tool's own failures, not the agent's config.
+ */
+export function blockedCause(output: string): "settings" | null {
   if (!output) return null;
-  if (/sandbox|read-only file ?system|operation not permitted|seatbelt|landlock/i.test(output)) return "sandbox";
-  if (/permission (to use .* )?(has been |was )?denied|not allowed|denied by (your )?(settings|policy|config)|blocked by (your )?(settings|policy|config)|requires (approval|permission)|user (rejected|declined|denied)|tool .* (is )?disabled|disallowed/i.test(output)) return "settings";
+  if (/\bPermission to use [A-Za-z][\w.-]*(?:\([^)]*\))?(?: with [^\n]*?)? has been denied\b/.test(output)) return "settings";
   return null;
 }
 

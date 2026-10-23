@@ -334,6 +334,28 @@ export interface RecentEntry {
   prNumber?: number;
   /** Kept in memory only (guide history is off). */
   sessionOnly?: boolean;
+  /** Set by `listRecentEverywhere`: the shelf and the repository it names (`owner/repo`). */
+  repoKey?: string;
+  repoName?: string;
+}
+
+/** `github.com__owner__repo` → `owner/repo` (other keys as they are). */
+export function repoNameOfKey(repoKey: string): string {
+  const parts = repoKey.split("__");
+  return parts.length >= 3 ? parts.slice(1).join("/") : repoKey;
+}
+
+/** Saved guides and drafts of every repository on this machine, newest first (the dashboard with no folder open). */
+export function listRecentEverywhere(options: { limit?: number } = {}): RecentEntry[] {
+  let keys: string[] = [];
+  try {
+    keys = readdirSync(join(getPlannotatorDataDir(), "guides"), { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+  } catch {
+    return [];
+  }
+  const all = keys.flatMap((repoKey) => listRecent(repoKey).map((e) => ({ ...e, repoKey, repoName: repoNameOfKey(repoKey) })));
+  all.sort((a, b) => b.at - a.at);
+  return all.slice(0, options.limit ?? 12);
 }
 
 /**
