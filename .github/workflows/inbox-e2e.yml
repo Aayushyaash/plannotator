@@ -13,7 +13,8 @@ name: Inbox window e2e
 # listener there (a pinned phone over the runner's network address; no
 # Bonjour on the runner, so the typed-address path); surface.spec.ts drives
 # the surface a phone hosts (apps/hook/dist/surface.html) in WebKit, the
-# engine WKWebView is. Runs only when the
+# engine WKWebView is, and the VS Code Guides webview's sanitizer and Mermaid
+# path (vscode-guides-sanitize.spec.ts, no binary needed). Runs only when the
 # Inbox, the ui and the guide viewer it composes, the binary entry or the build
 # could have changed.
 
@@ -54,6 +55,10 @@ on:
       - 'packages/shared/data-dir.ts'
       - 'tests/helpers/pinned-phone.ts'
       - 'scripts/inbox-sim.ts'
+      - 'apps/vscode-extension/src/guides/webview/**'
+      - 'apps/vscode-extension/src/guides/core/**'
+      - 'apps/vscode-extension/scripts/esbuild.config.ts'
+      - 'apps/vscode-extension/package.json'
       - '.github/workflows/inbox-e2e.yml'
   push:
     branches:
@@ -91,6 +96,10 @@ on:
       - 'packages/shared/data-dir.ts'
       - 'tests/helpers/pinned-phone.ts'
       - 'scripts/inbox-sim.ts'
+      - 'apps/vscode-extension/src/guides/webview/**'
+      - 'apps/vscode-extension/src/guides/core/**'
+      - 'apps/vscode-extension/scripts/esbuild.config.ts'
+      - 'apps/vscode-extension/package.json'
       - '.github/workflows/inbox-e2e.yml'
 
 permissions:
