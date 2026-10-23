@@ -3,8 +3,9 @@
  * any rendered text, the composer opens, and the comment becomes a file
  * comment that carries the quote (and, in the rendered diff, the kind of
  * section it was in). The same comment shows in the other view by its text,
- * and says so when its text is not there. Mermaid and Graphviz fences render
- * as code (the review bundle carries no diagram engine).
+ * and says so when its text is not there. Mermaid and Graphviz fences draw
+ * through the diagram engine the server advertises (loaded on demand), and
+ * render as code without it or when it fails to load.
  *
  * DOM-gated (DOM_TESTS=1) and registered in .github/workflows/test.yml's
  * "Run UI seam-contract + DOM tests" step.
@@ -16,6 +17,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { CodeAnnotation, MarkdownPreviewAnchor } from '@plannotator/ui/types';
 import type { ReviewState } from '../dock/ReviewStateContext';
 import type { MarkdownPreviewView } from '../hooks/useMarkdownPreview';
+import type { DiagramEngineUrls } from '../utils/diagramEngineContract';
+import { loadDiagramEngine, __resetDiagramEngineForTests } from '../utils/diagramEngine';
 
 const hasDom = typeof document !== 'undefined';
 
@@ -152,6 +155,7 @@ afterEach(async () => {
   added = [];
   setViewFromTest = null;
   window.getSelection()?.removeAllRanges();
+  __resetDiagramEngineForTests();
   document.body.innerHTML = '';
 });
 
@@ -322,28 +326,29 @@ describe.if(hasDom)('commenting in a Markdown preview', () => {
     expect(imgSrcs(el)).toEqual(['/api/review-markdown-image?doc=docs%2Fguide.md&side=new&src=+img%2Fa.png&snapshot=snap-1']);
   });
 
-  test('Mermaid and Graphviz fences render as code, not diagrams', async () => {
-    const withDiagram = `${NEW}\n\`\`\`mermaid\nflowchart LR\n  A --> B\n\`\`\`\n\n\`\`\`dot\ndigraph { a -> b }\n\`\`\`\n`;
-    const patch = [
-      'diff --git a/docs/guide.md b/docs/guide.md',
-      'new file mode 100644',
-      '--- /dev/null',
-      '+++ b/docs/guide.md',
-      `@@ -0,0 +1,${withDiagram.split('\n').length - 1} @@`,
-      ...withDiagram.split('\n').slice(0, -1).map((line) => `+${line}`),
-      '',
-    ].join('\n');
+  const WITH_DIAGRAM = `${NEW}\n\`\`\`mermaid\nflowchart LR\n  A --> B\n\`\`\`\n\n\`\`\`dot\ndigraph { a -> b }\n\`\`\`\n`;
+  const DIAGRAM_PATCH = [
+    'diff --git a/docs/guide.md b/docs/guide.md',
+    'new file mode 100644',
+    '--- /dev/null',
+    '+++ b/docs/guide.md',
+    `@@ -0,0 +1,${WITH_DIAGRAM.split('\n').length - 1} @@`,
+    ...WITH_DIAGRAM.split('\n').slice(0, -1).map((line) => `+${line}`),
+    '',
+  ].join('\n');
+
+  async function mountDiagrams(diagramEngine?: DiagramEngineUrls) {
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
     await act(async () => {
       root!.render(
-        <ReviewStateProvider value={{ files: [], allAnnotations: [], selectedAnnotationId: null } as unknown as ReviewState}>
+        <ReviewStateProvider value={{ files: [], allAnnotations: [], selectedAnnotationId: null, diagramEngine } as unknown as ReviewState}>
           <MarkdownFilePreview
             filePath="docs/guide.md"
             status="added"
-            patch={patch}
-            contents={{ fileContents: { forPath: 'docs/guide.md', old: null, new: withDiagram }, loading: false, stale: false }}
+            patch={DIAGRAM_PATCH}
+            contents={{ fileContents: { forPath: 'docs/guide.md', old: null, new: WITH_DIAGRAM }, loading: false, stale: false }}
             variant="single"
           />
         </ReviewStateProvider>,
@@ -351,8 +356,42 @@ describe.if(hasDom)('commenting in a Markdown preview', () => {
       await new Promise((r) => setTimeout(r, 30));
     });
     await settle(60);
-    expect(host.querySelector('[data-diagram-block]')).toBeNull();
-    const fences = Array.from(host.querySelectorAll('pre > code')).map((code) => code.textContent);
-    expect(fences).toEqual(['flowchart LR\n  A --> B', 'digraph { a -> b }']);
+    return host;
+  }
+  const fenceTexts = (el: HTMLElement) => Array.from(el.querySelectorAll('pre > code')).map((code) => code.textContent);
+
+  test('without the engine advert, Mermaid and Graphviz fences render as code', async () => {
+    const el = await mountDiagrams(undefined);
+    expect(el.querySelector('[data-diagram-block], [data-review-diagram]')).toBeNull();
+    expect(fenceTexts(el)).toEqual(['flowchart LR\n  A --> B', 'digraph { a -> b }']);
+  });
+
+  test('with the engine advert, both fences draw through the engine, loaded once', async () => {
+    const urls = { engine: '/assets/diagram-engine/engine-preview-ok.js', mermaid: '/m.js', graphviz: '/g.js' };
+    let imports = 0;
+    // The engine the server would serve, as the stub the loader hands back.
+    await loadDiagramEngine(urls, async () => {
+      imports += 1;
+      return {
+        apiVersion: 1,
+        DiagramFence: ({ kind, block }: { kind: string; block: { content: string } }) => <div data-stub-diagram={kind}>{block.content}</div>,
+      };
+    });
+    const el = await mountDiagrams(urls);
+    const drawn = Array.from(el.querySelectorAll('[data-stub-diagram]')).map((node) => [node.getAttribute('data-stub-diagram'), node.textContent]);
+    expect(drawn).toEqual([['mermaid', 'flowchart LR\n  A --> B'], ['graphviz', 'digraph { a -> b }']]);
+    expect(fenceTexts(el)).toEqual([]);
+    expect(imports).toBe(1);
+    // The rest of the document is unchanged.
+    expect(el.textContent).toContain('Run the new installer from the website.');
+  });
+
+  test('when the engine does not load, the fences stay code with a note and a Retry', async () => {
+    // No server here: the URL import fails, as it would offline.
+    const el = await mountDiagrams({ engine: '/assets/diagram-engine/engine-preview-missing.js', mermaid: '/m.js', graphviz: '/g.js' });
+    await settle(120);
+    expect(fenceTexts(el)).toEqual(['flowchart LR\n  A --> B', 'digraph { a -> b }']);
+    expect(el.querySelectorAll('[data-review-diagram="failed"]').length).toBe(2);
+    expect(el.querySelectorAll('[data-review-diagram-note] button').length).toBe(2);
   });
 });
