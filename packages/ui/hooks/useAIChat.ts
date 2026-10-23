@@ -52,6 +52,12 @@ export interface AskAIParams {
    *  received, and the server frames it as read-only context, never as
    *  feedback (#1748). Leave unset for every other provider. */
   draftAnnotations?: string;
+  /** Called once, when the stream first shows the question reached the
+   *  session (an answer started, or the session took it over). A busy, gone
+   *  or failed ask never calls it; a retry keeps it, so the retried question
+   *  calls it when it lands. Lets a caller record what the session was told
+   *  (e.g. which document a note named) only once it was received. */
+  onDelivered?: () => void;
 }
 
 /** What to send as `draftAnnotations` for one question: the list when this
@@ -411,11 +417,20 @@ export function useAIChat({
       const drafts = draftAnnotationsToSend(deliveredDraftsRef.current, BRIDGE_DRAFTS_KEY, params.draftAnnotations);
       // Recorded once the session shows it received the question, so a busy,
       // gone or failed ask sends the list again next time.
+      let deliveredCalled = false;
       const markDraftsDelivered = (msg: { type?: unknown; code?: unknown }) => {
-        if (drafts === undefined) return;
         const received = DELIVERED_MESSAGE_TYPES.has(String(msg.type))
           || (msg.type === 'error' && msg.code === SESSION_ASK_ERROR_CODES.takenOver);
-        if (received) deliveredDraftsRef.current = { sessionId: BRIDGE_DRAFTS_KEY, text: drafts };
+        if (!received) return;
+        if (drafts !== undefined) deliveredDraftsRef.current = { sessionId: BRIDGE_DRAFTS_KEY, text: drafts };
+        if (!deliveredCalled) {
+          deliveredCalled = true;
+          try {
+            params.onDelivered?.();
+          } catch {
+            // A caller's bookkeeping must never break the stream.
+          }
+        }
       };
       const res = await aiTransport.query({
         sessionId: sid,

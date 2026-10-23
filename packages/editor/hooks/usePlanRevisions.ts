@@ -25,6 +25,8 @@ export interface PlanRevisionSnapshot {
   previousPlan: string | null;
   versionInfo: VersionInfo | null;
   planRevision: number;
+  /** The revision's history version file (absolute), when the server names it. */
+  planPath?: string | null;
 }
 
 export type PlanRevisionBlocker = 'edits' | 'linked-document' | 'composer' | null;
@@ -154,6 +156,7 @@ export function usePlanRevisions(options: UsePlanRevisionsOptions): UsePlanRevis
         previousPlan: data.previousPlan ?? null,
         versionInfo: data.versionInfo ?? null,
         planRevision: data.planRevision,
+        planPath: typeof data.planPath === 'string' ? data.planPath : null,
       });
     } catch {
       // The next poll retries.

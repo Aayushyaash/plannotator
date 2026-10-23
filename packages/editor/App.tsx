@@ -299,6 +299,13 @@ import {
 import { resolveDocumentAreaClassName } from './documentAreaLayout';
 import { askAIAnnotationParams } from './askAIDrafts';
 import {
+  askDocumentParams,
+  describeAskDocument,
+  EMPTY_ASK_DOCUMENT_LATCH,
+  type AskDocument,
+  type AskDocumentLatch,
+} from './askDocumentContext';
+import {
   buildPlanEditPanelItem,
   buildDirectEditsSection,
   buildSavedFileChangePanelItems,
@@ -747,6 +754,9 @@ const App: React.FC = () => {
   const [imageBaseDir, setImageBaseDir] = useState<string | undefined>(undefined);
   // Plan review: the directory of the plan file on disk, when its contents match the plan.
   const [planDir, setPlanDir] = useState<string | undefined>(undefined);
+  // Plan review: the history file holding the exact plan on screen (absolute),
+  // so Ask AI can name the plan by path instead of pasting it.
+  const [planPath, setPlanPath] = useState<string | undefined>(undefined);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
@@ -3810,7 +3820,7 @@ const App: React.FC = () => {
         if (!res.ok) throw new Error('Not in API mode');
         return res.json();
       })
-      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'annotate-app' | 'annotate-bundle' | 'archive' | 'goal-setup'; bundle?: unknown; goalSetup?: GoalSetupBundle; filePath?: string; appUrl?: string; targetUrl?: string; liveToken?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; approvalNotesSupported?: boolean; clientLease?: AnnotateClientLeaseConfig; renderAs?: DocumentRenderAs; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; liveVersions?: boolean; planRevision?: number; serverSession?: string; archivePlans?: ArchivedPlan[]; projectRoot?: string; planDir?: string; isWSL?: boolean; markdownExtensions?: string[]; documentDrafts?: boolean; serverConfig?: { displayName?: string; gitUser?: string; autoUpdate?: boolean; autoUpdateEnv?: boolean; updateCheck?: boolean; updateCheckEnv?: boolean }; autoUpdateNotice?: unknown; updateAvailable?: unknown; autoUpdateSupported?: boolean; autoUpdateActive?: boolean; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; feedbackTemplates?: AnnotateFeedbackTemplates }) => {
+      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'annotate-app' | 'annotate-bundle' | 'archive' | 'goal-setup'; bundle?: unknown; goalSetup?: GoalSetupBundle; filePath?: string; appUrl?: string; targetUrl?: string; liveToken?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; approvalNotesSupported?: boolean; clientLease?: AnnotateClientLeaseConfig; renderAs?: DocumentRenderAs; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; liveVersions?: boolean; planRevision?: number; serverSession?: string; archivePlans?: ArchivedPlan[]; projectRoot?: string; planDir?: string; planPath?: string; isWSL?: boolean; markdownExtensions?: string[]; documentDrafts?: boolean; serverConfig?: { displayName?: string; gitUser?: string; autoUpdate?: boolean; autoUpdateEnv?: boolean; updateCheck?: boolean; updateCheckEnv?: boolean }; autoUpdateNotice?: unknown; updateAvailable?: unknown; autoUpdateSupported?: boolean; autoUpdateActive?: boolean; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; feedbackTemplates?: AnnotateFeedbackTemplates }) => {
         // Initialize config store with server-provided values (config file > cookie > default)
         configStore.init(data.serverConfig);
         // Stale-tab guard: every decision echoes this server's nonce.
@@ -3934,6 +3944,7 @@ const App: React.FC = () => {
           }
         }
         setPlanDir(data.planDir ?? undefined);
+        setPlanPath(data.mode === undefined && typeof data.planPath === 'string' ? data.planPath : undefined);
         if (data.sharingEnabled !== undefined) {
           setSharingEnabled(data.sharingEnabled);
         }
@@ -4309,6 +4320,7 @@ const App: React.FC = () => {
     originalMarkdownRef.current = normalized;
     setPreviousPlan(snapshot.previousPlan);
     setVersionInfo(snapshot.versionInfo);
+    setPlanPath(snapshot.planPath ?? undefined);
     setAppliedPlanRevision(snapshot.planRevision);
     setIsPlanDiffActive(false);
     const remapped = applyEditedDocument(normalized);
@@ -5411,6 +5423,33 @@ const App: React.FC = () => {
     linkedDocHook.isActive,
   ]);
 
+  // What is on screen, for the note a question carries when it changed.
+  const aiAskDocument = useMemo<AskDocument | null>(() => {
+    if (!aiContext) return null;
+    if (aiContext.mode === 'plan-review') {
+      return describeAskDocument({
+        kind: 'plan',
+        path: planPath,
+        version: versionInfo?.version,
+        content: markdown,
+      });
+    }
+    if (aiContext.mode !== 'annotate') return null;
+    return describeAskDocument({
+      kind: 'document',
+      path: aiDocumentPath,
+      sourceUrl: liveApp?.targetUrl ?? aiSourceInfo,
+      label: annotateSource === 'message' && !linkedDocHook.isActive ? "the agent's message" : undefined,
+      renderAs: aiRenderAs,
+      converted: aiSourceConverted,
+      position: aiContext.annotate.bundlePosition,
+      content: aiContext.annotate.content,
+    });
+  }, [aiContext, aiDocumentPath, aiRenderAs, aiSourceConverted, aiSourceInfo, annotateSource, linkedDocHook.isActive, liveApp, markdown, planPath, versionInfo]);
+  // What the agent was last told about the document, recorded once a question
+  // carrying it reached the session.
+  const askDocumentLatchRef = useRef<AskDocumentLatch>(EMPTY_ASK_DOCUMENT_LATCH);
+
   const aiChat = useAIChat({
     context: aiContext,
     providerId: aiConfig.providerId,
@@ -5488,13 +5527,12 @@ const App: React.FC = () => {
     return { prompt, markSent };
   }, [agentTerminalSessionId, getAIDraftList, aiDocumentPath, aiRenderAs, askScopeFromContext, displayedMarkdown, rawHtml, terminalAskReadableFilePath]);
 
-  // Annotate navigation shares one conversation, including an empty folder's
-  // first file. Archive and goal contexts still end that conversation.
-  const aiDocumentKey = annotateMode && !archive.archiveMode && !goalSetupMode
-    ? 'annotate-session'
-    : aiContext
-      ? `${aiDocumentMode ? 'document' : 'plan'}:${aiRenderAs}:${aiDocumentPath}:${versionInfo?.version ?? 'current'}`
-      : 'none';
+  // One Ask AI chat for the whole Plannotator session (#1001): switching files,
+  // linked documents, Back and plan revisions all keep it (each question then
+  // names what is on screen, see `askDocumentContext.ts`). Only archive and
+  // goal setup, which are other contexts, start their own. "New chat" is the
+  // explicit way to start fresh.
+  const aiDocumentKey = archive.archiveMode ? 'archive' : goalSetupMode ? 'goal-setup' : 'session';
   const previousAIDocumentKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!aiSessionEnabled) return;
@@ -5570,23 +5608,16 @@ const App: React.FC = () => {
       return false;
     }
     openAIChat();
+    const documentParams = askDocumentParams(askDocumentLatchRef, aiAskDocument, {
+      hasSession: !!aiSessionId,
+      sessionBridge: hasSessionBridge,
+    });
     askAI({
       prompt: question,
       scope: askScopeFromContext(context),
-      // Capture at submission: retries must keep this document even if the
-      // reviewer navigates. Annotation feedback travels separately below.
-      contextPreamble: aiContext?.mode === 'annotate'
-        ? [
-            'Current document for this question (supersedes the initial document context):',
-            JSON.stringify({
-              filePath: aiContext.annotate.filePath,
-              sourceInfo: aiContext.annotate.sourceInfo,
-              sourceConverted: aiContext.annotate.sourceConverted,
-              renderAs: aiContext.annotate.renderAs,
-              content: aiContext.annotate.content,
-            }),
-          ].join('\n')
-        : undefined,
+      // Decided at submission, so a retry ("Ask when it finishes") keeps the
+      // document it was asked about even if the reviewer moved on.
+      ...documentParams,
       ...askAIAnnotationParams({
         sessionBridge: hasSessionBridge,
         hasSession: !!aiSessionId,
@@ -5596,7 +5627,7 @@ const App: React.FC = () => {
     });
     return true;
   }, [
-    aiContext,
+    aiAskDocument,
     aiAnnotationsContext,
     aiSessionId,
     getAIDraftList,
