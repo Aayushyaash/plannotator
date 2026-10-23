@@ -10,7 +10,7 @@ import { mkdirSync } from "node:fs";
 import type { RequestPermissionRequest, RequestPermissionResponse } from "@agentclientprotocol/sdk";
 import { createGuideHtml, guideExportFilename, resolveGuideViewerAssets } from "@plannotator/core/guide-format";
 import { GUIDE_VIEWER_MANIFEST } from "@plannotator/core/guide-viewer-manifest";
-import { findSavedGuideById, listGuides } from "@plannotator/shared/guide-store";
+import { findSavedGuideById } from "@plannotator/shared/guide-store";
 import { readGuideInstructions } from "@plannotator/shared/guide-instructions-store";
 import { AcpClient } from "../acp/client";
 import { CLAUDE_CODE, readAgentOptions, resolveAgentLaunch, type AgentOptionsCache, type LoginCommand } from "../acp/agents";
@@ -22,13 +22,12 @@ import { startRelayHost, type RelayHost } from "../mcp/relay-host";
 import { ReaderModel, guideWorktreePath, resolveReaderSides, type ReaderSides } from "../reader-model";
 import { removeShareBeforeDelete } from "../share";
 import { buildLocalChangesPatch, changedFilesFromPatch, getRepoInfo, type LocalChangesMode } from "../sources/git";
-import { preparePullRequestWorktree, pullRequestWorktreePath, removePullRequestWorktree, viewPullRequest } from "../sources/github";
+import { preparePullRequestWorktree, removePullRequestWorktree, viewPullRequest } from "../sources/github";
 import { defaultRunner, findExecutable, type Runner } from "../sources/runner";
 import {
   deleteDraftRecord,
   deleteSavedGuide,
   guideHistoryEnabled,
-  listDraftRecords,
   loadDraftRecord,
   loadSavedGuide,
   setChapterReviewed,
@@ -47,6 +46,7 @@ import { ReaderUi } from "./reader-ui";
 import { getChildren, getParent, getTreeItem, nodeId, relativeTime, type TreeData, type TreeNode } from "./tree";
 import { GuideContentProvider, GUIDE_SCHEME, baseUri, headPathOf, headUri } from "./uris";
 import { WebviewHost, webviewHtml, webviewOptions, type WebviewMode } from "./webview-host";
+import { pullRequestWorktreeInUse, removeDraftWorktree, type WorktreeUsers } from "../worktrees";
 
 interface Log {
   info(message: string): void;
@@ -849,6 +849,8 @@ export class GuidesController implements vscode.Disposable {
     if (ok !== "Delete") return;
     deleteDraftRecord(record.repoKey, record.id);
     this.draftPanels.get(record.id)?.panel.dispose();
+    // The same rule as deleting a guide: the PR's worktree goes unless something else still reads it.
+    await removeDraftWorktree(this.runner, record, this.worktreeUsers());
     await this.refresh();
   }
 
@@ -1238,27 +1240,18 @@ export class GuidesController implements vscode.Disposable {
     const storage = this.context.globalStorageUri.fsPath;
     const wt = guideWorktreePath(loaded, storage);
     const repoRoot = loaded.sidecar.source?.repoRoot ?? this.dashboard?.repo?.root;
-    if (wt && repoRoot && !this.worktreeInUse(where.repoKey, wt, id)) await removePullRequestWorktree(this.runner, repoRoot, wt, storage);
+    if (wt && repoRoot && !pullRequestWorktreeInUse(where.repoKey, wt, this.worktreeUsers(), { guideId: id })) await removePullRequestWorktree(this.runner, repoRoot, wt, storage);
     await this.refresh();
   }
 
-  /** Whether another guide, a draft, the live run or the open reader reads this worktree. */
-  private worktreeInUse(repoKey: string, path: string, exceptGuideId: string): boolean {
-    const storage = this.context.globalStorageUri.fsPath;
-    if (this.run && this.run.gen.state.source.headRoot === path) return true;
-    if (this.reader && this.reader.sides.gitRoot === path) return true;
-    for (const d of listDraftRecords(repoKey)) {
-      if (d.source.kind === "pr" && d.source.pr && pullRequestWorktreePath(storage, repoKey, d.source.pr.number, d.source.headSha) === path) return true;
-    }
-    for (const { id } of listGuides(repoKey)) {
-      if (id === exceptGuideId) continue;
-      const other = loadSavedGuide(repoKey, id);
-      if (other && guideWorktreePath(other, storage) === path) return true;
-    }
-    for (const other of this.sessionGuides.values()) {
-      if (other.id !== exceptGuideId && guideWorktreePath(other, storage) === path) return true;
-    }
-    return false;
+  /** What reads a PR worktree besides the guides and drafts on disk. */
+  private worktreeUsers(): WorktreeUsers {
+    return {
+      storageDir: this.context.globalStorageUri.fsPath,
+      liveRunHeadRoot: this.run?.gen.state.source.headRoot ?? null,
+      readerGitRoot: this.reader?.sides.gitRoot ?? null,
+      sessionGuides: this.sessionGuides.values(),
+    };
   }
 
   dispose(): void {

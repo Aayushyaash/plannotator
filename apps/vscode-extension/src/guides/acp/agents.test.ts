@@ -53,8 +53,8 @@ describe("starting the adapter on Windows", () => {
 });
 
 describe("agent session policy", () => {
-  it("loads only the user's Claude Code settings and no project MCP config for a pull request", () => {
-    expect(sessionMetaFor({ kind: "pr" })).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true } } });
+  it("loads only the user's Claude Code settings, no project MCP config and no bypass for a pull request", () => {
+    expect(sessionMetaFor({ kind: "pr" })).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false } } });
     expect(sessionMetaFor({ kind: "local" })).toBeUndefined();
   });
 

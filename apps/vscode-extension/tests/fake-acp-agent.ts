@@ -44,6 +44,18 @@ interface Script {
   pace?: number;
   /** Answer `initialize` with this protocol version instead of ours. */
   protocolVersion?: number;
+  /**
+   * Start the session in this permission mode, as the real adapter does from
+   * the cwd's `.claude/settings*.json` `permissions.defaultMode`. Unset: the
+   * fake advertises no modes at all.
+   */
+  startMode?: string;
+  /** How the modes are advertised: a `mode` config option, `modes` on session/new, or both (the real adapter). */
+  modeSurface?: "config" | "modes" | "both";
+  /** Refuse every mode change (session/set_mode and the `mode` config option). */
+  refuseModeChange?: boolean;
+  /** Accept a mode change but stay in the start mode. */
+  ignoreModeChange?: boolean;
 }
 
 const script: Script = JSON.parse(readFileSync(process.env.FAKE_ACP_SCRIPT ?? "", "utf8"));
@@ -100,12 +112,28 @@ const efforts = script.efforts ?? [
 
 let currentModel = models[0].value;
 let currentEffort = efforts[efforts.length - 1].value;
+let currentMode = script.startMode;
+const modeSurface = script.modeSurface ?? "both";
+const availableModes = [
+  { id: "default", name: "Default" },
+  { id: "acceptEdits", name: "Accept Edits" },
+  { id: "plan", name: "Plan Mode" },
+  { id: "bypassPermissions", name: "Bypass Permissions" },
+];
 
 function configOptions(): SessionConfigOption[] {
   return [
+    ...(currentMode !== undefined && modeSurface !== "modes"
+      ? [{ id: "mode", name: "Mode", category: "mode", type: "select", currentValue: currentMode, options: availableModes.map((m) => ({ value: m.id, name: m.name })) }]
+      : []),
     { id: "model", name: "Model", category: "model", type: "select", currentValue: currentModel, options: models },
     { id: "effort", name: "Effort", category: "thought_level", type: "select", currentValue: currentEffort, options: efforts },
   ] as SessionConfigOption[];
+}
+
+function setMode(mode: string): void {
+  if (script.refuseModeChange) throw new Error("Mode change refused");
+  if (!script.ignoreModeChange) currentMode = mode;
 }
 
 const sessions = new Map<string, { cwd: string; mcp: McpClient | null; cancelled: boolean }>();
@@ -146,10 +174,17 @@ new AgentSideConnection((conn): Agent => ({
       log({ event: "mcpReady", protocolVersion: init.result?.protocolVersion, tools: (list.result?.tools ?? []).map((t: { name: string }) => t.name) });
     }
     sessions.set(sessionId, { cwd: params.cwd, mcp, cancelled: false });
-    return { sessionId, configOptions: configOptions() };
+    const modes = currentMode !== undefined && modeSurface !== "config" ? { currentModeId: currentMode, availableModes } : undefined;
+    return { sessionId, configOptions: configOptions(), ...(modes && { modes }) };
+  },
+  async setSessionMode(params) {
+    log({ event: "setMode", modeId: params.modeId });
+    setMode(params.modeId);
+    return {};
   },
   async setSessionConfigOption(params) {
     log({ event: "setConfig", configId: params.configId, value: params.value });
+    if (params.configId === "mode") setMode(String(params.value));
     if (params.configId === "model") currentModel = String(params.value);
     if (params.configId === "effort") currentEffort = String(params.value);
     return { configOptions: configOptions() };
@@ -157,7 +192,7 @@ new AgentSideConnection((conn): Agent => ({
   async prompt(params) {
     const session = sessions.get(params.sessionId)!;
     const text = params.prompt.map((b) => (b.type === "text" ? b.text : "")).join("");
-    log({ event: "prompt", text, model: currentModel, effort: currentEffort });
+    log({ event: "prompt", text, model: currentModel, effort: currentEffort, mode: currentMode ?? null });
     const update = (u: Record<string, unknown>) => conn.sessionUpdate({ sessionId: params.sessionId, update: u as never });
     let toolNo = 0;
     for (const step of script.steps) {

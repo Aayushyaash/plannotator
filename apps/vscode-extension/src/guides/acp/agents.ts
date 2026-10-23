@@ -89,12 +89,15 @@ export function pickDefault(select: ConfigSelect | null, pattern: RegExp, rememb
  * rules and MCP servers, and a `.mcp.json`, which Claude Code would load and
  * run under the reviewer's account (hooks need no prompt). The adapter reads
  * `_meta.claudeCode.options` and spreads it over its own options, so a PR run
- * loads the user's settings only and no MCP server but the ones we pass.
+ * loads the user's settings only and no MCP server but the ones we pass, and
+ * adapters that read `allowDangerouslySkipPermissions` refuse bypass. The
+ * adapter still starts the session in the worktree's `permissions.defaultMode`;
+ * `resetPermissionMode` in `generation.ts` sets it back to `default`.
  * Local changes are the user's own checkout: their project settings apply.
  */
 export function sessionMetaFor(source: { kind: "local" | "pr" }): Record<string, unknown> | undefined {
   if (source.kind !== "pr") return undefined;
-  return { claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true } } };
+  return { claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false } } };
 }
 
 /** A sign-in the agent offers: run the agent's own command with these args in a terminal. */

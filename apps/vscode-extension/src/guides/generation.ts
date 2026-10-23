@@ -12,7 +12,7 @@
 
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification, ToolCallLocation } from "@agentclientprotocol/sdk";
+import type { McpServer, NewSessionResponse, RequestPermissionRequest, RequestPermissionResponse, SessionConfigOption, SessionNotification, ToolCallLocation } from "@agentclientprotocol/sdk";
 import {
   GUIDE_BUILDER_TOOLS,
   GUIDE_BUILDER_TOOL_NAMES,
@@ -124,6 +124,8 @@ export interface GenerationInput {
 }
 
 const MAX_ACTIVITY = 400;
+/** The only permission mode a pull request runs in. */
+const DEFAULT_PERMISSION_MODE = "default";
 const BUILDER_TITLE = /guide_(set_header|set_overview|add_chapter|update_chapter|move_chapter|remove_chapter|place_file|move_file|unplace_file|read|finish)(?![a-z_])/;
 
 export class GuideGeneration {
@@ -274,7 +276,9 @@ export class GuideGeneration {
       if (this.cancelled) return this.stop("Cancelled before the agent started.");
       const session = await this.client.newSession(source.headRoot, [mcpServer], sessionMetaFor(source));
       this.state.acpSessionId = session.sessionId;
-      await this.applyChoices(session.sessionId, session.configOptions ?? []);
+      const configOptions = source.kind === "pr" ? await this.resetPermissionMode(session) : session.configOptions ?? [];
+      if (this.cancelled) return this.stop("Cancelled.");
+      await this.applyChoices(session.sessionId, configOptions);
       if (this.cancelled) return this.stop("Cancelled.");
       this.state.status = "running";
       this.persist();
@@ -305,6 +309,47 @@ export class GuideGeneration {
       this.client?.dispose();
       this.client = null;
     }
+  }
+
+  /**
+   * A pull request runs only in the default permission mode. The adapter reads
+   * the worktree's `.claude/settings*.json` itself, whatever `settingSources`
+   * says, and starts the session in its `permissions.defaultMode`: a PR could
+   * ask for `bypassPermissions` (no prompts at all on older adapters) or
+   * `acceptEdits`. Set it back to `default` before the first prompt; when that
+   * fails, or the mode cannot be read while the adapter advertises modes, the
+   * run is refused. Returns the session's config options after the change.
+   */
+  private async resetPermissionMode(session: NewSessionResponse): Promise<SessionConfigOption[]> {
+    let options = session.configOptions ?? [];
+    const select = readConfigSelect(options, "mode");
+    const modes = session.modes ?? null;
+    // An adapter that advertises no permission mode has none to set.
+    if (!select && !modes) return options;
+    const current = select ? select.current : modes?.currentModeId;
+    if (current === DEFAULT_PERMISSION_MODE) return options;
+    const refuse = (why: string): never => {
+      const asked = current ? `ask for ${current}` : "ask for a permission mode Guides could not read";
+      throw new Error(`This pull request's settings ${asked}; Guides runs PRs only in the default permission mode. ${why}`);
+    };
+    if (!current) refuse("The agent did not say which mode it started in.");
+    let failure: string | null = null;
+    try {
+      if (select && select.options.some((o) => o.value === DEFAULT_PERMISSION_MODE)) {
+        options = await this.client!.setConfigOption(session.sessionId, select.configId, DEFAULT_PERMISSION_MODE);
+        const after = readConfigSelect(options, "mode");
+        if (after?.current !== DEFAULT_PERMISSION_MODE) failure = `The agent stayed in ${after?.current ?? "a mode it did not report"}.`;
+      } else if (modes?.availableModes.some((m) => m.id === DEFAULT_PERMISSION_MODE)) {
+        await this.client!.setMode(session.sessionId, DEFAULT_PERMISSION_MODE);
+      } else {
+        failure = "The agent offers no default mode.";
+      }
+    } catch (err) {
+      failure = `Setting it back failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    if (failure) refuse(failure);
+    this.addActivity({ kind: "info", title: `The session started in ${current}; set back to the default permission mode for this pull request` });
+    return options;
   }
 
   private async applyChoices(sessionId: string, configOptions: Parameters<typeof readConfigSelect>[0]): Promise<void> {

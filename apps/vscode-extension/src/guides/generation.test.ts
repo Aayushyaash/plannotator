@@ -265,9 +265,77 @@ describe("guide generation over ACP", () => {
     const gen = new GuideGeneration(w.input, w.deps);
     await gen.run();
     const newSession = w.log().find((e) => e.event === "newSession")!;
-    expect(newSession.meta).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true } } });
+    expect(newSession.meta).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false } } });
     // Our builder server is still the one MCP server the agent gets.
     expect(newSession.mcpServers).toEqual([{ name: "plannotator-guide" }]);
+  });
+
+  const asPullRequest = (w: World) => {
+    w.input.source = { ...w.input.source, kind: "pr", label: "PR #482", pr: { number: 482, url: "https://github.com/northwind/checkout-service/pull/482", title: "Retry" }, worktreePath: w.input.source.headRoot };
+  };
+  /** The log index of the first prompt, and of every mode change before it. */
+  const modeChangesBeforePrompt = (log: Array<Record<string, any>>) => {
+    const promptAt = log.findIndex((e) => e.event === "prompt");
+    return log.slice(0, promptAt < 0 ? log.length : promptAt).filter((e) => e.event === "setMode" || (e.event === "setConfig" && e.configId === "mode"));
+  };
+
+  for (const startMode of ["bypassPermissions", "acceptEdits"]) {
+    it(`sets a pull request run that starts in ${startMode} back to default before the first prompt (mode config option)`, async () => {
+      const w = world([header], { script: { startMode } });
+      asPullRequest(w);
+      const gen = new GuideGeneration(w.input, w.deps);
+      await gen.run();
+      const log = w.log();
+      expect(modeChangesBeforePrompt(log)).toEqual([{ event: "setConfig", configId: "mode", value: "default" }]);
+      const prompt = log.find((e) => e.event === "prompt")!;
+      expect(prompt.mode).toBe("default");
+      expect(gen.state.activity.some((a) => a.title.includes(`started in ${startMode}`))).toBe(true);
+    });
+  }
+
+  it("uses session/set_mode for an adapter that exposes modes but no mode config option", async () => {
+    const w = world([header], { script: { startMode: "bypassPermissions", modeSurface: "modes" } });
+    asPullRequest(w);
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    const log = w.log();
+    expect(modeChangesBeforePrompt(log)).toEqual([{ event: "setMode", modeId: "default" }]);
+    expect(log.find((e) => e.event === "prompt")!.mode).toBe("default");
+  });
+
+  it("aborts a pull request run whose mode cannot be set back: no prompt is sent", async () => {
+    for (const script of [
+      { startMode: "bypassPermissions", refuseModeChange: true },
+      { startMode: "acceptEdits", ignoreModeChange: true },
+      { startMode: "bypassPermissions", modeSurface: "modes", refuseModeChange: true },
+    ]) {
+      const w = world([header], { script });
+      asPullRequest(w);
+      const gen = new GuideGeneration(w.input, w.deps);
+      await gen.run();
+      expect(gen.state.status).toBe("failed");
+      expect(gen.state.statusMessage).toStartWith(`This pull request's settings ask for ${script.startMode}; Guides runs PRs only in the default permission mode.`);
+      expect(w.log().some((e) => e.event === "prompt")).toBe(false);
+      expect(gen.state.activity.at(-1)?.isError).toBe(true);
+    }
+  });
+
+  it("leaves a local-changes run in the mode it started in", async () => {
+    const w = world([header], { script: { startMode: "acceptEdits" } });
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    const log = w.log();
+    expect(modeChangesBeforePrompt(log)).toEqual([]);
+    expect(log.find((e) => e.event === "prompt")!.mode).toBe("acceptEdits");
+  });
+
+  it("leaves a pull request run that already starts in default alone", async () => {
+    const w = world([header], { script: { startMode: "default" } });
+    asPullRequest(w);
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    expect(modeChangesBeforePrompt(w.log())).toEqual([]);
+    expect(w.log().find((e) => e.event === "prompt")!.mode).toBe("default");
   });
 
   it("fails a signed-out run with the agent's own sign-in commands", async () => {

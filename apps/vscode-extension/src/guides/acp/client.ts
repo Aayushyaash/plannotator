@@ -228,6 +228,11 @@ export class AcpClient {
     return res.configOptions;
   }
 
+  /** `session/set_mode`, for adapters that expose session modes rather than a `mode` config option. */
+  async setMode(sessionId: string, modeId: string): Promise<void> {
+    await this.raceExit(this.connection.setSessionMode({ sessionId, modeId }), "session/set_mode");
+  }
+
   prompt(sessionId: string, text: string): Promise<PromptResponse> {
     return this.raceExit(this.connection.prompt({ sessionId, prompt: [{ type: "text", text }] }), "session/prompt");
   }
