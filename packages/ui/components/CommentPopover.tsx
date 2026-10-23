@@ -121,6 +121,16 @@ interface CommentPopoverProps {
   /** Opt-in composer yield while shift-selecting: 'near' fades the composer,
    *  'over' makes it near-invisible and click-through. Undefined → no-op. */
   yieldState?: CommentPopoverYieldState;
+  /** Opt-in: the header's text in place of the quoted `contextText` (an image
+   *  region's "Region 3 · 356 × 486 px"). Absent → the quote, as always. */
+  headerText?: string;
+  /** Opt-in: `side` opens the popover beside the anchor (right, else left),
+   *  falling back to below/above when neither side has room (an image region
+   *  in the image viewer). Absent → below/above, as always. */
+  placement?: 'below' | 'side';
+  /** Opt-in: the stacking level, for a composer over a surface that is
+   *  itself above the page (the image viewer is z-200). Absent → 100. */
+  zIndex?: number;
 }
 
 const MAX_POPOVER_WIDTH = 384;
@@ -153,7 +163,19 @@ interface CommentPopoverPosition {
 export function computeCommentPopoverPosition(
   anchorRect: Pick<DOMRect, 'top' | 'right' | 'bottom' | 'left' | 'width'>,
   bounds: VisibleViewportBounds,
+  placement: 'below' | 'side' = 'below',
 ): CommentPopoverPosition {
+  if (placement === 'side') {
+    const width = Math.min(MAX_POPOVER_WIDTH, bounds.width);
+    const right = anchorRect.right + GAP * 1.75;
+    const left = anchorRect.left - GAP * 1.75 - width;
+    const sideLeft = right + width <= bounds.right ? right : left >= bounds.left ? left : null;
+    if (sideLeft !== null) {
+      const top = Math.max(bounds.top, Math.min(anchorRect.top, bounds.bottom - 280));
+      const maxHeight = Math.max(0, bounds.bottom - top);
+      if (maxHeight >= 280) return { top, left: sideLeft, flipAbove: false, width, maxHeight, requiresExpanded: false };
+    }
+  }
   const spaceBelow = Math.max(0, bounds.bottom - anchorRect.bottom - GAP);
   const spaceAbove = Math.max(0, anchorRect.top - bounds.top - GAP);
   const flipAbove = spaceBelow < 280 && spaceAbove > spaceBelow;
@@ -201,6 +223,9 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   refocusToken,
   captureStrayKeys = false,
   yieldState,
+  headerText,
+  placement = 'below',
+  zIndex,
 }) => {
   const visibleBounds = useVisibleViewportBounds(16);
   const coarsePointer = hasPrimaryCoarsePointer();
@@ -268,7 +293,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     const update = () => {
       const rect = anchorEl?.getBoundingClientRect() ?? anchorRect;
       if (!rect) return;
-      const nextPosition = computeCommentPopoverPosition(rect, visibleBounds);
+      const nextPosition = computeCommentPopoverPosition(rect, visibleBounds, placement);
       if (nextPosition.requiresExpanded) {
         setDialogIsForced(true);
         setMode('dialog');
@@ -282,7 +307,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     return () => {
       window.removeEventListener('scroll', update, true);
     };
-  }, [anchorEl, anchorRect, mode, visibleBounds, wasDragged]);
+  }, [anchorEl, anchorRect, mode, visibleBounds, wasDragged, placement]);
 
   // Surface a "jump back" arrow when an open popover scrolls out of view.
   // Re-measures whenever the popover repositions (position updates every scroll
@@ -586,11 +611,11 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     }
   };
 
-  const headerLabel = isGlobal
+  const headerLabel = headerText ?? (isGlobal
     ? 'Global Comment'
     : contextText
       ? `"${contextText.length > 50 ? contextText.slice(0, 50) + '...' : contextText}"`
-      : 'Comment';
+      : 'Comment');
 
   const canSubmit =
     hasUnsavedContent ||
@@ -633,6 +658,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
       <div
         data-comment-popover="true"
         className="pn-visible-viewport-overlay z-[100] flex items-center justify-center"
+        style={zIndex !== undefined ? { zIndex } : undefined}
       >
         {/* Backdrop */}
         <button
@@ -800,6 +826,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
       className={`fixed z-[100] bg-popover border border-border rounded-xl shadow-2xl flex flex-col${yieldClass}`}
       style={dragPosition
         ? {
+            ...(zIndex !== undefined ? { zIndex } : {}),
             top: dragPosition.top,
             left: dragPosition.left,
             width: position.width,
@@ -807,6 +834,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
             overflowY: showsSkillMenu ? 'visible' : 'auto',
           }
         : {
+            ...(zIndex !== undefined ? { zIndex } : {}),
             top: position.top,
             left: position.left,
             width: position.width,
