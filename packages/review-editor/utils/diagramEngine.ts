@@ -8,6 +8,13 @@
  * dropped from the memo, so the next fence that mounts (a view switch, a
  * Retry) tries again; until then fences show as code.
  *
+ * Every try after a failure imports the URL with a new query (`?r=1`, `?r=2`):
+ * Chromium keeps a failed dynamic `import()` per URL and answers the same
+ * failure again without fetching, so a Retry of the same URL would do
+ * nothing. The first try keeps the plain URL, so the server's immutable
+ * caching still applies; the server matches on the path alone. The runtime
+ * URLs on the host follow the same rule (see `retryingUrl`).
+ *
  * The namespace imports below are what the engine uses instead of its own
  * copies. They name modules the page already carries, so they cost the page
  * only the export names they keep alive.
@@ -66,6 +73,30 @@ function asEngine(value: unknown): DiagramEngineModule {
 
 let memo: { url: string; promise: Promise<DiagramEngineModule> } | null = null;
 let loaded: { url: string; engine: DiagramEngineModule } | null = null;
+/** Failed imports per engine URL, for the retry query. */
+const engineFailures = new Map<string, number>();
+
+/** `url` on try 0, then `url?r=1`, `url?r=2`… (the advert never carries a query). */
+export function withRetryQuery(url: string, tries: number): string {
+  return tries > 0 ? `${url}${url.includes('?') ? '&' : '?'}r=${tries}` : url;
+}
+
+/**
+ * The runtime URLs as the engine reads them: `import(host.runtimeUrls.mermaid)`
+ * at call time. ui's renderer slot keeps a loaded runtime and shares one in
+ * flight, so it reads the URL again only after an import failed (its own
+ * automatic re-attempt, a later fence, its Retry). So the first read is the
+ * plain URL and every later read carries a new retry query, which is what
+ * makes Chromium fetch again.
+ */
+function retryingRuntimeUrls(urls: DiagramEngineUrls): DiagramEngineHost['runtimeUrls'] {
+  const reads = { mermaid: 0, graphviz: 0 };
+  const read = (kind: keyof typeof reads) => withRetryQuery(urls[kind], reads[kind]++);
+  return Object.defineProperties({} as DiagramEngineHost['runtimeUrls'], {
+    mermaid: { enumerable: true, get: () => read('mermaid') },
+    graphviz: { enumerable: true, get: () => read('graphviz') },
+  });
+}
 
 /** The engine, if it already loaded from these URLs (so a fence mounted
  * after the load renders it on its first render, with no code flash). */
@@ -79,10 +110,11 @@ export function loadDiagramEngine(urls: DiagramEngineUrls, importer: DiagramEngi
   const host: DiagramEngineHost = {
     apiVersion: DIAGRAM_ENGINE_API_VERSION,
     modules: sharedModules(),
-    runtimeUrls: { mermaid: urls.mermaid, graphviz: urls.graphviz },
+    runtimeUrls: retryingRuntimeUrls(urls),
   };
   (globalThis as Record<string, unknown>)[DIAGRAM_ENGINE_HOST_KEY] = host;
-  const promise = importer(urls.engine).then(asEngine);
+  const tries = engineFailures.get(urls.engine) ?? 0;
+  const promise = importer(withRetryQuery(urls.engine, tries)).then(asEngine);
   const entry = { url: urls.engine, promise };
   memo = entry;
   promise.then(
@@ -90,6 +122,7 @@ export function loadDiagramEngine(urls: DiagramEngineUrls, importer: DiagramEngi
       if (memo === entry) loaded = { url: urls.engine, engine };
     },
     () => {
+      engineFailures.set(urls.engine, tries + 1);
       if (memo === entry) memo = null;
     },
   );
@@ -100,5 +133,6 @@ export function loadDiagramEngine(urls: DiagramEngineUrls, importer: DiagramEngi
 export function __resetDiagramEngineForTests(): void {
   memo = null;
   loaded = null;
+  engineFailures.clear();
   delete (globalThis as Record<string, unknown>)[DIAGRAM_ENGINE_HOST_KEY];
 }

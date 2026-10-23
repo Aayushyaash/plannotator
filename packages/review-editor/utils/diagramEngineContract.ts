@@ -63,6 +63,8 @@ export type DiagramEngineSharedModule = (typeof DIAGRAM_ENGINE_SHARED_MODULES)[n
 export interface DiagramEngineHost {
   apiVersion: typeof DIAGRAM_ENGINE_API_VERSION;
   modules: Record<DiagramEngineSharedModule, unknown>;
+  /** Read by the engine at each runtime import. A read after the first may
+   *  carry a retry query (`?r=1`), so a failed import is fetched again. */
   runtimeUrls: { mermaid: string; graphviz: string };
 }
 

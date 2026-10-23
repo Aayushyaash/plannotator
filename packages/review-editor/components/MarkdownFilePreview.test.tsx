@@ -394,4 +394,35 @@ describe.if(hasDom)('commenting in a Markdown preview', () => {
     expect(el.querySelectorAll('[data-review-diagram="failed"]').length).toBe(2);
     expect(el.querySelectorAll('[data-review-diagram-note] button').length).toBe(2);
   });
+
+  test('Retry imports the engine again under a new URL, and the fence draws', async () => {
+    // Chromium answers a failed import() of the same URL from its cache, so
+    // Retry must ask for a new one.
+    const { ReviewDiagramFence } = await import('./ReviewDiagramFence');
+    const urls = { engine: '/assets/diagram-engine/engine-retry.js', mermaid: '/m.js', graphviz: '/g.js' };
+    const imported: string[] = [];
+    const importer = async (url: string) => {
+      imported.push(url);
+      if (imported.length === 1) throw new Error('offline');
+      return {
+        apiVersion: 1,
+        DiagramFence: ({ block }: { block: { content: string } }) => <div data-stub-diagram="">{block.content}</div>,
+      };
+    };
+    const block = { id: 'b1', type: 'code', language: 'mermaid', content: 'flowchart LR\n  A --> B', order: 0, startLine: 1 } as const;
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(<ReviewDiagramFence block={block as never} kind="mermaid" urls={urls} importer={importer} fallback={<pre><code>{block.content}</code></pre>} />);
+    });
+    await settle(60);
+    const button = host.querySelector<HTMLButtonElement>('[data-review-diagram-note] button');
+    expect(button).not.toBeNull();
+    await act(async () => button!.click());
+    await settle(60);
+    expect(imported).toEqual([urls.engine, `${urls.engine}?r=1`]);
+    expect(host.querySelector('[data-stub-diagram]')?.textContent).toBe('flowchart LR\n  A --> B');
+    expect(host.querySelector('[data-review-diagram]')).toBeNull();
+  });
 });

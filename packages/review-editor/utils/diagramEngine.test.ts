@@ -63,20 +63,43 @@ describe('loadDiagramEngine', () => {
     expect(Object.keys(hostAtImport!.modules).sort()).toEqual([...DIAGRAM_ENGINE_SHARED_MODULES].sort());
     expect((hostAtImport!.modules.react as typeof React).useState).toBe(React.useState);
     expect((hostAtImport!.modules['ui:utils/math'] as typeof MathSlot).getMathRenderer).toBe(MathSlot.getMathRenderer);
-    expect(hostAtImport!.runtimeUrls).toEqual({ mermaid: URLS.mermaid, graphviz: URLS.graphviz });
+    // The engine's first read of each runtime URL is the plain URL.
+    expect(hostAtImport!.runtimeUrls.mermaid).toBe(URLS.mermaid);
+    expect(hostAtImport!.runtimeUrls.graphviz).toBe(URLS.graphviz);
   });
 
-  test('a failed import is forgotten, so the next fence tries again', async () => {
-    let attempts = 0;
-    const flaky = async () => {
-      attempts += 1;
-      if (attempts === 1) throw new Error('offline');
+  test('a runtime URL read again (after a failed runtime import) carries a new retry query', async () => {
+    let host: DiagramEngineHost | undefined;
+    await loadDiagramEngine(URLS, async () => {
+      host = (globalThis as Record<string, unknown>)[DIAGRAM_ENGINE_HOST_KEY] as DiagramEngineHost;
+      return ENGINE;
+    });
+    expect(host!.runtimeUrls.mermaid).toBe(URLS.mermaid);
+    expect(host!.runtimeUrls.mermaid).toBe(`${URLS.mermaid}?r=1`);
+    expect(host!.runtimeUrls.mermaid).toBe(`${URLS.mermaid}?r=2`);
+    // Each runtime counts its own reads.
+    expect(host!.runtimeUrls.graphviz).toBe(URLS.graphviz);
+    expect(host!.runtimeUrls.graphviz).toBe(`${URLS.graphviz}?r=1`);
+  });
+
+  test('a failed import is forgotten, and each retry imports a new URL', async () => {
+    // Chromium keeps a failed import() per URL, so a retry of the same URL
+    // would replay the failure without fetching.
+    const imported: string[] = [];
+    const flaky = async (url: string) => {
+      imported.push(url);
+      if (imported.length < 3) throw new Error('offline');
       return ENGINE;
     };
     await expect(loadDiagramEngine(URLS, flaky)).rejects.toThrow('offline');
     expect(peekDiagramEngine(URLS)).toBeNull();
+    await expect(loadDiagramEngine(URLS, flaky)).rejects.toThrow('offline');
     expect(await loadDiagramEngine(URLS, flaky)).toBe(ENGINE as never);
-    expect(attempts).toBe(2);
+    expect(imported).toEqual([URLS.engine, `${URLS.engine}?r=1`, `${URLS.engine}?r=2`]);
+    // Loaded under its advertised URL, whatever query the import used.
+    expect(peekDiagramEngine(URLS)).toBe(ENGINE as never);
+    expect(await loadDiagramEngine(URLS, flaky)).toBe(ENGINE as never);
+    expect(imported).toHaveLength(3);
   });
 
   test('an engine that does not match this page is refused', async () => {

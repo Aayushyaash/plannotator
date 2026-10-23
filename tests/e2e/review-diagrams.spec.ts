@@ -115,8 +115,31 @@ async function review(after: string) {
   return { url, close };
 }
 
+/** Answers requests for the diagram engine file named `name` with a 404 while
+ * `failing()` says so (by default only the first), then lets them through;
+ * records each URL asked for (query included). */
+async function failEngineFile(page: Page, name: 'engine' | 'mermaid', asked: string[], failing?: () => boolean) {
+  await page.route(
+    (u) => u.pathname.startsWith(`/assets/diagram-engine/${name}-`),
+    async (route) => {
+      const u = new URL(route.request().url());
+      asked.push(u.pathname + u.search);
+      if (failing ? failing() : asked.length === 1) {
+        await route.fulfill({ status: 404, contentType: 'text/plain', body: 'gone' });
+        return;
+      }
+      await route.continue();
+    },
+  );
+}
+
 /** Opens the review with the Markdown files' starting view set; records every request for the engine. */
-async function open(browser: Browser, url: string, view: 'read' | 'changes' | 'source') {
+async function open(
+  browser: Browser,
+  url: string,
+  view: 'read' | 'changes' | 'source',
+  before?: (page: Page) => Promise<void>,
+) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const seen = [
     ['plannotator-plan-look-choice-resolved', 'true'],
@@ -136,6 +159,7 @@ async function open(browser: Browser, url: string, view: 'read' | 'changes' | 's
     const path = new URL(request.url()).pathname;
     if (path.startsWith('/assets/diagram-engine/')) engineRequests.push(path);
   });
+  await before?.(page);
   await page.goto(url);
   // Any first-run dialog left is dismissed the way a reviewer would.
   for (let i = 0; i < 6; i++) {
@@ -224,5 +248,54 @@ test('a review without diagrams, and the Source view, never request the engine',
     await context.close();
   } finally {
     await withDiagrams.close();
+  }
+});
+
+test('Retry after a failed engine load fetches the engine again and draws the diagrams', async () => {
+  // Chromium keeps a failed import() per URL and never fetches it again, so
+  // Retry has to import a new URL (the engine's path with a retry query).
+  const session = await review(ARCHITECTURE);
+  try {
+    const asked: string[] = [];
+    let offline = true;
+    const { context, page } = await open(browser, session.url, 'read', (p) => failEngineFile(p, 'engine', asked, () => offline));
+    const retry = page.locator('[data-review-diagram="failed"] [data-review-diagram-note] button').first();
+    await expect(retry).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('pre > code', { hasText: 'flowchart LR' }).first()).toBeVisible();
+    // Each failed try asked for a URL of its own (a repeat would never reach
+    // the network in Chromium), the first one plain.
+    const failedTries = asked.length;
+    expect(failedTries).toBeGreaterThan(0);
+    expect(asked[0]).toMatch(/^\/assets\/diagram-engine\/engine-[^?]+\.js$/);
+    expect(asked).toEqual(asked.map((_, i) => (i === 0 ? asked[0] : `${asked[0]}?r=${i}`)));
+
+    offline = false;
+    await retry.click();
+    await expect(page.locator('[data-diagram-block="mermaid"] [data-diagram-inline] svg').first()).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('[data-diagram-block="mermaid"]').first()).toContainText('Reviewer');
+    expect(asked).toHaveLength(failedTries + 1);
+    expect(asked.at(-1)).toBe(`${asked[0]}?r=${failedTries}`);
+    await shot(page, 'engine-retry');
+    await context.close();
+  } finally {
+    await session.close();
+  }
+});
+
+test('a failed Mermaid runtime load is fetched again under a new URL and draws', async () => {
+  // The engine's renderer re-attempts a failed runtime import once by itself;
+  // the runtime URL it reads then carries a retry query.
+  const session = await review(ARCHITECTURE);
+  try {
+    const asked: string[] = [];
+    const { context, page } = await open(browser, session.url, 'read', (p) => failEngineFile(p, 'mermaid', asked));
+    await expect(page.locator('[data-diagram-block="mermaid"] [data-diagram-inline] svg').first()).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('[data-diagram-block="graphviz"] [data-diagram-inline] svg').first()).toBeVisible({ timeout: 30_000 });
+    expect(asked).toHaveLength(2);
+    expect(asked[0]).toMatch(/^\/assets\/diagram-engine\/mermaid-[^?]+\.js$/);
+    expect(asked[1]).toBe(`${asked[0]}?r=1`);
+    await context.close();
+  } finally {
+    await session.close();
   }
 });
