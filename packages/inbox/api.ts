@@ -178,6 +178,9 @@ export interface TailscaleSettings {
   exposed?: { https_port: number | null; target: string | null }[];
 }
 
+/** Split (old beside new) or Unified (one column): the diff layout code review and guided reviews share. */
+export type InboxDiffStyle = 'split' | 'unified';
+
 export interface SettingsModel {
   serverSession: string;
   /** Absent from an Inbox that predates "Over your tailnet". */
@@ -208,6 +211,11 @@ export interface SettingsModel {
   theme?: InboxThemeConfig | null;
   /** The window's text size in px (config.json `inboxTextSize`): 12 to 15, 14 unless chosen. Absent from an older Inbox. */
   text_size?: InboxTextSize;
+  /**
+   * The diff layout guided reviews draw (config.json `diffOptions.diffStyle`),
+   * shared with code review: null when never chosen. Absent from an older Inbox.
+   */
+  diff_style?: InboxDiffStyle | null;
   store: {
     dir: string;
     bytes: number;
@@ -699,6 +707,8 @@ export const inboxApi = {
   saveTheme: (theme: InboxThemeConfig) => post<{ theme: InboxThemeConfig | null }>('/api/inbox/settings', { theme }),
   /** The window's text size, written to config.json `inboxTextSize`. */
   saveTextSize: (textSize: InboxTextSize) => post<{ text_size: InboxTextSize }>('/api/inbox/settings', { text_size: textSize }),
+  /** The diff layout, written to config.json `diffOptions.diffStyle` (shared with code review). */
+  saveDiffStyle: (diffStyle: InboxDiffStyle) => post<{ diff_style: InboxDiffStyle | null }>('/api/inbox/settings', { diff_style: diffStyle }),
   saveTailscale: (on: boolean, replaceExposed = false) =>
     post<{ tailscale: TailscaleSettings }>('/api/inbox/settings', { tailscale: replaceExposed ? { on, replace_exposed: true } : { on } }),
   // Step 2: attachments (by id only), annotations, deleting.

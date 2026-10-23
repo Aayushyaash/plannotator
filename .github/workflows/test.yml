@@ -198,6 +198,7 @@ jobs:
           packages/inbox/listLabels.test.tsx
           packages/inbox/listRowMemo.test.tsx
           packages/inbox/rowTicks.test.tsx
+          packages/inbox/guideDiffStyle.test.tsx
           packages/inbox/componentTooltips.test.tsx
           packages/inbox/toast.test.tsx
           packages/inbox/attachmentsHeader.test.tsx
