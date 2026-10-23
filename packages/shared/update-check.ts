@@ -4,8 +4,10 @@
  * the compiled CLI and of Pi, `plannotator update`, the terminal hint) and by
  * background auto-update (packages/server/auto-update.ts).
  *
- * The machine asks GitHub: at most once per 24h per data
- * dir, and after a failed check (offline, 403/429, a proxy) no sooner than 6h.
+ * The machine asks GitHub: at most once an hour per data dir, and after a
+ * failed check (offline, 403/429, a proxy) no sooner than an hour later.
+ * One unauthenticated request an hour is well inside GitHub's 60 per hour
+ * per IP.
  * The answer is cached in `update-state.json` beside auto-update's own state,
  * and the release notes in `update-notes/<version>.json`, so a check made by
  * one process reaches every other one without a second request.
@@ -24,9 +26,18 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } fr
 import { join } from "node:path";
 import { getPlannotatorDataDir } from "./data-dir";
 
-export const RELEASE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/** How long a cached answer from GitHub counts as fresh: one request an hour at most per data dir. */
+export const RELEASE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 /** After a failed check: try again no sooner than this, never in a loop. */
-export const RELEASE_CHECK_RETRY_MS = 6 * 60 * 60 * 1000;
+export const RELEASE_CHECK_RETRY_MS = 60 * 60 * 1000;
+/**
+ * One release's notes or images (by its tag): asked again no sooner than
+ * this after an answer that carried nothing new (the release body is edited
+ * after publishing), and no sooner than the retry after a failure. Kept apart
+ * from the release check, which runs hourly.
+ */
+export const RELEASE_ASSETS_FETCH_INTERVAL_MS = 24 * 60 * 60 * 1000;
+export const RELEASE_ASSETS_FETCH_RETRY_MS = 6 * 60 * 60 * 1000;
 /** "Remind me tomorrow" in the Inbox. */
 export const UPDATE_SNOOZE_MS = 24 * 60 * 60 * 1000;
 /** The terminal hint shows at most this often. */
@@ -180,7 +191,7 @@ export function updateLog(message: string, dataDir?: string, tag = "update-check
   }
 }
 
-/** The cached latest-release version when it is still fresh (24h), else null. */
+/** The cached latest-release version when it is still fresh (1h), else null. */
 export function cachedLatestTag(state: UpdateState, now: number): string | null {
   const cached = state.latestRelease;
   if (!cached || typeof cached !== "object") return null;
@@ -205,8 +216,8 @@ export function knownLatestRelease(state: UpdateState): { version: string; fetch
 
 /**
  * Whether it is time to ask GitHub: never while the cached answer is under
- * 24h old, and never within 6h of the last attempt (a failure, or another
- * process's request still in flight).
+ * an hour old, and never within an hour of the last attempt (a failure, or
+ * another process's request still in flight).
  */
 export function isReleaseCheckDue(state: UpdateState, now: number): boolean {
   if (cachedLatestTag(state, now)) return false;
@@ -401,7 +412,7 @@ export async function fetchLatestRelease(
   return { ok: true, release: result.release };
 }
 
-/** One unauthenticated GET of the release tagged `vX.Y.Z`, with the same client rules as the daily check. */
+/** One unauthenticated GET of the release tagged `vX.Y.Z`, with the same client rules as the release check. */
 export async function fetchReleaseByTag(version: string, fetchImpl: typeof fetch = fetch): Promise<FetchReleaseResult> {
   const url = releaseTagApiUrl(version);
   if (!url) return { ok: false, error: "not a stable version" };
@@ -451,7 +462,7 @@ export async function runReleaseCheck(deps: ReleaseCheckDeps): Promise<ReleaseCh
   const version = result.ok ? normalizeStableVersion(result.release.tag) : null;
   if (!result.ok || !version) {
     const error = result.ok ? `not a stable version: ${JSON.stringify(result.release.tag).slice(0, 80)}` : result.error;
-    updateLog(`could not read the latest release (${error}); next try in 6h`, dataDir);
+    updateLog(`could not read the latest release (${error}); next try in 1h`, dataDir);
     try {
       patchUpdateState((s) => ({ ...s, releaseCheck: { attemptedAt: now, failedAt: now, error: error.slice(0, 200) } }), dataDir);
     } catch {}
@@ -509,7 +520,7 @@ export function isNotesFetchDue(state: UpdateState, version: string, now: number
   const record = state.notesFetch?.[version];
   const at = record?.attemptedAt;
   if (!record || typeof at !== "number" || !Number.isFinite(at) || at > now) return true;
-  return now - at >= (record.failedAt ? RELEASE_CHECK_RETRY_MS : RELEASE_CHECK_INTERVAL_MS);
+  return now - at >= (record.failedAt ? RELEASE_ASSETS_FETCH_RETRY_MS : RELEASE_ASSETS_FETCH_INTERVAL_MS);
 }
 
 export interface ReleaseNotesFetchDeps {
@@ -529,10 +540,10 @@ export type ReleaseNotesFetchOutcome =
 
 /**
  * The notes for one version, fetched by its tag when they are missing (a
- * release installed before the daily check saw it, or a check made before the
+ * release installed before the release check saw it, or a check made before the
  * release existed) or stored without a "What's New" part (saved before the
  * release body was edited). Saved to `update-notes/<version>.json` like the
- * daily check's. Never throws.
+ * release check's. Never throws.
  */
 export async function fetchReleaseNotesFor(deps: ReleaseNotesFetchDeps): Promise<ReleaseNotesFetchOutcome> {
   const dataDir = deps.dataDir;

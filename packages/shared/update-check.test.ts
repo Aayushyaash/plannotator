@@ -83,8 +83,8 @@ describe("resolveUpdateCheck", () => {
   });
 });
 
-describe("the 24h check", () => {
-  test("asks once, then answers from the cache for 24h", async () => {
+describe("the hourly check", () => {
+  test("asks once, then answers from the cache for an hour", async () => {
     const deps = { dataDir, enabled: () => true, fetchRelease: release() };
     expect(await runReleaseCheck({ ...deps, now: () => NOW })).toEqual({ outcome: "checked", version: "0.28.11" });
     expect(await runReleaseCheck({ ...deps, now: () => NOW + RELEASE_CHECK_INTERVAL_MS - 1 })).toEqual({
@@ -112,7 +112,13 @@ describe("the 24h check", () => {
     expect(fetches).toBe(2);
   });
 
-  test("a failure is logged, keeps the last known answer, and retries after 6h, not 24h, never sooner", async () => {
+  test("checks hourly, and a failure never waits longer than a success", () => {
+    // The owner's decision (2026-10-23): a new release shows within the hour.
+    expect(RELEASE_CHECK_INTERVAL_MS).toBe(60 * 60 * 1000);
+    expect(RELEASE_CHECK_RETRY_MS).toBeLessThanOrEqual(RELEASE_CHECK_INTERVAL_MS);
+  });
+
+  test("a failure is logged, keeps the last known answer, and retries after the back-off, never sooner", async () => {
     await runReleaseCheck({ dataDir, enabled: () => true, now: () => NOW, fetchRelease: release() });
     const later = NOW + RELEASE_CHECK_INTERVAL_MS;
     expect(await runReleaseCheck({ dataDir, enabled: () => true, now: () => later, fetchRelease: failing() })).toEqual({
