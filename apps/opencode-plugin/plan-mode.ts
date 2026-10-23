@@ -23,14 +23,32 @@ export function normalizeEditPermission(
 
 // ── Prompt stripping ──────────────────────────────────────────────────────
 
-function shouldStripPlanModeLine(line: string): boolean {
+export interface StripPlanModeOptions {
+  /**
+   * Also strip OpenCode 2's Plan mode wording (#2101): "discuss the plan with
+   * the user directly", "do not create or update plan files", and lines naming
+   * its plan directory (`.opencode/plan`, singular, or `.opencode/plans`).
+   * Only the OpenCode 2 adapter passes it, so OpenCode 1 strips exactly what
+   * it always did.
+   */
+  openCode2?: boolean;
+}
+
+/** `.opencode/plan` or `.opencode/plans`, either separator, not `.opencode/planning`. */
+const OPENCODE_PLAN_DIRECTORY = /\.opencode[\\/]plans?(?![a-z0-9_-])/;
+
+function shouldStripPlanModeLine(line: string, options: StripPlanModeOptions): boolean {
   const normalized = line.trim().toLowerCase();
-  return normalized.includes("strictly forbidden: any file edits")
+  if (normalized.includes("strictly forbidden: any file edits")
     || normalized.includes("your plan at ")
     || normalized.includes("plan file already exists at ")
     || normalized.includes(".opencode/plans/")
     || normalized.includes("plan_exit")
-    || (normalized.includes("agent's conversation") && normalized.includes("not on disk"));
+    || (normalized.includes("agent's conversation") && normalized.includes("not on disk"))) return true;
+  if (!options.openCode2) return false;
+  return normalized.includes("discuss the plan with the user directly")
+    || normalized.includes("do not create or update plan files")
+    || OPENCODE_PLAN_DIRECTORY.test(normalized);
 }
 
 function cleanupSystemEntry(entry: string): string {
@@ -42,13 +60,16 @@ function cleanupSystemEntry(entry: string): string {
     .trim();
 }
 
-export function stripConflictingPlanModeRules(systemEntries: string[]): string[] {
+export function stripConflictingPlanModeRules(
+  systemEntries: string[],
+  options: StripPlanModeOptions = {},
+): string[] {
   return systemEntries
     .map((entry) =>
       cleanupSystemEntry(
         entry
           .split("\n")
-          .filter((line) => !shouldStripPlanModeLine(line))
+          .filter((line) => !shouldStripPlanModeLine(line, options))
           .join("\n"),
       ),
     )
