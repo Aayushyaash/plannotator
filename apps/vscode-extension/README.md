@@ -32,6 +32,14 @@ Review code changes with a full diff viewer, file tree, inline annotations, and 
 
 ![Code Review](https://d17ygohy796f9l.cloudfront.net/vscode/code-review.jpeg)
 
+## Guided Reviews
+
+The **Guides** view (its own icon in the activity bar) turns a change into a guided review: a title, an intent, an overview with a diagram, and a few chapters in reading order, each with the files it covers. Pick this branch's pull request, another open PR, or your local changes; Claude Code writes the guide with your own Claude Code setup and permissions, and you watch it build. Then read it chapter by chapter in VS Code's own diff editor, with go to definition on the real files and ticks per chapter and file.
+
+- Needs Claude Code's ACP adapter: `npm install -g @agentclientprotocol/claude-agent-acp` (or point `plannotator.guides.claudeCode.command` at it). Pull requests need the GitHub CLI (`gh`).
+- A PR opens in a git worktree in the extension's storage, so your checkout is never touched.
+- Guides are saved where Plannotator's web app finds them: open and export them from either side.
+
 ## Features
 
 - **In-editor plan review** — approve or deny plans with annotated feedback, directly in a VS Code tab

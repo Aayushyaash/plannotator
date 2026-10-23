@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@plannotator/core/*": ["../../packages/core/*"],
+      "@plannotator/shared/*": ["../../packages/shared/*"]
+    }
+  },
+  "include": ["src/guides/vscode/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

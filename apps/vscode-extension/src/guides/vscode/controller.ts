@@ -1,0 +1,1286 @@
+/**
+ * The Guides view: dashboard, starting a review, the generating view and the
+ * reader, wired to VS Code. State lives here; the pieces it drives
+ * (generation, store, data sources, reader model) know nothing of VS Code.
+ */
+
+import * as vscode from "vscode";
+import { basename } from "node:path";
+import { mkdirSync } from "node:fs";
+import type { RequestPermissionRequest, RequestPermissionResponse } from "@agentclientprotocol/sdk";
+import { createGuideHtml, guideExportFilename, resolveGuideViewerAssets } from "@plannotator/core/guide-format";
+import { GUIDE_VIEWER_MANIFEST } from "@plannotator/core/guide-viewer-manifest";
+import { findSavedGuideById } from "@plannotator/shared/guide-store";
+import { readGuideInstructions } from "@plannotator/shared/guide-instructions-store";
+import { AcpClient } from "../acp/client";
+import { CLAUDE_CODE, readAgentOptions, resolveAgentLaunch, type AgentOptionsCache, type LoginCommand } from "../acp/agents";
+import { planSpawn } from "../acp/spawn-plan";
+import { parseGuideLink } from "../core/adapter";
+import { loadDashboard, type DashboardModel } from "../dashboard";
+import { GuideGeneration, type GenerationState } from "../generation";
+import { startRelayHost, type RelayHost } from "../mcp/relay-host";
+import { ReaderModel, guideWorktreePath, resolveReaderSides, type ReaderSides } from "../reader-model";
+import { removeShareBeforeDelete } from "../share";
+import { buildLocalChangesPatch, changedFilesFromPatch, getRepoInfo, type LocalChangesMode } from "../sources/git";
+import { preparePullRequestWorktree, removePullRequestWorktree, viewPullRequest } from "../sources/github";
+import { defaultRunner, findExecutable, type Runner } from "../sources/runner";
+import {
+  deleteDraftRecord,
+  deleteSavedGuide,
+  guideHistoryEnabled,
+  loadDraftRecord,
+  loadSavedGuide,
+  setChapterReviewed,
+  snapshotOfGuide,
+  writeSidecar,
+  type AgentChoiceRecord,
+  type DraftRecord,
+  type LoadedGuide,
+  type RecentEntry,
+  type ReviewSourceRecord,
+} from "../store";
+import type { ChapterViewState, GeneratingViewState, GuideViewState, HomeViewState } from "../webview-protocol";
+import { chapterColorCss, linkInfo, locateLink, resolveSymbolForBuilder } from "./intel";
+import { pickAgentAndEffort, pickPullRequest, pickSource, type SourceChoice } from "./new-review";
+import { ReaderUi } from "./reader-ui";
+import { getChildren, getParent, getTreeItem, nodeId, relativeTime, type TreeData, type TreeNode } from "./tree";
+import { GuideContentProvider, GUIDE_SCHEME, baseUri, headPathOf, headUri } from "./uris";
+import { WebviewHost, webviewHtml, webviewOptions, type WebviewMode } from "./webview-host";
+import { pullRequestWorktreeInUse, removeDraftWorktree, type WorktreeUsers } from "../worktrees";
+
+interface Log {
+  info(message: string): void;
+  warn(message: string): void;
+  error(message: string): void;
+}
+
+export interface GuidesHostBridge {
+  treeView: vscode.TreeView<TreeNode>;
+  fireTreeChanged(element?: TreeNode): void;
+}
+
+interface PanelEntry {
+  panel: vscode.WebviewPanel;
+  host: WebviewHost;
+}
+
+interface RunEntry {
+  gen: GuideGeneration;
+  background: boolean;
+  panel: PanelEntry | null;
+  running: Promise<void> | null;
+}
+
+const OPTIONS_KEY = "plannotator.guides.agentOptions.claude-code";
+const DEFAULTS_KEY = "plannotator.guides.defaults";
+const OPTIONS_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+
+export class GuidesController implements vscode.Disposable {
+  /** `gh` is the `plannotator.guides.ghPath` setting when set (VS Code's PATH may not have it). */
+  private readonly runner: Runner = (command, args, options) => {
+    const ghPath = command === "gh" ? vscode.workspace.getConfiguration("plannotator.guides").get<string>("ghPath")?.trim() : "";
+    return defaultRunner(ghPath || command, args, options);
+  };
+  private readonly disposables: vscode.Disposable[] = [];
+  private dashboard: DashboardModel | null = null;
+  private loading: Promise<void> | null = null;
+  private relay: Promise<RelayHost> | null = null;
+  private run: RunEntry | null = null;
+  private home: PanelEntry | null = null;
+  private readonly guidePanels = new Map<string, PanelEntry>();
+  private readonly draftPanels = new Map<string, PanelEntry>();
+  private chapterView: { view: vscode.WebviewView; host: WebviewHost } | null = null;
+  private reader: { model: ReaderModel; sides: ReaderSides } | null = null;
+  private currentFile: string | null = null;
+  /** Guides made while guide history is off: kept in memory for this session only. */
+  private readonly sessionGuides = new Map<string, LoadedGuide>();
+  private readonly ui: ReaderUi;
+  private readonly version: string;
+
+  constructor(
+    private readonly context: vscode.ExtensionContext,
+    private readonly log: Log,
+    private readonly bridge: GuidesHostBridge,
+  ) {
+    this.version = String((context.extension?.packageJSON as { version?: string } | undefined)?.version ?? "dev");
+    this.ui = new ReaderUi({ current: () => this.reader });
+    this.disposables.push(
+      this.ui,
+      vscode.workspace.registerTextDocumentContentProvider(GUIDE_SCHEME, new GuideContentProvider(this.runner)),
+      bridge.treeView.onDidChangeCheckboxState((e) => this.onCheckboxes(e)),
+      vscode.window.onDidChangeActiveTextEditor((editor) => this.onActiveEditor(editor)),
+      vscode.workspace.onDidChangeWorkspaceFolders(() => void this.refresh()),
+    );
+    void this.refresh();
+  }
+
+  // -------------------------------------------------------------------------
+  // Tree
+  // -------------------------------------------------------------------------
+
+  private treeData(): TreeData {
+    return {
+      dashboard: this.dashboard,
+      loading: !!this.loading,
+      generation: this.run?.gen.state ?? null,
+      reader: this.reader?.model ?? null,
+      readerLabel: this.readerLabel(),
+      currentFile: this.currentFile,
+    };
+  }
+
+  getChildren(node?: TreeNode): TreeNode[] {
+    return getChildren(this.treeData(), node);
+  }
+
+  getTreeItem(node: TreeNode): vscode.TreeItem {
+    return getTreeItem(this.treeData(), node);
+  }
+
+  getParent(node: TreeNode): TreeNode | undefined {
+    return getParent(this.treeData(), node);
+  }
+
+  private fireTree(): void {
+    this.bridge.fireTreeChanged();
+  }
+
+  private readerLabel(): string {
+    const env = this.reader?.model.loaded.envelope;
+    return env ? env.label || "local" : "";
+  }
+
+  // -------------------------------------------------------------------------
+  // Dashboard
+  // -------------------------------------------------------------------------
+
+  private cwd(): string | undefined {
+    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  }
+
+  async refresh(): Promise<void> {
+    if (this.loading) return this.loading;
+    this.loading = (async () => {
+      this.fireTree();
+      try {
+        this.dashboard = withSessionGuides(await loadDashboard(this.runner, this.cwd()), [...this.sessionGuides.values()], guideHistoryEnabled());
+      } catch (err) {
+        this.log.error(`[guides] dashboard: ${err instanceof Error ? err.stack ?? err.message : err}`);
+      } finally {
+        this.loading = null;
+      }
+      this.fireTree();
+      this.updateHome();
+    })();
+    return this.loading;
+  }
+
+  private homeState(): HomeViewState {
+    const d = this.dashboard;
+    const defaults = this.context.globalState.get<{ model?: string; effort?: string }>(DEFAULTS_KEY);
+    const options = this.agentOptions();
+    const modelName = options?.model?.options.find((o) => o.value === defaults?.model)?.name ?? (defaults?.model ? defaults.model : "Sonnet");
+    const effortName = options?.effort?.options.find((o) => o.value === defaults?.effort)?.name ?? (defaults?.effort ? defaults.effort : "low effort");
+    const ghNote = !d ? null : d.gh.state === "missing" ? "Install the GitHub CLI (gh) to see pull requests." : d.gh.state === "signed-out" ? "Run `gh auth login` to see pull requests." : d.gh.state === "error" ? "gh did not answer." : null;
+    return {
+      mode: "home",
+      repo: d?.repo ? { name: d.repo.displayName, branch: d.repo.branch, host: d.repo.github ? "GitHub" : "local repository" } : null,
+      defaults: { agent: CLAUDE_CODE.label, model: modelName, effort: /effort/.test(effortName) ? effortName : `${effortName.toLowerCase()} effort` },
+      ghNote,
+      cards: {
+        pr: d && d.gh.state === "ok" && d.repo?.github
+          ? { open: d.prs.length, waiting: d.prs.filter((p) => p.reviewRequested).length, current: d.currentBranchPR ? { number: d.currentBranchPR.number, title: d.currentBranchPR.title } : null }
+          : null,
+        local: d?.local ? { files: d.local.files, additions: d.local.additions, deletions: d.local.deletions, baseLabel: d.local.baseLabel } : null,
+      },
+      recent: (d?.recent ?? []).map((r) => ({
+        kind: r.kind,
+        id: r.id,
+        title: r.title,
+        sub: [d?.repo?.displayName.split("/").pop(), r.label].filter(Boolean).join(" · "),
+        progress: r.kind === "guide" && r.progress && !r.moved ? r.progress : null,
+        note: r.sessionOnly ? "not saved: this session only" : r.moved ? "head moved since the guide" : r.kind === "draft" ? `Draft · ${r.draftInfo?.chapters ?? 0} chapters · ${r.draftInfo?.filesLeft ?? 0} files left` : null,
+        warn: !!r.moved,
+        when: relativeTime(r.at),
+      })),
+      waiting: (d?.waiting ?? []).map((w) => ({
+        url: w.url,
+        number: w.number,
+        title: w.title,
+        sub: `${w.repo} · @${w.author}`,
+        inThisRepo: !!d?.repo?.github && w.repo.toLowerCase() === d.repo.displayName.toLowerCase(),
+      })),
+      notes: d?.notes ?? [],
+    };
+  }
+
+  private updateHome(): void {
+    this.home?.host.show(this.homeState());
+  }
+
+  openHome(): void {
+    if (this.home) {
+      this.home.panel.reveal();
+      this.updateHome();
+      return;
+    }
+    const entry = this.createPanel("plannotator.guides.home", "Guided Reviews", "home");
+    this.home = entry;
+    entry.panel.onDidDispose(() => (this.home = null));
+    entry.host.show(this.homeState());
+  }
+
+  private createPanel(viewType: string, title: string, mode: WebviewMode, column = vscode.ViewColumn.Active, preserveFocus = false): PanelEntry {
+    const panel = vscode.window.createWebviewPanel(viewType, title, { viewColumn: column, preserveFocus }, { ...webviewOptions(this.context.extensionUri), retainContextWhenHidden: true });
+    panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, "images", "guides.svg");
+    panel.webview.html = webviewHtml(panel.webview, this.context.extensionUri, mode);
+    const host = new WebviewHost(panel.webview, {
+      onCommand: (command, args) => void this.webviewCommand(command, args),
+      onLink: (link, action) => void this.openLink(link, action),
+      onLinkInfo: (link) => this.linkInfo(link),
+    });
+    panel.onDidDispose(() => host.dispose());
+    return { panel, host };
+  }
+
+  // -------------------------------------------------------------------------
+  // Commands
+  // -------------------------------------------------------------------------
+
+  async runCommand(id: string, args: unknown[]): Promise<unknown> {
+    const name = id.replace(/^plannotator\.guides\./, "");
+    try {
+      return await this.dispatch(name, args);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.error(`[guides] ${id}: ${err instanceof Error ? err.stack ?? err.message : err}`);
+      void vscode.window.showErrorMessage(`Guides: ${message}`);
+      return undefined;
+    }
+  }
+
+  private async webviewCommand(command: string, args: unknown[]): Promise<void> {
+    const map: Record<string, string> = {
+      guideLocal: "guideLocal",
+      guidePullRequest: "guidePullRequest",
+      guideCurrentPR: "guidePullRequest",
+      newReview: "newReview",
+      openGuide: "openGuide",
+      resumeDraft: "resumeDraft",
+      saveDraftAsIs: "saveDraftAsIs",
+      deleteDraft: "deleteDraft",
+      cancel: "cancelGeneration",
+      runInBackground: "runInBackground",
+      openLocation: "openLocation",
+      openChapter: "openChapter",
+      markChapterReviewed: "markChapterReviewed",
+      nextChapter: "nextChapter",
+      openFile: "openFile",
+      changeDefaults: "changeDefaults",
+      openExternal: "openPullRequestOnGitHub",
+      refresh: "refresh",
+      exportGuide: "exportGuide",
+      signIn: "signIn",
+    };
+    if (command === "guideCurrentPR" && this.dashboard?.currentBranchPR) args = [this.dashboard.currentBranchPR.number];
+    const target = map[command];
+    if (target) await this.runCommand(`plannotator.guides.${target}`, args);
+  }
+
+  private async dispatch(name: string, args: unknown[]): Promise<unknown> {
+    const num = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" && /^\d+$/.test(v) ? Number(v) : undefined);
+    const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+    switch (name) {
+      case "refresh":
+        return this.refresh();
+      case "openHome":
+        return this.openHome();
+      case "newReview":
+        return this.newReview();
+      case "guideLocal":
+        return this.newReview({ kind: "local", mode: "since-base" });
+      case "guidePullRequest": {
+        const node = args[0] && typeof args[0] === "object" ? (args[0] as TreeNode) : null;
+        const n = num(args[0]) ?? (node?.kind === "pr" ? node.pr.number : node?.kind === "waiting" ? node.row.number : undefined);
+        if (n !== undefined) return this.newReview({ kind: "pr", number: n });
+        await this.ensureDashboard();
+        const choice = this.dashboard ? await pickPullRequest(this.dashboard) : undefined;
+        return choice ? this.newReview(choice) : undefined;
+      }
+      case "openGuide":
+        return this.openGuide(str(args[0]));
+      case "closeGuide":
+        return this.closeGuide();
+      case "showGeneration":
+        return this.showGeneration(str(args[0]));
+      case "resumeDraft":
+        return this.resumeDraft(str(args[0]) ?? treeArg(args[0]));
+      case "saveDraftAsIs":
+        return this.saveDraftAsIs(str(args[0]) ?? treeArg(args[0]));
+      case "deleteDraft":
+        return this.deleteDraft(str(args[0]) ?? treeArg(args[0]));
+      case "deleteGuide":
+        return this.deleteGuide(str(args[0]) ?? treeArg(args[0]));
+      case "exportGuide":
+        return this.exportGuide(str(args[0]) ?? treeArg(args[0]));
+      case "cancelGeneration":
+        return this.run?.gen.cancel();
+      case "runInBackground":
+        return this.runInBackground();
+      case "openLocation":
+        return this.openLocation(str(args[0]), num(args[1]));
+      case "openChapter":
+        return this.openChapter(num(args[0]) ?? (args[0] && typeof args[0] === "object" && "index" in (args[0] as object) ? (args[0] as { index: number }).index + 1 : undefined), args[1] as { openFile?: boolean } | undefined);
+      case "nextChapter":
+        return this.nextChapter();
+      case "markChapterReviewed":
+        return this.markChapterReviewed(num(args[0]) ?? (this.reader ? this.reader.model.currentChapter + 1 : undefined), typeof args[1] === "boolean" ? args[1] : undefined);
+      case "openFile":
+        return this.openFile(str(args[0]) ?? (args[0] && typeof args[0] === "object" && "path" in (args[0] as object) ? (args[0] as { path: string }).path : undefined));
+      case "nextFile":
+        return this.nextFile(str(args[0]) ?? this.currentFile ?? undefined);
+      case "toggleFileReviewed":
+        return this.toggleFileReviewed(str(args[0]) ?? (args[0] && typeof args[0] === "object" && "path" in (args[0] as object) ? (args[0] as { path: string }).path : undefined));
+      case "changeDefaults":
+        return this.changeDefaults();
+      case "signIn":
+        return this.signIn(str(args[0]));
+      case "openPullRequestOnGitHub": {
+        const target = str(args[0]) ?? (args[0] && typeof args[0] === "object" ? ((args[0] as { pr?: { url: string }; row?: { url: string } }).pr?.url ?? (args[0] as { row?: { url: string } }).row?.url) : undefined);
+        if (target && /^https:\/\//.test(target)) await vscode.env.openExternal(vscode.Uri.parse(target));
+        return;
+      }
+      default:
+        this.log.warn(`[guides] unknown command ${name}`);
+        return undefined;
+    }
+  }
+
+  private async ensureDashboard(): Promise<void> {
+    if (!this.dashboard) await this.refresh();
+  }
+
+  // -------------------------------------------------------------------------
+  // Agent options (models and efforts), cached per agent
+  // -------------------------------------------------------------------------
+
+  private agentOptions(): AgentOptionsCache | null {
+    const cached = this.context.globalState.get<AgentOptionsCache>(OPTIONS_KEY);
+    return cached && Date.now() - cached.fetchedAt < OPTIONS_MAX_AGE_MS ? cached : null;
+  }
+
+  private agentSetting(): { command?: string; args?: string[] } {
+    const cfg = vscode.workspace.getConfiguration("plannotator.guides.claudeCode");
+    return { command: cfg.get<string>("command") ?? "", args: cfg.get<string[]>("args") ?? [] };
+  }
+
+  /** Start the adapter once, read its config options, stop it. Nothing is prompted. */
+  private async probeAgentOptions(): Promise<AgentOptionsCache | null> {
+    const launch = resolveAgentLaunch(CLAUDE_CODE, this.agentSetting());
+    if (!launch.ok) {
+      this.showAdapterMissing(launch.message);
+      return null;
+    }
+    const cwd = this.dashboard?.repo?.root ?? this.cwd() ?? this.context.globalStorageUri.fsPath;
+    let client: AcpClient | null = null;
+    try {
+      client = await AcpClient.start({ command: launch.command, args: launch.args, cwd }, {
+        onUpdate: () => {},
+        requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
+        onStderr: (t) => this.log.info(`[agent] ${t.trimEnd()}`),
+      }, { name: "plannotator-vscode", title: "Plannotator", version: this.version });
+      const session = await Promise.race([
+        client.newSession(cwd, []),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Claude Code did not answer within 60 seconds.")), 60_000)),
+      ]);
+      const options = readAgentOptions(CLAUDE_CODE.id, session.configOptions);
+      await this.context.globalState.update(OPTIONS_KEY, options);
+      return options;
+    } catch (err) {
+      void vscode.window.showErrorMessage(`Could not read Claude Code's models: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    } finally {
+      client?.dispose();
+    }
+  }
+
+  private showAdapterMissing(message: string): void {
+    void vscode.window.showErrorMessage(message, "Copy install command", "Open settings").then((choice) => {
+      if (choice === "Copy install command") void vscode.env.clipboard.writeText(CLAUDE_CODE.installCommand);
+      if (choice === "Open settings") void vscode.commands.executeCommand("workbench.action.openSettings", "plannotator.guides.claudeCode");
+    });
+  }
+
+  private async changeDefaults(): Promise<void> {
+    const defaults = this.context.globalState.get<{ model?: string; effort?: string }>(DEFAULTS_KEY);
+    const picked = await pickAgentAndEffort({
+      options: this.agentOptions(),
+      loadOptions: () => this.probeAgentOptions(),
+      remembered: defaults,
+      standingInstructions: "",
+      defaultsOnly: true,
+    });
+    if (!picked) return;
+    await this.context.globalState.update(DEFAULTS_KEY, { model: picked.agent.model?.id, effort: picked.agent.effort?.id });
+    this.updateHome();
+  }
+
+  // -------------------------------------------------------------------------
+  // Starting a review
+  // -------------------------------------------------------------------------
+
+  private async newReview(preset?: SourceChoice): Promise<void> {
+    if (this.run && isLive(this.run.gen.state)) {
+      const choice = await vscode.window.showWarningMessage("A guide is being built. Show it?", "Show");
+      if (choice) this.showGeneration(this.run.gen.state.id);
+      return;
+    }
+    await this.ensureDashboard();
+    const model = this.dashboard;
+    if (!model?.repo) {
+      void vscode.window.showWarningMessage("Open a folder that is a git repository to start a guided review.");
+      return;
+    }
+    const source = preset ?? (await pickSource(model));
+    if (!source) return;
+    const remembered = this.context.workspaceState.get<{ model?: string; effort?: string }>(`plannotator.guides.choices:${model.repo.root}`) ?? this.context.globalState.get(DEFAULTS_KEY);
+    const picked = await pickAgentAndEffort({
+      options: this.agentOptions(),
+      loadOptions: () => this.probeAgentOptions(),
+      remembered,
+      standingInstructions: readGuideInstructions(),
+    });
+    if (!picked) return;
+    await this.context.workspaceState.update(`plannotator.guides.choices:${model.repo.root}`, { model: picked.agent.model?.id, effort: picked.agent.effort?.id });
+    await this.startRun(source, picked.agent, picked.instructions);
+  }
+
+  private async prepareSource(choice: SourceChoice): Promise<{ source: ReviewSourceRecord; rawPatch: string } | null> {
+    const repo = this.dashboard?.repo ?? (this.cwd() ? await getRepoInfo(this.runner, this.cwd()!) : null);
+    if (!repo) throw new Error("No git repository is open.");
+    if (choice.kind === "local") {
+      const patch = await buildLocalChangesPatch(this.runner, repo, choice.mode as LocalChangesMode);
+      if (patch.files.length === 0) {
+        void vscode.window.showInformationMessage(choice.mode === "uncommitted" ? "There are no uncommitted changes." : `There are no changes since ${patch.baseLabel}.`);
+        return null;
+      }
+      return {
+        rawPatch: patch.rawPatch,
+        source: {
+          kind: "local",
+          repoRoot: repo.root,
+          headRoot: repo.root,
+          repoName: repo.displayName,
+          label: choice.mode === "uncommitted" ? "Uncommitted changes" : "Local changes",
+          branch: repo.branch,
+          headSha: repo.headSha,
+          baseSha: patch.baseSha,
+          baseLabel: patch.baseLabel,
+          workingTree: true,
+        },
+      };
+    }
+    return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Preparing PR #${choice.number}` }, async (progress) => {
+      const pr = await viewPullRequest(this.runner, repo.root, choice.number);
+      const storage = this.context.globalStorageUri.fsPath;
+      mkdirSync(storage, { recursive: true });
+      const wt = await preparePullRequestWorktree(this.runner, repo, pr, storage, (step) => progress.report({ message: step }));
+      return {
+        rawPatch: wt.rawPatch,
+        source: {
+          kind: "pr",
+          repoRoot: repo.root,
+          headRoot: wt.path,
+          repoName: repo.displayName,
+          label: `PR #${pr.number}`,
+          headSha: wt.headSha,
+          baseSha: wt.mergeBase,
+          baseLabel: pr.baseRefName,
+          pr: { number: pr.number, url: pr.url, title: pr.title, author: pr.author },
+          worktreePath: wt.path,
+        },
+      };
+    });
+  }
+
+  private relayHost(): Promise<RelayHost> {
+    if (!this.relay) {
+      this.relay = startRelayHost({ serverVersion: this.version, log: (l) => this.log.warn(l) });
+      this.disposables.push({ dispose: () => void this.relay?.then((r) => r.close()) });
+    }
+    return this.relay;
+  }
+
+  private async startRun(choice: SourceChoice, agent: AgentChoiceRecord, instructions?: string, resume?: DraftRecord): Promise<void> {
+    const launch = resolveAgentLaunch(CLAUDE_CODE, this.agentSetting());
+    if (!launch.ok) return this.showAdapterMissing(launch.message);
+    let prepared: { source: ReviewSourceRecord; rawPatch: string } | null;
+    if (resume) prepared = { source: resume.source, rawPatch: resume.draft.review.rawPatch };
+    else prepared = await this.prepareSource(choice);
+    if (!prepared) return;
+    const repoKey = resume?.repoKey ?? this.dashboard?.repo?.repoKey;
+    if (!repoKey) throw new Error("No repository.");
+    const relay = await this.relayHost();
+    const files = changedFilesFromPatch(prepared.rawPatch);
+    const gen = new GuideGeneration(
+      { repoKey, source: prepared.source, rawPatch: prepared.rawPatch, files, agent, ...(instructions && { instructions }), ...(resume && { resume }) },
+      {
+        relay,
+        agentLaunch: (cwd) => ({ command: launch.command, args: launch.args, cwd }),
+        mcpServer: {
+          command: process.execPath,
+          args: [vscode.Uri.joinPath(this.context.extensionUri, "dist", "guide-mcp.cjs").fsPath],
+          env: { ELECTRON_RUN_AS_NODE: "1" },
+        },
+        clientInfo: { name: "plannotator-vscode", title: "Plannotator", version: this.version },
+        requestPermission: (req, signal) => this.askPermission(req, signal, agent.label),
+        resolveSymbol: (name, path, f, headRoot) => resolveSymbolForBuilder(name, path, headRoot, f.map((x) => x.path)),
+        checkMermaid: (source) => this.checkMermaid(source),
+        log: (line) => this.log.info(line),
+        history: guideHistoryEnabled(),
+      },
+    );
+    const entry: RunEntry = { gen, background: false, panel: null, running: null };
+    this.run = entry;
+    this.draftPanels.get(gen.state.id)?.panel.dispose();
+    this.showRunPanel(entry);
+    void vscode.commands.executeCommand("setContext", "plannotator.guides.generating", true);
+    let lastTree = 0;
+    gen.onChange((state) => {
+      entry.panel?.host.show(this.generatingState(state));
+      this.updateBadge(state);
+      const now = Date.now();
+      if (now - lastTree > 400 || !isLive(state)) {
+        lastTree = now;
+        this.fireTree();
+      }
+    });
+    entry.running = gen.run().then(() => this.onRunEnded(entry));
+  }
+
+  private async onRunEnded(entry: RunEntry): Promise<void> {
+    const state = entry.gen.state;
+    void vscode.commands.executeCommand("setContext", "plannotator.guides.generating", false);
+    this.updateBadge(state);
+    if (entry.gen.memoryGuide) this.sessionGuides.set(entry.gen.memoryGuide.id, entry.gen.memoryGuide);
+    await this.refresh();
+    if (state.status === "failed" && state.signIn) {
+      void this.signIn();
+      return;
+    }
+    if (state.status === "finished" && state.savedGuideId) {
+      if (entry.background || !entry.panel) {
+        const choice = await vscode.window.showInformationMessage(`Guide ready: ${state.draft.title || state.source.label}`, "Open guide");
+        if (choice) await this.openGuide(state.savedGuideId);
+      } else {
+        entry.panel.panel.dispose();
+        await this.openGuide(state.savedGuideId);
+      }
+      if (this.run === entry) this.run = null;
+      this.fireTree();
+      return;
+    }
+    if (entry.background && state.status !== "finished") {
+      const choice = await vscode.window.showWarningMessage(`The guide for ${state.source.label} stopped: ${state.statusMessage ?? ""}`, "Show");
+      if (choice) this.showRunPanel(entry);
+    }
+  }
+
+  private showRunPanel(entry: RunEntry): void {
+    if (entry.panel) {
+      entry.panel.panel.reveal();
+      return;
+    }
+    const p = this.createPanel("plannotator.guides.guide", "Guide", "generating");
+    p.panel.title = `Guide · ${entry.gen.state.source.label}`;
+    entry.panel = p;
+    entry.background = false;
+    p.panel.onDidDispose(() => {
+      if (entry.panel === p) entry.panel = null;
+      if (isLive(entry.gen.state)) entry.background = true;
+    });
+    p.host.show(this.generatingState(entry.gen.state));
+  }
+
+  private runInBackground(): void {
+    const entry = this.run;
+    if (!entry) return;
+    entry.background = true;
+    // Keep the tab (it renders the Mermaid check) but step away from it.
+    void vscode.commands.executeCommand("workbench.action.navigateBack");
+    void vscode.window.showInformationMessage(`Building the guide for ${entry.gen.state.source.label} in the background. You'll get a notification when it is ready.`);
+  }
+
+  private updateBadge(state: GenerationState): void {
+    this.bridge.treeView.badge = isLive(state) ? { value: 1, tooltip: `Building a guide · ${state.progress.placed} of ${state.progress.total} files placed` } : undefined;
+  }
+
+  private generatingState(s: GenerationState): GeneratingViewState {
+    const live = isLive(s);
+    const fmt = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+    const source = s.source;
+    return {
+      mode: "generating",
+      id: s.id,
+      status: s.status,
+      statusMessage: s.statusMessage ?? null,
+      kicker: `${live ? "Building guided review" : s.status === "finished" ? "Guided review saved" : "Draft guided review"} · ${source.label}`,
+      title: s.draft.title || (source.pr?.title ?? `${source.label} on ${source.branch ?? source.repoName}`),
+      sub: source.kind === "pr" && source.pr ? `${source.pr.url.replace(/^https:\/\//, "")} · in a worktree at ${source.headSha.slice(0, 7)}` : `${source.repoName} · ${source.baseLabel}..working tree`,
+      agent: s.agent.label,
+      modelEffort: [s.appliedModel ?? s.agent.model?.label ?? "agent default", s.appliedEffort ?? s.agent.effort?.label].filter(Boolean).join(" · "),
+      startedAt: s.startedAt,
+      endedAt: s.endedAt ?? null,
+      cost: s.cost ? `$${s.cost.amount.toFixed(2)}` : null,
+      activity: s.activity.map((a) => ({ id: a.id, at: fmt(a.at), kind: a.kind, title: a.title, ...(a.detail && { detail: a.detail }), ...(a.status && { status: a.status }), ...(a.isError && { isError: true }), ...(a.locations && { locations: a.locations }) })),
+      chapters: s.draft.chapters.map((c, i) => ({
+        n: i + 1,
+        id: c.id,
+        title: c.title,
+        added: s.marks.added.includes(c.id),
+        files: c.files.map((f) => ({ path: f.file, name: basename(f.file), movedFrom: s.marks.moved[f.file] ?? null })),
+      })),
+      unplaced: s.draft.unplaced.map((u) => basename(u.file)),
+      left: [...s.progress.remaining],
+      summary: s.progress.line,
+      savedGuideId: s.savedGuideId ?? null,
+      signIn: s.signIn ? (s.signIn.logins.length ? s.signIn.logins.map((l) => l.label) : ["Sign in"]) : null,
+      memoryOnly: !!s.memoryOnly,
+    };
+  }
+
+  /**
+   * The agent's own permission options, as a Quick Pick that stays open until
+   * answered (a modal dialog cannot be closed when the run is cancelled; this
+   * one closes with the run). Closing it is a "no": the agent's reject option.
+   */
+  private async askPermission(req: RequestPermissionRequest, signal: AbortSignal, agentLabel: string): Promise<RequestPermissionResponse> {
+    if (signal.aborted) return { outcome: { outcome: "cancelled" } };
+    const title = req.toolCall.title ?? "a tool";
+    const raw = req.toolCall.rawInput as Record<string, unknown> | undefined;
+    const detail = raw && typeof raw === "object"
+      ? Object.entries(raw).slice(0, 4).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`.slice(0, 300)).join(" · ")
+      : undefined;
+    const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { optionId: string }>();
+    qp.title = `${agentLabel} asks to run: ${title}`;
+    qp.placeholder = detail ?? "The guide's agent asks before running this tool, under your own settings.";
+    qp.ignoreFocusOut = true;
+    qp.items = req.options.map((o) => ({ label: o.name, optionId: o.optionId, ...(o.kind.startsWith("reject") && { description: "no" }) }));
+    const chosen = await new Promise<string | null | "aborted">((resolve) => {
+      let done = false;
+      const finish = (v: string | null | "aborted") => {
+        if (done) return;
+        done = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+        qp.dispose();
+      };
+      const onAbort = () => finish("aborted");
+      signal.addEventListener("abort", onAbort, { once: true });
+      qp.onDidAccept(() => finish(qp.selectedItems[0]?.optionId ?? null));
+      qp.onDidHide(() => finish(null));
+      qp.show();
+    });
+    if (chosen === "aborted" || signal.aborted) return { outcome: { outcome: "cancelled" } };
+    if (chosen) return { outcome: { outcome: "selected", optionId: chosen } };
+    const reject = req.options.find((o) => o.kind === "reject_once") ?? req.options.find((o) => o.kind.startsWith("reject"));
+    return reject ? { outcome: { outcome: "selected", optionId: reject.optionId } } : { outcome: { outcome: "cancelled" } };
+  }
+
+  /**
+   * Sign in to the agent: a terminal running the agent's own login command
+   * (the terminal sign-ins it listed in `initialize`), else `claude /login`.
+   */
+  private async signIn(label?: string): Promise<void> {
+    const state = this.run?.gen.state;
+    const logins: LoginCommand[] = state?.signIn?.logins ?? [];
+    const launch = resolveAgentLaunch(CLAUDE_CODE, this.agentSetting());
+    let choice = label;
+    if (!choice) {
+      const buttons = logins.length ? logins.map((l) => l.label) : ["Sign in"];
+      choice = await vscode.window.showErrorMessage(`${CLAUDE_CODE.label} is not signed in. Sign in in a terminal, then resume the guide.`, ...buttons);
+      if (!choice) return;
+    }
+    const login = logins.find((l) => l.label === choice) ?? (logins.length === 1 ? logins[0] : undefined);
+    let command: string;
+    let args: string[];
+    if (login && launch.ok) {
+      command = launch.command;
+      args = [...launch.args, ...login.args];
+    } else {
+      const claude = findExecutable("claude");
+      if (!claude) {
+        void vscode.window.showErrorMessage(`Run \`claude\` in a terminal and sign in with /login, then resume the guide.`);
+        return;
+      }
+      command = claude;
+      args = ["/login"];
+    }
+    let plan;
+    try {
+      plan = planSpawn(command, args);
+    } catch (err) {
+      void vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    const terminal = vscode.window.createTerminal({
+      name: `${CLAUDE_CODE.label} sign-in`,
+      shellPath: plan.command,
+      shellArgs: plan.args,
+      cwd: state?.source.repoRoot ?? this.cwd(),
+      env: { ...plan.env, ...login?.env },
+    });
+    terminal.show();
+  }
+
+  /** The Mermaid render check, in whichever Guides webview is open. */
+  private async checkMermaid(source: string): Promise<{ ok: true; checked: boolean } | { ok: false; message: string; line?: number }> {
+    const hosts = [this.run?.panel?.host, this.home?.host, ...[...this.guidePanels.values()].map((p) => p.host), this.chapterView?.host].filter((h): h is WebviewHost => !!h && h.isReady);
+    for (const host of hosts) {
+      const r = await host.checkMermaid(source);
+      if (!r) continue;
+      return r.ok ? { ok: true, checked: true } : { ok: false, message: r.message ?? "Mermaid could not render it.", ...(r.line !== undefined && { line: r.line }) };
+    }
+    return { ok: true, checked: false };
+  }
+
+  // -------------------------------------------------------------------------
+  // Drafts
+  // -------------------------------------------------------------------------
+
+  private findDraft(id: string | undefined): DraftRecord | null {
+    if (!id) return null;
+    // With guide history off the run's draft is only in memory.
+    if (this.run?.gen.state.id === id && this.run.gen.state.memoryOnly) return this.run.gen.toDraftRecord();
+    const keys = new Set([this.dashboard?.repo?.repoKey, this.run?.gen.state.repoKey].filter((k): k is string => !!k));
+    for (const key of keys) {
+      const r = loadDraftRecord(key, id);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  private showGeneration(id: string | undefined): void {
+    if (this.run && (!id || this.run.gen.state.id === id)) {
+      this.showRunPanel(this.run);
+      return;
+    }
+    const record = this.findDraft(id);
+    if (!record) {
+      void vscode.window.showWarningMessage("That draft is gone.");
+      return;
+    }
+    const existing = this.draftPanels.get(record.id);
+    if (existing) {
+      existing.panel.reveal();
+      return;
+    }
+    const p = this.createPanel("plannotator.guides.guide", `Guide · draft`, "generating");
+    this.draftPanels.set(record.id, p);
+    p.panel.onDidDispose(() => this.draftPanels.delete(record.id));
+    const gen = new GuideGeneration(
+      { repoKey: record.repoKey, source: record.source, rawPatch: record.draft.review.rawPatch, files: changedFilesFromPatch(record.draft.review.rawPatch), agent: record.agent, ...(record.instructions && { instructions: record.instructions }), resume: record },
+      this.idleDeps(),
+    );
+    const state = { ...gen.state, status: record.status === "running" ? "stopped" : record.status, statusMessage: record.statusMessage ?? "The run stopped before the guide was finished.", startedAt: record.createdAt, endedAt: record.updatedAt } as GenerationState;
+    p.host.show(this.generatingState(state));
+  }
+
+  /** Deps for a generation that is never run (Save as is). */
+  private idleDeps(): ConstructorParameters<typeof GuideGeneration>[1] {
+    return {
+      relay: null as unknown as RelayHost,
+      agentLaunch: () => {
+        throw new Error("not running");
+      },
+      mcpServer: { command: "", args: [] },
+      clientInfo: { name: "plannotator-vscode", title: "Plannotator", version: this.version },
+      requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
+      resolveSymbol: (name, path, f, headRoot) => resolveSymbolForBuilder(name, path, headRoot, f.map((x) => x.path)),
+      checkMermaid: (source) => this.checkMermaid(source),
+      history: guideHistoryEnabled(),
+    };
+  }
+
+  private async resumeDraft(id: string | undefined): Promise<void> {
+    const record = this.findDraft(id ?? this.run?.gen.state.id);
+    if (!record) {
+      void vscode.window.showWarningMessage("That draft is gone.");
+      return;
+    }
+    if (this.run && isLive(this.run.gen.state)) {
+      void vscode.window.showWarningMessage("A guide is already being built.");
+      return;
+    }
+    this.draftPanels.get(record.id)?.panel.dispose();
+    if (this.run?.gen.state.id === record.id) this.run.panel?.panel.dispose();
+    await this.startRun({ kind: "local", mode: "since-base" }, record.agent, record.instructions, record);
+  }
+
+  private async saveDraftAsIs(id: string | undefined): Promise<void> {
+    const record = this.findDraft(id ?? this.run?.gen.state.id);
+    if (!record) return;
+    const gen = new GuideGeneration(
+      { repoKey: record.repoKey, source: record.source, rawPatch: record.draft.review.rawPatch, files: changedFilesFromPatch(record.draft.review.rawPatch), agent: record.agent, ...(record.instructions && { instructions: record.instructions }), resume: record },
+      this.idleDeps(),
+    );
+    const result = await gen.saveAsIs();
+    if (!result.ok) {
+      void vscode.window.showWarningMessage(`The draft was not saved: ${result.problems.join(" ")}`);
+      return;
+    }
+    if (gen.memoryGuide) {
+      this.sessionGuides.set(gen.memoryGuide.id, gen.memoryGuide);
+      void vscode.window.showInformationMessage("Guide history is off, so this guide is kept only until VS Code closes.");
+    }
+    this.draftPanels.get(record.id)?.panel.dispose();
+    if (this.run?.gen.state.id === record.id) {
+      this.run.panel?.panel.dispose();
+      this.run = null;
+    }
+    await this.refresh();
+    await this.openGuide(result.guideId);
+  }
+
+  private async deleteDraft(id: string | undefined): Promise<void> {
+    const record = this.findDraft(id);
+    if (!record) return;
+    const ok = await vscode.window.showWarningMessage(`Delete the draft "${record.draft.title || record.source.label}"?`, { modal: true }, "Delete");
+    if (ok !== "Delete") return;
+    deleteDraftRecord(record.repoKey, record.id);
+    this.draftPanels.get(record.id)?.panel.dispose();
+    // The same rule as deleting a guide: the PR's worktree goes unless something else still reads it.
+    await removeDraftWorktree(this.runner, record, this.worktreeUsers());
+    await this.refresh();
+  }
+
+  // -------------------------------------------------------------------------
+  // Reading a guide
+  // -------------------------------------------------------------------------
+
+  private locateGuide(id: string): { repoKey: string } | null {
+    const memory = this.sessionGuides.get(id);
+    if (memory) return { repoKey: memory.repoKey };
+    const key = this.dashboard?.repo?.repoKey;
+    if (key && loadSavedGuide(key, id)) return { repoKey: key };
+    const found = findSavedGuideById(id);
+    return found ? { repoKey: found.repoKey } : null;
+  }
+
+  /** A saved guide, or one kept in memory because guide history is off. */
+  private loadGuide(repoKey: string, id: string): LoadedGuide | null {
+    return this.sessionGuides.get(id) ?? loadSavedGuide(repoKey, id);
+  }
+
+  async openGuide(id: string | undefined): Promise<void> {
+    if (!id) return;
+    if (this.reader?.model.id !== id) {
+      await this.ensureDashboard();
+      const where = this.locateGuide(id);
+      if (!where) {
+        void vscode.window.showWarningMessage("That guide is gone.");
+        return;
+      }
+      const loaded = this.loadGuide(where.repoKey, id);
+      if (!loaded) return;
+      if (!loaded.rawPatch) {
+        void vscode.window.showWarningMessage("This guide predates portable guides: its diff was not kept, so it opens in Plannotator's web app only.");
+        return;
+      }
+      const sides = await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: "Opening the guide" }, (progress) =>
+        resolveReaderSides(this.runner, loaded, { repoRoot: this.dashboard?.repo?.root ?? null, storageDir: this.context.globalStorageUri.fsPath, onStep: (m) => progress.report({ message: m }) }),
+      );
+      if ("error" in sides) {
+        void vscode.window.showWarningMessage(sides.error);
+        return;
+      }
+      const model = new ReaderModel(loaded);
+      const firstOpen = model.reviewed.findIndex((r) => !r);
+      model.currentChapter = firstOpen >= 0 ? firstOpen : 0;
+      this.reader = { model, sides };
+      this.currentFile = null;
+      void vscode.commands.executeCommand("setContext", "plannotator.guides.readerOpen", true);
+    }
+    this.showGuidePanel();
+    this.updateReaderViews();
+    void vscode.commands.executeCommand(`${"plannotator.guides.tree"}.focus`);
+    void this.recheckDiagram();
+  }
+
+  /**
+   * A guide whose overview diagram was saved without a render check (no
+   * Guides webview was open during a background run) is checked once its tab
+   * is open, and the reader is told when it does not render.
+   */
+  private async recheckDiagram(): Promise<void> {
+    const reader = this.reader;
+    if (!reader || reader.model.loaded.sidecar.diagramCheck !== "unchecked") return;
+    const source = reader.model.overview?.diagram?.source;
+    const host = this.guidePanels.get(reader.model.id)?.host;
+    if (!source || !host) return;
+    let result: Awaited<ReturnType<WebviewHost["checkMermaid"]>> = null;
+    for (let i = 0; i < 20 && !result; i++) {
+      result = await host.checkMermaid(source);
+      if (!result) await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!result || this.reader !== reader) return;
+    const loaded = reader.model.loaded;
+    loaded.sidecar.diagramCheck = result.ok ? "ok" : "failed";
+    if (!this.sessionGuides.has(loaded.id)) writeSidecar(loaded.repoKey, loaded.id, loaded.sidecar);
+    if (!result.ok) void vscode.window.showWarningMessage(`The overview diagram of this guide does not render: ${result.message ?? "Mermaid refused it"}${result.line ? ` (line ${result.line})` : ""}.`);
+  }
+
+  private closeGuide(): void {
+    if (!this.reader) return;
+    this.guidePanels.get(this.reader.model.id)?.panel.dispose();
+    this.reader = null;
+    this.currentFile = null;
+    void vscode.commands.executeCommand("setContext", "plannotator.guides.readerOpen", false);
+    this.updateReaderViews();
+  }
+
+  private guideState(): GuideViewState | null {
+    if (!this.reader) return null;
+    const { model, sides } = this.reader;
+    const env = model.loaded.envelope;
+    const engine = env.engine === "claude" ? "Claude Code" : env.engine ?? "";
+    const kicker = ["Guided review", env.label, engine, model.loaded.sidecar.agent?.model?.label ?? env.model, env.generatedAt ? relativeTime(env.generatedAt) : ""].filter(Boolean).join(" · ");
+    return {
+      mode: "guide",
+      guideId: model.id,
+      kicker,
+      title: model.title,
+      intent: env.guide.intent,
+      overview: model.overview,
+      chapters: model.chapters.map((c, i) => ({ n: i + 1, title: c.title, files: c.files.map((f) => basename(f.path)), reviewed: model.reviewed[i], color: chapterColorCss(i) })),
+      reviewed: model.reviewed.filter(Boolean).length,
+      moved: sides.moved,
+    };
+  }
+
+  private showGuidePanel(): void {
+    if (!this.reader) return;
+    const id = this.reader.model.id;
+    let p = this.guidePanels.get(id);
+    if (!p) {
+      for (const [other, entry] of this.guidePanels) if (other !== id) entry.panel.dispose();
+      p = this.createPanel("plannotator.guides.guide", "Guide", "guide");
+      const entry = p;
+      this.guidePanels.set(id, entry);
+      entry.panel.onDidDispose(() => {
+        if (this.guidePanels.get(id) === entry) this.guidePanels.delete(id);
+      });
+    } else p.panel.reveal();
+    p.panel.title = `Guide · ${this.reader.model.loaded.envelope.label || "local"}`;
+    const state = this.guideState();
+    if (state) p.host.show(state);
+  }
+
+  private chapterState(): ChapterViewState {
+    if (!this.reader) return { mode: "chapter", empty: true };
+    const { model } = this.reader;
+    const i = model.currentChapter;
+    const ch = model.chapters[i];
+    if (!ch) return { mode: "chapter", empty: true };
+    const sc = model.loaded.sidecar;
+    const footer = sc.agent ? [sc.agent.label, sc.agent.model?.label, sc.agent.effort?.label, sc.cost ? `$${sc.cost.amount.toFixed(2)}` : ""].filter(Boolean).join(" · ") : undefined;
+    return {
+      mode: "chapter",
+      empty: false,
+      n: i + 1,
+      total: model.chapters.length,
+      title: ch.title,
+      overview: ch.overview,
+      files: ch.files.map((f) => ({ path: f.path, name: basename(f.path), summary: f.summary, reviewed: model.fileTicks.has(f.path) })),
+      reviewed: model.reviewed[i],
+      hasNext: i + 1 < model.chapters.length,
+      ...(footer && { footer }),
+    };
+  }
+
+  resolveChapterView(view: vscode.WebviewView): void {
+    view.webview.options = webviewOptions(this.context.extensionUri);
+    view.webview.html = webviewHtml(view.webview, this.context.extensionUri, "chapter");
+    const host = new WebviewHost(view.webview, {
+      onCommand: (command, args) => void this.webviewCommand(command, args),
+      onLink: (link, action) => void this.openLink(link, action),
+      onLinkInfo: (link) => this.linkInfo(link),
+    });
+    this.chapterView = { view, host };
+    view.onDidDispose(() => {
+      host.dispose();
+      if (this.chapterView?.view === view) this.chapterView = null;
+    });
+    this.updateChapterView();
+  }
+
+  private updateChapterView(): void {
+    if (!this.chapterView) return;
+    const state = this.chapterState();
+    this.chapterView.view.title = state.empty ? "Chapter" : `Chapter ${state.n} · why this changed`;
+    this.chapterView.host.show(state);
+  }
+
+  private updateReaderViews(): void {
+    this.fireTree();
+    this.updateChapterView();
+    const state = this.guideState();
+    if (state && this.reader) this.guidePanels.get(this.reader.model.id)?.host.show(state);
+    this.ui.refresh();
+    this.ui.updateStatus(this.currentFile);
+  }
+
+  private persistTicks(): void {
+    if (!this.reader) return;
+    const { model } = this.reader;
+    if (!this.sessionGuides.has(model.id)) {
+      setChapterReviewed(model.loaded.repoKey, model.id, model.reviewed);
+      writeSidecar(model.loaded.repoKey, model.id, { ...model.loaded.sidecar, fileTicks: [...model.fileTicks] });
+    }
+    model.loaded.sidecar.fileTicks = [...model.fileTicks];
+    model.loaded.envelope.reviewed = [...model.reviewed];
+  }
+
+  private async openChapter(n: number | undefined, options?: { openFile?: boolean }): Promise<void> {
+    if (!this.reader || n === undefined) return;
+    const { model } = this.reader;
+    const index = n - 1;
+    if (!model.chapters[index]) return;
+    model.currentChapter = index;
+    this.updateReaderViews();
+    void vscode.commands.executeCommand("plannotator.guides.chapter.focus");
+    try {
+      await this.bridge.treeView.reveal({ kind: "chapter", index }, { expand: true, select: true, focus: false });
+    } catch {
+      // the tree may not be visible
+    }
+    if (options?.openFile !== false) {
+      const first = model.chapters[index].files.find((f) => !model.fileTicks.has(f.path)) ?? model.chapters[index].files[0];
+      if (first) await this.openFile(first.path);
+    }
+  }
+
+  private async nextChapter(): Promise<void> {
+    if (!this.reader) return;
+    const next = this.reader.model.currentChapter + 1;
+    if (next >= this.reader.model.chapters.length) {
+      void vscode.window.showInformationMessage("That was the last chapter.");
+      return;
+    }
+    await this.openChapter(next + 1);
+  }
+
+  private async markChapterReviewed(n: number | undefined, value?: boolean): Promise<void> {
+    if (!this.reader || n === undefined) return;
+    const { model } = this.reader;
+    const index = n - 1;
+    model.setChapterReviewed(index, value ?? !model.reviewed[index]);
+    this.persistTicks();
+    this.updateReaderViews();
+  }
+
+  private async toggleFileReviewed(path: string | undefined): Promise<void> {
+    const p = path ?? this.currentFile;
+    if (!this.reader || !p) return;
+    this.reader.model.setFileReviewed(p, !this.reader.model.fileTicks.has(p));
+    this.persistTicks();
+    this.updateReaderViews();
+  }
+
+  private onCheckboxes(e: vscode.TreeCheckboxChangeEvent<TreeNode>): void {
+    if (!this.reader) return;
+    for (const [node, state] of e.items) {
+      const checked = state === vscode.TreeItemCheckboxState.Checked;
+      if (node.kind === "chapter") this.reader.model.setChapterReviewed(node.index, checked);
+      else if (node.kind === "file") this.reader.model.setFileReviewed(node.path, checked);
+    }
+    this.persistTicks();
+    this.updateReaderViews();
+  }
+
+  private async nextFile(path: string | undefined): Promise<void> {
+    if (!this.reader) return;
+    const next = this.reader.model.nextFile(path ?? null);
+    if (!next) {
+      void vscode.window.showInformationMessage("That was the last file of the guide.");
+      return;
+    }
+    await this.openFile(next.path);
+  }
+
+  /** Open a guide file in the native diff editor, in preview so stepping reuses one tab. */
+  async openFile(path: string | undefined, line?: number): Promise<void> {
+    if (!this.reader || !path) return;
+    const { model, sides } = this.reader;
+    const file = model.files.get(path) ?? { path, status: "modified" };
+    const chapter = model.chapterOf(path);
+    if (chapter >= 0) model.currentChapter = chapter;
+    this.currentFile = path;
+    const focus = model.focusRanges(path)[0];
+    const target = line ?? focus?.start ?? model.files.get(path)?.hunks[0]?.start;
+    const selection = target ? new vscode.Range(target - 1, 0, target - 1, 0) : undefined;
+    const title = `${basename(path)}${chapter >= 0 ? ` · Chapter ${chapter + 1}` : ""}`;
+    await vscode.commands.executeCommand("vscode.diff", baseUri(sides, file), headUri(sides, file), title, { preview: true, ...(selection && { selection }) });
+    this.updateReaderViews();
+    void this.offerDiffCodeLens();
+  }
+
+  /**
+   * The "Chapter 2 of 5 · Mark reviewed · Next file" line is a CodeLens, and
+   * VS Code hides CodeLens in diff editors unless `diffEditor.codeLens` is on.
+   * Ask once; never change the setting without the reader's yes.
+   */
+  private async offerDiffCodeLens(): Promise<void> {
+    if (vscode.workspace.getConfiguration("diffEditor").get<boolean>("codeLens")) return;
+    if (this.context.globalState.get<boolean>("plannotator.guides.askedDiffCodeLens")) return;
+    await this.context.globalState.update("plannotator.guides.askedDiffCodeLens", true);
+    const choice = await vscode.window.showInformationMessage(
+      "Guides put a line at the top of each diff: its chapter, Mark reviewed and Next file. VS Code hides such lines in diffs unless CodeLens in the diff editor is on. Turn it on?",
+      "Turn on",
+      "Not now",
+    );
+    if (choice === "Turn on") await vscode.workspace.getConfiguration("diffEditor").update("codeLens", true, vscode.ConfigurationTarget.Global);
+  }
+
+  private onActiveEditor(editor: vscode.TextEditor | undefined): void {
+    if (!this.reader || !editor) return;
+    const path = headPathOf(this.reader.sides, editor.document.uri);
+    if (!path || this.reader.model.chapterOf(path) < 0 || path === this.currentFile) return;
+    this.currentFile = path;
+    this.reader.model.currentChapter = this.reader.model.chapterOf(path);
+    this.updateReaderViews();
+  }
+
+  private async openLocation(path: string | undefined, line?: number): Promise<void> {
+    if (!path) return;
+    const root = this.run?.gen.state.source.headRoot ?? this.reader?.sides.gitRoot ?? this.dashboard?.repo?.root;
+    if (!root) return;
+    const uri = path.startsWith("/") ? vscode.Uri.file(path) : vscode.Uri.joinPath(vscode.Uri.file(root), path);
+    const pos = line ? new vscode.Position(Math.max(0, line - 1), 0) : undefined;
+    await vscode.window.showTextDocument(uri, { preview: true, ...(pos && { selection: new vscode.Range(pos, pos) }) });
+  }
+
+  private async linkInfo(href: string) {
+    if (!this.reader) return { ok: false, label: href, inChange: false, message: "Open a guide first." };
+    try {
+      return await linkInfo(href, this.reader.model, this.reader.sides);
+    } catch (err) {
+      return { ok: false, label: href, inChange: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** A click on an overview link: its diff when the file is in the change, the plain file otherwise. */
+  private async openLink(href: string, action: "open" | "definition" | "references"): Promise<void> {
+    if (!this.reader) return;
+    const parsed = parseGuideLink(href);
+    if (!parsed?.ok) return;
+    const link = parsed.link;
+    if (link.kind === "chapter") return this.openChapter(link.chapter);
+    const target = await locateLink(link, this.reader.model, this.reader.sides);
+    if ("error" in target) {
+      void vscode.window.showWarningMessage(target.error);
+      return;
+    }
+    if (action === "open" && target.inChange) return this.openFile(target.path, target.range.start.line + 1);
+    const editor = await vscode.window.showTextDocument(target.uri, { preview: true, selection: target.range });
+    if (action === "definition") await vscode.commands.executeCommand("editor.action.revealDefinition");
+    if (action === "references") await vscode.commands.executeCommand("editor.action.goToReferences", editor.document.uri, target.range.start);
+  }
+
+  // -------------------------------------------------------------------------
+  // Export and delete
+  // -------------------------------------------------------------------------
+
+  private async exportGuide(id: string | undefined): Promise<void> {
+    const guideId = id ?? this.reader?.model.id;
+    if (!guideId) return;
+    const where = this.locateGuide(guideId);
+    const loaded = where ? this.loadGuide(where.repoKey, guideId) : null;
+    if (!where || !loaded) return;
+    const snapshot = snapshotOfGuide(loaded);
+    if (!snapshot) {
+      void vscode.window.showWarningMessage("This guide's diff was not kept, so it cannot be exported.");
+      return;
+    }
+    const html = createGuideHtml(snapshot, { viewer: resolveGuideViewerAssets(GUIDE_VIEWER_MANIFEST, { baseUrl: process.env.PLANNOTATOR_GUIDE_VIEWER_URL }) });
+    const defaultUri = vscode.Uri.joinPath(vscode.Uri.file(this.dashboard?.repo?.root ?? this.context.globalStorageUri.fsPath), guideExportFilename(snapshot.guide.title));
+    const target = await vscode.window.showSaveDialog({ defaultUri, filters: { HTML: ["html"] }, title: "Download portable guide" });
+    if (!target) return;
+    await vscode.workspace.fs.writeFile(target, Buffer.from(html, "utf8"));
+    void vscode.window.showInformationMessage(`Saved ${basename(target.fsPath)}. It opens in any browser.`);
+  }
+
+  private async deleteGuide(id: string | undefined): Promise<void> {
+    if (!id) return;
+    const where = this.locateGuide(id);
+    const loaded = where ? this.loadGuide(where.repoKey, id) : null;
+    if (!where || !loaded) return;
+    const memory = this.sessionGuides.has(id);
+    const share = loaded.envelope.share;
+    const ok = await vscode.window.showWarningMessage(
+      memory ? `Delete the guide "${loaded.envelope.title}"? It was never saved (guide history is off).` : `Delete the guide "${loaded.envelope.title}"? The web app's list loses it too.${share ? " Its share link is removed first." : ""}`,
+      { modal: true },
+      "Delete",
+    );
+    if (ok !== "Delete") return;
+    // The envelope is the only copy of the share link's delete token: remove the link first.
+    const unshared = await removeShareBeforeDelete(share);
+    if (!unshared.ok) {
+      const choice = await vscode.window.showWarningMessage(
+        `Could not remove the share link ${unshared.url}: ${unshared.reason}. Deleting the guide now loses the only copy of its delete token.`,
+        { modal: true, detail: `To remove the link later: ${unshared.command}` },
+        "Copy command and delete",
+      );
+      if (choice !== "Copy command and delete") return;
+      await vscode.env.clipboard.writeText(unshared.command);
+    }
+    if (this.reader?.model.id === id) this.closeGuide();
+    if (memory) this.sessionGuides.delete(id);
+    else deleteSavedGuide(where.repoKey, id);
+    const storage = this.context.globalStorageUri.fsPath;
+    const wt = guideWorktreePath(loaded, storage);
+    const repoRoot = loaded.sidecar.source?.repoRoot ?? this.dashboard?.repo?.root;
+    if (wt && repoRoot && !pullRequestWorktreeInUse(where.repoKey, wt, this.worktreeUsers(), { guideId: id })) await removePullRequestWorktree(this.runner, repoRoot, wt, storage);
+    await this.refresh();
+  }
+
+  /** What reads a PR worktree besides the guides and drafts on disk. */
+  private worktreeUsers(): WorktreeUsers {
+    return {
+      storageDir: this.context.globalStorageUri.fsPath,
+      liveRunHeadRoot: this.run?.gen.state.source.headRoot ?? null,
+      readerGitRoot: this.reader?.sides.gitRoot ?? null,
+      sessionGuides: this.sessionGuides.values(),
+    };
+  }
+
+  dispose(): void {
+    // VS Code is closing: no grace period for the agent or anything it started.
+    this.run?.gen.kill();
+    for (const d of this.disposables) d.dispose();
+  }
+}
+
+function isLive(s: GenerationState): boolean {
+  return s.status === "starting" || s.status === "running" || s.status === "finishing";
+}
+
+/** A tree node passed as a command argument (inline actions pass the node). */
+function treeArg(arg: unknown): string | undefined {
+  if (!arg || typeof arg !== "object") return undefined;
+  const node = arg as TreeNode;
+  if (node.kind === "recent") return node.entry.id;
+  return undefined;
+}
+
+export { nodeId };
+
+/** The dashboard with this session's unsaved guides (guide history off) and a note when history is off. */
+function withSessionGuides(model: DashboardModel, guides: LoadedGuide[], history: boolean): DashboardModel {
+  const key = model.repo?.repoKey;
+  const entries: RecentEntry[] = guides
+    .filter((g) => g.repoKey === key)
+    .map((g) => ({ kind: "guide", id: g.id, title: g.envelope.title, label: g.envelope.label, at: g.envelope.savedAt, progress: { reviewed: g.envelope.reviewed.filter(Boolean).length, total: g.envelope.guide.sections.length }, sessionOnly: true }));
+  const notes = history ? model.notes : [...model.notes, "Guide history is off (PLANNOTATOR_GUIDE_HISTORY or guideHistory in Plannotator's config.json): new guides and drafts are not saved, only kept until VS Code closes."];
+  return { ...model, recent: [...entries, ...model.recent].sort((a, b) => b.at - a.at), notes };
+}
