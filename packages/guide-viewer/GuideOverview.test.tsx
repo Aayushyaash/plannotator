@@ -205,6 +205,12 @@ describe('renderInlineMarkdown guide links', () => {
     expect(html(renderInlineMarkdown('see [x](code:a.ts) now'))).toBe('see node now');
   });
 
+  test('a target with balanced parentheses reaches the renderer whole', () => {
+    const seen: string[] = [];
+    renderInlineMarkdown('open [page](code:app/(shop)/page.tsx#L3) now', { renderLink: (href) => { seen.push(href); return null; } });
+    expect(seen).toEqual(['code:app/(shop)/page.tsx#L3']);
+  });
+
   test('a renderer may decline a link (null) and it falls back to the label', () => {
     const nodes = renderInlineMarkdown('[a](chapter:1) [b](symbol:x)', { renderLink: (href, label, key) => (href === 'chapter:1' ? <b key={key}>{label}</b> : null) });
     const types = nodes.filter((n) => typeof n !== 'string').map((n) => (n as React.ReactElement).type);

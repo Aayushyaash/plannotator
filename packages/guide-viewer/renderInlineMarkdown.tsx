@@ -1,4 +1,5 @@
 import React from 'react';
+import { GUIDE_LINK_TARGET_SOURCE } from '@plannotator/core/guide-links';
 
 /**
  * Renders a guide link (`[label](code:…)`, `symbol:…`, `chapter:…`). Hosts that
@@ -49,8 +50,12 @@ function renderInline(text: string, startKey: number, opts?: InlineMarkdownOptio
   let key = startKey;
 
   // Match inline patterns: [text](url), `code`, **bold**, *italic*, _italic_, bare URLs
-  // The last alternative is a guide link: [label](code:…|symbol:…|chapter:…).
-  const regex = /(\[([^\]]+)\]\((https?:\/\/[^)]+)\)|`[^`]+`|\*\*[^*]+\*\*|(?<!\w)_([^_\s](?:[\s\S]*?[^_\s])?)_(?!\w)|\*[^*]+\*|https?:\/\/[^\s<)\]]+|\[([^\]]+)\]\(((?:code|symbol|chapter):[^)\s]*)\))/g;
+  // The last alternative is a guide link: [label](code:…|symbol:…|chapter:…),
+  // its target read as guide-links reads it (balanced parentheses allowed).
+  const regex = new RegExp(
+    String.raw`(\[([^\]]+)\]\((https?:\/\/[^)]+)\)|` + '`[^`]+`' + String.raw`|\*\*[^*]+\*\*|(?<!\w)_([^_\s](?:[\s\S]*?[^_\s])?)_(?!\w)|\*[^*]+\*|https?:\/\/[^\s<)\]]+|\[([^\]]+)\]\((${GUIDE_LINK_TARGET_SOURCE})\))`,
+    'g',
+  );
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 

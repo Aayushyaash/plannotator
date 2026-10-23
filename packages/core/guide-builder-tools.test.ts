@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   GUIDE_BUILDER_METHODOLOGY,
+  GUIDE_BUILDER_METHODOLOGY_SOURCE_PASSAGES,
   GUIDE_BUILDER_PROMPT_PARAGRAPH,
   GUIDE_BUILDER_RESUME_PARAGRAPH,
   GUIDE_BUILDER_TOOL_NAMES,
@@ -50,14 +51,33 @@ describe("tool definitions", () => {
 });
 
 describe("prompt pieces", () => {
-  test("the builder methodology drops the one-shot Speed section and points at the tools", () => {
+  test("every passage the builder methodology rewrites is still in the source prompt", () => {
+    // If this fails the in-app methodology changed: update the rewrite pair in guide-builder-tools.ts.
+    for (const passage of GUIDE_BUILDER_METHODOLOGY_SOURCE_PASSAGES) expect(GUIDE_REVIEW_PROMPT).toContain(passage);
+  });
+
+  test("the source prompt is untouched: current in-app jobs send the same bytes", () => {
     expect(GUIDE_REVIEW_PROMPT).toContain("## Speed");
-    expect(GUIDE_BUILDER_METHODOLOGY).not.toContain("## Speed");
-    expect(GUIDE_BUILDER_METHODOLOGY).not.toContain("Return structured JSON");
-    expect(GUIDE_BUILDER_METHODOLOGY).not.toContain("Always include unplacedFiles");
-    expect(GUIDE_BUILDER_METHODOLOGY).toContain("8. Call `guide_finish`.");
-    expect(GUIDE_BUILDER_METHODOLOGY).toContain("Mark these with `guide_unplace_file`.");
-    expect(GUIDE_BUILDER_METHODOLOGY).toContain("## Coverage rule (hard constraint)");
+    expect(GUIDE_REVIEW_PROMPT).toContain("If one file has two unrelated changes, split it into two sections.");
+    expect(GUIDE_REVIEW_PROMPT).toContain("8. Return structured JSON matching the schema.");
+  });
+
+  test("the builder methodology speaks of chapters and files placed with the tools", () => {
+    const m = GUIDE_BUILDER_METHODOLOGY;
+    expect(m).not.toContain("## Speed");
+    expect(m).not.toMatch(/\bsections?\b/i);
+    expect(m).not.toContain("diffs[]");
+    expect(m).not.toMatch(/\bdiffs\b/);
+    expect(m).not.toContain("unplacedFiles");
+    expect(m).not.toMatch(/JSON|split it into two/);
+    // The builder keeps a file whole, in one chapter.
+    expect(m).toContain("A file\nbelongs to exactly one chapter, whole");
+    expect(m).toContain("`guide_add_chapter`");
+    expect(m).toContain("`guide_place_file`");
+    expect(m).toContain("`guide_unplace_file`");
+    expect(m).toContain("7. Verify coverage with `guide_read`");
+    expect(m).toContain("8. Call `guide_finish`.");
+    expect(m).toContain("## Coverage rule (hard constraint)");
   });
 
   test("buildGuideBuilderPrompt: target, methodology, the tools paragraph, then resume and instructions", () => {

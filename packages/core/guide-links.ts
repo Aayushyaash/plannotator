@@ -43,8 +43,12 @@ function decode(text: string): string {
 }
 
 /** A repo-relative path as the change names it: no leading slash or `./`, no `..` segment. */
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+
 function pathProblem(path: string): string | null {
   if (path.length === 0) return "it names no file";
+  if (path.includes("\\")) return "use / between folders, not \\";
+  if (CONTROL_CHARACTER.test(path)) return "the path has a control character";
   if (path.startsWith("/")) return "use the repo-relative path, without a leading /";
   if (path.startsWith("./")) return "use the repo-relative path, without a leading ./";
   if (path.split("/").some((segment) => segment === "..")) return "the path may not contain ..";
@@ -96,6 +100,7 @@ export function parseGuideLink(rawHref: string): GuideLinkParse | null {
   const name = decode(hash >= 0 ? rest.slice(hash + 1) : rest).trim();
   const path = hash >= 0 ? decode(rest.slice(0, hash)) : undefined;
   if (name.length === 0) return bad("it names no symbol");
+  if (CONTROL_CHARACTER.test(name)) return bad("the symbol name has a control character");
   if (/\s/.test(name)) return bad("a symbol name has no spaces");
   if (path !== undefined) {
     const problem = pathProblem(path);
@@ -115,7 +120,15 @@ export interface GuideLinkOccurrence {
   readonly label?: string;
 }
 
-const MARKDOWN_LINK = /\[([^\]\n]*)\]\(\s*((?:code|symbol|chapter):[^)\s]*)\s*\)/gi;
+/**
+ * The target of a markdown guide link: no spaces, and parentheses only in
+ * balanced pairs, one level deep, so a Next.js route group
+ * (`code:app/(shop)/page.tsx`) is read whole. Shared with the viewer's inline
+ * renderer so both read a link the same way.
+ */
+export const GUIDE_LINK_TARGET_SOURCE = String.raw`(?:code|symbol|chapter):(?:[^()\s]|\([^()\s]*\))*`;
+
+const MARKDOWN_LINK = new RegExp(String.raw`\[([^\]\n]*)\]\(\s*(${GUIDE_LINK_TARGET_SOURCE})\s*\)`, "gi");
 const MERMAID_CLICK = /^\s*click\s+\S+\s+(?:href\s+)?(?:"([^"]*)"|'([^']*)')/gim;
 const HTML_HREF = /\b(?:href|xlink:href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+))/gi;
 
