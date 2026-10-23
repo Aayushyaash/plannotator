@@ -145,15 +145,14 @@ describe("pull request sources", () => {
   it("fetches the PR head, creates a detached worktree under the extension's storage, and diffs from the merge base", async () => {
     const calls: string[] = [];
     const storage = mkdtempSync(join(tmpdir(), "pn-guides-storage-"));
-    const wtPath = join(storage, "worktrees", "key", "pr-482");
+    const wtPath = join(storage, "worktrees", "key", "pr-482-headsha");
     let fetched = false;
     const runner = scripted([
       [/^git cat-file -e headsha\^\{commit\}/, () => (fetched ? ok("") : { code: 1, stdout: "", stderr: "" })],
       [/^git cat-file -e basesha\^\{commit\}/, ok("")],
-      [/^git --no-pager fetch --no-tags origin pull\/482\/head/, () => ((fetched = true), ok(""))],
+      [/^git --no-pager fetch --no-tags --refmap= -- origin refs\/pull\/482\/head$/, () => ((fetched = true), ok(""))],
       [/^git --no-pager merge-base basesha headsha/, ok("mergebase\n")],
-      [/^git --no-pager worktree prune/, ok("")],
-      [new RegExp(`^git --no-pager worktree add --detach ${wtPath.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")} headsha`), ok("")],
+      [new RegExp(`^git --no-pager worktree add --force --detach -- ${wtPath.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")} headsha$`), ok("")],
       [/^git --no-pager -c core.quotePath=false diff --no-ext-diff --no-color --src-prefix=a\/ --dst-prefix=b\/ mergebase headsha/, ok("diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1,2 +1,3 @@\n a\n+b\n c\n")],
     ], calls);
     const repo = { root: "/repo", repoKey: "key" } as Parameters<typeof preparePullRequestWorktree>[1];
@@ -163,7 +162,10 @@ describe("pull request sources", () => {
     expect(wt).toMatchObject({ path: wtPath, headSha: "headsha", mergeBase: "mergebase" });
     expect(wt.files).toEqual([{ path: "x.ts", status: "modified", additions: 1, deletions: 0, hunks: [{ start: 1, end: 3 }] }]);
     expect(steps).toEqual(["Fetching PR #482", "Creating a worktree at the PR head"]);
-    // Nothing touches the user's own checkout: no checkout, reset, or branch in the repo itself.
+    // Nothing touches the user's own checkout: no checkout, reset, or branch in the repo itself,
+    // no `worktree prune` of their worktrees, and no fetch that could move one of their refs.
     expect(calls.some((c) => / (checkout|reset|switch|branch) /.test(c))).toBe(false);
+    expect(calls.some((c) => /worktree prune/.test(c))).toBe(false);
+    expect(calls.filter((c) => / fetch /.test(c)).every((c) => c.includes("--refmap= --"))).toBe(true);
   });
 });

@@ -5,8 +5,8 @@
  * both get real files, and the user's own checkout is never touched).
  */
 
-import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { RepoInfo } from "./git";
 import { changedFilesFromPatch, commitExists, type ChangedFileInfo } from "./git";
 import type { Runner } from "./runner";
@@ -176,14 +176,90 @@ export interface PullRequestWorktree {
   files: ChangedFileInfo[];
 }
 
-/** Where a PR's worktree lives under the extension's storage. One per PR, reused. */
-export function pullRequestWorktreePath(storageDir: string, repoKey: string, number: number): string {
-  return join(storageDir, "worktrees", repoKey, `pr-${number}`);
+/** Where the extension keeps its PR worktrees. Nothing outside it is ever removed. */
+export function worktreesRoot(storageDir: string): string {
+  return join(storageDir, "worktrees");
 }
 
 /**
- * Fetch a PR's head and base and check the head out in a detached worktree.
- * Reuses the PR's worktree when it exists (moving it to the new head).
+ * Where a PR's worktree lives under the extension's storage: one per PR head,
+ * named by it, so a worktree is never moved under a live run or another saved
+ * guide that reads the same head.
+ */
+export function pullRequestWorktreePath(storageDir: string, repoKey: string, number: number, headSha: string): string {
+  return join(worktreesRoot(storageDir), repoKey, `pr-${number}-${headSha.slice(0, 7)}`);
+}
+
+/** A branch name safe to put in a refspec. */
+const SAFE_REF = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/;
+
+type Git = (args: string[], cwd?: string, timeoutMs?: number) => ReturnType<Runner>;
+
+function gitIn(runner: Runner, repoRoot: string): Git {
+  return (args, cwd = repoRoot, timeoutMs = 120_000) => runner("git", ["--no-pager", ...args], { cwd, timeoutMs, env: { GIT_TERMINAL_PROMPT: "0" } });
+}
+
+/**
+ * Bring a PR's head commit into the repository's objects. `--refmap=` keeps
+ * every configured fetch refspec out of it, so no ref of the user's moves
+ * (only FETCH_HEAD is written, as for any fetch).
+ */
+export async function fetchPullRequestHead(runner: Runner, repoRoot: string, number: number, headSha: string): Promise<{ ok: boolean; stderr: string }> {
+  if (await commitExists(runner, repoRoot, headSha)) return { ok: true, stderr: "" };
+  const f = await gitIn(runner, repoRoot)(["fetch", "--no-tags", "--refmap=", "--", "origin", `refs/pull/${number}/head`]);
+  return { ok: f.code === 0 && (await commitExists(runner, repoRoot, headSha)), stderr: f.stderr.trim() };
+}
+
+/**
+ * The PR's base commit, fetched without moving the user's `origin/<base>`:
+ * by its sha first, else the branch into a private ref that is deleted again
+ * once read (the merge base stays reachable from the PR head).
+ */
+async function fetchBase(runner: Runner, repoRoot: string, pr: PullRequestDetail): Promise<string | null> {
+  const g = gitIn(runner, repoRoot);
+  if (pr.baseRefOid && (await commitExists(runner, repoRoot, pr.baseRefOid))) return pr.baseRefOid;
+  if (pr.baseRefOid) {
+    await g(["fetch", "--no-tags", "--refmap=", "--", "origin", pr.baseRefOid]);
+    if (await commitExists(runner, repoRoot, pr.baseRefOid)) return pr.baseRefOid;
+  }
+  if (!SAFE_REF.test(pr.baseRefName)) return null;
+  const privateRef = `refs/plannotator/guides/pr-${pr.number}-base`;
+  const f = await g(["fetch", "--no-tags", "--refmap=", "--", "origin", `+refs/heads/${pr.baseRefName}:${privateRef}`]);
+  if (f.code !== 0) return null;
+  const sha = (await g(["rev-parse", "--verify", "--quiet", `${privateRef}^{commit}`])).stdout.trim();
+  await g(["update-ref", "-d", privateRef]);
+  return sha || null;
+}
+
+/**
+ * A detached worktree at `sha` in `path` (under the extension's storage).
+ * Reuses it when it is there; never runs `git worktree prune` on the user's
+ * repository (`--force` re-adds a path git still lists as missing).
+ */
+export async function ensureWorktreeAt(runner: Runner, repoRoot: string, path: string, sha: string, storageDir: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!isInside(worktreesRoot(storageDir), path)) return { ok: false, error: `Refusing a worktree outside the extension's storage: ${path}` };
+  const g = gitIn(runner, repoRoot);
+  if (existsSync(join(path, ".git"))) {
+    const at = (await g(["rev-parse", "HEAD"], path, 30_000)).stdout.trim();
+    if (at === sha) return { ok: true };
+    // The path is named by its head: put it back there.
+    const co = await g(["checkout", "--detach", "--force", sha], path);
+    return co.code === 0 ? { ok: true } : { ok: false, error: co.stderr.trim() };
+  }
+  if (existsSync(path)) rmSync(path, { recursive: true, force: true });
+  mkdirSync(dirname(path), { recursive: true });
+  const add = await g(["worktree", "add", "--force", "--detach", "--", path, sha]);
+  return add.code === 0 ? { ok: true } : { ok: false, error: add.stderr.trim() };
+}
+
+function isInside(root: string, path: string): boolean {
+  const rel = relative(resolve(root), resolve(path));
+  return !!rel && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/**
+ * Fetch a PR's head and base and check the head out in a detached worktree
+ * of its own (`pr-<n>-<sha7>`), reused when it exists.
  */
 export async function preparePullRequestWorktree(
   runner: Runner,
@@ -192,43 +268,32 @@ export async function preparePullRequestWorktree(
   storageDir: string,
   onStep: (step: string) => void = () => {},
 ): Promise<PullRequestWorktree> {
-  const g = (args: string[], cwd = repo.root, timeoutMs = 120_000) => runner("git", ["--no-pager", ...args], { cwd, timeoutMs, env: { GIT_TERMINAL_PROMPT: "0" } });
+  const g = gitIn(runner, repo.root);
   if (!pr.headRefOid) throw new Error(`PR #${pr.number} has no head commit.`);
   if (!(await commitExists(runner, repo.root, pr.headRefOid))) {
     onStep(`Fetching PR #${pr.number}`);
-    const f = await g(["fetch", "--no-tags", "origin", `pull/${pr.number}/head`]);
-    if (f.code !== 0 || !(await commitExists(runner, repo.root, pr.headRefOid))) {
-      throw new Error(`Could not fetch PR #${pr.number} from origin: ${f.stderr.trim() || "the head commit is missing"}`);
-    }
+    const f = await fetchPullRequestHead(runner, repo.root, pr.number, pr.headRefOid);
+    if (!f.ok) throw new Error(`Could not fetch PR #${pr.number} from origin: ${f.stderr || "the head commit is missing"}`);
   }
-  if (pr.baseRefOid && !(await commitExists(runner, repo.root, pr.baseRefOid))) {
-    onStep(`Fetching ${pr.baseRefName}`);
-    await g(["fetch", "--no-tags", "origin", pr.baseRefName]);
-  }
-  const baseRev = pr.baseRefOid && (await commitExists(runner, repo.root, pr.baseRefOid)) ? pr.baseRefOid : `origin/${pr.baseRefName}`;
+  if (pr.baseRefOid && !(await commitExists(runner, repo.root, pr.baseRefOid))) onStep(`Fetching ${pr.baseRefName}`);
+  const baseRev = await fetchBase(runner, repo.root, pr);
+  if (!baseRev) throw new Error(`Could not fetch ${pr.baseRefName}, the branch PR #${pr.number} merges into.`);
   const mb = await g(["merge-base", baseRev, pr.headRefOid], repo.root, 30_000);
   if (mb.code !== 0 || !mb.stdout.trim()) throw new Error(`Could not find where PR #${pr.number} branches off ${pr.baseRefName}.`);
   const mergeBase = mb.stdout.trim();
 
-  const path = pullRequestWorktreePath(storageDir, repo.repoKey, pr.number);
-  if (existsSync(join(path, ".git"))) {
-    onStep("Updating the PR worktree");
-    const co = await g(["checkout", "--detach", "--force", pr.headRefOid], path);
-    if (co.code !== 0) throw new Error(`Could not move the PR worktree to ${pr.headRefOid.slice(0, 7)}: ${co.stderr.trim()}`);
-  } else {
-    onStep("Creating a worktree at the PR head");
-    mkdirSync(dirname(path), { recursive: true });
-    await g(["worktree", "prune"]);
-    const add = await g(["worktree", "add", "--detach", path, pr.headRefOid]);
-    if (add.code !== 0) throw new Error(`Could not create a worktree for PR #${pr.number}: ${add.stderr.trim()}`);
-  }
+  const path = pullRequestWorktreePath(storageDir, repo.repoKey, pr.number, pr.headRefOid);
+  onStep(existsSync(join(path, ".git")) ? "Using the PR worktree" : "Creating a worktree at the PR head");
+  const wt = await ensureWorktreeAt(runner, repo.root, path, pr.headRefOid, storageDir);
+  if (!wt.ok) throw new Error(`Could not create a worktree for PR #${pr.number}: ${wt.error}`);
   const diff = await runner("git", ["--no-pager", "-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", mergeBase, pr.headRefOid], { cwd: path, timeoutMs: 120_000 });
   if (diff.code !== 0) throw new Error(`Could not diff PR #${pr.number}: ${diff.stderr.trim()}`);
   return { path, headSha: pr.headRefOid, mergeBase, rawPatch: diff.stdout, files: changedFilesFromPatch(diff.stdout) };
 }
 
-/** Remove a PR worktree (when its guide is deleted). */
-export async function removePullRequestWorktree(runner: Runner, repoRoot: string, path: string): Promise<void> {
-  if (!existsSync(path)) return;
-  await runner("git", ["worktree", "remove", "--force", path], { cwd: repoRoot, timeoutMs: 60_000 });
+/** Remove one of the extension's PR worktrees (only ever a path under its storage). */
+export async function removePullRequestWorktree(runner: Runner, repoRoot: string, path: string, storageDir: string): Promise<boolean> {
+  if (!isInside(worktreesRoot(storageDir), path) || !existsSync(path)) return false;
+  const r = await gitIn(runner, repoRoot)(["worktree", "remove", "--force", "--", path], repoRoot, 60_000);
+  return r.code === 0;
 }

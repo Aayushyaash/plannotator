@@ -9,7 +9,7 @@ import { join } from "node:path";
 import type { GuideOverview } from "@plannotator/core/guide";
 import type { GuideFocusRange } from "./core/adapter";
 import { changedFilesFromPatch, commitExists, type ChangedFileInfo } from "./sources/git";
-import { pullRequestWorktreePath } from "./sources/github";
+import { ensureWorktreeAt, fetchPullRequestHead, pullRequestWorktreePath } from "./sources/github";
 import type { Runner } from "./sources/runner";
 import type { LoadedGuide, ReviewSourceRecord } from "./store";
 
@@ -134,6 +134,20 @@ export class ReaderModel {
 }
 
 /**
+ * The PR worktree a guide reads its head from (`pr-<n>-<sha7>` under the
+ * extension's storage), or null for a guide of local changes. Guides made in
+ * the web app have no sidecar; the envelope names the PR and its head.
+ */
+export function guideWorktreePath(loaded: LoadedGuide, storageDir: string): string | null {
+  const env = loaded.envelope;
+  const kind = loaded.sidecar.source?.kind ?? env.review?.source.kind;
+  const prNumber = loaded.sidecar.source?.pr?.number ?? env.review?.source.pr?.number;
+  const headSha = loaded.sidecar.source?.headSha ?? env.headSha ?? env.review?.source.headSha;
+  if (kind !== "pr" || prNumber === undefined || !headSha) return null;
+  return pullRequestWorktreePath(storageDir, loaded.repoKey, prNumber, headSha);
+}
+
+/**
  * Work out both sides of the guide's diffs. A guide made in VS Code knows its
  * source (sidecar); a guide made in the web app is read from its envelope.
  * A PR's head is a worktree under the extension's storage, created again at
@@ -155,21 +169,15 @@ export async function resolveReaderSides(
 
   if (kind === "pr" && prNumber !== undefined) {
     if (!headSha) return { error: "This guide does not record the PR's head commit." };
-    const path = sidecar?.worktreePath ?? pullRequestWorktreePath(options.storageDir, loaded.repoKey, prNumber);
+    const path = pullRequestWorktreePath(options.storageDir, loaded.repoKey, prNumber, headSha);
     if (!(await commitExists(runner, repoRoot, headSha))) {
       options.onStep?.(`Fetching PR #${prNumber}`);
-      await g(["fetch", "--no-tags", "origin", `pull/${prNumber}/head`], repoRoot);
-      if (!(await commitExists(runner, repoRoot, headSha))) return { error: `The guide's head commit ${headSha.slice(0, 7)} is not on GitHub any more (the PR was force-pushed).` };
+      const f = await fetchPullRequestHead(runner, repoRoot, prNumber, headSha);
+      if (!f.ok) return { error: `The guide's head commit ${headSha.slice(0, 7)} is not on GitHub any more (the PR was force-pushed).` };
     }
-    if (!existsSync(join(path, ".git"))) {
-      options.onStep?.("Creating a worktree at the guide's head");
-      await g(["worktree", "prune"], repoRoot);
-      const add = await g(["worktree", "add", "--detach", path, headSha], repoRoot);
-      if (add.code !== 0) return { error: `Could not create a worktree for PR #${prNumber}: ${add.stderr.trim()}` };
-    } else {
-      const at = (await g(["rev-parse", "HEAD"], path)).stdout.trim();
-      if (at !== headSha) await g(["checkout", "--detach", "--force", headSha], path);
-    }
+    if (!existsSync(join(path, ".git"))) options.onStep?.("Creating a worktree at the guide's head");
+    const wt = await ensureWorktreeAt(runner, repoRoot, path, headSha, options.storageDir);
+    if (!wt.ok) return { error: `Could not create a worktree for PR #${prNumber}: ${wt.error}` };
     const baseRev = sidecar?.baseSha ?? (await mergeBaseFor(runner, repoRoot, env.review?.base, headSha));
     if (!baseRev) return { error: "Could not find the commit this PR branches off." };
     return { gitRoot: path, baseRev, head: { kind: "fs", root: path }, moved: false };
