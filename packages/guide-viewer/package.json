@@ -12,6 +12,7 @@
     "./host": "./host.tsx",
     "./GuideView": "./GuideView.tsx",
     "./GuideSectionCard": "./GuideSectionCard.tsx",
+    "./GuideOverview": "./GuideOverview.tsx",
     "./GuideFileCard": "./GuideFileCard.tsx",
     "./GuideViewportManager": "./GuideViewportManager.tsx",
     "./GuideSkeleton": "./GuideSkeleton.tsx",

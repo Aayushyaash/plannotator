@@ -5,6 +5,7 @@ import { fileKind, groupByFileKind, type FileKind } from '@plannotator/core/file
 import type { DiffFile } from './types';
 import { FILE_KIND_LABELS, FileKindIcon } from './FileKindIcon';
 import { renderMarkdownProse } from './renderMarkdownProse';
+import type { GuideLinkRenderer } from './renderInlineMarkdown';
 import { useGuideHost } from './host';
 import { GuideFileCard } from './GuideFileCard';
 
@@ -88,6 +89,8 @@ interface GuideSectionCardProps {
   revealTarget: { filePath: string; token: number } | null;
   onActivate: (filePath: string) => void;
   onRequestReveal: (filePath: string) => void;
+  /** Renders guide links (`chapter:`, `code:`) in the chapter overview. */
+  renderLink?: GuideLinkRenderer;
 }
 
 /**
@@ -108,6 +111,7 @@ export const GuideSectionCard: React.FC<GuideSectionCardProps> = ({
   revealTarget,
   onActivate,
   onRequestReveal,
+  renderLink,
 }) => {
   const [collapsedOverride, setCollapsedOverride] = useState<boolean | null>(null);
   const host = useGuideHost();
@@ -158,7 +162,7 @@ export const GuideSectionCard: React.FC<GuideSectionCardProps> = ({
 
   if (isCollapsed) {
     return (
-      <div ref={cardRef} className="flex w-full items-center gap-3 rounded-lg border border-border/50 bg-muted/10 px-4 py-3">
+      <div ref={cardRef} data-guide-section={index} className="flex w-full items-center gap-3 rounded-lg border border-border/50 bg-muted/10 px-4 py-3">
         {showReviewed && (
           <button
             type="button"
@@ -188,7 +192,7 @@ export const GuideSectionCard: React.FC<GuideSectionCardProps> = ({
   }
 
   return (
-    <div ref={cardRef} className="scroll-mt-4 overflow-clip rounded-lg border border-border/50 bg-card">
+    <div ref={cardRef} data-guide-section={index} className="scroll-mt-4 overflow-clip rounded-lg border border-border/50 bg-card">
       {/* Stacked below md; a proportional chapter column on tablets; the fixed 440px column from lg up (desktop unchanged). */}
       <div className="md:grid md:grid-cols-[minmax(260px,36%)_minmax(0,1fr)] lg:grid-cols-[440px_minmax(0,1fr)]">
         <div className="border-b border-border/40 md:border-b-0 md:border-r">
@@ -225,7 +229,7 @@ export const GuideSectionCard: React.FC<GuideSectionCardProps> = ({
             )}
 
             {section.overview && (
-              <div className="mt-3.5 space-y-2.5 md:flex-none">{renderMarkdownProse(section.overview, { tone: 'muted' })}</div>
+              <div className="mt-3.5 space-y-2.5 md:flex-none">{renderMarkdownProse(section.overview, { tone: 'muted', renderLink })}</div>
             )}
 
             {section.diffs.length > 0 && (

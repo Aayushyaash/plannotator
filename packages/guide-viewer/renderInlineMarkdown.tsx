@@ -1,10 +1,22 @@
 import React from 'react';
 
 /**
- * Renders simple inline markdown: `code`, **bold**, *italic*, _italic_, and
- * fenced code blocks (```...```). Enough for review comments.
+ * Renders a guide link (`[label](code:…)`, `symbol:…`, `chapter:…`). Hosts that
+ * can act on the link return a control; `null` falls back to the label as
+ * plain text, which is also what happens when no renderer is given.
  */
-export function renderInlineMarkdown(text: string): React.ReactNode[] {
+export type GuideLinkRenderer = (href: string, label: React.ReactNode, key: number) => React.ReactNode | null;
+
+export interface InlineMarkdownOptions {
+  renderLink?: GuideLinkRenderer;
+}
+
+/**
+ * Renders simple inline markdown: `code`, **bold**, *italic*, _italic_, and
+ * fenced code blocks (```...```). Enough for review comments. Guide links
+ * (`code:`, `symbol:`, `chapter:`) go through `opts.renderLink`.
+ */
+export function renderInlineMarkdown(text: string, opts?: InlineMarkdownOptions): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
   let key = 0;
 
@@ -24,7 +36,7 @@ export function renderInlineMarkdown(text: string): React.ReactNode[] {
       );
     } else {
       // Process inline markdown
-      nodes.push(...renderInline(part, key));
+      nodes.push(...renderInline(part, key, opts));
       key++;
     }
   }
@@ -32,12 +44,13 @@ export function renderInlineMarkdown(text: string): React.ReactNode[] {
   return nodes;
 }
 
-function renderInline(text: string, startKey: number): React.ReactNode[] {
+function renderInline(text: string, startKey: number, opts?: InlineMarkdownOptions): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
   let key = startKey;
 
   // Match inline patterns: [text](url), `code`, **bold**, *italic*, _italic_, bare URLs
-  const regex = /(\[([^\]]+)\]\((https?:\/\/[^)]+)\)|`[^`]+`|\*\*[^*]+\*\*|(?<!\w)_([^_\s](?:[\s\S]*?[^_\s])?)_(?!\w)|\*[^*]+\*|https?:\/\/[^\s<)\]]+)/g;
+  // The last alternative is a guide link: [label](code:…|symbol:…|chapter:…).
+  const regex = /(\[([^\]]+)\]\((https?:\/\/[^)]+)\)|`[^`]+`|\*\*[^*]+\*\*|(?<!\w)_([^_\s](?:[\s\S]*?[^_\s])?)_(?!\w)|\*[^*]+\*|https?:\/\/[^\s<)\]]+|\[([^\]]+)\]\(((?:code|symbol|chapter):[^)\s]*)\))/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -53,7 +66,12 @@ function renderInline(text: string, startKey: number): React.ReactNode[] {
     }
 
     const token = match[0];
-    if (match[1] && match[2] && match[3]) {
+    if (match[5] !== undefined && match[6] !== undefined) {
+      const label = renderInline(match[5], 0);
+      const rendered = opts?.renderLink?.(match[6], label, key);
+      nodes.push(rendered ?? <span key={key} data-guide-link={match[6]}>{label}</span>);
+      key++;
+    } else if (match[1] && match[2] && match[3]) {
       if (isImage) {
         // Markdown image: ![alt](url). Broken sources hide themselves.
         nodes.push(
