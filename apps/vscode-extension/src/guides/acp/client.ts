@@ -1,9 +1,11 @@
 /**
  * The extension as an ACP v1 client (SPEC 4.1). It starts the agent as a
  * child process over stdio, with the user's own environment, and adds no
- * tools of its own beyond the builder's MCP server: no `fs/*`, no
- * `terminal/*` (not advertised, and refused when an agent calls them anyway;
- * the agent reads with its own tools). It advertises terminal
+ * tools of its own beyond the builder's MCP server: every listed agent reads,
+ * searches and runs commands with its own tools, so `fs/*` and `terminal/*`
+ * are not advertised. An agent that calls `fs/read_text_file` anyway is
+ * served (reading never needs to fail); write and terminal methods, which
+ * were not advertised, answer "method not found". It advertises terminal
  * sign-in (`auth.terminal`), so the agent lists its own login commands for
  * the "Sign in" button. Permission requests go to
  * a callback that shows the agent's own options; this module never answers
@@ -12,6 +14,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import { Readable, Writable } from "node:stream";
 import {
   ClientSideConnection,
@@ -60,9 +64,9 @@ const STDERR_TAIL = 8 * 1024;
 const KILL_GRACE_MS = 3000;
 
 /**
- * What the client offers the agent: no file system and no terminal (the agent
- * reads with its own tools, and Guides never lets it write or run commands
- * through the client), only terminal sign-in so it can list its login commands.
+ * What the client offers the agent: terminal sign-in, so it can list its login
+ * commands. No file system or terminal: the agents Guides starts all bring
+ * their own, and an agent that does not see these uses its own tools.
  */
 export const CLIENT_CAPABILITIES = {
   fs: { readTextFile: false, writeTextFile: false },
@@ -70,8 +74,19 @@ export const CLIENT_CAPABILITIES = {
   auth: { terminal: true },
 } as const;
 
-function refuse(method: string): never {
-  throw RequestError.methodNotFound(`${method} (Guides offers no file system or terminal: guided reviews are read-only)`);
+function notOffered(method: string): never {
+  throw RequestError.methodNotFound(`${method} (not offered by this client: the agent's own tools do this)`);
+}
+
+/** `fs/read_text_file`: the file's text, from `line` (1-based) for `limit` lines when given. */
+export async function readTextFileForAgent(params: { path: string; line?: number | null; limit?: number | null }): Promise<{ content: string }> {
+  if (!isAbsolute(params.path)) throw RequestError.invalidParams(undefined, "path must be absolute");
+  const text = await readFile(params.path, "utf8");
+  if (params.line == null && params.limit == null) return { content: text };
+  const lines = text.split("\n");
+  const start = Math.max(0, (params.line ?? 1) - 1);
+  const end = params.limit == null ? lines.length : start + Math.max(0, params.limit);
+  return { content: lines.slice(start, end).join("\n") };
 }
 
 /** The ACP JSON-RPC error code for "authentication required". */
@@ -138,15 +153,16 @@ export class AcpClient {
       sessionUpdate: async (params) => {
         this.handlers.onUpdate(params);
       },
-      // Not advertised (see `CLIENT_CAPABILITIES`), and refused if asked anyway:
-      // left out, the SDK would answer `fs/write_text_file` with an empty success.
-      writeTextFile: async () => refuse("fs/write_text_file"),
-      readTextFile: async () => refuse("fs/read_text_file"),
-      createTerminal: async () => refuse("terminal/create"),
-      terminalOutput: async () => refuse("terminal/output"),
-      releaseTerminal: async () => refuse("terminal/release"),
-      waitForTerminalExit: async () => refuse("terminal/wait_for_exit"),
-      killTerminal: async () => refuse("terminal/kill"),
+      // Reading is served even though it is not advertised. Writing and terminals
+      // were not advertised; left out, the SDK would answer `fs/write_text_file`
+      // with an empty success that wrote nothing, so they say so instead.
+      readTextFile: (params) => readTextFileForAgent(params),
+      writeTextFile: async () => notOffered("fs/write_text_file"),
+      createTerminal: async () => notOffered("terminal/create"),
+      terminalOutput: async () => notOffered("terminal/output"),
+      releaseTerminal: async () => notOffered("terminal/release"),
+      waitForTerminalExit: async () => notOffered("terminal/wait_for_exit"),
+      killTerminal: async () => notOffered("terminal/kill"),
     };
     this.connection = new ClientSideConnection((_agent: Agent) => client, stream);
     child.stderr?.setEncoding("utf8");

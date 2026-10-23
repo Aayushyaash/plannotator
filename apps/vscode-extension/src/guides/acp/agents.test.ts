@@ -9,9 +9,7 @@ import {
   KNOWN_AGENTS,
   OPENCODE,
   PI,
-  claudePrSettingsRisk,
   customAgent,
-  openCodeConfig,
   detectAgents,
   engineLabel,
   findAgent,
@@ -19,7 +17,6 @@ import {
   pickDefault,
   readAgentOptions,
   resolveAgentLaunch,
-  sessionMetaFor,
   type AgentDescriptor,
 } from "./agents";
 import { planSpawn, shimEntry } from "./spawn-plan";
@@ -74,23 +71,7 @@ describe("starting the adapter on Windows", () => {
   });
 });
 
-describe("agent session policy", () => {
-  it("loads only the user's Claude Code settings, no project MCP config and no bypass for a pull request", () => {
-    const allowed = ["Read", "Grep", "Glob", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"];
-    const denied = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell", "BashOutput", "KillShell", "KillBash", "Monitor", "TaskStop"];
-    expect(sessionMetaFor(CLAUDE_CODE, { kind: "pr" })).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false, tools: allowed, disallowedTools: [...denied, "WebFetch", "WebSearch"] } } });
-    expect(sessionMetaFor(CLAUDE_CODE, { kind: "local" })).toEqual({ claudeCode: { options: { strictMcpConfig: true, tools: allowed, disallowedTools: denied } } });
-    // The allowlist holds no tool that writes, runs a command or reaches the network, and both shells are denied.
-    for (const run of ["local", "pr"] as const) {
-      const opts = (sessionMetaFor(CLAUDE_CODE, { kind: run }) as { claudeCode: { options: { tools: string[]; disallowedTools: string[] } } }).claudeCode.options;
-      for (const t of ["Bash", "PowerShell", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task", "Monitor", "TaskStop", "Skill"]) expect(opts.tools).not.toContain(t);
-      for (const t of ["Bash", "PowerShell", "Monitor", "TaskStop", "KillShell"]) expect(opts.disallowedTools).toContain(t);
-    }
-    expect(CLAUDE_CODE.readOnly.mode?.ids).toEqual(["default", "plan"]);
-    // Only Claude Code reads _meta.claudeCode.
-    for (const a of KNOWN_AGENTS.filter((x) => x !== CLAUDE_CODE)) expect(sessionMetaFor(a, { kind: "pr" })).toBeUndefined();
-  });
-
+describe("agent sign-in", () => {
   it("reads the terminal sign-ins the agent offers", () => {
     expect(loginCommands([
       { id: "claude-ai-login", name: "Claude Subscription", description: "Use Claude subscription", type: "terminal", args: ["--cli", "auth", "login", "--claudeai"] },
@@ -101,19 +82,16 @@ describe("agent session policy", () => {
   });
 });
 
-const FOUND = (names: string[]) => (name: string) => (names.includes(name) || name.startsWith("/") ? (name.startsWith("/") ? name : `/bin/${name}`) : null);
+const FOUND = (names: string[]) => (name: string) => (name.startsWith("/") ? name : names.includes(name) ? `/bin/${name}` : null);
 
 describe("the agent registry", () => {
-  it("lists exactly the supported agents, each with an install command and an https source", () => {
+  it("lists the supported agents, each with an install command and an https source, and never npx", () => {
     expect(KNOWN_AGENTS.map((a) => a.id)).toEqual(["claude-code", "codex", "opencode", "copilot", "cursor", "kiro", "kilo", "pi"]);
     for (const a of KNOWN_AGENTS) {
       expect(a.installCommand.length).toBeGreaterThan(0);
       expect(a.docsUrl).toStartWith("https://");
-      expect(a.readOnly.summary.length).toBeGreaterThan(0);
-      // Never an npx download: only programs the user installed.
       expect([a.command, ...a.args].join(" ")).not.toContain("npx");
     }
-    expect(new Set(KNOWN_AGENTS.map((a) => a.id)).size).toBe(KNOWN_AGENTS.length);
     expect(new Set(KNOWN_AGENTS.map((a) => a.engine)).size).toBe(KNOWN_AGENTS.length);
   });
 
@@ -131,94 +109,40 @@ describe("the agent registry", () => {
     expect(launch(PI)).toBe("pi-acp");
   });
 
-  it("says which agents enforce read-only themselves, and which only through the permission policy", () => {
-    const layers = Object.fromEntries(KNOWN_AGENTS.map((a) => [a.id, a.readOnly.layer]));
-    expect(layers).toEqual({ "claude-code": "agent", codex: "agent", opencode: "agent", copilot: "permissions", cursor: "agent", kiro: "permissions", kilo: "agent", pi: "permissions" });
-    expect(CODEX.readOnly.mode?.ids).toEqual(["read-only"]);
-    expect(OPENCODE.readOnly.mode?.ids).toEqual(["plannotator-guide-review"]);
-    expect(CURSOR.readOnly.mode?.ids).toEqual(["ask", "plan"]);
-    expect(KILO.readOnly.mode?.ids).toEqual(["ask"]);
-    expect(JSON.parse(KILO.readOnly.env!.KILO_CONFIG_CONTENT)).toEqual({ permission: { webfetch: "deny", websearch: "deny" } });
-  });
-
-  it("takes pull requests only for Claude Code and OpenCode (fails closed for the rest)", () => {
-    const prs = KNOWN_AGENTS.filter((a) => !a.refusePullRequests && !a.unsupported).map((a) => a.id);
-    expect(prs).toEqual(["claude-code", "opencode"]);
-    expect(customAgent({ command: "/opt/x" })?.refusePullRequests).toBeTruthy();
-    expect(KILO.refusePullRequests).toContain("mcp.json");
-  });
-
-  it("gives OpenCode its own read-only agent, '*' first so every later rule is an exception", () => {
-    for (const run of ["local", "pr"] as const) {
-      const cfg = JSON.parse(openCodeConfig(run));
-      expect(cfg.lsp).toBe(false);
-      expect(Object.keys(cfg)).toEqual(["lsp", "agent"]);
-      const agent = cfg.agent["plannotator-guide-review"];
-      expect(agent.mode).toBe("primary");
-      expect(Object.keys(agent.permission)[0]).toBe("*");
-      expect(agent.permission["*"]).toBe("ask");
-      for (const k of ["grep", "glob", "list", "todowrite", "plannotator-guide_*"]) expect(agent.permission[k]).toBe("allow");
-      expect(agent.permission.read["*"]).toBe("allow");
-      expect(agent.permission.read["*.env"]).toBe("ask");
-      for (const k of ["edit", "bash", "task", "lsp", "question", "websearch", "codesearch"]) expect(agent.permission[k]).toBe("deny");
-      expect(agent.permission.external_directory).toBe("ask");
-      expect(agent.permission.webfetch).toBe(run === "pr" ? "deny" : "ask");
+  it("carries nothing that changes the user's agent config: no extra arguments, environment or session _meta", () => {
+    for (const a of KNOWN_AGENTS) {
+      const r = resolveAgentLaunch(a, {}, FOUND([a.command]));
+      expect(r).toEqual({ ok: true, command: `/bin/${a.command}`, args: [...a.args], source: "path" });
+      expect(Object.keys(a).sort()).not.toContain("readOnly");
     }
-    expect(OPENCODE.readOnly.env?.OPENCODE_CONFIG_CONTENT).toBe(openCodeConfig("local"));
-    expect(OPENCODE.readOnly.prEnv?.OPENCODE_CONFIG_CONTENT).toBe(openCodeConfig("pr"));
   });
 
-  it("refuses a Claude Code pull request whose own settings would start a program, and fails closed on an unreadable file", () => {
-    const files = (map: Record<string, string>) => (path: string) => {
-      const name = Object.keys(map).find((k) => path.endsWith(k));
-      if (name === undefined) throw Object.assign(new Error("no"), { code: "ENOENT" });
-      return map[name];
-    };
-    expect(claudePrSettingsRisk("/r", files({}))).toBeNull();
-    expect(claudePrSettingsRisk("/r", files({ "settings.json": JSON.stringify({ permissions: { allow: ["Bash(*)"] }, hooks: {} }) }))).toBeNull();
-    for (const key of ["apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh", "otelHeadersHelper", "env"]) {
-      expect(claudePrSettingsRisk("/r", files({ "settings.local.json": JSON.stringify({ [key]: "x" }) }))).toContain(`.claude/settings.local.json sets ${key}`);
-    }
-    expect(claudePrSettingsRisk("/r", files({ "settings.json": "{ // jsonc\n }" }))).toContain("is not plain JSON");
-    expect(claudePrSettingsRisk("/r", () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); })).toContain("could not be read");
+  it("uses an agent's own permissive mode only for automatic approval: Claude Code acceptEdits, Codex agent", () => {
+    expect(CLAUDE_CODE.permissiveModes).toEqual(["acceptEdits"]);
+    expect(CODEX.permissiveModes).toEqual(["agent"]);
   });
 
-  it("refuses Codex for pull requests, and never starts Pi", () => {
-    expect(CODEX.refusePullRequests).toContain(".codex/");
-    expect(PI.unsupported).toContain("MCP");
-    const r = resolveAgentLaunch(PI, {}, "local", FOUND(["pi-acp"]));
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.message).toStartWith("Pi: pi-acp does not pass MCP servers");
+  it("starts Pi like any other agent, with its capability gap as a note", () => {
+    expect(resolveAgentLaunch(PI, {}, FOUND(["pi-acp"]))).toEqual({ ok: true, command: "/bin/pi-acp", args: [], source: "path" });
+    expect(PI.note).toContain("Can't write guides yet");
+    expect(PI.note).toContain("MCP");
   });
 });
 
 describe("starting an agent", () => {
-  it("finds the program on PATH and adds the read-only arguments and environment", () => {
-    expect(resolveAgentLaunch(CODEX, {}, "local", FOUND(["codex-acp"]))).toEqual({ ok: true, command: "/bin/codex-acp", args: [], env: { INITIAL_AGENT_MODE: "read-only" }, source: "path" });
-    expect(resolveAgentLaunch(CLAUDE_CODE, {}, "local", FOUND(["claude-agent-acp"]))).toEqual({ ok: true, command: "/bin/claude-agent-acp", args: [], source: "path" });
-  });
-
-  it("adds the pull-request environment only to a pull request run", () => {
-    const local = resolveAgentLaunch(OPENCODE, {}, "local", FOUND(["opencode"]));
-    const pr = resolveAgentLaunch(OPENCODE, {}, "pr", FOUND(["opencode"]));
-    expect(local.ok && local.env).toEqual({ OPENCODE_CONFIG_CONTENT: openCodeConfig("local") });
-    expect(pr.ok && pr.env).toEqual({ OPENCODE_CONFIG_CONTENT: openCodeConfig("pr"), OPENCODE_DISABLE_PROJECT_CONFIG: "1", OPENCODE_DISABLE_CLAUDE_CODE: "1" });
-  });
-
   it("tries the program's other names", () => {
-    expect(resolveAgentLaunch(CURSOR, {}, "local", FOUND(["agent"]))).toMatchObject({ ok: true, command: "/bin/agent", args: ["acp"] });
-    expect(resolveAgentLaunch(KILO, {}, "local", FOUND(["kilocode"]))).toMatchObject({ ok: true, command: "/bin/kilocode", args: ["acp"] });
+    expect(resolveAgentLaunch(CURSOR, {}, FOUND(["agent"]))).toEqual({ ok: true, command: "/bin/agent", args: ["acp"], source: "path" });
+    expect(resolveAgentLaunch(KILO, {}, FOUND(["kilocode"]))).toEqual({ ok: true, command: "/bin/kilocode", args: ["acp"], source: "path" });
   });
 
   it("says how to install a missing agent", () => {
-    const r = resolveAgentLaunch(OPENCODE, {}, "local", FOUND([]));
-    expect(r).toEqual({ ok: false, message: "OpenCode is not installed: `opencode` is not on PATH. Install it with `curl -fsSL https://opencode.ai/install | bash`, then try again." });
+    expect(resolveAgentLaunch(OPENCODE, {}, FOUND([]))).toEqual({ ok: false, message: "OpenCode is not installed: `opencode` is not on PATH. Install it with `curl -fsSL https://opencode.ai/install | bash`, then try again." });
   });
 
-  it("uses a command override with its own args, or the agent's, and keeps the read-only additions", () => {
-    expect(resolveAgentLaunch(OPENCODE, { command: "/opt/oc" }, "local", FOUND([]))).toMatchObject({ ok: true, command: "/opt/oc", args: ["acp"], source: "setting" });
-    expect(resolveAgentLaunch(CODEX, { command: "/opt/codex-acp", args: ["--x"] }, "local", FOUND([]))).toMatchObject({ ok: true, command: "/opt/codex-acp", args: ["--x"], env: { INITIAL_AGENT_MODE: "read-only" } });
-    expect(resolveAgentLaunch(CODEX, { command: "nope" }, "local", FOUND([]))).toEqual({ ok: false, message: "The configured command for Codex, `nope`, was not found." });
+  it("uses a command override with its own args, or the agent's", () => {
+    expect(resolveAgentLaunch(OPENCODE, { command: "/opt/oc" }, FOUND([]))).toEqual({ ok: true, command: "/opt/oc", args: ["acp"], source: "setting" });
+    expect(resolveAgentLaunch(CODEX, { command: "/opt/codex-acp", args: ["--x"] }, FOUND([]))).toEqual({ ok: true, command: "/opt/codex-acp", args: ["--x"], source: "setting" });
+    expect(resolveAgentLaunch(CODEX, { command: "nope" }, FOUND([]))).toEqual({ ok: false, message: "The configured command for Codex, `nope`, was not found." });
   });
 
   it("lists installed agents first, then the rest, and the custom agent when set", () => {
@@ -228,7 +152,6 @@ describe("starting an agent", () => {
       ["opencode", true], ["kiro", true], ["custom", true],
       ["claude-code", false], ["codex", false], ["copilot", false], ["cursor", false], ["kilo", false], ["pi", false],
     ]);
-    expect(custom?.readOnly.layer).toBe("permissions");
     expect(custom?.label).toBe("Mine");
     expect(customAgent({ command: "  " })).toBeNull();
     expect(findAgent("custom", custom)).toBe(custom);

@@ -19,6 +19,8 @@ import type {
 } from "../webview-protocol";
 import { renderInlineMarkdown, renderMarkdown } from "./markdown";
 import { checkMermaid, renderMermaid } from "./diagram";
+import { h, icon } from "./dom";
+import { renderBottlenecks, renderPermissions } from "./approvals";
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void; getState(): unknown; setState(state: unknown): void };
 const vscode = acquireVsCodeApi();
@@ -26,23 +28,6 @@ const post = (message: ToExtension) => vscode.postMessage(message);
 const command = (name: string, ...args: unknown[]) => post({ type: "command", command: name, args });
 
 const root = document.getElementById("root")!;
-
-type Child = Node | string | null | undefined | false;
-function h(tag: string, attrs: Record<string, string | number | boolean | undefined | null | ((e: Event) => void)> = {}, ...children: Child[]): HTMLElement {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v === undefined || v === null || v === false) continue;
-    if (typeof v === "function") el.addEventListener(k.replace(/^on/, "").toLowerCase(), v as EventListener);
-    else if (k === "class") el.className = String(v);
-    else el.setAttribute(k, v === true ? "" : String(v));
-  }
-  for (const c of children) if (c !== null && c !== undefined && c !== false) el.append(c);
-  return el;
-}
-
-function icon(name: string, extra = ""): HTMLElement {
-  return h("span", { class: `codicon codicon-${name} ${extra}`, "aria-hidden": "true" });
-}
 
 let state: ViewState | null = null;
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
@@ -199,6 +184,9 @@ function renderGenerating(s: GeneratingViewState): HTMLElement {
   const stats = h("div", { class: "pn-stats" },
     stat("Agent", h("span", {}, icon("sparkle", "pn-agent-mark"), ` ${s.agent}`)),
     stat("Model · effort", s.modelEffort),
+    stat("Approvals", s.approvals.auto
+      ? h("span", { "data-approvals": "auto" }, icon("unlock"), " Automatic", s.approvals.mode ? h("span", { class: "pn-muted" }, ` · ${s.approvals.mode} mode`) : null)
+      : h("span", { "data-approvals": "user" }, icon("person"), " You approve", h("span", { class: "pn-muted" }, " · your settings"))),
     stat("Elapsed", elapsed),
     stat("Cost", s.cost ? h("span", {}, h("b", {}, s.cost), h("span", { class: "pn-muted" }, " reported by the agent")) : h("span", { class: "pn-muted" }, "not reported")),
   );
@@ -223,8 +211,9 @@ function renderGenerating(s: GeneratingViewState): HTMLElement {
         : s.chapters.length ? h("div", { class: "pn-draft-foot pn-ok" }, icon("pass"), " Every changed file is accounted for") : null,
     ),
   );
-  return h("div", { class: "pn-page pn-gen" }, header, statusLine, stats, h("div", { class: "pn-two pn-two-gen" }, activity, draft));
+  return h("div", { class: "pn-page pn-gen" }, header, statusLine, ...renderPermissions(s, command), ...renderBottlenecks(s, command), stats, h("div", { class: "pn-two pn-two-gen" }, activity, draft));
 }
+
 
 function stat(label: string, value: Node | string): HTMLElement {
   return h("div", { class: "pn-stat" }, h("div", { class: "pn-stat-label" }, label), typeof value === "string" ? h("div", { class: "pn-stat-value" }, value) : value);

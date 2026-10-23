@@ -62,6 +62,14 @@ export interface GeneratingViewState {
   signIn: string[] | null;
   /** Guide history is off: nothing of this run is saved. */
   memoryOnly: boolean;
+  /** Permission requests waiting on the user, with every option the agent offers. */
+  pendingPermissions: Array<{ id: number; title: string; kind: string | null; target: string | null; options: Array<{ optionId: string; name: string; kind: string }> }>;
+  /** How the agent's requests are answered: by the user, or automatically (and in which mode of the agent's own). */
+  approvals: { auto: boolean; mode: string | null };
+  /** Offer automatic approval inline (the first request reached the user while it was off). */
+  offerAutoApprove: boolean;
+  /** What in the agent's setup holds the run back, with one click that helps where there is one. */
+  bottlenecks: Array<{ key: string; title: string; detail: string | null; action: "approveRun" | "resumeWithApproval" | null }>;
 }
 
 export interface OverviewData {
@@ -145,6 +153,10 @@ export const WEBVIEW_COMMANDS = [
   "refresh",
   "exportGuide",
   "signIn",
+  "answerPermission",
+  "approveRun",
+  "approveAlways",
+  "resumeWithApproval",
 ] as const;
 
 export type WebviewCommand = (typeof WEBVIEW_COMMANDS)[number];

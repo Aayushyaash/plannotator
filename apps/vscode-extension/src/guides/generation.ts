@@ -28,8 +28,8 @@ import {
 } from "./core/adapter";
 import type { GuideLaunchReview, GuideSnapshot } from "@plannotator/core/guide-format";
 import { ACP_AUTH_REQUIRED_CODE, AcpClient, readEffortSelect, readModeSelect, readModelSelect, type AcpClientInfo, type AgentLaunch } from "./acp/client";
-import { loginCommands, sessionMetaFor, type AgentDescriptor, type LoginCommand } from "./acp/agents";
-import { WRITE_KINDS, decidePermission, refusalResponse, vetAnswer } from "./acp/permission-policy";
+import { loginCommands, type AgentDescriptor, type LoginCommand } from "./acp/agents";
+import { builderAutoAllow } from "./acp/permission-policy";
 import type { RelayHost, RelaySession } from "./mcp/relay-host";
 import type { ChangedFileInfo } from "./sources/git";
 import { buildGuidePrompt } from "./prompt";
@@ -60,6 +60,32 @@ export interface ActivityEntry {
   /** For tool calls: the files it touched, relative to the head root when inside it. */
   locations?: Array<{ path: string; line?: number }>;
   isError?: boolean;
+}
+
+/** A permission request the agent is waiting on, shown in the run view with the agent's own options. */
+export interface PendingPermission {
+  id: number;
+  title: string;
+  kind?: string;
+  /** What it acts on: the files or the command, when the agent says. */
+  target?: string;
+  options: Array<{ optionId: string; name: string; kind: string }>;
+}
+
+/** The user's answer to a pending permission: one of the agent's options, or approve this and the rest automatically. */
+export type PermissionAnswer = { optionId: string } | { approve: "run" | "always" };
+
+/**
+ * Something in the agent's setup that holds the run back (a request turned
+ * down, a tool its settings or sandbox blocked, the guide's tools never
+ * reached). Shown in the run view; the run goes on.
+ */
+export interface Bottleneck {
+  key: string;
+  title: string;
+  detail?: string;
+  /** One click that helps: approve automatically for the rest of this run, or resume the run with it on. */
+  action?: "approveRun" | "resumeWithApproval";
 }
 
 export interface ChapterMark {
@@ -94,11 +120,20 @@ export interface GenerationState {
   memoryOnly?: boolean;
   /** The overview diagram was saved without a render check (no Guides webview could run one). */
   diagramUnchecked?: boolean;
+  /** Permission requests waiting on the user. */
+  pendingPermissions: PendingPermission[];
+  /** The user opted in to answering the agent's permission requests automatically for this run. */
+  autoApprove: boolean;
+  /** Offer automatic approval inline: set at the first request the user is asked about while it is off. */
+  offerAutoApprove: boolean;
+  /** The agent's own permissive mode Guides switched to because the user opted in to automatic approval. */
+  permissiveMode?: string;
+  bottlenecks: Bottleneck[];
 }
 
 export interface GenerationDeps {
   relay: RelayHost;
-  /** The agent: its read-only switches (session `_meta`, mode) and its engine name. */
+  /** The agent: its engine name, and its permissive modes for automatic approval. */
   agent: AgentDescriptor;
   /** The agent adapter to start in `cwd`. */
   agentLaunch(cwd: string): AgentLaunch;
@@ -106,11 +141,13 @@ export interface GenerationDeps {
   mcpServer: { command: string; args: string[]; env?: Record<string, string> };
   clientInfo: AcpClientInfo;
   /**
-   * Ask the user about a request the permission policy lets through (reads,
-   * searches, unknown tools): `request.options` holds only "allow once" and
-   * "reject" options.
+   * Tell the user about a pending permission outside the run view (a
+   * notification), resolving with their answer, or null when they dismissed
+   * it. The run view shows it too; whichever answers first wins.
    */
-  requestPermission(request: RequestPermissionRequest, signal: AbortSignal): Promise<RequestPermissionResponse>;
+  requestPermission?(pending: PendingPermission, signal: AbortSignal): Promise<PermissionAnswer | null>;
+  /** The user chose "Always approve during guides": turn the setting on. */
+  approveAlways?(): void;
   resolveSymbol(name: string, path: string | undefined, files: readonly ChangedFileInfo[], headRoot: string): Promise<GuideSymbolResolution>;
   /** Render-check Mermaid with the Guide tab's engine; `checked: false` when no webview could do it. */
   checkMermaid(source: string): Promise<{ ok: true; checked: boolean } | { ok: false; message: string; line?: number }>;
@@ -129,6 +166,8 @@ export interface GenerationInput {
   instructions?: string;
   /** Continue a stopped draft: same id, its draft, a "continue" prompt. */
   resume?: DraftRecord;
+  /** The user opted in to automatic approval (the setting, or the choice in the start flow). Off: the user's own config decides. */
+  autoApprove?: boolean;
 }
 
 const MAX_ACTIVITY = 400;
@@ -145,12 +184,10 @@ export class GuideGeneration {
   /** The kind the agent reported for each tool call, for permission requests that leave it out. */
   private readonly toolKinds = new Map<string, ToolKind>();
   private readonly toolTitles = new Map<string, string>();
-  /** Set when the agent changed a file without asking, or left its read-only mode: the run is stopped and fails with this. */
-  private violation: string | null = null;
-  /** The read-only modes the session must stay in, once it is in one (null: the agent declares none). */
-  private allowedModes: readonly string[] | null = null;
-  /** The mode the agent last reported in a `current_mode_update` or `config_option_update`. */
-  private reportedMode: string | undefined;
+  private nextPermission = 1;
+  private readonly permissionWaiters = new Map<number, { request: RequestPermissionRequest; resolve: (r: RequestPermissionResponse) => void }>();
+  /** Turned down requests and blocked tools this run, for the end-of-run advice. */
+  private blocked = 0;
   /** Whether the agent ever reached the builder's MCP server (an agent that drops the client's MCP servers never does). */
   private builderReached = false;
   private messageEntry: ActivityEntry | null = null;
@@ -194,6 +231,10 @@ export class GuideGeneration {
       progress: guideDraftProgress(draft),
       marks: { added: [], moved: {} },
       ...(!this.history && { memoryOnly: true }),
+      pendingPermissions: [],
+      autoApprove: !!input.autoApprove,
+      offerAutoApprove: false,
+      bottlenecks: [],
     };
   }
 
@@ -273,10 +314,6 @@ export class GuideGeneration {
     const { source } = this.input;
     try {
       const agent = this.deps.agent;
-      if (agent.unsupported) return this.fail(`${agent.label} cannot write a guide: ${agent.unsupported}`);
-      if (source.kind === "pr" && agent.refusePullRequests) return this.fail(`${agent.label} cannot write a guide for a pull request: ${agent.refusePullRequests}`);
-      const preflight = source.kind === "pr" ? agent.prPreflight?.(source.headRoot) : null;
-      if (preflight) return this.fail(`Guides does not run ${agent.label} on this pull request. ${preflight}`);
       this.persist();
       this.relaySession = this.deps.relay.openSession({
         listTools: () => {
@@ -294,7 +331,11 @@ export class GuideGeneration {
         args: this.deps.mcpServer.args,
         env: Object.entries({ ...this.deps.mcpServer.env, ...this.relaySession.env }).map(([name, value]) => ({ name, value })),
       };
-      this.addActivity({ kind: "info", title: `Starting ${this.input.agent.label}`, detail: `Read-only: ${agent.readOnly.summary}` });
+      this.addActivity({
+        kind: "info",
+        title: `Starting ${this.input.agent.label}`,
+        detail: this.state.autoApprove ? "Its permission requests are approved automatically (you opted in)." : "With your own settings: you approve what it asks about.",
+      });
       this.emit();
       this.client = await AcpClient.start(this.deps.agentLaunch(source.headRoot), {
         onUpdate: (n) => this.onUpdate(n),
@@ -302,10 +343,12 @@ export class GuideGeneration {
         onStderr: (text) => this.deps.log?.(`[agent] ${text.trimEnd()}`),
       }, this.deps.clientInfo);
       if (this.cancelled) return this.stop("Cancelled before the agent started.");
-      const session = await this.client.newSession(source.headRoot, [mcpServer], sessionMetaFor(this.deps.agent, source));
+      const session = await this.client.newSession(source.headRoot, [mcpServer]);
       this.state.acpSessionId = session.sessionId;
-      const configOptions = await this.enterReadOnlyMode(session);
-      if (this.deps.agent.readOnly.mode) this.allowedModes = this.deps.agent.readOnly.mode.ids;
+      this.sessionModes = session.modes ?? null;
+      let configOptions: readonly SessionConfigOption[] = session.configOptions ?? [];
+      this.latestOptions = configOptions;
+      if (this.state.autoApprove) configOptions = (await this.enterPermissiveMode(session.sessionId, configOptions)) ?? configOptions;
       if (this.cancelled) return this.stop("Cancelled.");
       await this.applyChoices(session.sessionId, configOptions);
       if (this.cancelled) return this.stop("Cancelled.");
@@ -315,16 +358,28 @@ export class GuideGeneration {
       const prompt = buildGuidePrompt({ source, files: this.input.files, instructions: this.input.instructions, resume: !!this.input.resume });
       const response = await this.client.prompt(session.sessionId, prompt);
       await this.builderQueue;
-      if (this.violation) return this.fail(this.violation);
       if (this.state.savedGuideId) return this.finish();
       if (this.cancelled || response.stopReason === "cancelled") return this.stop("Cancelled.");
+      if (!this.builderReached) {
+        this.addBottleneck({
+          key: "no-builder",
+          title: `${this.input.agent.label} never reached the guide's tools`,
+          detail: this.deps.agent.note ?? `The guide is written through Guides' own MCP server (plannotator-guide). ${this.input.agent.label} may not accept MCP servers from an ACP client, or its settings may turn MCP servers off.`,
+        });
+      } else if (this.blocked > 0 && !this.state.autoApprove) {
+        this.addBottleneck({
+          key: "ended-blocked",
+          title: "The run ended after requests were turned down or blocked",
+          detail: "Resume it with automatic approval to let the agent's requests through.",
+          action: "resumeWithApproval",
+        });
+      }
       const why = !this.builderReached
-        ? `${this.input.agent.label} never reached the guide's tools (the plannotator-guide MCP server), so it could not write the guide. It may not accept MCP servers from an ACP client.`
+        ? `${this.input.agent.label} never reached the guide's tools (the plannotator-guide MCP server), so it could not write the guide.`
         : response.stopReason === "end_turn" ? "The agent ended its turn without calling guide_finish." : `The agent stopped (${response.stopReason}).`;
       return this.stop(why);
     } catch (err) {
       await this.builderQueue.catch(() => {});
-      if (this.violation) return this.fail(this.violation);
       if (this.state.savedGuideId) return this.finish();
       if (this.cancelled) return this.stop("Cancelled.");
       const message = this.client ? await this.client.describeFailure(err) : err instanceof Error ? err.message : String(err);
@@ -340,62 +395,41 @@ export class GuideGeneration {
   }
 
   /**
-   * Put the session in the agent's read-only mode before the first prompt
-   * (`readOnly.mode` on the agent: Claude Code's `default` permission mode,
-   * which asks before every edit, or an agent's plan or read-only mode). An
-   * agent's own settings, and for a pull request the PR's (Claude Code reads
-   * the cwd's `.claude/settings*.json` `permissions.defaultMode` whatever
-   * `settingSources` says), may start the session in a mode that edits
-   * without asking. The mode is read from the `mode` config option, else
-   * `modes.currentModeId`, and set with `setConfigOption`, else
-   * `session/set_mode`. When it cannot be set, or cannot be read while the
-   * agent advertises modes, the run fails and nothing is prompted. Returns
-   * the session's config options after the change.
+   * Only when the user opted in to automatic approval: switch the session to
+   * the agent's own permissive mode (`permissiveModes` on the agent, the first
+   * one it offers), so what its settings would ask about runs, and say which
+   * mode in the run header. A mode that cannot be set is a note, never a stop.
+   * Returns the config options after the change, or null when nothing changed.
    */
-  private async enterReadOnlyMode(session: NewSessionResponse): Promise<SessionConfigOption[]> {
-    let options = session.configOptions ?? [];
-    const want = this.deps.agent.readOnly.mode;
-    if (!want) return options;
+  private async enterPermissiveMode(sessionId: string, options: readonly SessionConfigOption[]): Promise<SessionConfigOption[] | null> {
+    const wanted = this.deps.agent.permissiveModes ?? [];
+    if (!wanted.length || !this.client) return null;
     const select = readModeSelect(options);
-    const modes = session.modes ?? null;
-    const label = this.deps.agent.label;
-    const pr = this.input.source.kind === "pr";
-    if (!select && !modes) {
-      // Claude Code's adapter advertises its modes; one that advertises none has none to set.
-      if (want.ids.includes("default")) return options;
-      throw new Error(`${label} did not offer ${want.label}, so Guides cannot keep it from editing files. Update ${label}, then try again.`);
+    const modes = this.sessionModes;
+    const current = select?.current ?? modes?.currentModeId;
+    if (current && wanted.includes(current)) {
+      this.state.permissiveMode = current;
+      return null;
     }
-    const current = select ? select.current : modes?.currentModeId;
-    if (current && want.ids.includes(current)) return options;
-    const refuse = (why: string): never => {
-      const asked = current ? `ask for ${current}` : "ask for a mode Guides could not read";
-      const whose = pr ? "This pull request's settings" : `${label}'s settings`;
-      const runs = pr ? `Guides runs PRs only in ${want.label}` : `Guides runs only in ${want.label}`;
-      throw new Error(`${whose} ${asked}; ${runs}. ${why}`);
-    };
-    if (!current) refuse("The agent did not say which mode it started in.");
-    let failure: string | null = null;
+    const viaConfig = select ? wanted.find((id) => select.options.some((o) => o.value === id)) : undefined;
+    const viaModes = !viaConfig && modes ? wanted.find((id) => modes.availableModes.some((m) => m.id === id)) : undefined;
     try {
-      const target = select ? want.ids.find((id) => select.options.some((o) => o.value === id)) : undefined;
-      const targetMode = !target && modes ? want.ids.find((id) => modes.availableModes.some((m) => m.id === id)) : undefined;
-      if (select && target) {
-        options = await this.client!.setConfigOption(session.sessionId, select.configId, target);
-        const after = readModeSelect(options);
-        if (!after || !want.ids.includes(after.current)) failure = `The agent stayed in ${after?.current ?? "a mode it did not report"}.`;
-      } else if (targetMode) {
-        this.reportedMode = undefined;
-        await this.client!.setMode(session.sessionId, targetMode);
-        // session/set_mode answers nothing: read back the mode the agent reported meanwhile, if it did.
-        if (this.reportedMode !== undefined && !want.ids.includes(this.reportedMode)) failure = `The agent reported ${this.reportedMode} after the change.`;
-      } else {
-        failure = `The agent offers no ${want.label}.`;
+      if (select && viaConfig) {
+        const after = await this.client.setConfigOption(sessionId, select.configId, viaConfig);
+        this.latestOptions = after;
+        this.state.permissiveMode = viaConfig;
+        this.addActivity({ kind: "info", title: `Switched ${this.input.agent.label} to ${viaConfig} for automatic approval` });
+        return after;
+      }
+      if (viaModes) {
+        await this.client.setMode(sessionId, viaModes);
+        this.state.permissiveMode = viaModes;
+        this.addActivity({ kind: "info", title: `Switched ${this.input.agent.label} to ${viaModes} for automatic approval` });
       }
     } catch (err) {
-      failure = `Setting it failed: ${err instanceof Error ? err.message : String(err)}`;
+      this.addActivity({ kind: "info", title: `${this.input.agent.label} stayed in its own mode: ${err instanceof Error ? err.message : String(err)}` });
     }
-    if (failure) refuse(failure);
-    this.addActivity({ kind: "info", title: `The session started in ${current}; set to ${want.label} for this guide` });
-    return options;
+    return null;
   }
 
   private async applyChoices(sessionId: string, configOptions: readonly SessionConfigOption[]): Promise<void> {
@@ -434,6 +468,10 @@ export class GuideGeneration {
     this.client?.kill();
     this.relaySession?.dispose();
   }
+
+  private sessionModes: NewSessionResponse["modes"] | null = null;
+  /** The session's config options as last reported (session/new, set_config_option, config_option_update). */
+  private latestOptions: readonly SessionConfigOption[] = [];
 
   private fail(message: string): void {
     this.state.status = "failed";
@@ -584,7 +622,6 @@ export class GuideGeneration {
         this.messageEntry = null;
         if (u.kind) this.toolKinds.set(u.toolCallId, u.kind);
         if (u.title) this.toolTitles.set(u.toolCallId, u.title);
-        this.checkWrite(u.toolCallId, u.status);
         if (BUILDER_TITLE.test(u.title ?? "")) break; // shown from the builder side, with its answer
         const entry = this.addActivity({
           kind: "tool",
@@ -598,7 +635,7 @@ export class GuideGeneration {
       case "tool_call_update": {
         if (u.kind) this.toolKinds.set(u.toolCallId, u.kind);
         if (u.title) this.toolTitles.set(u.toolCallId, u.title);
-        this.checkWrite(u.toolCallId, u.status);
+        if (u.status === "failed") this.explainFailure(u.toolCallId, toolOutputText(u.content, u.rawOutput));
         const entry = this.toolEntries.get(u.toolCallId);
         if (!entry) break;
         if (u.title && !BUILDER_TITLE.test(u.title)) entry.title = u.title;
@@ -617,13 +654,12 @@ export class GuideGeneration {
         else this.addActivity({ kind: "plan", title });
         break;
       }
-      case "current_mode_update": {
-        this.checkMode(u.currentModeId);
+      case "config_option_update": {
+        this.latestOptions = u.configOptions;
         return;
       }
-      case "config_option_update": {
-        const mode = readModeSelect(u.configOptions);
-        if (mode) this.checkMode(mode.current);
+      case "current_mode_update": {
+        if (this.sessionModes) this.sessionModes = { ...this.sessionModes, currentModeId: u.currentModeId };
         return;
       }
       case "usage_update": {
@@ -646,76 +682,186 @@ export class GuideGeneration {
   }
 
   /**
-   * The tripwire: a tool call whose kind changes files (`edit`, `delete`,
-   * `move`) that completes means the agent wrote without our yes (the policy
-   * never allows those kinds). The run is cancelled and fails, saying so: the
-   * agent's own settings let it write without asking.
+   * A tool call failed. When its output reads like the agent's settings or
+   * sandbox refused it, say so plainly with the way through; the run goes on.
    */
-  private checkWrite(toolCallId: string, status: string | null | undefined): void {
-    if (this.violation || status !== "completed") return;
-    const kind = this.toolKinds.get(toolCallId);
-    if (!kind || !WRITE_KINDS.includes(kind)) return;
-    const what = this.toolTitles.get(toolCallId) || `a tool that ${kind === "edit" ? "edits" : kind === "delete" ? "deletes" : "moves"} files`;
-    const where = this.input.source.kind === "pr" ? "in the pull request's worktree" : "in your working copy";
-    this.stopForViolation(
-      `${this.input.agent.label} changed files without asking (${what}), so the run was stopped. Guided reviews are read-only; check ${where} with \`git status\`. Its own settings let it write without asking: turn that off for ${this.input.agent.label}, or pick another agent.`,
-      `Wrote without asking: ${what}`,
-    );
+  private explainFailure(toolCallId: string, output: string): void {
+    const cause = blockedCause(output);
+    if (!cause) return;
+    const title = this.toolTitles.get(toolCallId) ?? "A tool";
+    const label = this.input.agent.label;
+    this.blocked++;
+    this.addBottleneck({
+      key: `blocked:${cause}:${title}`,
+      title: cause === "sandbox" ? `${label}'s sandbox blocked ${title}` : `${label}'s settings blocked ${title}`,
+      detail: [
+        `"${output.trim().split("\n")[0].slice(0, 200)}"`,
+        cause === "sandbox"
+          ? `The guide can still be written without it.${this.state.autoApprove ? "" : ` Approving automatically switches ${label} to a mode that lets it run, where it has one.`}`
+          : `Your ${label} settings deny or ask about it; the guide can still be written without it.`,
+      ].join(" "),
+      ...(!this.state.autoApprove && { action: "approveRun" as const }),
+    });
   }
 
-  /**
-   * The session must stay in its read-only mode: a mode the agent reports
-   * after the run entered it (a `current_mode_update`, or a `mode` config
-   * option in a `config_option_update`) that is not one of them stops the run.
-   */
-  private checkMode(mode: string): void {
-    this.reportedMode = mode;
-    if (!this.allowedModes || this.allowedModes.includes(mode)) return;
-    this.stopForViolation(`${this.input.agent.label} left its read-only mode for ${mode}, so the run was stopped. Guided reviews run only in ${this.deps.agent.readOnly.mode?.label ?? "a read-only mode"}.`, `Left the read-only mode for ${mode}`);
-  }
-
-  private stopForViolation(message: string, title: string): void {
-    if (this.violation) return;
-    this.violation = message;
-    this.addActivity({ kind: "error", title, isError: true });
+  private addBottleneck(b: Bottleneck): void {
+    if (this.state.bottlenecks.some((x) => x.key === b.key)) return;
+    this.state.bottlenecks.push(b);
+    this.addActivity({ kind: "info", title: b.title, ...(b.detail && { detail: b.detail }), isError: true });
     this.emit();
-    this.cancelled = true;
-    const client = this.client;
-    const sessionId = this.state.acpSessionId;
-    if (client && sessionId) void client.cancel(sessionId).finally(() => client.dispose());
-    else client?.dispose();
   }
 
   /**
-   * Every permission request goes through the read-only policy first: edits,
-   * deletes, moves, commands and mode switches are refused without asking;
-   * the builder's own tools are allowed once; anything else is asked, with
-   * only "allow once" and "reject" offered.
+   * A permission request from the agent. Its own settings decided to ask; the
+   * user decides. The builder's own tools are allowed once without a prompt;
+   * with automatic approval on, the agent's allow option is picked; otherwise
+   * the request waits in the run view (and a notification) with all the
+   * agent's options until the user answers.
    */
   private async onPermission(request: RequestPermissionRequest, signal: AbortSignal): Promise<RequestPermissionResponse> {
-    const title = request.toolCall.title ?? "a tool";
-    const decision = decidePermission(request, { run: this.input.source.kind, knownKind: this.toolKinds.get(request.toolCall.toolCallId) });
-    if (decision.action === "refuse") {
-      this.addActivity({ kind: "permission", title: `Refused: ${title}`, detail: decision.reason, status: "failed" });
-      this.emit();
-      return refusalResponse(request);
+    const builder = builderAutoAllow(request);
+    if (builder) return { outcome: { outcome: "selected", optionId: builder } };
+    const title = request.toolCall.title ?? this.toolTitles.get(request.toolCall.toolCallId) ?? "a tool";
+    if (this.state.autoApprove) {
+      const allow = allowOption(request);
+      if (allow) {
+        this.addActivity({ kind: "permission", title: `Approved automatically: ${title}`, detail: allow.name, status: "completed" });
+        this.emit();
+        return { outcome: { outcome: "selected", optionId: allow.optionId } };
+      }
     }
-    if (decision.action === "allow") return { outcome: { outcome: "selected", optionId: decision.optionId } };
-    const entry = this.addActivity({ kind: "permission", title: `Asks to run: ${title}`, status: "pending" });
+    const id = this.nextPermission++;
+    const kind = request.toolCall.kind ?? this.toolKinds.get(request.toolCall.toolCallId);
+    const pending: PendingPermission = {
+      id,
+      title,
+      ...(kind && { kind }),
+      ...(describeTarget(request) && { target: describeTarget(request) }),
+      options: request.options.map((o) => ({ optionId: o.optionId, name: o.name, kind: o.kind })),
+    };
+    const entry = this.addActivity({ kind: "permission", title: `Waiting for your approval: ${title}`, ...(pending.target && { detail: pending.target }), status: "pending" });
+    this.state.pendingPermissions.push(pending);
+    if (!this.state.autoApprove) this.state.offerAutoApprove = true;
     this.emit();
-    const asked: RequestPermissionRequest = { ...request, options: decision.options };
-    const answer = vetAnswer(request, decision.options, await this.deps.requestPermission(asked, signal));
+    const answer = await new Promise<RequestPermissionResponse>((resolve) => {
+      this.permissionWaiters.set(id, { request, resolve });
+      signal.addEventListener("abort", () => this.settlePermission(id, { outcome: { outcome: "cancelled" } }), { once: true });
+      void this.deps.requestPermission?.(pending, signal).then((a) => {
+        if (a) this.answerPermission(id, a);
+      }, () => {});
+    });
     const chosen = answer.outcome.outcome === "selected" ? request.options.find((o) => o.optionId === (answer.outcome as { optionId: string }).optionId) : undefined;
-    entry.status = chosen && chosen.kind.startsWith("allow") ? "completed" : "failed";
+    const allowed = !!chosen && chosen.kind.startsWith("allow");
+    entry.title = `${allowed ? "Allowed" : chosen ? "Turned down" : "Not answered"}: ${title}`;
+    entry.status = allowed ? "completed" : "failed";
     entry.detail = chosen ? chosen.name : "Cancelled";
+    if (chosen && !allowed) {
+      this.blocked++;
+      this.addBottleneck({
+        key: "turned-down",
+        title: `You turned down ${title}`,
+        detail: `${this.input.agent.label} will try another way. Approve automatically to let its requests through for the rest of this run.`,
+        action: "approveRun",
+      });
+    }
     this.emit();
     return answer;
+  }
+
+  /** The user answered a pending permission (from the run view or the notification). The first answer wins. */
+  answerPermission(id: number, answer: PermissionAnswer): void {
+    const waiter = this.permissionWaiters.get(id);
+    if (!waiter) return;
+    if ("approve" in answer) {
+      if (answer.approve === "always") this.deps.approveAlways?.();
+      this.approveAutomatically();
+      return;
+    }
+    if (!waiter.request.options.some((o) => o.optionId === answer.optionId)) return;
+    this.settlePermission(id, { outcome: { outcome: "selected", optionId: answer.optionId } });
+  }
+
+  /**
+   * Turn automatic approval on for the rest of this run: every pending
+   * request is answered with the agent's allow option, later ones too, and
+   * the agent switches to its permissive mode where it has one.
+   */
+  approveAutomatically(): void {
+    if (!this.state.autoApprove) {
+      this.state.autoApprove = true;
+      this.state.offerAutoApprove = false;
+      this.addActivity({ kind: "info", title: "Approving the agent's requests automatically for the rest of this run" });
+      const client = this.client;
+      const sessionId = this.state.acpSessionId;
+      if (client && sessionId) {
+        void this.enterPermissiveMode(sessionId, this.latestOptions).then(() => this.emit(), () => {});
+      }
+    }
+    for (const [id, waiter] of [...this.permissionWaiters]) {
+      const allow = allowOption(waiter.request);
+      this.settlePermission(id, allow ? { outcome: { outcome: "selected", optionId: allow.optionId } } : { outcome: { outcome: "cancelled" } });
+    }
+    this.emit();
+  }
+
+  private settlePermission(id: number, response: RequestPermissionResponse): void {
+    const waiter = this.permissionWaiters.get(id);
+    if (!waiter) return;
+    this.permissionWaiters.delete(id);
+    this.state.pendingPermissions = this.state.pendingPermissions.filter((p) => p.id !== id);
+    waiter.resolve(response);
   }
 
   /** The head file a tool location points at, absolute. */
   headPath(path: string): string {
     return isAbsolute(path) ? path : join(this.input.source.headRoot, path);
   }
+}
+
+/** The agent's allow option: "allow once" first, else "allow always". */
+function allowOption(request: RequestPermissionRequest) {
+  return request.options.find((o) => o.kind === "allow_once") ?? request.options.find((o) => o.kind === "allow_always") ?? null;
+}
+
+/** What a permission request acts on: its locations, else the first string of its raw input. */
+function describeTarget(request: RequestPermissionRequest): string | undefined {
+  const locations = request.toolCall.locations?.map((l) => l.path).filter(Boolean) ?? [];
+  if (locations.length) return locations.slice(0, 3).join(", ");
+  const raw = request.toolCall.rawInput;
+  if (raw && typeof raw === "object") {
+    for (const key of ["command", "cmd", "file_path", "path", "url", "pattern"]) {
+      const v = (raw as Record<string, unknown>)[key];
+      if (typeof v === "string" && v.trim()) return v.slice(0, 300);
+      if (Array.isArray(v) && v.every((x) => typeof x === "string")) return v.join(" ").slice(0, 300);
+    }
+  }
+  return undefined;
+}
+
+/** The text of a tool call's output (content blocks and raw output). */
+export function toolOutputText(content: unknown, rawOutput: unknown): string {
+  const parts: string[] = [];
+  if (Array.isArray(content)) {
+    for (const c of content as Array<{ type?: string; content?: { type?: string; text?: string } }>) {
+      if (c?.type === "content" && c.content?.type === "text" && typeof c.content.text === "string") parts.push(c.content.text);
+    }
+  }
+  if (typeof rawOutput === "string") parts.push(rawOutput);
+  else if (rawOutput && typeof rawOutput === "object") {
+    for (const key of ["error", "message", "stderr", "output"]) {
+      const v = (rawOutput as Record<string, unknown>)[key];
+      if (typeof v === "string") parts.push(v);
+    }
+  }
+  return parts.join("\n");
+}
+
+/** Whether a failed tool's output reads like the agent's settings or sandbox refused it. */
+export function blockedCause(output: string): "sandbox" | "settings" | null {
+  if (!output) return null;
+  if (/sandbox|read-only file ?system|operation not permitted|seatbelt|landlock/i.test(output)) return "sandbox";
+  if (/permission (to use .* )?(has been |was )?denied|not allowed|denied by (your )?(settings|policy|config)|blocked by (your )?(settings|policy|config)|requires (approval|permission)|user (rejected|declined|denied)|tool .* (is )?disabled|disallowed/i.test(output)) return "settings";
+  return null;
 }
 
 const AUTH_TEXT = /auth(entication)?[_ ]required|not (logged|signed) in|please (log|sign) in|\/login/i;

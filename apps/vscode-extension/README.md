@@ -38,36 +38,26 @@ The **Guides** view (its own icon in the activity bar) turns a change into a gui
 
 The agent runs over the [Agent Client Protocol](https://agentclientprotocol.com). Guides finds these on your PATH and shows how to install the ones you don't have (it never installs anything itself):
 
-| Agent | Started as | Install | Pull requests |
-|---|---|---|---|
-| Claude Code | `claude-agent-acp` | `npm install -g @agentclientprotocol/claude-agent-acp` | yes |
-| OpenCode | `opencode acp` | `curl -fsSL https://opencode.ai/install \| bash` | yes |
-| Codex | `codex-acp` | `npm install -g @agentclientprotocol/codex-acp` | local changes only |
-| GitHub Copilot CLI | `copilot --acp --stdio` | `npm install -g @github/copilot` | local changes only |
-| Cursor | `cursor-agent acp` (or `agent acp`) | `curl https://cursor.com/install -fsS \| bash` | local changes only |
-| Kiro CLI | `kiro-cli acp` | `curl -fsSL https://cli.kiro.dev/install \| bash` | local changes only |
-| Kilo Code | `kilo acp` (or `kilocode acp`) | `npm install -g @kilocode/cli` | local changes only |
+| Agent | Started as | Install |
+|---|---|---|
+| Claude Code | `claude-agent-acp` | `npm install -g @agentclientprotocol/claude-agent-acp` |
+| OpenCode | `opencode acp` | `curl -fsSL https://opencode.ai/install \| bash` |
+| Codex | `codex-acp` | `npm install -g @agentclientprotocol/codex-acp` |
+| GitHub Copilot CLI | `copilot --acp --stdio` | `npm install -g @github/copilot` |
+| Cursor | `cursor-agent acp` (or `agent acp`) | `curl https://cursor.com/install -fsS \| bash` |
+| Kiro CLI | `kiro-cli acp` | `curl -fsSL https://cli.kiro.dev/install \| bash` |
+| Kilo Code | `kilo acp` (or `kilocode acp`) | `npm install -g @kilocode/cli` |
+| Pi | `pi-acp` | `npm install -g pi-acp` |
 
-Pi is listed but cannot write guides yet: `pi-acp` does not pass MCP servers to Pi, so it cannot reach the guide's tools. Any other ACP agent works through `plannotator.guides.customAgent.command` (and `.args`, `.label`), on local changes only. `plannotator.guides.agentCommands` overrides how a listed agent is started (`plannotator.guides.claudeCode.command` still works for Claude Code). These settings, and `plannotator.guides.ghPath`, can only be set in your user settings, never by a workspace.
+Pi can't write guides yet: `pi-acp` does not pass MCP servers on to Pi, so Pi cannot reach the guide's tools. Any other ACP agent works through `plannotator.guides.customAgent.command` (and `.args`, `.label`). `plannotator.guides.agentCommands` overrides how a listed agent is started (`plannotator.guides.claudeCode.command` still works for Claude Code). These settings, `plannotator.guides.autoApprove` and `plannotator.guides.ghPath` can only be set in your user settings, never by a workspace.
 
-**A guide is read-only, for every agent.** Guides offers the agent no file system or terminal. It refuses every request to edit, delete or move a file, run a command or switch modes, without asking you, and a pull request run also refuses network fetches. Reads and unknown tools are asked, with "allow once" and "reject once" only (never an "always" answer, which could write a rule into the agent's settings). If an agent changes a file without asking, or leaves its read-only mode, the run stops and says so. Where an agent has its own switches, Guides turns them on too:
-- Claude Code: the default (or plan) permission mode, only its read, search and to-do tools (edit, write and shell tools are also disallowed), and no MCP server but the guide's.
-- OpenCode: Guides' own OpenCode agent, which denies edits, shell and subagents and asks about any other tool but reads and searches.
-- Codex: its read-only mode. Cursor and Kilo: their ask mode, and Kilo's web tools denied.
-- Copilot CLI and Kiro CLI rely on asking first, which they do by default, and on Guides refusing.
+**Guides runs your agent with your own configuration and permissions.** What the agent may do is governed by your agent's settings, exactly as when you run it yourself. Guides adds only what a guide needs: its own tool server (the guide's builder tools, which change nothing but the draft), the model and effort you pick, and the prompt.
 
-**Pull requests** open in a git worktree in the extension's storage, so your checkout is never touched, and need the GitHub CLI (`gh`). A PR is someone else's code, and its own agent config (hooks, allow rules, MCP servers) could start programs, so Guides takes PRs only with the agents it can keep from loading that config:
-- Claude Code loads only your user settings, and Guides refuses a PR whose `.claude/settings*.json` sets a command (`apiKeyHelper`, `env`, …), because the adapter's sign-in check runs in the PR's folder.
-- OpenCode skips the PR's `opencode.json` and `.opencode/`.
-
-The other agents are offered for local changes only.
-
-**What this does not cover:**
-- Guides can only refuse what an agent asks about. Anything an agent does without asking is up to its own settings and the switches above.
-- The write check runs after the fact: it stops the run once an edit has completed.
-- Codex, Kiro and Kilo still run commands they judge read-only (in Codex's read-only sandbox, or Kiro's and Kilo's read-only command lists) without asking.
-- On local changes the repository's own agent config is trusted, as it is when you run the agent yourself.
-- The agent runs with VS Code's environment, including any credentials in it.
+- **Approvals.** When the agent asks before doing something, the request waits in the guide's view, with every option the agent offers ("allow once", "always allow", "reject", …), and in a notification. Your answer goes back to the agent as it is. The guide's own builder tools are approved without asking.
+- **Approve automatically (opt-in).** You can let the agent work without asking: when you start a guide, at the first request ("Approve all for this run" or "Always approve during guides"), or with the `plannotator.guides.autoApprove` setting. Every request the agent asks about is then approved, and where the agent has a mode that does not ask, Guides switches to it and says so in the run's header (Claude Code: `acceptEdits`; Codex: `agent`). Off by default.
+- **When your setup holds the run back,** the guide's view says so plainly and the run goes on. It names a request you turned down, a tool your agent's settings or sandbox blocked, and an agent that never reached the guide's tools. Where there is a way through, it offers it in one click: "Approve automatically for this run", or "Resume with automatic approval".
+- **Pull requests** need the GitHub CLI (`gh`). Each PR opens in a git worktree of its own in the extension's storage, so your checkout is never touched. Like any checkout, it may carry its own agent config (hooks, allow rules, MCP servers), and your agent loads it as it would anywhere.
+- **The agent inherits VS Code's environment,** including any credentials in it.
 - Guides are saved where Plannotator's web app finds them: open and export them from either side.
 
 ## Features

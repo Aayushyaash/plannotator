@@ -388,7 +388,7 @@
           "type": "object",
           "default": {},
           "scope": "machine",
-          "markdownDescription": "Override how Guided Reviews start a known agent, by its id (`claude-code`, `codex`, `opencode`, `pi`, `copilot`, `cursor`, `kiro`, `kilo`): `{ \"codex\": { \"command\": \"/opt/bin/codex-acp\", \"args\": [] } }`. `command` replaces the program found on PATH; `args`, when given, replace the agent's own ACP arguments. Guides' read-only flags for that agent are always added.",
+          "markdownDescription": "Override how Guided Reviews start a known agent, by its id (`claude-code`, `codex`, `opencode`, `pi`, `copilot`, `cursor`, `kiro`, `kilo`): `{ \"codex\": { \"command\": \"/opt/bin/codex-acp\", \"args\": [] } }`. `command` replaces the program found on PATH; `args`, when given, replace the agent's own ACP arguments.",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -411,7 +411,21 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "markdownDescription": "Any other ACP agent for Guided Reviews: the program that starts it in ACP mode on stdio. When set, it is offered as a choice beside the known agents. It runs under Guides' read-only permission policy only (edits, deletes, moves and commands are refused when it asks), so it is only as read-only as its own settings make it, and only on local changes (never a pull request)."
+          "markdownDescription": "Any other ACP agent for Guided Reviews: the program that starts it in ACP mode on stdio. When set, it is offered as a choice beside the known agents. Like every agent, it runs with its own settings and permissions."
+        },
+        "plannotator.guides.autoApprove": {
+          "type": "string",
+          "enum": [
+            "off",
+            "allow-all"
+          ],
+          "enumDescriptions": [
+            "The agent runs with your own settings, and you approve each request it asks about.",
+            "Approve every request the agent asks about during a guide, and switch it to its own mode that does not ask (Claude Code: acceptEdits, Codex: agent) where it has one."
+          ],
+          "default": "off",
+          "scope": "machine",
+          "markdownDescription": "Whether Guided Reviews approve the agent's permission requests automatically. Off by default: what the agent may do is governed by its own settings, and you answer what it asks about (in the guide's view or a notification). You can also turn it on for one guide when you start it, or from the first request."
         },
         "plannotator.guides.customAgent.args": {
           "type": "array",

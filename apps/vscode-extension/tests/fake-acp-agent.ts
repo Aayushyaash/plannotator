@@ -22,7 +22,9 @@ import {
 
 type Step =
   | { say: string }
-  | { tool: { title: string; kind?: string; locations?: Array<{ path: string; line?: number }>; fail?: boolean } }
+  | { tool: { title: string; kind?: string; locations?: Array<{ path: string; line?: number }>; fail?: boolean; output?: string } }
+  /** Call the client's `fs/read_text_file` and log the answer. */
+  | { clientRead: { path: string; line?: number; limit?: number } }
   /**
    * Ask `session/request_permission`. `kind` defaults to "execute"; with
    * `kindOnlyInUpdate` the kind is sent only in the `tool_call` update before
@@ -70,6 +72,8 @@ interface Script {
   refuseModeChange?: boolean;
   /** Accept a mode change but stay in the start mode. */
   ignoreModeChange?: boolean;
+  /** Accept the client's MCP servers but never start them (like pi-acp). */
+  ignoreMcp?: boolean;
   /** The modes offered (default: Claude Code's four), e.g. another agent's read-only or plan mode. */
   modes?: Array<{ id: string; name: string }>;
 }
@@ -179,7 +183,7 @@ new AgentSideConnection((conn): Agent => ({
     const sessionId = `fake-${Date.now()}`;
     let mcp: McpClient | null = null;
     const server = params.mcpServers[0] as { command?: string; args?: string[]; env?: Array<{ name: string; value: string }> } | undefined;
-    if (server?.command) {
+    if (server?.command && !script.ignoreMcp) {
       const env: Record<string, string> = { ...(process.env as Record<string, string>) };
       for (const e of server.env ?? []) env[e.name] = e.value;
       const child = spawn(server.command, server.args ?? [], { env, stdio: ["pipe", "pipe", "inherit"] });
@@ -219,7 +223,7 @@ new AgentSideConnection((conn): Agent => ({
       } else if ("tool" in step) {
         const toolCallId = `t${++toolNo}`;
         await update({ sessionUpdate: "tool_call", toolCallId, title: step.tool.title, kind: step.tool.kind ?? "read", status: "in_progress", locations: step.tool.locations?.map((l) => ({ path: l.path.startsWith("/") ? l.path : `${session.cwd}/${l.path}`, line: l.line })) });
-        await update({ sessionUpdate: "tool_call_update", toolCallId, status: step.tool.fail ? "failed" : "completed" });
+        await update({ sessionUpdate: "tool_call_update", toolCallId, status: step.tool.fail ? "failed" : "completed", ...(step.tool.output && { content: [{ type: "content", content: { type: "text", text: step.tool.output } }] }) });
       } else if ("permission" in step) {
         const toolCallId = `t${++toolNo}`;
         const p = step.permission;
@@ -238,6 +242,13 @@ new AgentSideConnection((conn): Agent => ({
         log({ event: "permission", title: p.title, kind, outcome: answer.outcome });
         if (allowed && p.writeOnAllow) writeFileSync(`${session.cwd}/${p.writeOnAllow}`, "written after an allow\n");
         await update({ sessionUpdate: "tool_call_update", toolCallId, status: allowed ? "completed" : "failed" });
+      } else if ("clientRead" in step) {
+        try {
+          const res = await conn.readTextFile({ sessionId: params.sessionId, path: `${session.cwd}/${step.clientRead.path}`, ...(step.clientRead.line && { line: step.clientRead.line }), ...(step.clientRead.limit && { limit: step.clientRead.limit }) });
+          log({ event: "clientRead", ok: true, content: res.content });
+        } catch (err) {
+          log({ event: "clientRead", ok: false, message: err instanceof Error ? err.message : String(err) });
+        }
       } else if ("clientWrite" in step) {
         try {
           const res = await conn.writeTextFile({ sessionId: params.sessionId, path: `${session.cwd}/${step.clientWrite.path}`, content: step.clientWrite.content });

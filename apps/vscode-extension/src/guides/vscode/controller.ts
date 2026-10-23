@@ -7,7 +7,6 @@
 import * as vscode from "vscode";
 import { basename } from "node:path";
 import { mkdirSync } from "node:fs";
-import type { RequestPermissionRequest, RequestPermissionResponse } from "@agentclientprotocol/sdk";
 import { createGuideHtml, guideExportFilename, resolveGuideViewerAssets } from "@plannotator/core/guide-format";
 import { GUIDE_VIEWER_MANIFEST } from "@plannotator/core/guide-viewer-manifest";
 import { findSavedGuideById } from "@plannotator/shared/guide-store";
@@ -32,7 +31,7 @@ import {
 import { planSpawn } from "../acp/spawn-plan";
 import { parseGuideLink } from "../core/adapter";
 import { loadDashboard, type DashboardModel } from "../dashboard";
-import { GuideGeneration, type GenerationState } from "../generation";
+import { GuideGeneration, type GenerationState, type PendingPermission, type PermissionAnswer } from "../generation";
 import { startRelayHost, type RelayHost } from "../mcp/relay-host";
 import { ReaderModel, guideWorktreePath, resolveReaderSides, type ReaderSides } from "../reader-model";
 import { removeShareBeforeDelete } from "../share";
@@ -89,6 +88,7 @@ interface RunEntry {
 /** The models and efforts an agent listed, cached per agent. */
 const optionsKey = (agentId: string) => `plannotator.guides.agentOptions.${agentId}`;
 const DEFAULTS_KEY = "plannotator.guides.defaults";
+const APPROVE_RUN_BUTTON = "Approve all for this run";
 const OPTIONS_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
 
 export class GuidesController implements vscode.Disposable {
@@ -299,6 +299,10 @@ export class GuidesController implements vscode.Disposable {
       refresh: "refresh",
       exportGuide: "exportGuide",
       signIn: "signIn",
+      answerPermission: "answerPermission",
+      approveRun: "approveRun",
+      approveAlways: "approveAlways",
+      resumeWithApproval: "resumeWithApproval",
     };
     if (command === "guideCurrentPR" && this.dashboard?.currentBranchPR) args = [this.dashboard.currentBranchPR.number];
     const target = map[command];
@@ -363,6 +367,23 @@ export class GuidesController implements vscode.Disposable {
         return this.changeDefaults();
       case "signIn":
         return this.signIn(str(args[0]));
+      case "answerPermission": {
+        // (run id, permission id, option id)
+        const gen = this.run?.gen;
+        const id = num(args[1]);
+        const optionId = str(args[2]);
+        if (gen && gen.state.id === str(args[0]) && id !== undefined && optionId) gen.answerPermission(id, { optionId });
+        return;
+      }
+      case "approveRun":
+        if (this.run && this.run.gen.state.id === str(args[0])) this.run.gen.approveAutomatically();
+        return;
+      case "approveAlways":
+        await vscode.workspace.getConfiguration("plannotator.guides").update("autoApprove", "allow-all", vscode.ConfigurationTarget.Global);
+        if (this.run && this.run.gen.state.id === str(args[0])) this.run.gen.approveAutomatically();
+        return;
+      case "resumeWithApproval":
+        return this.resumeDraft(str(args[0]) ?? treeArg(args[0]), true);
       case "openPullRequestOnGitHub": {
         const target = str(args[0]) ?? (args[0] && typeof args[0] === "object" ? ((args[0] as { pr?: { url: string }; row?: { url: string } }).pr?.url ?? (args[0] as { row?: { url: string } }).row?.url) : undefined);
         if (target && /^https:\/\//.test(target)) await vscode.env.openExternal(vscode.Uri.parse(target));
@@ -420,8 +441,13 @@ export class GuidesController implements vscode.Disposable {
     return detectAgents((id) => this.agentOverride(id), this.customAgent());
   }
 
-  private launchFor(agent: AgentDescriptor, run: "local" | "pr" = "local"): AdapterResolution {
-    return resolveAgentLaunch(agent, agent.id === CUSTOM_AGENT_ID ? {} : this.agentOverride(agent.id), run);
+  private launchFor(agent: AgentDescriptor): AdapterResolution {
+    return resolveAgentLaunch(agent, agent.id === CUSTOM_AGENT_ID ? {} : this.agentOverride(agent.id));
+  }
+
+  /** `plannotator.guides.autoApprove`: the user opted in to approving the agent's requests automatically during guides. */
+  private autoApproveSetting(): boolean {
+    return vscode.workspace.getConfiguration("plannotator.guides").get<string>("autoApprove") === "allow-all";
   }
 
   /** Start the agent once, read its config options, stop it. Nothing is prompted. */
@@ -434,7 +460,7 @@ export class GuidesController implements vscode.Disposable {
     const cwd = this.dashboard?.repo?.root ?? this.cwd() ?? this.context.globalStorageUri.fsPath;
     let client: AcpClient | null = null;
     try {
-      client = await AcpClient.start({ command: launch.command, args: launch.args, cwd, ...(launch.env && { env: launch.env }) }, {
+      client = await AcpClient.start({ command: launch.command, args: launch.args, cwd }, {
         onUpdate: () => {},
         requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
         onStderr: (t) => this.log.info(`[agent] ${t.trimEnd()}`),
@@ -469,11 +495,6 @@ export class GuidesController implements vscode.Disposable {
   private async agentMissing(status: AgentStatus): Promise<void> {
     const { agent, launch } = status;
     const message = launch.ok ? "" : launch.message;
-    if (agent.unsupported) {
-      const choice = await vscode.window.showInformationMessage(message, "Open docs");
-      this.onMissingChoice(agent, choice);
-      return;
-    }
     const buttons = [...(agent.installCommand ? ["Copy install command"] : []), "Open docs", "Open settings"];
     const choice = await vscode.window.showInformationMessage(`${message} Guides never installs anything itself.`, { modal: false }, ...buttons);
     this.onMissingChoice(agent, choice);
@@ -516,7 +537,7 @@ export class GuidesController implements vscode.Disposable {
     const source = preset ?? (await pickSource(model));
     if (!source) return;
     const remembered = this.context.workspaceState.get<RememberedChoice>(`plannotator.guides.choices:${model.repo.root}`) ?? this.context.globalState.get<RememberedChoice>(DEFAULTS_KEY);
-    const picked = await pickAgentAndEffort({ ...this.pickerInput(remembered), standingInstructions: readGuideInstructions(), run: source.kind });
+    const picked = await pickAgentAndEffort({ ...this.pickerInput(remembered), standingInstructions: readGuideInstructions(), autoApprove: this.autoApproveSetting() });
     if (!picked) return;
     await this.context.workspaceState.update(`plannotator.guides.choices:${model.repo.root}`, { agent: picked.agent.id, model: picked.agent.model?.id, effort: picked.agent.effort?.id });
     await this.startRun(source, picked.agent, picked.instructions);
@@ -578,7 +599,7 @@ export class GuidesController implements vscode.Disposable {
     return this.relay;
   }
 
-  private async startRun(choice: SourceChoice, agent: AgentChoiceRecord, instructions?: string, resume?: DraftRecord): Promise<void> {
+  private async startRun(choice: SourceChoice, agent: AgentChoiceRecord, instructions?: string, resume?: DraftRecord, autoApprove = this.autoApproveSetting()): Promise<void> {
     const descriptor = this.agentById(agent.id);
     if (!descriptor) {
       void vscode.window.showErrorMessage(agent.id === CUSTOM_AGENT_ID ? "This guide was started with the custom agent, which is no longer set (plannotator.guides.customAgent.command)." : `Guides does not know the agent ${agent.label}.`);
@@ -590,29 +611,25 @@ export class GuidesController implements vscode.Disposable {
     if (resume) prepared = { source: resume.source, rawPatch: resume.draft.review.rawPatch };
     else prepared = await this.prepareSource(choice);
     if (!prepared) return;
-    if (prepared.source.kind === "pr" && descriptor.refusePullRequests) {
-      void vscode.window.showWarningMessage(`${descriptor.label} cannot write a guide for a pull request: ${descriptor.refusePullRequests}`);
-      return;
-    }
-    const launch = this.launchFor(descriptor, prepared.source.kind);
-    if (!launch.ok) return this.showAdapterMissing(descriptor, launch.message);
+    const launch = available;
     const repoKey = resume?.repoKey ?? this.dashboard?.repo?.repoKey;
     if (!repoKey) throw new Error("No repository.");
     const relay = await this.relayHost();
     const files = changedFilesFromPatch(prepared.rawPatch);
     const gen = new GuideGeneration(
-      { repoKey, source: prepared.source, rawPatch: prepared.rawPatch, files, agent, ...(instructions && { instructions }), ...(resume && { resume }) },
+      { repoKey, source: prepared.source, rawPatch: prepared.rawPatch, files, agent, ...(instructions && { instructions }), ...(resume && { resume }), ...(autoApprove && { autoApprove: true }) },
       {
         relay,
         agent: descriptor,
-        agentLaunch: (cwd) => ({ command: launch.command, args: launch.args, cwd, ...(launch.env && { env: launch.env }) }),
+        agentLaunch: (cwd) => ({ command: launch.command, args: launch.args, cwd }),
         mcpServer: {
           command: process.execPath,
           args: [vscode.Uri.joinPath(this.context.extensionUri, "dist", "guide-mcp.cjs").fsPath],
           env: { ELECTRON_RUN_AS_NODE: "1" },
         },
         clientInfo: { name: "plannotator-vscode", title: "Plannotator", version: this.version },
-        requestPermission: (req, signal) => this.askPermission(req, signal, agent.label),
+        requestPermission: (pending, signal) => this.notifyPermission(pending, signal, agent.label),
+        approveAlways: () => void vscode.workspace.getConfiguration("plannotator.guides").update("autoApprove", "allow-all", vscode.ConfigurationTarget.Global),
         resolveSymbol: (name, path, f, headRoot) => resolveSymbolForBuilder(name, path, headRoot, f.map((x) => x.path)),
         checkMermaid: (source) => this.checkMermaid(source),
         log: (line) => this.log.info(line),
@@ -725,46 +742,28 @@ export class GuidesController implements vscode.Disposable {
       savedGuideId: s.savedGuideId ?? null,
       signIn: s.signIn ? (s.signIn.logins.length ? s.signIn.logins.map((l) => l.label) : ["Sign in"]) : null,
       memoryOnly: !!s.memoryOnly,
+      pendingPermissions: (s.pendingPermissions ?? []).map((p) => ({ id: p.id, title: p.title, kind: p.kind ?? null, target: p.target ?? null, options: p.options })),
+      approvals: { auto: !!s.autoApprove, mode: s.permissiveMode ?? null },
+      offerAutoApprove: !!s.offerAutoApprove && !s.autoApprove,
+      bottlenecks: (s.bottlenecks ?? []).map((b) => ({ key: b.key, title: b.title, detail: b.detail ?? null, action: b.action ?? null })),
     };
   }
 
   /**
-   * The agent's own permission options, as a Quick Pick that stays open until
-   * answered (a modal dialog cannot be closed when the run is cancelled; this
-   * one closes with the run). Closing it is a "no": the agent's reject option.
+   * A pending permission request, as a notification (it never blocks the
+   * editor) with every option the agent offers plus "Approve all for this run".
+   * The run view shows the same request with the same buttons; the first
+   * answer wins. Dismissing the notification leaves it waiting in the run view.
    */
-  private async askPermission(req: RequestPermissionRequest, signal: AbortSignal, agentLabel: string): Promise<RequestPermissionResponse> {
-    // The read-only policy has already refused edits, commands and mode switches; these are reads and unknown tools.
-    if (signal.aborted) return { outcome: { outcome: "cancelled" } };
-    const title = req.toolCall.title ?? "a tool";
-    const raw = req.toolCall.rawInput as Record<string, unknown> | undefined;
-    const detail = raw && typeof raw === "object"
-      ? Object.entries(raw).slice(0, 4).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`.slice(0, 300)).join(" · ")
-      : undefined;
-    const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { optionId: string }>();
-    qp.title = `${agentLabel} asks to run: ${title}`;
-    qp.placeholder = detail ?? "Guides are read-only: allow it only if this tool does not change anything.";
-    qp.ignoreFocusOut = true;
-    qp.items = req.options.map((o) => ({ label: o.name, optionId: o.optionId, ...(o.kind.startsWith("reject") && { description: "no" }) }));
-    const chosen = await new Promise<string | null | "aborted">((resolve) => {
-      let done = false;
-      const finish = (v: string | null | "aborted") => {
-        if (done) return;
-        done = true;
-        signal.removeEventListener("abort", onAbort);
-        resolve(v);
-        qp.dispose();
-      };
-      const onAbort = () => finish("aborted");
-      signal.addEventListener("abort", onAbort, { once: true });
-      qp.onDidAccept(() => finish(qp.selectedItems[0]?.optionId ?? null));
-      qp.onDidHide(() => finish(null));
-      qp.show();
-    });
-    if (chosen === "aborted" || signal.aborted) return { outcome: { outcome: "cancelled" } };
-    if (chosen) return { outcome: { outcome: "selected", optionId: chosen } };
-    const reject = req.options.find((o) => o.kind === "reject_once") ?? req.options.find((o) => o.kind.startsWith("reject"));
-    return reject ? { outcome: { outcome: "selected", optionId: reject.optionId } } : { outcome: { outcome: "cancelled" } };
+  private async notifyPermission(pending: PendingPermission, signal: AbortSignal, agentLabel: string): Promise<PermissionAnswer | null> {
+    if (signal.aborted) return null;
+    const message = `${agentLabel} asks to run: ${pending.title}${pending.target ? ` (${pending.target})` : ""}`;
+    const buttons = [...pending.options.map((o) => o.name), APPROVE_RUN_BUTTON];
+    const choice = await vscode.window.showInformationMessage(message, ...buttons);
+    if (!choice || signal.aborted) return null;
+    if (choice === APPROVE_RUN_BUTTON) return { approve: "run" };
+    const option = pending.options.find((o) => o.name === choice);
+    return option ? { optionId: option.optionId } : null;
   }
 
   /**
@@ -878,14 +877,13 @@ export class GuidesController implements vscode.Disposable {
       },
       mcpServer: { command: "", args: [] },
       clientInfo: { name: "plannotator-vscode", title: "Plannotator", version: this.version },
-      requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
       resolveSymbol: (name, path, f, headRoot) => resolveSymbolForBuilder(name, path, headRoot, f.map((x) => x.path)),
       checkMermaid: (source) => this.checkMermaid(source),
       history: guideHistoryEnabled(),
     };
   }
 
-  private async resumeDraft(id: string | undefined): Promise<void> {
+  private async resumeDraft(id: string | undefined, autoApprove?: boolean): Promise<void> {
     const record = this.findDraft(id ?? this.run?.gen.state.id);
     if (!record) {
       void vscode.window.showWarningMessage("That draft is gone.");
@@ -897,7 +895,7 @@ export class GuidesController implements vscode.Disposable {
     }
     this.draftPanels.get(record.id)?.panel.dispose();
     if (this.run?.gen.state.id === record.id) this.run.panel?.panel.dispose();
-    await this.startRun({ kind: "local", mode: "since-base" }, record.agent, record.instructions, record);
+    await this.startRun({ kind: "local", mode: "since-base" }, record.agent, record.instructions, record, autoApprove ?? this.autoApproveSetting());
   }
 
   private async saveDraftAsIs(id: string | undefined): Promise<void> {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { PermissionOption, RequestPermissionRequest, ToolKind } from "@agentclientprotocol/sdk";
-import { ALL_TOOL_KINDS, REFUSED_KINDS, decidePermission, isBuilderToolCall, refusalResponse, vetAnswer } from "./permission-policy";
+import { builderAutoAllow, isBuilderToolCall } from "./permission-policy";
 
 const OPTIONS: PermissionOption[] = [
   { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
@@ -8,78 +8,21 @@ const OPTIONS: PermissionOption[] = [
   { optionId: "reject-once", name: "Reject", kind: "reject_once" },
   { optionId: "reject-always", name: "Never", kind: "reject_always" },
 ];
+const KINDS: ToolKind[] = ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other"];
 
-function request(kind: ToolKind | null, extra: Partial<RequestPermissionRequest["toolCall"]> = {}, options = OPTIONS): RequestPermissionRequest {
-  return { sessionId: "s", toolCall: { toolCallId: "t1", title: "A tool", ...(kind && { kind }), ...extra }, options };
+function request(kind: ToolKind | null, extra: Partial<RequestPermissionRequest["toolCall"]> = {}): RequestPermissionRequest {
+  return { sessionId: "s", toolCall: { toolCallId: "t1", title: "A tool", ...(kind && { kind }), ...extra }, options: OPTIONS };
 }
 
-describe("the read-only permission policy", () => {
-  it("covers every ACP tool kind", () => {
-    // The SDK's ToolKind union: a new kind must be decided here on purpose.
-    expect([...ALL_TOOL_KINDS].sort()).toEqual(["delete", "edit", "execute", "fetch", "move", "other", "read", "search", "switch_mode", "think"]);
+describe("permission requests", () => {
+  it("answers nothing on its own for any tool kind: every request goes to the user", () => {
+    for (const kind of [...KINDS, null]) expect(builderAutoAllow(request(kind))).toBeNull();
   });
 
-  type Action = "ask" | "refuse" | "allow";
-  const table: Record<ToolKind, { local: Action; pr: Action }> = {
-    read: { local: "ask", pr: "ask" },
-    search: { local: "ask", pr: "ask" },
-    think: { local: "ask", pr: "ask" },
-    fetch: { local: "ask", pr: "refuse" },
-    edit: { local: "refuse", pr: "refuse" },
-    delete: { local: "refuse", pr: "refuse" },
-    move: { local: "refuse", pr: "refuse" },
-    execute: { local: "refuse", pr: "refuse" },
-    switch_mode: { local: "refuse", pr: "refuse" },
-    other: { local: "ask", pr: "ask" },
-  };
-  for (const kind of ALL_TOOL_KINDS) {
-    for (const run of ["local", "pr"] as const) {
-      it(`${kind} in a ${run} run: ${table[kind][run]}`, () => {
-        expect(decidePermission(request(kind), { run }).action).toBe(table[kind][run]);
-      });
-    }
-  }
-
-  it("refuses every kind that changes files or runs commands", () => {
-    expect([...REFUSED_KINDS].sort()).toEqual(["delete", "edit", "execute", "move", "switch_mode"]);
-  });
-
-  it("uses the kind from the earlier tool_call update when the request leaves it out", () => {
-    expect(decidePermission(request(null), { run: "local", knownKind: "edit" }).action).toBe("refuse");
-    expect(decidePermission(request(null), { run: "local", knownKind: "read" }).action).toBe("ask");
-  });
-
-  it("refuses when either the request's kind or the earlier kind is refused: a request cannot downgrade a known execute", () => {
-    expect(decidePermission(request("read"), { run: "local", knownKind: "execute" }).action).toBe("refuse");
-    expect(decidePermission(request("execute"), { run: "local", knownKind: "read" }).action).toBe("refuse");
-    expect(decidePermission(request("search"), { run: "local", knownKind: "edit" }).action).toBe("refuse");
-    expect(decidePermission(request("read"), { run: "pr", knownKind: "fetch" }).action).toBe("refuse");
-    expect(decidePermission(request("read"), { run: "local", knownKind: "read" }).action).toBe("ask");
-    // A builder name is allowed only when no kind says otherwise.
-    expect(decidePermission(request("other", { name: "guide_finish" }), { run: "local", knownKind: "execute" }).action).toBe("refuse");
-    expect(decidePermission(request("other", { name: "guide_finish" }), { run: "local", knownKind: "read" }).action).toBe("ask");
-  });
-
-  it("never offers or answers an 'always' option, allow or reject", () => {
-    for (const kind of ALL_TOOL_KINDS) {
-      for (const run of ["local", "pr"] as const) {
-        const d = decidePermission(request(kind), { run });
-        if (d.action === "ask") expect(d.options.map((o) => o.kind)).toEqual(["allow_once", "reject_once"]);
-        const answer = d.action === "refuse" ? refusalResponse(request(kind)) : d.action === "allow" ? { outcome: { outcome: "selected", optionId: d.optionId } } : null;
-        if (answer?.outcome.outcome === "selected") expect(answer.outcome.optionId).not.toMatch(/always/);
-      }
-    }
-  });
-
-  it("refuses when the agent offers no once-only allow", () => {
-    const d = decidePermission(request("read", {}, [OPTIONS[1], OPTIONS[2]]), { run: "local" });
-    expect(d.action).toBe("refuse");
-  });
-
-  it("allows the builder's own tools once without asking", () => {
+  it("allows the builder's own tools once without a prompt", () => {
     for (const t of [{ name: "guide_set_header" }, { title: "mcp__plannotator-guide__guide_finish" }, { title: "plannotator-guide.guide_place_file" }, { title: "plannotator-guide/guide_read" }, { title: "plannotator-guide_guide_add_chapter" }, { title: "guide_set_overview" }]) {
-      expect(decidePermission(request("other", t), { run: "pr" })).toEqual({ action: "allow", optionId: "allow-once" });
-      expect(decidePermission(request(null, t), { run: "pr" })).toEqual({ action: "allow", optionId: "allow-once" });
+      expect(builderAutoAllow(request("other", t))).toBe("allow-once");
+      expect(builderAutoAllow(request(null, t))).toBe("allow-once");
     }
   });
 
@@ -87,22 +30,6 @@ describe("the read-only permission policy", () => {
     expect(isBuilderToolCall({ title: "echo guide_finish && rm -rf ~" })).toBe(false);
     expect(isBuilderToolCall({ title: "mcp__evil__guide_finish" })).toBe(false);
     expect(isBuilderToolCall({ title: "guide_not_a_tool" })).toBe(false);
-    // A builder name on a tool of a refused kind is still refused.
-    expect(decidePermission(request("execute", { name: "guide_finish" }), { run: "local" }).action).toBe("refuse");
-    expect(decidePermission(request("edit", { title: "guide_finish" }), { run: "local" }).action).toBe("refuse");
-  });
-
-  it("answers a refusal with the agent's reject-once option, else cancelled (never reject-always)", () => {
-    expect(refusalResponse(request("edit"))).toEqual({ outcome: { outcome: "selected", optionId: "reject-once" } });
-    expect(refusalResponse(request("edit", {}, [OPTIONS[0], OPTIONS[3]]))).toEqual({ outcome: { outcome: "cancelled" } });
-    expect(refusalResponse(request("edit", {}, [OPTIONS[0], OPTIONS[1]]))).toEqual({ outcome: { outcome: "cancelled" } });
-  });
-
-  it("turns an answer outside the offered options into a refusal", () => {
-    const req = request("read");
-    const offered = [OPTIONS[0], OPTIONS[2]];
-    expect(vetAnswer(req, offered, { outcome: { outcome: "selected", optionId: "allow-once" } })).toEqual({ outcome: { outcome: "selected", optionId: "allow-once" } });
-    expect(vetAnswer(req, offered, { outcome: { outcome: "selected", optionId: "allow-always" } })).toEqual({ outcome: { outcome: "selected", optionId: "reject-once" } });
-    expect(vetAnswer(req, offered, { outcome: { outcome: "cancelled" } })).toEqual({ outcome: { outcome: "cancelled" } });
+    expect(builderAutoAllow(request("execute", { name: "guide_finish" }))).toBeNull();
   });
 });

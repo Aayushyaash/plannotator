@@ -106,10 +106,13 @@ export async function pickPullRequest(model: DashboardModel): Promise<SourceChoi
 export interface AgentPickResult {
   agent: AgentChoiceRecord;
   instructions?: string;
+  /** The user opted in to approving the agent's permission requests automatically for this run. */
+  autoApprove?: boolean;
 }
 
 const LOAD_MODELS = Symbol("load-models");
 const ADD_INSTRUCTIONS = Symbol("add-instructions");
+const TOGGLE_APPROVE = Symbol("toggle-approve");
 
 export interface RememberedChoice {
   agent?: string;
@@ -117,29 +120,23 @@ export interface RememberedChoice {
   effort?: string;
 }
 
-/** The agent step's rows: installed agents first (the remembered one active), then the ones to install. */
-export function agentRows(agents: readonly AgentStatus[], remembered?: string, run?: "local" | "pr"): Array<{ status: AgentStatus; label: string; description: string; detail?: string; active: boolean; usable: boolean }> {
+/** The agent step's rows: installed agents first (the remembered one active), then the ones to install. Every installed agent can be picked. */
+export function agentRows(agents: readonly AgentStatus[], remembered?: string): Array<{ status: AgentStatus; label: string; description: string; detail?: string; active: boolean }> {
   const rows = agents.map((status) => {
     const { agent, launch } = status;
     const installed = launch.ok;
-    if (agent.unsupported) {
-      return { status, label: `$(circle-slash) ${agent.label}`, description: "cannot write guides yet", detail: agent.unsupported, active: false, usable: false };
-    }
-    if (installed && run === "pr" && agent.refusePullRequests) {
-      return { status, label: `$(circle-slash) ${agent.label}`, description: "installed · local changes only", detail: agent.refusePullRequests, active: false, usable: false };
-    }
-    const enforcement = agent.readOnly.layer === "agent" ? "read-only enforced by the agent and Guides" : "read-only enforced by Guides' permission policy only";
     return {
       status,
-      label: `${installed ? "$(check)" : "$(circle-slash)"} ${agent.label}`,
-      description: installed ? (launch.source === "setting" ? "installed · command from settings" : "installed") : agent.installCommand ? "not installed" : "not found",
-      detail: installed ? enforcement : agent.installCommand ? `Install: ${agent.installCommand}` : launch.message,
+      label: `${installed ? "$(check)" : "$(cloud-download)"} ${agent.label}`,
+      description: installed
+        ? [launch.source === "setting" ? "installed · command from settings" : "installed", agent.note ? "can't write guides yet" : ""].filter(Boolean).join(" · ")
+        : agent.installCommand ? "not installed" : "not found",
+      detail: agent.note ?? (installed ? "Runs with your own settings and permissions." : agent.installCommand ? `Install: ${agent.installCommand}` : launch.message),
       active: false,
-      usable: installed,
     };
   });
-  const firstUsable = rows.find((r) => r.usable);
-  const target = rows.find((r) => r.status.agent.id === remembered && r.usable) ?? firstUsable;
+  const firstInstalled = rows.find((r) => r.status.launch.ok);
+  const target = rows.find((r) => r.status.agent.id === remembered && r.status.launch.ok) ?? firstInstalled;
   if (target) target.active = true;
   return rows;
 }
@@ -158,8 +155,8 @@ export async function pickAgentAndEffort(input: {
   standingInstructions: string;
   /** Only the defaults (the Change defaults command): no instructions step. */
   defaultsOnly?: boolean;
-  /** The run this pick is for: an agent that refuses pull requests is not offered for one. */
-  run?: "local" | "pr";
+  /** Automatic approval preselected (the `plannotator.guides.autoApprove` setting). */
+  autoApprove?: boolean;
 }): Promise<AgentPickResult | undefined> {
   const title = input.defaultsOnly ? "Guide defaults" : "New Guided Review";
   const total = input.defaultsOnly ? 3 : 4;
@@ -170,15 +167,15 @@ export async function pickAgentAndEffort(input: {
     aq.title = title;
     aq.step = 1 + offset;
     aq.totalSteps = total;
-    aq.placeholder = "Which agent writes the guide? It runs read-only, with your own setup and sign-in.";
+    aq.placeholder = "Which agent writes the guide? It runs with your own setup, settings and sign-in.";
     aq.matchOnDetail = true;
-    const rows = agentRows(input.agents, input.remembered?.agent, input.run);
+    const rows = agentRows(input.agents, input.remembered?.agent);
     const items: Array<Item<AgentStatus>> = [];
-    const installed = rows.filter((r) => r.usable);
-    const missing = rows.filter((r) => !r.usable);
+    const installed = rows.filter((r) => r.status.launch.ok);
+    const missing = rows.filter((r) => !r.status.launch.ok);
     if (installed.length) items.push({ label: "Installed", kind: vscode.QuickPickItemKind.Separator });
     for (const r of installed) items.push({ label: r.label, description: r.description, detail: r.detail, value: r.status });
-    if (missing.length) items.push({ label: "Not available: pick one to see why, or how to install it", kind: vscode.QuickPickItemKind.Separator });
+    if (missing.length) items.push({ label: "Not installed: pick one to see how to install it", kind: vscode.QuickPickItemKind.Separator });
     for (const r of missing) items.push({ label: r.label, description: r.description, detail: r.detail, value: r.status });
     aq.items = items;
     const active = items.find((i) => i.value && rows.find((r) => r.active)?.status === i.value);
@@ -187,10 +184,6 @@ export async function pickAgentAndEffort(input: {
     if (!status) return undefined;
     if (!status.launch.ok) {
       await input.onMissing(status);
-      continue;
-    }
-    if (input.run === "pr" && status.agent.refusePullRequests) {
-      await vscode.window.showInformationMessage(`${status.agent.label} cannot write a guide for a pull request: ${status.agent.refusePullRequests}`);
       continue;
     }
     const picked = await pickModelAndEffort({ ...input, agent: status.agent, title, total, offset, remembered: input.remembered?.agent === status.agent.id ? input.remembered : undefined });
@@ -208,6 +201,7 @@ async function pickModelAndEffort(input: {
   remembered?: RememberedChoice;
   standingInstructions: string;
   defaultsOnly?: boolean;
+  autoApprove?: boolean;
   title: string;
   total: number;
   offset: number;
@@ -272,15 +266,16 @@ async function pickModelAndEffort(input: {
     // Step: effort (+ instructions)
     let instructions = input.standingInstructions || undefined;
     let added = false;
+    let autoApprove = !!input.autoApprove;
     for (;;) {
-      const eq = vscode.window.createQuickPick<Item<ConfigChoice | null | typeof ADD_INSTRUCTIONS>>();
+      const eq = vscode.window.createQuickPick<Item<ConfigChoice | null | typeof ADD_INSTRUCTIONS | typeof TOGGLE_APPROVE>>();
       eq.title = input.title;
       eq.step = 3 + input.offset;
       eq.totalSteps = input.total;
       eq.placeholder = `Effort for ${model?.name ?? "the agent's default model"}`;
       const efforts = options?.effortByModel?.[model?.value ?? ""] ?? options?.effort ?? null;
       const preferredEffort = pickDefault(efforts, agent.defaultEffort, input.remembered?.effort);
-      const eItems: Array<Item<ConfigChoice | null | typeof ADD_INSTRUCTIONS>> = [];
+      const eItems: Array<Item<ConfigChoice | null | typeof ADD_INSTRUCTIONS | typeof TOGGLE_APPROVE>> = [];
       if (efforts && efforts.options.length) {
         for (const e of efforts.options) eItems.push({ label: e.name, description: e.value === preferredEffort?.value ? "default" : "", detail: e.description, value: e });
       } else eItems.push({ label: "Agent default", description: "this model has no effort levels", value: null });
@@ -293,12 +288,25 @@ async function pickModelAndEffort(input: {
           value: ADD_INSTRUCTIONS,
           alwaysShow: true,
         });
+        eItems.push({
+          label: autoApprove ? "$(unlock) Approve the agent's requests automatically: on" : "$(lock) Approve the agent's requests automatically: off",
+          description: autoApprove ? "this run" : "you approve each request",
+          detail: autoApprove
+            ? `Every permission request ${agent.label} sends is approved for you during this guide${agent.permissiveModes?.length ? `, and it runs in its ${agent.permissiveModes[0]} mode` : ""}. Pick to turn off.`
+            : `Off: ${agent.label} runs with your own settings and you answer what it asks about. Pick to turn on for this guide.`,
+          value: TOGGLE_APPROVE,
+          alwaysShow: true,
+        });
       }
       eq.items = eItems;
       const activeEffort = eItems.find((i) => i.value && typeof i.value === "object" && preferredEffort && i.value.value === preferredEffort.value);
       if (activeEffort) eq.activeItems = [activeEffort];
       const effortChoice = await pick(eq);
       if (effortChoice === undefined) return undefined;
+      if (effortChoice === TOGGLE_APPROVE) {
+        autoApprove = !autoApprove;
+        continue;
+      }
       if (effortChoice === ADD_INSTRUCTIONS) {
         const text = await vscode.window.showInputBox({
           title: "Instructions for this guide",
@@ -321,6 +329,7 @@ async function pickModelAndEffort(input: {
           ...(effort && { effort: { id: effort.value, label: effort.name } }),
         },
         ...(instructions && { instructions }),
+        ...(autoApprove && { autoApprove: true }),
       };
     }
   }
