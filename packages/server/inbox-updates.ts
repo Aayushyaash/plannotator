@@ -3,7 +3,7 @@
  * §4.2-4.4 and the owner's answers): one sidebar button whose state the
  * server works out from what is on this machine.
  *
- *   available   a newer stable release exists (the shared daily check) and
+ *   available   a newer stable release exists (the shared hourly check) and
  *               nothing newer is installed yet; not snoozed for that version.
  *   updating    the install script runs (update.lock is held): the person
  *               pressed Update now, ran `plannotator update`, or auto-update
@@ -14,7 +14,7 @@
  *               (update-result.json); a background failure stays out of the
  *               sidebar.
  *
- * The Inbox is long-lived and one per machine, so it also runs the daily
+ * The Inbox is long-lived and one per machine, so it also runs the hourly
  * release check (never awaited by a request, never in a dev run, never while
  * PLANNOTATOR_UPDATE_CHECK is off). It re-reads the cache on its health tick,
  * so a check another process made reaches it without a second request.
@@ -123,7 +123,7 @@ export interface InboxUpdatesOptions {
   healthTickMs: number;
   now?: () => number;
   fetchRelease?: () => Promise<FetchReleaseResult>;
-  /** One release by its tag, for notes a version needs and the daily check never saved. */
+  /** One release by its tag, for notes a version needs and the release check never saved. */
   fetchReleaseTag?: (version: string) => Promise<FetchReleaseResult>;
   /** How long the What's new route waits for those notes (WHATS_NEW_WAIT_MS). */
   whatsNewWaitMs?: number;
@@ -276,7 +276,7 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
 
   // One release's notes fetched by its tag, once per version at a time: a
   // version installed outside the Inbox (the install script run by hand)
-  // before the daily check saw it has none saved (fetchReleaseNotesFor).
+  // before the release check saw it has none saved (fetchReleaseNotesFor).
   const notesInFlight = new Map<string, Promise<void>>();
 
   /**
@@ -409,8 +409,9 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
     try {
       await probeBinary();
       if (release) {
-        // The daily check: answers from the cache within its window, so this
-        // asks GitHub at most once a day (6 h after a failure).
+        // The hourly check: answers from the cache within its window, so this
+        // asks GitHub at most once an hour (an hour after a failure, up to
+        // 6 h after GitHub's rate limit).
         await runReleaseCheck({
           dataDir: options.dataDir,
           now,

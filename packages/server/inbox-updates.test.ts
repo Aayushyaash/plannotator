@@ -1,5 +1,5 @@
 /**
- * The Inbox's update control against a real Inbox server: the daily check
+ * The Inbox's update control against a real Inbox server: the hourly check
  * (stubbed fetch, never GitHub), the button's states on health, Update now
  * (a recording launcher, never the install script), Remind me tomorrow, the
  * Settings switches (the dialog's "Install new versions automatically"
@@ -377,7 +377,7 @@ describe("What's new for a version installed outside the Inbox (no notes saved)"
     const server = await startReal();
     expect(await waitFor(() => listUpdated(server), (v) => v === null)).toBeNull();
     expect((await whatsNew(server, "0.28.10")).status).toBe(404);
-    // One attempt, then the 6 h back-off: the tick and the route ask no more.
+    // One attempt, then the notes' 6 h back-off: the tick and the route ask no more.
     await Bun.sleep(150);
     expect(tagRequests).toEqual(["0.28.10"]);
   });

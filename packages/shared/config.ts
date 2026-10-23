@@ -249,7 +249,7 @@ export interface PlannotatorConfig {
    */
   autoUpdate?: boolean;
   /**
-   * Update notices: whether Plannotator asks GitHub (once a day per machine,
+   * Update notices: whether Plannotator asks GitHub (about once an hour per machine,
    * from the machine, never the browser) whether a newer stable release
    * exists, and tells you in the Inbox, the review windows and the terminal.
    * `false` makes no automatic request at all, which also stops auto-update;

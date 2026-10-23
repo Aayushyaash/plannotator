@@ -109,6 +109,16 @@ function getReviewHtml(): string {
   return _reviewHtml;
 }
 
+/** Code review's diagram engine folder, shipped beside review-editor.html;
+ * undefined when absent (diagram fences then show as code). */
+function getReviewDiagramEngineDir(): string | undefined {
+  try {
+    return resolveBundledHtmlPath("diagram-engine");
+  } catch {
+    return undefined;
+  }
+}
+
 const DEFAULT_PLAN_TIMEOUT_SECONDS = 345_600; // 96 hours
 
 // ── Plugin ────────────────────────────────────────────────────────────────
@@ -161,6 +171,7 @@ type EmbeddedRuntimeModule = {
       client: any;
       htmlContent: string;
       reviewHtmlContent: string;
+      reviewDiagramEngineDir?: string;
       getSharingEnabled: () => Promise<boolean>;
       getShareBaseUrl: () => string | undefined;
       getPasteApiUrl: () => string | undefined;
@@ -602,6 +613,7 @@ Do NOT proceed with implementation until your plan is approved.`;
           client,
           htmlContent: getPlanHtml(),
           reviewHtmlContent: getReviewHtml(),
+          reviewDiagramEngineDir: getReviewDiagramEngineDir(),
           getSharingEnabled,
           getShareBaseUrl,
           getPasteApiUrl,

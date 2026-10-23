@@ -35,7 +35,7 @@ function isDismissedVersion(latestVersion: string): boolean {
 /**
  * The Options menu's update state, from the server's advert (`updateAvailable`
  * on /api/plan and /api/diff). The browser never asks GitHub: the machine
- * checks once a day (packages/shared/update-check.ts) and the server passes
+ * checks about once an hour (packages/shared/update-check.ts) and the server passes
  * the answer on, or nothing when update checks are off, in a dev build, or on
  * a surface with no server.
  *

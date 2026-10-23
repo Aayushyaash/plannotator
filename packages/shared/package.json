@@ -8,6 +8,7 @@
     "./annotate-bundle": "./annotate-bundle.ts",
     "./diff-files": "./diff-files.ts",
     "./app-html": "./app-html.ts",
+    "./diagram-engine-assets": "./diagram-engine-assets.ts",
     "./compress": "./compress.ts",
     "./crypto": "./crypto.ts",
     "./diff-paths": "./diff-paths.ts",

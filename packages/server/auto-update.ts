@@ -326,7 +326,7 @@ export async function runAutoUpdateCheck(deps: AutoUpdateDeps): Promise<AutoUpda
   patchUpdateState((s) => ({ ...s, lastCheckAt: now }), deps.dataDir);
   // Give the window back when nothing was installed for a reason that is not
   // "checked and up to date": the next session start retries (the release
-  // check's own 6h backoff still bounds the requests).
+  // check's own one-hour backoff still bounds the requests).
   const restoreWindow = () =>
     patchUpdateState((s) => {
       const next = { ...s };
@@ -335,7 +335,7 @@ export async function runAutoUpdateCheck(deps: AutoUpdateDeps): Promise<AutoUpda
       return next;
     }, deps.dataDir);
 
-  // The shared release check answers from the 24h cache, or asks GitHub once
+  // The shared release check answers from its one-hour cache, or asks GitHub once
   // (it reduces the tag to a canonical X.Y.Z, since the tag ends up as an
   // installer argument).
   let latest = cachedLatestTag(state, now);
@@ -357,7 +357,8 @@ export async function runAutoUpdateCheck(deps: AutoUpdateDeps): Promise<AutoUpda
   const others = otherOpenSessions(deps.listSessions(), deps.pid);
   if (others.length > 0) {
     // Do not spend the 24h install window: the next session start retries,
-    // answering from the cached release instead of querying GitHub again.
+    // answering from the cached release while it is under an hour old, and
+    // otherwise through the release check's own throttle.
     restoreWindow();
     log(
       `${latest} is available; skipped because ${others.length} other Plannotator session(s) are open`,
@@ -734,8 +735,8 @@ let noticeVersion: string | undefined;
  * every failure into update.log. Called by the compiled CLI each time a
  * session registers; only the first call per process does anything.
  *
- * First the shared release check (the update notices: at most once per 24h
- * per machine, 6h after a failure, never when PLANNOTATOR_UPDATE_CHECK is
+ * First the shared release check (the update notices: at most once an hour
+ * per machine, an hour after a failure, never when PLANNOTATOR_UPDATE_CHECK is
  * off), then opt-in auto-update, which answers from that same cache.
  */
 export function scheduleAutoUpdateCheck(currentVersion: string | undefined): void {

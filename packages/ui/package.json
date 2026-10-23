@@ -12,6 +12,7 @@
     "./components/ImageAnnotator": "./components/ImageAnnotator/index.tsx",
     "./components/html-viewer": "./components/html-viewer/index.ts",
     "./components/diagram": "./components/diagram/index.ts",
+    "./components/diagramLanguages": "./components/diagramLanguages.ts",
     "./components/diagram/*": "./components/diagram/*.tsx",
     "./components/html-viewer/bridge-script": "./components/html-viewer/bridge-script.ts",
     "./components/html-viewer/bridge-script.asset.js": "./components/html-viewer/bridge-script.asset.js",
