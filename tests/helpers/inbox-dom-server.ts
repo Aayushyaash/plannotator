@@ -71,6 +71,11 @@
  * polling the bridge with `body`'s fields (`plugin`, `busy`, `send_now`...);
  * the server answers `{ "polled": true }`.
  *
+ * With `guide` (approval "inbox-guide-diff-style"), each project also gets a
+ * thread whose agent sent a guided review of two sections (two files each
+ * side of a two-section patch) through the Inbox's own MCP (`submit_guide`);
+ * the world adds `guide` (`{ thread, message }`).
+ *
  * With `leaked-subject`, each project also gets a thread whose STORED subject
  * holds an agent's leaked tool-call text, as an Inbox older than the one-line
  * subject check kept it (tests/helpers/inbox-leaked-subject.ts); the world
@@ -281,7 +286,25 @@ type World = {
   htmlLinks?: { thread: string; ids: Record<string, string> };
   restart?: { thread: string; session: string; project: string; installPath: string; oldPath: string };
   leaked?: string;
+  guide?: { thread: string; message: string };
   news: string[];
+};
+/** The guided review the `guide` mode sends: two sections, one file each, so the first card and the second differ. */
+const DOM_GUIDE = {
+  body: "I wrote a guided review of the token refresh change.",
+  guide: {
+    title: "Token refresh",
+    intent: "Refresh tokens before they expire.",
+    sections: [
+      { title: "The guard", overview: "Where the refresh happens.", diffs: [{ file: "src/auth.ts", summary: "Adds the refresh guard." }] },
+      { title: "The session", overview: "What the session remembers.", diffs: [{ file: "src/session.ts", summary: "Keeps the expiry." }] },
+    ],
+    review: { gitRef: "origin/main...HEAD", base: "origin/main" },
+    generator: { engine: "claude-code", model: "claude-opus-5" },
+  },
+  patch:
+    "diff --git a/src/auth.ts b/src/auth.ts\n--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -1,3 +1,3 @@\n export function refresh() {\n-  return old();\n+  return early();\n }\n" +
+    "diff --git a/src/session.ts b/src/session.ts\n--- a/src/session.ts\n+++ b/src/session.ts\n@@ -1,2 +1,3 @@\n export interface Session {\n+  expiresAt: number;\n }\n",
 };
 const SENT_MULTI = [
   "Two things before the release:",
@@ -407,7 +430,20 @@ for (let i = 0; i < count; i++) {
     store.sendReply(asked.id, { idempotency_key: `restart-${i}`, words: "Queue it. Cap retries at 5 and dead-letter after." });
     restart = { thread: asked.id, session, project: root, installPath: pluginFolder("0.28.25"), oldPath: pluginFolder("0.28.23") };
   }
+  let guide: World["guide"];
+  if (extra === "guide") {
+    const client = new Client({ name: "inbox-dom-server", version: "1.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`)));
+    const result = (await client.callTool({
+      name: "submit_guide",
+      arguments: { project_path: root, ...DOM_GUIDE, agent_session: `ses_g${i}`, agent_name: "Claude Code", agent_host: "claude-code" },
+    })) as { isError?: boolean; content: { text: string }[]; structuredContent: { message_id: string; thread_id: string } };
+    await client.close();
+    if (result.isError) throw new Error(result.content[0]!.text);
+    guide = { thread: result.structuredContent.thread_id, message: result.structuredContent.message_id };
+  }
   worlds.push({
+    ...(guide ? { guide } : {}),
     ...(htmlLinks ? { htmlLinks } : {}),
     ...(restart ? { restart } : {}),
     ...(leakedIds[i] ? { leaked: leakedIds[i] } : {}),

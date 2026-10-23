@@ -1565,6 +1565,15 @@ pre code.pn-code[data-keep-layout] {
 .ib-viewer.ib-fold .ib-gbody { isolation: isolate; z-index: 0; }
 .ib-viewer.ib-fold.ib-panel-open .ib-gpanel { display: flex; position: absolute; top: 0; right: 0; bottom: 0; width: min(300px, 100%); z-index: 6; box-shadow: -16px 0 48px rgba(0, 0, 0, 0.18); }
 
+/* Split | Unified (approval "inbox-guide-diff-style", #2107): the control in the tab the guide chain raises out of the
+   first section card's top-right edge (GuideSectionCard's SectionTab draws the tab; this is the control in it).
+   26 px tall; no phone form (a phone draws Unified with no control). */
+.pn-inbox .ib-gtab { height: 26px; box-sizing: border-box; align-items: stretch; flex: none; }
+.pn-inbox .ib-gtab .ib-seg-o { height: auto; padding: 0 10px; font-size: var(--ib-fs-12-5, 12.5px); }
+@media (prefers-reduced-motion: reduce) {
+  .pn-inbox .ib-gtab, .pn-inbox .ib-gtab .ib-seg-o { transition: none; }
+}
+
 /* New message (record 5.x): the button's states beside Reply, the list of live
    sessions (5.2) and the "not running" state (5.3), above the button. */
 .pn-inbox .ib-btn.ib-on { border-color: color-mix(in oklch, var(--primary) 55%, transparent); background: color-mix(in oklch, var(--primary) 10%, var(--card)); color: var(--primary); }
