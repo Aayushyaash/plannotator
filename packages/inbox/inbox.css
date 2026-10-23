@@ -3786,7 +3786,7 @@ ol.ib-rl-two .ib-rw-cmd { font-weight: 400; margin-top: 6px; }
 .pn-inbox .ib-chk-foot .ib-ic { width: 14px; height: 14px; margin-top: 1px; flex: none; }
 @media (max-width: 767px), (max-height: 500px) and (max-width: 1023px) and (pointer: coarse) {
   .pn-inbox .ib-chk-head { padding-right: 6px; }
-  .pn-inbox .ib-chk-count { order: 3; flex-basis: 100%; padding-left: 23px; }
+  .pn-inbox .ib-chk-count { order: 3; flex-basis: 100%; padding-left: 22px; }
   .pn-inbox .ib-chk-tick { width: 48px; }
   .pn-inbox .ib-chk-toggle { min-height: 44px; }
   .pn-inbox .ib-chk-panel { padding: 2px 12px 14px 14px; }
