@@ -202,6 +202,7 @@ jobs:
           packages/inbox/componentTooltips.test.tsx
           packages/inbox/toast.test.tsx
           packages/inbox/attachmentsHeader.test.tsx
+          packages/inbox/threadArtifacts.test.tsx
           packages/inbox/sentQuestionLocked.test.tsx
           packages/inbox/themeToggle.test.tsx
           packages/inbox/textSize.test.tsx

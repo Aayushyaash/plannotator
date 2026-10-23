@@ -46,7 +46,7 @@ import { ImageAttachmentView } from './ImageAttachmentView';
 import { VideoAttachmentView, type VideoAttachmentViewHandle } from './VideoAttachmentView';
 import { OpenInControl, type OpenInSurface } from './OpenIn';
 import { AttachmentStepper, type StepSource } from './AttachmentStepper';
-import { FIRST_NOTE, LAST_NOTE, stepAnnouncement, stepKeyIntent, type AttachmentStep } from '../stepping';
+import { FIRST_NOTE, LAST_NOTE, stepAnnouncement, stepIndexOf, stepKeyIntent, type AttachmentStep } from '../stepping';
 import { Icon } from '../icons';
 import { FileName } from './FileName';
 import { useNarrowerThan } from '../narrower';
@@ -329,7 +329,7 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
 
   // ── Stepping (design record "inbox-attachment-stepping", v2) ──────────────
   const steps = props.steps ?? [];
-  const index = steps.findIndex((s) => s.attachment.id === attachment.id);
+  const index = stepIndexOf(steps, attachment.id);
   const multi = steps.length > 1 && index >= 0;
   const phone = props.phone === true;
   const [menuOpen, setMenuOpen] = useState(false);
@@ -560,7 +560,7 @@ export const AttachmentPane = forwardRef<AttachmentPaneHandle, AttachmentPanePro
     const source = pendingStep.current;
     pendingStep.current = null;
     if (!source) return;
-    const at = stepsRef.current.findIndex((s) => s.attachment.id === attachment.id);
+    const at = stepIndexOf(stepsRef.current, attachment.id);
     if (at >= 0) announce(stepAnnouncement(stepsRef.current, at));
     // Full screen keeps on through a step; with no bar under the file, a chip names the file for a moment.
     if (fullRef.current) showChipRef.current(null);

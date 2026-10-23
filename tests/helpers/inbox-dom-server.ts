@@ -76,6 +76,15 @@
  * side of a two-section patch) through the Inbox's own MCP (`submit_guide`);
  * the world adds `guide` (`{ thread, message }`).
  *
+ * With `artifacts` (approval "inbox-thread-artifacts"), each project also gets a
+ * thread of five messages through the Inbox's own MCP and routes: an agent's
+ * text showing `design/before.png` that also attaches it with `docs/spec.md`;
+ * the person's reply with `sketch.png` pasted in; an agent's `after.png` in the
+ * text with `traces.zip` attached; a guided review; and an agent's
+ * `flow.sql`. The world adds `artifacts` (`{ thread, ids: { <name>: <id> },
+ * guide }`: the inline image's id under `before.png`, the attached copy's under
+ * `before.png (attached)`).
+ *
  * With `leaked-subject`, each project also gets a thread whose STORED subject
  * holds an agent's leaked tool-call text, as an Inbox older than the one-line
  * subject check kept it (tests/helpers/inbox-leaked-subject.ts); the world
@@ -287,6 +296,7 @@ type World = {
   restart?: { thread: string; session: string; project: string; installPath: string; oldPath: string };
   leaked?: string;
   guide?: { thread: string; message: string };
+  artifacts?: { thread: string; ids: Record<string, string>; guide: string };
   news: string[];
 };
 /** The guided review the `guide` mode sends: two sections, one file each, so the first card and the second differ. */
@@ -442,7 +452,52 @@ for (let i = 0; i < count; i++) {
     if (result.isError) throw new Error(result.content[0]!.text);
     guide = { thread: result.structuredContent.thread_id, message: result.structuredContent.message_id };
   }
+  let artifacts: World["artifacts"];
+  if (extra === "artifacts") {
+    const png = Buffer.from(
+      "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63f8cfc0f01f0005fe02fe0dd8a2c90000000049454e44ae426082",
+      "hex",
+    );
+    mkdirSync(join(root, "design"), { recursive: true });
+    mkdirSync(join(root, "docs"), { recursive: true });
+    writeFileSync(join(root, "design", "before.png"), png);
+    writeFileSync(join(root, "design", "after.png"), png);
+    writeFileSync(join(root, "docs", "spec.md"), "# Spec\n\nOne drawer.\n");
+    writeFileSync(join(root, "traces.zip"), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0, 0xff, 0xfe]));
+    writeFileSync(join(root, "flow.sql"), "CREATE TABLE checkout_sessions (id uuid);\n");
+    const client = new Client({ name: "inbox-dom-server", version: "1.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`)));
+    const agentArgs = { project_path: root, agent_session: `ses_art${i}`, agent_name: "Claude Code", agent_host: "claude-code" };
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const result = (await client.callTool({ name, arguments: { ...agentArgs, ...args } })) as { isError?: boolean; content: { text: string }[]; structuredContent: Record<string, any> };
+      if (result.isError) throw new Error(result.content[0]!.text);
+      return result.structuredContent;
+    };
+    const first = await call("send_message", { subject: "Checkout drawer", body: "Today:\n\n![Today](design/before.png)\n\nThe spec is attached.", attachments: ["docs/spec.md", "design/before.png"] });
+    const firstId = (first.message?.id ?? first.message_id) as string;
+    const base = `http://127.0.0.1:${server.port}`;
+    const ss = server.serverSession;
+    const upload = (await (await fetch(`${base}/api/inbox/uploads?name=sketch.png&serverSession=${ss}`, { method: "POST", body: png })).json()) as { upload: { upload_id: string } };
+    const replied = await fetch(`${base}/api/inbox/messages/${firstId}/reply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ serverSession: ss, idempotency_key: `art-${i}`, words: "Sketch attached.", uploads: [upload.upload.upload_id] }),
+    });
+    if (!replied.ok) throw new Error(`reply ${replied.status} ${await replied.text()}`);
+    await call("send_message", { reply_to: firstId, body: "Built it:\n\n![After](design/after.png)", attachments: ["traces.zip"] });
+    const guideSent = await call("submit_guide", { ...DOM_GUIDE, reply_to: firstId });
+    await call("send_message", { reply_to: firstId, body: "The migration.", attachments: ["flow.sql"] });
+    await client.close();
+    const thread = store.thread(first.thread_id as string)!;
+    const ids: Record<string, string> = {};
+    for (const message of thread.messages) {
+      for (const image of message.inline_images ?? []) ids[image.name] = image.id;
+      for (const a of message.attachments ?? []) ids[ids[a.name] ? `${a.name} (attached)` : a.name] = a.id;
+    }
+    artifacts = { thread: first.thread_id as string, ids, guide: (guideSent.message?.id ?? guideSent.message_id) as string };
+  }
   worlds.push({
+    ...(artifacts ? { artifacts } : {}),
     ...(guide ? { guide } : {}),
     ...(htmlLinks ? { htmlLinks } : {}),
     ...(restart ? { restart } : {}),
