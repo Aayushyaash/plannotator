@@ -142,6 +142,12 @@ export const window = {
   onDidChangeActiveTextEditor(_listener: unknown) {
     return { dispose() {} };
   },
+  createTreeView(_id: string, _options: unknown) {
+    return { dispose() {} };
+  },
+  registerWebviewViewProvider(_id: string, _provider: unknown, _options?: unknown) {
+    return { dispose() {} };
+  },
 };
 
 export const env = {

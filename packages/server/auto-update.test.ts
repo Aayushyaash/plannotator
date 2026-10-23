@@ -23,6 +23,7 @@ import {
   type AutoUpdateDeps,
   type InstallerLaunch,
 } from "./auto-update";
+import { RELEASE_CHECK_RETRY_MS } from "@plannotator/shared/update-check";
 import type { SessionInfo } from "./sessions";
 
 const NOW = 1_800_000_000_000;
@@ -483,15 +484,15 @@ describe("Update now (the person asked)", () => {
 });
 
 describe("a failed fetch gives the install window back", () => {
-  test("no release: lastCheckAt is restored, so the next start retries once the 6h backoff allows", async () => {
+  test("no release: lastCheckAt is restored, so the next start retries once the release check's backoff allows", async () => {
     const d = deps({ fetchLatestTag: async () => (fetches++, null) });
     expect(await runAutoUpdateCheck(d)).toBe("no-release");
     expect(readAutoUpdateState(dataDir).lastCheckAt).toBeUndefined();
-    // Inside the release check's 6h backoff: no second request yet.
+    // Inside the release check's backoff: no second request yet.
     expect(await runAutoUpdateCheck(deps({ now: () => NOW + 60_000, fetchLatestTag: async () => (fetches++, "v0.28.0") }))).toBe("no-release");
     expect(fetches).toBe(1);
     // After it: the install window was not spent, so it asks and installs.
-    expect(await runAutoUpdateCheck(deps({ now: () => NOW + 6 * 60 * 60 * 1000 }))).toBe("launched");
+    expect(await runAutoUpdateCheck(deps({ now: () => NOW + RELEASE_CHECK_RETRY_MS }))).toBe("launched");
     expect(fetches).toBe(2);
   });
 });

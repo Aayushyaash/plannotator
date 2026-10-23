@@ -253,6 +253,9 @@ const reviewHtmlContent = reviewHtml as unknown as string;
 import inboxHtml from "../dist/inbox.html" with { type: "text" };
 const inboxHtmlContent = inboxHtml as unknown as string;
 
+// Code review's diagram engine: embedded too, read on first need.
+import { loadEmbeddedDiagramEngine } from "./diagram-engine";
+
 // The optional T3 Code hook (`t3-hook` with no arguments) runs on EVERY Bash
 // call of a Claude session that loads it. Only an Agent SDK session can be a
 // T3 conversation; answer every other one first, before any startup work.
@@ -1426,6 +1429,7 @@ if (args[0] === "sessions") {
     // this CLI's origins may see approve-carrying menu items (spec §6.4).
     approvalNotesSupported: supportsReviewApprovalNotes(detectedOrigin),
     htmlContent: reviewHtmlContent,
+    diagramEngine: loadEmbeddedDiagramEngine,
     tailnetPublished: tailscaleFlag,
     onCleanup: worktreeCleanup,
     onReady: async (url, isRemote, port) => {
@@ -2358,6 +2362,7 @@ if (args[0] === "sessions") {
     approvalNotesSupported:
       supportsReviewApprovalNotes("opencode") && input.supportsApprovalNotes === true,
     htmlContent: reviewHtmlContent,
+    diagramEngine: loadEmbeddedDiagramEngine,
     opencodeClient: makeOpenCodeBridgeClient(input.agents),
     onReady: (url, isRemote, port) => {
       handleReviewServerReady(url, isRemote, port);

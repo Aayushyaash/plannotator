@@ -147,7 +147,7 @@ The install script also updates the Claude Code plugin when it is already instal
 
 ### Update check
 
-Once a day, the machine (never your browser) asks GitHub for the latest stable release and caches the answer. When a newer one exists:
+About once an hour, the machine (never your browser) asks GitHub for the latest stable release and caches the answer. When a newer one exists:
 
 - the Inbox shows an **Update** button above Settings, which opens a dialog with what's new and **Update now** (see [the Inbox](/docs/reference/inbox/#update));
 - plan review, annotate and code review show a short toast at most once every three days, with **Update** (or the command to copy, on Pi: `pi update --extensions`), and the Options menu shows the right update command for your agent;
