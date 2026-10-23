@@ -1,5 +1,24 @@
 import { describe, expect, it } from "bun:test";
-import { loginCommands, sessionMetaFor } from "./agents";
+import {
+  CLAUDE_CODE,
+  CODEX,
+  COPILOT,
+  CURSOR,
+  KILO,
+  KIRO,
+  KNOWN_AGENTS,
+  OPENCODE,
+  PI,
+  customAgent,
+  detectAgents,
+  engineLabel,
+  findAgent,
+  loginCommands,
+  pickDefault,
+  readAgentOptions,
+  resolveAgentLaunch,
+  type AgentDescriptor,
+} from "./agents";
 import { planSpawn, shimEntry } from "./spawn-plan";
 
 /** What `npm install -g` writes on Windows for a package bin. */
@@ -52,12 +71,7 @@ describe("starting the adapter on Windows", () => {
   });
 });
 
-describe("agent session policy", () => {
-  it("loads only the user's Claude Code settings, no project MCP config and no bypass for a pull request", () => {
-    expect(sessionMetaFor({ kind: "pr" })).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false } } });
-    expect(sessionMetaFor({ kind: "local" })).toBeUndefined();
-  });
-
+describe("agent sign-in", () => {
   it("reads the terminal sign-ins the agent offers", () => {
     expect(loginCommands([
       { id: "claude-ai-login", name: "Claude Subscription", description: "Use Claude subscription", type: "terminal", args: ["--cli", "auth", "login", "--claudeai"] },
@@ -65,5 +79,129 @@ describe("agent session policy", () => {
       { id: "bad", name: "Bad", type: "terminal", args: [1] } as never,
     ])).toEqual([{ label: "Claude Subscription", description: "Use Claude subscription", args: ["--cli", "auth", "login", "--claudeai"] }]);
     expect(loginCommands(undefined)).toEqual([]);
+  });
+});
+
+const FOUND = (names: string[]) => (name: string) => (name.startsWith("/") ? name : names.includes(name) ? `/bin/${name}` : null);
+
+describe("the agent registry", () => {
+  it("lists the supported agents, each with an install command and an https source, and never npx", () => {
+    expect(KNOWN_AGENTS.map((a) => a.id)).toEqual(["claude-code", "codex", "opencode", "copilot", "cursor", "kiro", "kilo", "pi"]);
+    for (const a of KNOWN_AGENTS) {
+      expect(a.installCommand.length).toBeGreaterThan(0);
+      expect(a.docsUrl).toStartWith("https://");
+      expect([a.command, ...a.args].join(" ")).not.toContain("npx");
+    }
+    expect(new Set(KNOWN_AGENTS.map((a) => a.engine)).size).toBe(KNOWN_AGENTS.length);
+  });
+
+  it("starts each agent the way its docs say", () => {
+    const launch = (a: AgentDescriptor) => [a.command, ...a.args].join(" ");
+    expect(launch(CLAUDE_CODE)).toBe("claude-agent-acp");
+    expect(launch(CODEX)).toBe("codex-acp");
+    expect(launch(OPENCODE)).toBe("opencode acp");
+    expect(launch(COPILOT)).toBe("copilot --acp --stdio");
+    expect(launch(CURSOR)).toBe("cursor-agent acp");
+    expect(CURSOR.altCommands).toEqual(["agent"]);
+    expect(launch(KIRO)).toBe("kiro-cli acp");
+    expect(launch(KILO)).toBe("kilo acp");
+    expect(KILO.altCommands).toEqual(["kilocode"]);
+    expect(launch(PI)).toBe("pi-acp");
+  });
+
+  it("carries nothing that changes the user's agent config: no extra arguments, environment or session _meta", () => {
+    for (const a of KNOWN_AGENTS) {
+      const r = resolveAgentLaunch(a, {}, FOUND([a.command, ...(a.requires ? [a.requires.command] : [])]));
+      expect(r).toEqual({ ok: true, command: `/bin/${a.command}`, args: [...a.args], source: "path" });
+      expect(Object.keys(a).sort()).not.toContain("readOnly");
+    }
+  });
+
+  it("uses an agent's own permissive mode only for automatic approval: Claude Code acceptEdits, Codex agent", () => {
+    // The first is the mode Guides switches to; the rest are at least as permissive and are never downgraded.
+    expect(CLAUDE_CODE.permissiveModes).toEqual(["acceptEdits", "auto", "bypassPermissions"]);
+    expect(CODEX.permissiveModes).toEqual(["agent", "agent-full-access"]);
+  });
+
+  it("starts Pi like any other agent, with its capability gap as a note", () => {
+    expect(resolveAgentLaunch(PI, {}, FOUND(["pi-acp", "pi"]))).toEqual({ ok: true, command: "/bin/pi-acp", args: [], source: "path" });
+    expect(PI.note).toContain("Can't write guides yet");
+    expect(PI.note).toContain("MCP");
+  });
+});
+
+describe("starting an agent", () => {
+  it("tries the program's other names", () => {
+    expect(resolveAgentLaunch(CURSOR, {}, FOUND(["agent"]))).toEqual({ ok: true, command: "/bin/agent", args: ["acp"], source: "path" });
+    expect(resolveAgentLaunch(KILO, {}, FOUND(["kilocode"]))).toEqual({ ok: true, command: "/bin/kilocode", args: ["acp"], source: "path" });
+  });
+
+  it("says how to install a missing agent", () => {
+    expect(resolveAgentLaunch(OPENCODE, {}, FOUND([]))).toEqual({ ok: false, reason: "agent", message: "OpenCode is not installed: `opencode` is not on PATH. Install it with `curl -fsSL https://opencode.ai/install | bash`, then try again." });
+  });
+
+  it("uses a command override with its own args, or the agent's", () => {
+    expect(resolveAgentLaunch(OPENCODE, { command: "/opt/oc" }, FOUND([]))).toEqual({ ok: true, command: "/opt/oc", args: ["acp"], source: "setting" });
+    expect(resolveAgentLaunch(CODEX, { command: "/opt/codex-acp", args: ["--x"] }, FOUND([]))).toEqual({ ok: true, command: "/opt/codex-acp", args: ["--x"], source: "setting" });
+    expect(resolveAgentLaunch(CODEX, { command: "nope" }, FOUND([]))).toEqual({ ok: false, reason: "setting", message: "The configured command for Codex, `nope`, was not found." });
+  });
+
+  it("lists installed agents first, then the rest, and the custom agent when set", () => {
+    const custom = customAgent({ command: "/opt/my-acp", args: ["acp"], label: "Mine" });
+    const statuses = detectAgents(() => ({}), custom, FOUND(["opencode", "kiro-cli"]));
+    expect(statuses.map((s) => [s.agent.id, s.launch.ok])).toEqual([
+      ["opencode", true], ["kiro", true], ["custom", true],
+      ["claude-code", false], ["codex", false], ["copilot", false], ["cursor", false], ["kilo", false], ["pi", false],
+    ]);
+    expect(custom?.label).toBe("Mine");
+    expect(customAgent({ command: "  " })).toBeNull();
+    expect(findAgent("custom", custom)).toBe(custom);
+    expect(findAgent("kilo", null)).toBe(KILO);
+    expect(findAgent("gone", null)).toBeNull();
+  });
+
+  it("names a saved guide's engine", () => {
+    expect(engineLabel("claude")).toBe("Claude Code");
+    expect(engineLabel("kilo")).toBe("Kilo Code");
+    expect(engineLabel("acp")).toBe("acp");
+    expect(engineLabel(undefined)).toBe("");
+  });
+});
+
+describe("cheap defaults", () => {
+  const select = { configId: "model", name: "Model", current: "opus", options: [{ value: "opus", name: "Opus" }, { value: "sonnet", name: "Sonnet" }] };
+  it("prefers the remembered choice, then the agent's cheap default, then its current one", () => {
+    expect(pickDefault(select, /sonnet/i, "opus")?.value).toBe("opus");
+    expect(pickDefault(select, /sonnet/i)?.value).toBe("sonnet");
+    expect(pickDefault(select, undefined)?.value).toBe("opus");
+    expect(pickDefault(null, /x/)).toBeNull();
+  });
+
+  it("reads model and effort from the agent's config options, whatever the effort is called", () => {
+    const opts = (effort: Record<string, unknown>) => [
+      { id: "model", name: "Model", category: "model", type: "select", currentValue: "a", options: [{ value: "a", name: "A" }] },
+      { name: "Effort", type: "select", currentValue: "low", options: [{ value: "low", name: "Low" }], ...effort },
+    ] as never;
+    for (const effort of [{ id: "e", category: "thought_level" }, { id: "thinking", category: "thinking" }, { id: "effortLevel" }, { id: "reasoning_effort", category: "other" }]) {
+      const o = readAgentOptions("x", opts(effort), 1);
+      expect(o.model?.current).toBe("a");
+      expect(o.effort?.options.map((c) => c.value)).toEqual(["low"]);
+    }
+  });
+});
+
+describe("installing an agent on Windows", () => {
+  it("types the documented PowerShell command, the same npm command, or nothing (the docs instead)", async () => {
+    const { installCommandFor } = await import("./agents");
+    const win = (a: AgentDescriptor) => installCommandFor(a.installCommand, a.installCommandWindows, "win32");
+    expect(win(CURSOR)).toBe("irm 'https://cursor.com/install?win32=true' | iex");
+    expect(win(OPENCODE)).toBe("npm install -g opencode-ai");
+    expect(win(COPILOT)).toBe("npm install -g @github/copilot");
+    expect(win(KILO)).toBe("npm install -g @kilocode/cli");
+    expect(win(KIRO)).toBeNull();
+    for (const a of KNOWN_AGENTS) expect(win(a) ?? "").not.toContain("| bash");
+    expect(installCommandFor(CURSOR.installCommand, CURSOR.installCommandWindows, "darwin")).toBe(CURSOR.installCommand);
+    const kiro = resolveAgentLaunch(KIRO, {}, () => null, () => null, "win32");
+    expect(!kiro.ok && kiro.message).toBe("Kiro CLI is not installed: `kiro-cli` is not on PATH. Install it as its docs say (https://kiro.dev/docs/cli/acp/), then try again.");
   });
 });

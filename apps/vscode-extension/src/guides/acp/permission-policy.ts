@@ -1,0 +1,46 @@
+/**
+ * Permission requests. Guides never refuses one on its own: the agent's own
+ * settings decide what it asks about, and every request is shown to the user
+ * with all the options the agent offers (allow once or always, reject once or
+ * always); the user's choice goes back as it is.
+ *
+ * The one exception is the guide's own builder tools (`guide_*` on the
+ * `plannotator-guide` MCP server). They change nothing but the draft held in
+ * the extension, and a guide makes dozens of calls to them, so when an agent
+ * asks about one it is allowed once without a prompt. They are matched by
+ * their exact programmatic name or whole title, never a title that merely
+ * mentions one (a shell command can).
+ */
+
+import type { RequestPermissionRequest } from "@agentclientprotocol/sdk";
+import { GUIDE_BUILDER_TOOL_NAMES } from "../core/adapter";
+
+const BUILDER_NAMES = new Set<string>(GUIDE_BUILDER_TOOL_NAMES as readonly string[]);
+
+/**
+ * Whether a tool call is one of the builder's own MCP tools: its programmatic
+ * name, or its whole title, is a builder tool name, bare or with the server's
+ * prefix as agents spell it (`mcp__plannotator-guide__guide_finish`,
+ * `plannotator-guide.guide_finish`, `plannotator-guide/guide_finish`,
+ * `plannotator-guide_guide_finish`, `plannotator-guide: guide_finish`).
+ */
+export function isBuilderToolCall(toolCall: { name?: string | null; title?: string | null }): boolean {
+  for (const raw of [toolCall.name, toolCall.title]) {
+    if (typeof raw !== "string") continue;
+    const m = /^(?:(?:mcp__)?plannotator-guide(?:__|[._/]|: ?))?(guide_[a-z_]+)$/.exec(raw.trim());
+    if (m && BUILDER_NAMES.has(m[1])) return true;
+  }
+  return false;
+}
+
+/**
+ * The option to answer with without asking: "allow once" for a request about
+ * one of the builder's own tools (of kind `other` or no kind), else null (ask
+ * the user).
+ */
+export function builderAutoAllow(request: RequestPermissionRequest): string | null {
+  const kind = request.toolCall.kind;
+  if (kind && kind !== "other") return null;
+  if (!isBuilderToolCall(request.toolCall)) return null;
+  return request.options.find((o) => o.kind === "allow_once")?.optionId ?? null;
+}
