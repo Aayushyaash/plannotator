@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://marketplace.visualstudio.com/items?itemName=backnotprop.plannotator-webview"><img src="https://img.shields.io/visual-studio-marketplace/v/backnotprop.plannotator-webview?label=Marketplace&logo=visualstudiocode" alt="VS Code Marketplace" /></a>
-  <a href="https://code.visualstudio.com/"><img src="https://img.shields.io/badge/VS%20Code-^1.85.0-blue?logo=visualstudiocode" alt="VS Code" /></a>
+  <a href="https://code.visualstudio.com/"><img src="https://img.shields.io/badge/VS%20Code-^1.90.0-blue?logo=visualstudiocode" alt="VS Code" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
 </p>
 
@@ -31,6 +31,14 @@ Review, annotate, and approve AI-generated plans without leaving your editor. Ad
 Review code changes with a full diff viewer, file tree, inline annotations, and AI-assisted review — all in a VS Code tab.
 
 ![Code Review](https://d17ygohy796f9l.cloudfront.net/vscode/code-review.jpeg)
+
+## Guided Reviews
+
+The **Guides** view (its own icon in the activity bar) turns a change into a guided review: a title, an intent, an overview with a diagram, and a few chapters in reading order, each with the files it covers. Pick this branch's pull request, another open PR, or your local changes; Claude Code writes the guide with your own Claude Code setup and permissions, and you watch it build. Then read it chapter by chapter in VS Code's own diff editor, with go to definition on the real files and ticks per chapter and file.
+
+- Needs Claude Code's ACP adapter: `npm install -g @agentclientprotocol/claude-agent-acp` (or point `plannotator.guides.claudeCode.command` at it). Pull requests need the GitHub CLI (`gh`).
+- A PR opens in a git worktree in the extension's storage, so your checkout is never touched.
+- Guides are saved where Plannotator's web app finds them: open and export them from either side.
 
 ## Features
 
