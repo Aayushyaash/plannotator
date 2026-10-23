@@ -326,6 +326,7 @@ jobs:
           packages/editor/App.planRevision.test.tsx
           packages/editor/App.liveVersion.test.tsx
           packages/editor/askSessionDrafts.test.tsx
+          packages/editor/askDocumentLatch.test.tsx
           packages/review-editor/App.decisionControl.test.tsx
           packages/ui/components/TerminalToolsAnnouncementDialog.test.tsx
           packages/editor/App.terminalToolsAnnouncement.test.tsx

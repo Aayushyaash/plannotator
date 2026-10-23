@@ -408,6 +408,8 @@ export async function startPlanReviewServer(options: {
 					approvalNotesSupported: options.approvalNotesSupported === true,
 					previousPlan,
 					versionInfo,
+					// The history file holding this exact plan, so Ask AI can name it by path.
+					...(historyResult.path ? { planPath: historyResult.path } : {}),
 					sharingEnabled,
 					shareBaseUrl,
 					pasteApiUrl,

@@ -472,7 +472,7 @@ export async function startPlannotatorServer(
                 ...getUpdateAdvert(origin, { exposed: isRemote }),
               });
             }
-            return Response.json({ plan, origin, permissionMode, approvalNotesSupported, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, serverSession, ...(options.planRevisions ? { planRevision } : {}), projectRoot: process.cwd(), planDir: planFile?.dir, isWSL: wslFlag, serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge, options.opencodeToolCapable)), ...getAutoUpdateAdvert(), ...getUpdateAdvert(origin, { exposed: isRemote }) });
+            return Response.json({ plan, origin, permissionMode, approvalNotesSupported, sharingEnabled, shareBaseUrl, pasteApiUrl, repoInfo, previousPlan, versionInfo, serverSession, ...(options.planRevisions ? { planRevision } : {}), ...(currentPlanPath ? { planPath: currentPlanPath } : {}), projectRoot: process.cwd(), planDir: planFile?.dir, ...(planFile ? { planFilePath: planFile.path } : {}), isWSL: wslFlag, serverConfig: getServerConfig(gitUser, agentToolHostForServer(options.sessionBridge, options.opencodeToolCapable)), ...getAutoUpdateAdvert(), ...getUpdateAdvert(origin, { exposed: isRemote }) });
           }
 
           // API: The live plan revision (open reviews that receive revised plans)
