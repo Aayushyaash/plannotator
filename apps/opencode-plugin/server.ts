@@ -7,6 +7,7 @@ import { INBOX_REMINDER_TEXT, INBOX_TOOL_NAME, inboxReminderText } from "@planno
 import { readImprovementHook } from "@plannotator/shared/improvement-hooks";
 import { composeImproveContext } from "@plannotator/shared/pfm-reminder";
 import { composeSystemPrompt, stripConflictingPlanModeRules } from "./plan-mode";
+import { replacePlanModeReminders } from "./plan-reminder";
 import {
   isPlanningAgent,
   normalizeWorkflowOptions,
@@ -252,7 +253,7 @@ const serverPlugin = {
             "While actively planning with the user, use submit_plan instead. Only use todos once implementation begins or unless the user explicitly asks.";
         }
 
-        replaceStrictPlanReminder(event.messages);
+        replacePlanModeReminders(event.messages);
 
         const systemText = event.system.map((part) => part.text).join("\n").toLowerCase();
         if (systemText.includes("title generator") || systemText.includes("generate a title")) return;
@@ -640,7 +641,7 @@ export function replacePlanningSystemParts(
   system: SystemPart[],
   additions: string[],
 ): void {
-  const stripped = stripConflictingPlanModeRules(system.map((part) => part.text));
+  const stripped = stripConflictingPlanModeRules(system.map((part) => part.text), { openCode2: true });
   const composed = composeSystemPrompt([], [...stripped, ...additions.filter(Boolean)]);
   system.length = 0;
   system.push(...composed.map((text) => ({ type: "text" as const, text })));
@@ -687,30 +688,6 @@ export async function addInboxReminder(
   if (agent?.mode === "subagent") return;
   if (systemText.includes(reminder.toLowerCase())) return;
   pushComposedSystemReminder(event.system, reminder);
-}
-
-function replaceStrictPlanReminder(messages: unknown[]): void {
-  for (const message of messages) {
-    if (!message || typeof message !== "object" || Reflect.get(message, "role") !== "user") continue;
-    const content = Reflect.get(message, "content");
-    if (!Array.isArray(content)) continue;
-    for (const part of content) {
-      if (!part || typeof part !== "object" || Reflect.get(part, "type") !== "text") continue;
-      const text = Reflect.get(part, "text");
-      if (typeof text !== "string" || !text.includes("STRICTLY FORBIDDEN")) continue;
-      Reflect.set(part, "text", `<system-reminder>
-# Plan Mode - System Reminder
-
-CRITICAL: Plan mode ACTIVE. You are in a PLANNING phase. The ONLY file modifications
-allowed are writing or editing markdown files (.md) - plans, specs, documentation, etc.
-All other file edits, code modifications, and system changes are STRICTLY FORBIDDEN.
-Do NOT use shell commands to manipulate non-markdown files. Commands may ONLY read/inspect.
-
-Use submit_plan to submit the completed plan for user review. Do not proceed with
-implementation until the plan is approved.
-</system-reminder>`);
-    }
-  }
 }
 
 function getGenericPlanReminder(): string {
