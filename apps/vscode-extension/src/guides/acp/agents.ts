@@ -89,15 +89,27 @@ export interface AgentDescriptor {
 }
 
 /**
- * Claude Code's tools that change files or run commands, refused by the
- * adapter itself on every run (`disallowedTools`). Claude Code calls
+ * The only built-in Claude Code tools a guide run has: an allowlist, passed as
+ * `tools` in `_meta.claudeCode.options`. claude-agent-acp hands the client's
+ * `tools` to the SDK ahead of its `claude_code` preset (`tools:
+ * userProvidedOptions?.tools ?? { type: "preset", preset: "claude_code" }` in
+ * `src/acp-agent.ts`); it lists built-in tools only, and MCP servers (the
+ * guide's own) are passed separately. TodoWrite and the Task* plan tools only
+ * update the agent's to-do list.
+ */
+export const CLAUDE_ALLOWED_TOOLS = ["Read", "Grep", "Glob", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"];
+
+/**
+ * The second layer: Claude Code's tools that change files or run commands,
+ * refused by the adapter itself on every run (`disallowedTools`), in case an
+ * adapter ignores `tools`. Claude Code calls
  * `canUseTool` (and so the client's permission request) only when its own
  * rules say "ask": the user's allow rules (`Bash(npm test:*)` in
  * ~/.claude/settings.json), sandbox auto-allow and its built-in read-only
  * auto-approvals run commands without a request, so Bash is refused at the
  * agent, not only by the permission policy.
  */
-export const CLAUDE_DISALLOWED_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "BashOutput", "KillShell", "KillBash"];
+export const CLAUDE_DISALLOWED_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell", "BashOutput", "KillShell", "KillBash", "Monitor", "TaskStop"];
 /** Also refused on a pull request run: the network (a PR's text must not send what the agent read anywhere). */
 export const CLAUDE_PR_DISALLOWED_TOOLS = ["WebFetch", "WebSearch"];
 
@@ -159,16 +171,17 @@ export const CLAUDE_CODE: AgentDescriptor = {
   defaultEffort: /^low$/i,
   readOnly: {
     layer: "agent",
-    summary: "Runs in Claude Code's default permission mode with its edit, write and shell tools disallowed and no MCP server but Guides'; a pull request also loads only your user settings and has no network.",
+    summary: "Runs in Claude Code's default (or plan) permission mode with only its read, search and to-do tools, and no MCP server but Guides'; a pull request also loads only your user settings and has no network.",
     sessionMeta: (run) => ({
       claudeCode: {
         options:
           run === "pr"
-            ? { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false, disallowedTools: [...CLAUDE_DISALLOWED_TOOLS, ...CLAUDE_PR_DISALLOWED_TOOLS] }
-            : { strictMcpConfig: true, disallowedTools: [...CLAUDE_DISALLOWED_TOOLS] },
+            ? { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false, tools: [...CLAUDE_ALLOWED_TOOLS], disallowedTools: [...CLAUDE_DISALLOWED_TOOLS, ...CLAUDE_PR_DISALLOWED_TOOLS] }
+            : { strictMcpConfig: true, tools: [...CLAUDE_ALLOWED_TOOLS], disallowedTools: [...CLAUDE_DISALLOWED_TOOLS] },
       },
     }),
-    mode: { ids: ["default"], label: "the default permission mode" },
+    // Plan mode is read-only too: a session in it stays; leaving it is a switch_mode request, which is refused.
+    mode: { ids: ["default", "plan"], label: "the default permission mode" },
   },
   prPreflight: (headRoot) => claudePrSettingsRisk(headRoot),
   signIn: { command: "claude", args: ["/login"] },

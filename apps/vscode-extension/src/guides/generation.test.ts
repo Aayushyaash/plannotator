@@ -10,7 +10,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GuideGeneration, type GenerationDeps, type GenerationInput } from "./generation";
-import { CLAUDE_CODE, CLAUDE_DISALLOWED_TOOLS, CODEX, COPILOT, CURSOR, KILO, KIRO, customAgent, type AgentDescriptor } from "./acp/agents";
+import { CLAUDE_ALLOWED_TOOLS, CLAUDE_CODE, CLAUDE_DISALLOWED_TOOLS, CODEX, COPILOT, CURSOR, KILO, KIRO, customAgent, type AgentDescriptor } from "./acp/agents";
 import { startRelayHost, type RelayHost } from "./mcp/relay-host";
 import { changedFilesFromPatch } from "./sources/git";
 import { listDraftRecords, loadDraftRecord, loadSavedGuide, listRecent } from "./store";
@@ -148,7 +148,7 @@ describe("guide generation over ACP", () => {
     const log = w.log();
     expect(log.find((e) => e.event === "initialize")?.clientCapabilities).toMatchObject({ fs: { readTextFile: false, writeTextFile: false }, terminal: false, auth: { terminal: true } });
     // Local changes are the user's own checkout: their project settings apply; only Claude Code's write tools are disallowed.
-    expect(log.find((e) => e.event === "newSession")?.meta).toEqual({ claudeCode: { options: { strictMcpConfig: true, disallowedTools: CLAUDE_DISALLOWED_TOOLS } } });
+    expect(log.find((e) => e.event === "newSession")?.meta).toEqual({ claudeCode: { options: { strictMcpConfig: true, tools: CLAUDE_ALLOWED_TOOLS, disallowedTools: CLAUDE_DISALLOWED_TOOLS } } });
     expect(log.find((e) => e.event === "mcpReady")?.tools).toContain("guide_place_file");
     expect(log.filter((e) => e.event === "setConfig").map((e) => `${e.configId}=${e.value}`)).toEqual(["model=sonnet", "effort=low"]);
     const prompt = log.find((e) => e.event === "prompt")!;
@@ -269,7 +269,7 @@ describe("guide generation over ACP", () => {
     const gen = new GuideGeneration(w.input, w.deps);
     await gen.run();
     const newSession = w.log().find((e) => e.event === "newSession")!;
-    expect(newSession.meta).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false, disallowedTools: [...CLAUDE_DISALLOWED_TOOLS, "WebFetch", "WebSearch"] } } });
+    expect(newSession.meta).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false, tools: CLAUDE_ALLOWED_TOOLS, disallowedTools: [...CLAUDE_DISALLOWED_TOOLS, "WebFetch", "WebSearch"] } } });
     // Our builder server is still the one MCP server the agent gets.
     expect(newSession.mcpServers).toEqual([{ name: "plannotator-guide" }]);
   });
@@ -340,6 +340,15 @@ describe("guide generation over ACP", () => {
     expect(gen.state.status).toBe("failed");
     expect(gen.state.statusMessage).toStartWith("Claude Code's settings ask for bypassPermissions; Guides runs only in the default permission mode.");
     expect(w.log().some((e) => e.event === "prompt")).toBe(false);
+  });
+
+  it("leaves a Claude Code run that starts in plan mode in it: plan is read-only too", async () => {
+    const w = world([header], { script: { startMode: "plan" } });
+    asPullRequest(w);
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    expect(modeChangesBeforePrompt(w.log())).toEqual([]);
+    expect(w.log().find((e) => e.event === "prompt")!.mode).toBe("plan");
   });
 
   it("leaves a pull request run that already starts in default alone", async () => {

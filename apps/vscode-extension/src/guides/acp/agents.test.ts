@@ -76,9 +76,17 @@ describe("starting the adapter on Windows", () => {
 
 describe("agent session policy", () => {
   it("loads only the user's Claude Code settings, no project MCP config and no bypass for a pull request", () => {
-    const tools = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "BashOutput", "KillShell", "KillBash"];
-    expect(sessionMetaFor(CLAUDE_CODE, { kind: "pr" })).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false, disallowedTools: [...tools, "WebFetch", "WebSearch"] } } });
-    expect(sessionMetaFor(CLAUDE_CODE, { kind: "local" })).toEqual({ claudeCode: { options: { strictMcpConfig: true, disallowedTools: tools } } });
+    const allowed = ["Read", "Grep", "Glob", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"];
+    const denied = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell", "BashOutput", "KillShell", "KillBash", "Monitor", "TaskStop"];
+    expect(sessionMetaFor(CLAUDE_CODE, { kind: "pr" })).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false, tools: allowed, disallowedTools: [...denied, "WebFetch", "WebSearch"] } } });
+    expect(sessionMetaFor(CLAUDE_CODE, { kind: "local" })).toEqual({ claudeCode: { options: { strictMcpConfig: true, tools: allowed, disallowedTools: denied } } });
+    // The allowlist holds no tool that writes, runs a command or reaches the network, and both shells are denied.
+    for (const run of ["local", "pr"] as const) {
+      const opts = (sessionMetaFor(CLAUDE_CODE, { kind: run }) as { claudeCode: { options: { tools: string[]; disallowedTools: string[] } } }).claudeCode.options;
+      for (const t of ["Bash", "PowerShell", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task", "Monitor", "TaskStop", "Skill"]) expect(opts.tools).not.toContain(t);
+      for (const t of ["Bash", "PowerShell", "Monitor", "TaskStop", "KillShell"]) expect(opts.disallowedTools).toContain(t);
+    }
+    expect(CLAUDE_CODE.readOnly.mode?.ids).toEqual(["default", "plan"]);
     // Only Claude Code reads _meta.claudeCode.
     for (const a of KNOWN_AGENTS.filter((x) => x !== CLAUDE_CODE)) expect(sessionMetaFor(a, { kind: "pr" })).toBeUndefined();
   });
