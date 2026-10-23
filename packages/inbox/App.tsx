@@ -184,6 +184,11 @@ interface Route {
   /** The message whose guided review is open over the window (`#thread=…&guide=msg_…`). */
   guide?: string | null;
   /**
+   * The thread's Artifacts view (`#thread=…&artifacts`, approval "inbox-thread-artifacts"): the grid of every
+   * artifact in place of the messages. A file or a guided review opened from it keeps it, so their Back returns to it.
+   */
+  artifacts?: boolean;
+  /**
    * A message to land on (`#thread=…&msg=msg_…`, a search result): the thread
    * opens there, the message unfolded, centred, focused and ringed. Dropped
    * from the hash once landed, so a reload does not jump again.
@@ -215,6 +220,7 @@ function routeOf(fullHash: string): Route {
     file: fileId ? { id: fileId, version: params.get('v') === 'sent' ? 'sent' : 'current', focus: params.get('at'), linked: params.get('linked'), view: parseFileView(params.get('view')) } : null,
     guide: thread ? params.get('guide') : null,
     msg: thread ? params.get('msg') : null,
+    artifacts: thread ? params.has('artifacts') : false,
   };
 }
 
@@ -229,6 +235,7 @@ function hashOf(route: Route): string {
     if (route.project) params.set('project', route.project);
     if (route.thread) params.set('thread', route.thread);
     if (route.thread && route.msg) params.set('msg', route.msg);
+    if (route.thread && route.artifacts) params.set('artifacts', '');
     if (route.thread && route.file) {
       params.set('file', route.file.id);
       if (route.file.version === 'sent') params.set('v', 'sent');
@@ -238,7 +245,8 @@ function hashOf(route: Route): string {
       if (route.file.view) params.set('view', route.file.view);
     }
     if (route.thread && route.guide) params.set('guide', route.guide);
-    hash = params.toString();
+    // `&artifacts`, a flag: written without its empty `=`.
+    hash = params.toString().replace(/(^|&)artifacts=(?=&|$)/, '$1artifacts');
   }
   return hash ? `#${hash}` : '';
 }
@@ -256,6 +264,8 @@ function currentHash(): string {
  * the browser's Back on a phone.
  */
 function writeRoute(route: Route, options: { replace?: boolean } = {}): void {
+  // The Artifacts view belongs to the thread it was opened in: another thread, or a message to land on, opens on the messages.
+  if (route.artifacts && (route.thread !== readRoute().thread || route.msg)) route = { ...route, artifacts: false };
   const hash = hashOf(route);
   const next = hash || window.location.pathname + window.location.search;
   if (options.replace) {
@@ -1068,8 +1078,10 @@ function Inbox() {
       if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable)) return;
       // Words selected in a message (approval "inbox-message-comments"): its selection toolbar or label picker owns this Escape.
       if (selectionToolbarShowing()) return;
-      // An open guided review closes first, back to its thread.
-      closeTo(routeRef.current.guide ? { ...routeRef.current, guide: null } : { ...routeRef.current, thread: null });
+      // An open guided review closes first, back to its thread; then the Artifacts view, back to the messages
+      // (approval "inbox-thread-artifacts": one more rung before Escape closes the thread).
+      const now = routeRef.current;
+      closeTo(now.guide ? { ...now, guide: null } : now.artifacts ? { ...now, artifacts: false } : { ...now, thread: null });
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -2411,6 +2423,8 @@ function Inbox() {
               writeRoute(next, options);
             }}
             onOpenGuide={(messageId) => go({ ...route, guide: messageId })}
+            artifacts={route.artifacts === true}
+            onArtifacts={(open) => (open ? go({ ...routeRef.current, artifacts: true, msg: null }) : close({ ...routeRef.current, artifacts: false }))}
             landing={
               route.msg
                 ? {

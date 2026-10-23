@@ -15,7 +15,9 @@ import { annotationOf, attachmentFeedback, isFileComment } from '../attachments'
 import { AttachmentTiles, AttachmentsCount, changedCount } from './AttachmentTiles';
 import { AttachmentPane, type AttachmentPaneHandle } from './AttachmentPane';
 import type { OpenInSurface } from './OpenIn';
-import { attachmentSequence } from '../stepping';
+import { stepsOf } from '../stepping';
+import { artifactKey, artifactOfFile, threadArtifacts } from '../artifacts';
+import { ArtifactsView } from './ArtifactsView';
 import { fileViewFor, openingView, parseFileView, readFileViewChoice, writeFileViewChoice, type FileView } from '../fileView';
 import type { InboxToastModel } from './Toast';
 import { AnnotationsChip } from './AnnotationsChip';
@@ -710,6 +712,13 @@ export interface ThreadPaneProps {
    */
   landing?: { messageId: string; terms: readonly string[]; questionKey: string | null } | null;
   onLanded?: () => void;
+  /**
+   * The Artifacts view is on (approval "inbox-thread-artifacts", `#thread=…&artifacts`):
+   * the thread's body is swapped for a grid of every artifact across its messages.
+   */
+  artifacts?: boolean;
+  /** Turn the Artifacts view on or off (the header's button, "Back to the thread"). Absent: no Artifacts button. */
+  onArtifacts?: (open: boolean) => void;
 }
 
 /** The thread's attachments as they are now and the annotations waiting for a Send, kept fresh. */
@@ -867,7 +876,7 @@ async function replyLanded(threadId: string, key: string): Promise<'yes' | 'no' 
 
 const THREAD_GONE_TEXT = 'This thread was deleted, so nothing was sent.';
 
-export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged = 0, onClose, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onAction, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, onToast, landing = null, onLanded }: ThreadPaneProps) {
+export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged = 0, onClose, file, onOpenFile, onOpenGuide, lookSeq, seenThrough = null, onSeen, covered = false, onScreenChange, row, onMarkRead, onAck, onAction, onArchive, replyRequest, onReplyOpened, backLabel = 'Inbox', phone = false, stacked = false, fileStacked = false, remote = false, onBackToList, onToast, landing = null, onLanded, artifacts: artifactsRoute = false, onArtifacts }: ThreadPaneProps) {
   // "Open in" (OpenIn.tsx): apps on this computer; a new tab only through the tailnet or on a phone.
   const openIn: OpenInSurface | undefined = phone || remote === true ? 'tab' : remote === null ? undefined : 'apps';
   const root = thread.messages[0]!;
@@ -1451,8 +1460,23 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   /** Bumped when the person opens a file, so focus moves into its pane. */
   const [paneFocus, setPaneFocus] = useState(0);
   const paneRef = useRef<AttachmentPaneHandle>(null);
-  /** Every attachment of the thread in thread order: what the pane steps through. */
-  const steps = useMemo(() => attachmentSequence(thread.messages, attachments, inlineImages), [thread.messages, attachments, inlineImages]);
+  /**
+   * The thread's artifacts (artifacts.ts): one list, read by the Artifacts view
+   * (newest first) and by the viewer's stepping and its peek (thread order, the
+   * guided reviews left out: they open their own reader).
+   */
+  const artifactList = useMemo(() => threadArtifacts(thread.messages, attachments, inlineImages), [thread.messages, attachments, inlineImages]);
+  /** Every file of the thread in thread order: what the pane steps through. */
+  const steps = useMemo(() => stepsOf(artifactList), [artifactList]);
+  /** The Artifacts view swaps the thread's body for the grid (the messages never change). */
+  const artifactsOn = artifactsRoute;
+  /** The button shows once the thread's files have loaded and something is there (or the view is open, from a link). */
+  const artifactsButton = onArtifacts !== undefined && ((files !== null && artifactList.length > 0) || artifactsOn);
+  const artifactsButtonRef = useRef<HTMLButtonElement>(null);
+  const artifactsHeadingRef = useRef<HTMLHeadingElement>(null);
+  const artifactsBodyRef = useRef<HTMLDivElement>(null);
+  /** The tile last opened from the grid: focus comes back to it when its file or guide closes. */
+  const artifactOpened = useRef<string | null>(null);
   const openFile = (attachment: Pick<InboxAttachmentState, 'id' | 'kind' | 'ref'>, version: 'current' | 'sent' = 'current', focus: string | null = null, view: FileView | null = null) => {
     // A tile's ⋯ names a view for this file alone. The file already open keeps the view it is in (a comment
     // card in the reply box, its tile again: a one-off view from the ⋯ stays). Else the remembered choice,
@@ -1461,8 +1485,10 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     onOpenFile({ id: attachment.id, version, focus, view: view ?? kept ?? openingView(attachment) });
   };
   /** A tile, or a link in a message: the file as it is now, focus in its pane (a typed comment in the open file asks first). */
-  const openFromMessage = (attachment: Pick<InboxAttachmentState, 'id' | 'kind' | 'ref'> & { name?: string }, view: FileView | null = null) => {
+  /** `opening`: called only when the file does open (not after "Keep writing" on a typed comment). */
+  const openFromMessage = (attachment: Pick<InboxAttachmentState, 'id' | 'kind' | 'ref'> & { name?: string }, view: FileView | null = null, opening?: () => void) => {
     const go = () => {
+      opening?.();
       openFile(attachment, 'current', null, view);
       setPaneFocus((n) => n + 1);
     };
@@ -1632,16 +1658,65 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     [onSeen, thread.thread_id],
   );
   // On a phone the pill sits in the foot and covers none of the thread.
-  useSeenOnSight({ bodyRef, candidates, covered: covered || fileCovers, pill: chrome.pill > 0 && !phone, onSeen: sawOne });
+  useSeenOnSight({ bodyRef, candidates, covered: covered || fileCovers || artifactsOn, pill: chrome.pill > 0 && !phone, onSeen: sawOne });
   // The thread on screen, for notifications: a question in it raises nothing while it is visible.
   const screenRef = useRef(onScreenChange);
   screenRef.current = onScreenChange;
-  const paneCovered = covered || fileCovers;
+  const paneCovered = covered || fileCovers || artifactsOn;
   showingRef.current = !paneCovered;
   useEffect(() => {
     screenRef.current?.({ threadId: thread.thread_id, covered: paneCovered });
   }, [thread.thread_id, paneCovered]);
   useEffect(() => () => screenRef.current?.(null), []);
+
+  // The Artifacts view: opening it moves focus to its heading, leaving it returns focus to the Artifacts
+  // button (the messages keep the scroll they had). Only on a change in this pane, never on the first draw
+  // (a reload or a link lands where the window puts focus).
+  const artifactsWas = useRef(artifactsOn);
+  const threadScroll = useRef(0);
+  useLayoutEffect(() => {
+    if (artifactsWas.current === artifactsOn) return;
+    artifactsWas.current = artifactsOn;
+    if (artifactsOn) {
+      artifactsHeadingRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    if (bodyRef.current) bodyRef.current.scrollTop = threadScroll.current;
+    const button = artifactsButtonRef.current;
+    if (button) button.focus();
+    else bodyRef.current?.querySelector<HTMLElement>('.ib-subject')?.focus();
+  }, [artifactsOn]);
+  // The thread's scroll, kept while the grid is shown over it.
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body || artifactsOn) return;
+    const keep = () => {
+      threadScroll.current = body.scrollTop;
+    };
+    body.addEventListener('scroll', keep, { passive: true });
+    return () => body.removeEventListener('scroll', keep);
+  }, [artifactsOn]);
+  // A file or a guided review opened from the grid closes: focus back on its tile, unless something took it.
+  const gridCovered = file !== null || covered;
+  const gridCoveredWas = useRef(gridCovered);
+  // A step in the viewer moves on to another file: focus comes back to the tile of the file last open.
+  if (file && artifactOpened.current && !artifactOpened.current.startsWith('guide:')) {
+    const open = artifactOfFile(artifactList, file.id);
+    artifactOpened.current = open ? artifactKey(open) : file.id;
+  }
+  useEffect(() => {
+    const was = gridCoveredWas.current;
+    gridCoveredWas.current = gridCovered;
+    if (!was || gridCovered || !artifactsOn) return;
+    const key = artifactOpened.current;
+    if (!key) return;
+    const frame = requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (active && active !== document.body && active.isConnected) return;
+      artifactsBodyRef.current?.querySelector<HTMLElement>(`[data-artifact-tile="${CSS.escape(key)}"]`)?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [gridCovered, artifactsOn]);
 
   // Arrivals while the thread is open: announced to a screen reader, drawn
   // with a short entrance, and, when the person is at the end of the thread,
@@ -1753,9 +1828,10 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   }, [passedIds]);
 
   // j / k move between messages (and the middle fold), n goes to the first
-  // new one; Enter and Space are the buttons' own. Never while typing.
+  // new one; Enter and Space are the buttons' own. Never while typing, and
+  // never while the Artifacts grid stands in for the messages.
   useEffect(() => {
-    if (one) return;
+    if (one || artifactsOn) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey || event.defaultPrevented) return;
       if (event.key !== 'j' && event.key !== 'k' && event.key !== 'n') return;
@@ -1793,7 +1869,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [one, jumpNew]);
+  }, [one, artifactsOn, jumpNew]);
 
   // Another window (or a phone's Send) saved, sent or discarded this thread's draft, or this one did:
   // its copy here follows. A box with no edits since its last save or read takes the new words (or
@@ -2736,9 +2812,25 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
       aria-label={thread.subject ?? 'Thread'}
       data-thread-id={thread.thread_id}
     >
-      <div className="ib-phead">
+      <div className="ib-phead" data-artifacts-on={artifactsOn ? '' : undefined}>
         {/* A phone leads with the way back to the list; Archive sits at the right, where the close was. */}
-        {phone ? (
+        {phone && artifactsOn ? (
+          // On a phone Artifacts is a screen of its own: its way back is to the thread (the browser's Back, so the swipe agrees).
+          <>
+            <button type="button" className="ib-pback" onClick={() => onArtifacts?.(false)} aria-label="Back to the thread" data-artifacts-phone-back="">
+              <Icon name="chevL" size={18} />
+              <span className="ib-pback-l">Thread</span>
+            </button>
+            <span className="ib-art-ph-title" aria-hidden="true">
+              Artifacts
+            </span>
+            {artifactList.length > 0 && (
+              <span className="ib-art-ph-n" aria-hidden="true">
+                {artifactList.length}
+              </span>
+            )}
+          </>
+        ) : phone ? (
           <button type="button" className="ib-pback" onClick={onClose} aria-label={`Back to ${backLabel}`} data-phone-back="">
             <Icon name="chevL" size={18} />
             <span className="ib-pback-l">{backLabel}</span>
@@ -2771,41 +2863,67 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             )}
           </>
         )}
-        {/* Mark read leads, furthest from the close; Archive sits beside the close at the right
-            (owner, 2026-10-16). A phone keeps the same order after its way back. */}
-        {markReadButton}
-        {one ? (
-          <span className="ib-sp" />
-        ) : (
+        {/* Mark read leads, furthest from the close, with its label and its E; everything at the right is an icon
+            with a tooltip (approval "inbox-thread-artifacts"): Artifacts, Expand / Fold all, Archive, then the close.
+            A phone keeps the same order after its way back. */}
+        {phone && artifactsOn ? null : (
           <>
-            {/* The subject, once it has scrolled away (the heading stays the one a screen reader reads). */}
-            <span className="ib-phsubj" dir="auto" data-header-subject="" data-on={chrome.subject ? '' : undefined} aria-hidden="true">
-              {thread.subject ?? '(no subject)'}
-            </span>
-            <Tip content={allOpen ? 'Fold the earlier messages' : 'Expand all messages'}>
-              <button
-                type="button"
-                className="ib-ptool"
-                data-expand-all=""
-                onClick={expandAll}
-                aria-label={allOpen ? 'Fold the earlier messages' : 'Expand all messages'}
-              >
-                <Icon name={allOpen ? 'collapse' : 'expand'} size={15} />
-                <span className="ib-ptool-l">{allOpen ? 'Fold all' : 'Expand all'}</span>
-              </button>
-            </Tip>
+            {markReadButton}
+            {one && !artifactsOn ? (
+              <span className="ib-sp" />
+            ) : (
+              // The subject, once it has scrolled away, and always over the Artifacts grid (the heading stays the one a screen reader reads).
+              <span className="ib-phsubj" dir="auto" data-header-subject="" data-on={chrome.subject || artifactsOn ? '' : undefined} aria-hidden="true">
+                {thread.subject ?? '(no subject)'}
+              </span>
+            )}
+            {artifactsButton && (
+              <Tip content={artifactsOn ? 'Back to the thread' : 'Artifacts: every file, image and guided review in this thread'}>
+                <button
+                  ref={artifactsButtonRef}
+                  type="button"
+                  className="ib-iconbtn ib-artbtn"
+                  aria-label={`Artifacts, ${artifactList.length}`}
+                  aria-pressed={artifactsOn}
+                  onClick={() => onArtifacts?.(!artifactsOn)}
+                  data-artifacts-button=""
+                >
+                  <Icon name="artifacts" size={17} />
+                  <span className="ib-artbtn-n" aria-hidden="true">
+                    {artifactList.length}
+                  </span>
+                </button>
+              </Tip>
+            )}
+            {!one && !artifactsOn && (
+              <Tip content={allOpen ? 'Fold the earlier messages' : 'Expand all messages'}>
+                <button
+                  type="button"
+                  className="ib-iconbtn"
+                  data-expand-all=""
+                  onClick={expandAll}
+                  aria-label={allOpen ? 'Fold the earlier messages' : 'Expand all messages'}
+                >
+                  <Icon name={allOpen ? 'collapse' : 'expand'} size={16} />
+                </button>
+              </Tip>
+            )}
+            {archiveButton}
+            {phone || stacked || backBesideFile ? null : (
+              <>
+                <span className="ib-vsep" aria-hidden="true" />
+                <Tip content="Close">
+                  <button type="button" className="ib-iconbtn" onClick={onClose} aria-label="Close the thread">
+                    <Icon name="x" />
+                  </button>
+                </Tip>
+              </>
+            )}
           </>
         )}
-        {archiveButton}
-        {phone || stacked || backBesideFile ? null : (
-          <Tip content="Close">
-            <button type="button" className="ib-iconbtn" onClick={onClose} aria-label="Close the thread">
-              <Icon name="x" />
-            </button>
-          </Tip>
-        )}
       </div>
-      <div className={`ib-pbody${one ? '' : ' ib-folding'}`} ref={bodyRef}>
+      {/* The Artifacts view swaps the messages out (kept mounted, so folds, scroll and the reply box stay as left). */}
+      <div className={`ib-pbody${one ? '' : ' ib-folding'}`} ref={bodyRef} hidden={artifactsOn}>
         {/* A focus target (the way back's fallback, a stacked thread), never a tab stop. */}
         <h2 className="ib-subject" dir="auto" tabIndex={-1}>{thread.subject ?? '(no subject)'}</h2>
         {startedTo && (
@@ -3268,7 +3386,27 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
           {announced}
         </div>
       </div>
-      <div className="ib-pfoot">
+      {artifactsOn && (
+        <div className="ib-pbody ib-artbody" ref={artifactsBodyRef}>
+          <ArtifactsView
+            ref={artifactsHeadingRef}
+            artifacts={files === null ? null : artifactList}
+            annotationCounts={countsByPath}
+            openId={file && !shownFull ? file.id : null}
+            // Focus comes back to the tile only when it did open (a typed comment's "Keep writing" keeps the file).
+            onOpen={(artifact) => openFromMessage(artifact.attachment, null, () => (artifactOpened.current = artifactKey(artifact)))}
+            onOpenGuide={(artifact) => {
+              artifactOpened.current = artifactKey(artifact);
+              onOpenGuide(artifact.messageId);
+            }}
+            onOpenAs={phone || fileStacked ? undefined : (artifact, view) => openFromMessage(artifact.attachment, view, () => (artifactOpened.current = artifactKey(artifact)))}
+            onBack={phone ? undefined : () => onArtifacts?.(false)}
+            openIn={openIn}
+            phone={phone}
+          />
+        </div>
+      )}
+      <div className="ib-pfoot" hidden={artifactsOn}>
         {/* One status region, always mounted, so a screen reader announces the note when it appears. */}
         <div role="status" id={noteId} data-asker-note="">
           {showAskerNote && asking && <AskerEndedNote asking={asking} project={thread.project.name} anyLive={anyOtherLive} />}

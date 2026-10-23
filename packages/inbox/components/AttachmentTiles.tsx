@@ -28,7 +28,7 @@ export function iconOf(attachment: InboxAttachmentState): IconName {
 }
 
 /** "1280 × 800, 79 KB" for an image; "MP4 video · 7:41 · 1920 × 1080 · 461 MB" for a video; "PDF, 2.3 MB" otherwise. */
-function sizeLine(attachment: InboxAttachmentState): string {
+export function sizeLine(attachment: InboxAttachmentState): string {
   const size = formatBytes(attachment.current?.size ?? attachment.size);
   const kind = readInboxAttachmentKind(attachment.kind);
   if (kind === 'video') {
