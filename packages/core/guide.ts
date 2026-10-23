@@ -40,11 +40,34 @@ export interface GuideSection {
   diffs: GuideDiffRef[];
 }
 
+/** The kinds of picture a guide overview can carry. Mermaid renders through
+ *  Plannotator's diagram engine; HTML is a sanitized custom picture (not drawn
+ *  by any viewer yet; accepted only where the producer can sanitize it). */
+export type GuideOverviewDiagramKind = 'mermaid' | 'html';
+
+export interface GuideOverviewDiagram {
+  kind: GuideOverviewDiagramKind;
+  /** Mermaid source, or sanitized HTML. May carry `code:`, `symbol:` and
+   *  `chapter:` links (Mermaid `click` lines, HTML `href`s). */
+  source: string;
+}
+
+/** The agent's overview above the chapters: a few sentences on how the change
+ *  fits together (markdown, with `code:` / `symbol:` / `chapter:` links) and
+ *  optionally one diagram. New in snapshot format version 2. */
+export interface GuideOverview {
+  text: string;
+  diagram?: GuideOverviewDiagram;
+}
+
 export interface CodeGuideOutput {
   /** From the PR title when a PR is given, otherwise derived from the changes. */
   title: string;
   /** 1-2 sentence framing shown under the title: why this changeset exists. */
   intent: string;
+  /** Optional overview above the chapters (format version 2). Absent on every
+   *  guide the in-app generator writes. */
+  overview?: GuideOverview;
   /** Ordered sections: core first, consequence next, support last. */
   sections: GuideSection[];
   /** Changed files the model didn't place — rendered in a trailing "Everything else" section. */

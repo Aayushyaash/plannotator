@@ -10,13 +10,31 @@
  */
 
 import { parseDiffToFiles } from "./diff-files";
-import type { CodeGuideOutput, GuideDiffRef, GuideSection } from "./guide";
+import type { CodeGuideOutput, GuideDiffRef, GuideOverview, GuideOverviewDiagram, GuideOverviewDiagramKind, GuideSection } from "./guide";
 
 /** Discriminator for a portable guided-review snapshot. */
 export const GUIDE_SNAPSHOT_KIND = "plannotator-guided-review" as const;
 
-/** Current snapshot schema version. Bump only for breaking changes; add optional fields freely. */
+/**
+ * The base snapshot schema version: every guide without a version-2 field is
+ * written as version 1, byte for byte as before version 2 existed. (The
+ * guides.show viewer tree is also namespaced by it: `/v1/`.)
+ */
 export const GUIDE_SNAPSHOT_VERSION = 1 as const;
+
+/**
+ * Format version 2 adds one optional field, `guide.overview` (the agent's
+ * overview and its diagram). A snapshot carries version 2 exactly when it has
+ * an overview, so a version-1 reader (an old pinned viewer, which rejects
+ * unknown fields) is never handed a field it cannot read.
+ */
+export const GUIDE_SNAPSHOT_OVERVIEW_VERSION = 2 as const;
+
+/** Every snapshot version the current parser reads. */
+export const GUIDE_SNAPSHOT_VERSIONS = [GUIDE_SNAPSHOT_VERSION, GUIDE_SNAPSHOT_OVERVIEW_VERSION] as const;
+export type GuideSnapshotVersion = (typeof GUIDE_SNAPSHOT_VERSIONS)[number];
+
+const OVERVIEW_DIAGRAM_KINDS: readonly GuideOverviewDiagramKind[] = ["mermaid", "html"];
 
 /** DOM id of the inert `<script type="application/json">` carrying the snapshot inside an exported HTML file. */
 export const GUIDE_SNAPSHOT_SCRIPT_ID = "plannotator-guided-review";
@@ -79,10 +97,13 @@ export interface GuideSnapshotTheme {
 /** The guide plus the reader's checkbox state. Never carries persistence flags (`saved`/`moved`). */
 export type GuideSnapshotGuide = CodeGuideOutput & { readonly reviewed: readonly boolean[] };
 
-/** Versioned data contract shared by downloaded files, the CDN viewer, and future hosted guides. */
-export interface GuideSnapshotV1 {
+/**
+ * Versioned data contract shared by downloaded files, the CDN viewer, and
+ * hosted guides. `version` is 1, or 2 when `guide.overview` is present.
+ */
+export interface GuideSnapshot {
   readonly kind: typeof GUIDE_SNAPSHOT_KIND;
-  readonly version: typeof GUIDE_SNAPSHOT_VERSION;
+  readonly version: GuideSnapshotVersion;
   readonly exportedAt: string;
   readonly guide: GuideSnapshotGuide;
   readonly review: GuideSnapshotReview;
@@ -91,7 +112,10 @@ export interface GuideSnapshotV1 {
   readonly theme?: GuideSnapshotTheme;
 }
 
-export type GuideSnapshot = GuideSnapshotV1;
+/** A version-1 snapshot: no overview. */
+export type GuideSnapshotV1 = GuideSnapshot & { readonly version: typeof GUIDE_SNAPSHOT_VERSION };
+/** A version-2 snapshot: the guide carries an overview. */
+export type GuideSnapshotV2 = GuideSnapshot & { readonly version: typeof GUIDE_SNAPSHOT_OVERVIEW_VERSION };
 
 /**
  * What a producer captures when a guide job LAUNCHES: the exact review the
@@ -119,8 +143,12 @@ export interface BuildGuideSnapshotInput {
   readonly exportedAt?: string;
 }
 
-/** Assemble a v1 snapshot from producer-side pieces. Pure; strips persistence-only guide flags. */
-export function buildGuideSnapshot(input: BuildGuideSnapshotInput): GuideSnapshotV1 {
+/**
+ * Assemble a snapshot from producer-side pieces. Pure; strips
+ * persistence-only guide flags. Version 1 unless the guide has an overview,
+ * which makes it version 2 (a guide without one is byte-identical to before).
+ */
+export function buildGuideSnapshot(input: BuildGuideSnapshotInput): GuideSnapshot {
   const { guide } = input;
   const reviewed = new Array<boolean>(guide.sections.length).fill(false);
   input.reviewed.forEach((v, i) => { if (i < reviewed.length) reviewed[i] = v === true; });
@@ -133,13 +161,15 @@ export function buildGuideSnapshot(input: BuildGuideSnapshotInput): GuideSnapsho
   const generator = Object.fromEntries(
     Object.entries(generatorInput).filter(([, v]) => typeof v === "string" && v.length > 0),
   ) as GuideSnapshotGenerator;
+  const overview = guide.overview ? copyOverview(guide.overview) : undefined;
   return {
     kind: GUIDE_SNAPSHOT_KIND,
-    version: GUIDE_SNAPSHOT_VERSION,
+    version: overview ? GUIDE_SNAPSHOT_OVERVIEW_VERSION : GUIDE_SNAPSHOT_VERSION,
     exportedAt: input.exportedAt ?? new Date().toISOString(),
     guide: {
       title: guide.title,
       intent: guide.intent,
+      ...(overview && { overview }),
       sections: guide.sections,
       ...(guide.unplacedFiles !== undefined && { unplacedFiles: guide.unplacedFiles }),
       reviewed,
@@ -156,6 +186,13 @@ export function buildGuideSnapshot(input: BuildGuideSnapshotInput): GuideSnapsho
   };
 }
 
+/** Only `{ text, diagram? }` travels: stray producer fields never reach a snapshot. */
+function copyOverview(overview: GuideOverview): GuideOverview {
+  return overview.diagram
+    ? { text: overview.text, diagram: { kind: overview.diagram.kind, source: overview.diagram.source } }
+    : { text: overview.text };
+}
+
 /** Stable parse failure for malformed or unsupported snapshot data. */
 export interface GuideSnapshotParseError {
   readonly _tag: "GuideSnapshotParseError";
@@ -165,7 +202,7 @@ export interface GuideSnapshotParseError {
 }
 
 export type GuideSnapshotParseResult =
-  | { readonly ok: true; readonly value: GuideSnapshotV1 }
+  | { readonly ok: true; readonly value: GuideSnapshot }
   | { readonly ok: false; readonly error: GuideSnapshotParseError };
 
 type Parsed<T> =
@@ -263,16 +300,50 @@ function parseSection(input: unknown, path: string): Parsed<GuideSection> {
   return { ok: true, value: { title: title.value, overview: overview.value, diffs } };
 }
 
-function parseGuide(input: unknown): Parsed<GuideSnapshotGuide> {
+function parseOverview(input: unknown, path: string): Parsed<GuideOverview> {
+  const object = asRecord(input, path);
+  if (isFail(object)) return object;
+  const s = strict(object.value, ["text", "diagram"], path);
+  if (isFail(s)) return s;
+  const text = str(s.value.text, `${path}.text`, { nonEmpty: true });
+  if (isFail(text)) return text;
+  if (s.value.diagram === undefined) return { ok: true, value: { text: text.value } };
+  const dpath = `${path}.diagram`;
+  const dobj = asRecord(s.value.diagram, dpath);
+  if (isFail(dobj)) return dobj;
+  const d = strict(dobj.value, ["kind", "source"], dpath);
+  if (isFail(d)) return d;
+  const kind = d.value.kind;
+  if (typeof kind !== "string" || !OVERVIEW_DIAGRAM_KINDS.includes(kind as GuideOverviewDiagramKind)) {
+    return fail(`${dpath}.kind`, `Expected one of ${OVERVIEW_DIAGRAM_KINDS.join(", ")}`);
+  }
+  const source = str(d.value.source, `${dpath}.source`, { nonEmpty: true });
+  if (isFail(source)) return source;
+  const diagram: GuideOverviewDiagram = { kind: kind as GuideOverviewDiagramKind, source: source.value };
+  return { ok: true, value: { text: text.value, diagram } };
+}
+
+function parseGuide(input: unknown, version: GuideSnapshotVersion): Parsed<GuideSnapshotGuide> {
   const path = "$.guide";
   const object = asRecord(input, path);
   if (isFail(object)) return object;
-  const s = strict(object.value, ["title", "intent", "sections", "unplacedFiles", "reviewed"], path);
+  // Version 1 has no overview: the field is unknown there, as it is to every
+  // version-1 reader, so a v1 document can never carry one.
+  const fields = version === GUIDE_SNAPSHOT_VERSION
+    ? ["title", "intent", "sections", "unplacedFiles", "reviewed"]
+    : ["title", "intent", "overview", "sections", "unplacedFiles", "reviewed"];
+  const s = strict(object.value, fields, path);
   if (isFail(s)) return s;
   const title = str(s.value.title, `${path}.title`, { nonEmpty: true });
   if (isFail(title)) return title;
   const intent = str(s.value.intent, `${path}.intent`);
   if (isFail(intent)) return intent;
+  let overview: GuideOverview | undefined;
+  if (s.value.overview !== undefined) {
+    const parsed = parseOverview(s.value.overview, `${path}.overview`);
+    if (isFail(parsed)) return parsed;
+    overview = parsed.value;
+  }
   if (!Array.isArray(s.value.sections)) return fail(`${path}.sections`, "Expected an array");
   if (s.value.sections.length === 0) return fail(`${path}.sections`, "Expected at least one section");
   if (s.value.sections.length > MAX_GUIDE_SECTIONS) {
@@ -318,6 +389,7 @@ function parseGuide(input: unknown): Parsed<GuideSnapshotGuide> {
     value: {
       title: title.value,
       intent: intent.value,
+      ...(overview !== undefined && { overview }),
       sections,
       ...(unplacedFiles !== undefined && { unplacedFiles }),
       reviewed,
@@ -445,7 +517,7 @@ function parseTheme(input: unknown): Parsed<GuideSnapshotTheme | undefined> {
   return { ok: true, value: palette.value === undefined ? {} : { palette: palette.value } };
 }
 
-/** Parse an unknown value into a v1 snapshot. Never throws. */
+/** Parse an unknown value into a snapshot (version 1 or 2). Never throws. */
 export function parseGuideSnapshot(input: unknown): GuideSnapshotParseResult {
   const object = asRecord(input, "$");
   if (isFail(object)) return object;
@@ -456,13 +528,14 @@ export function parseGuideSnapshot(input: unknown): GuideSnapshotParseResult {
   );
   if (isFail(s)) return s;
   if (s.value.kind !== GUIDE_SNAPSHOT_KIND) return fail("$.kind", `Expected ${GUIDE_SNAPSHOT_KIND}`);
-  if (s.value.version !== GUIDE_SNAPSHOT_VERSION) {
-    return fail("$.version", `Unsupported snapshot version: ${String(s.value.version)}`);
+  const version = s.value.version;
+  if (!GUIDE_SNAPSHOT_VERSIONS.includes(version as GuideSnapshotVersion)) {
+    return fail("$.version", `Unsupported snapshot version: ${String(version)}`);
   }
   const exportedAt = str(s.value.exportedAt, "$.exportedAt", { nonEmpty: true });
   if (isFail(exportedAt)) return exportedAt;
   if (!Number.isFinite(Date.parse(exportedAt.value))) return fail("$.exportedAt", "Expected an ISO-compatible timestamp");
-  const guide = parseGuide(s.value.guide);
+  const guide = parseGuide(s.value.guide, version as GuideSnapshotVersion);
   if (isFail(guide)) return guide;
   const review = parseReview(s.value.review);
   if (isFail(review)) return review;
@@ -476,7 +549,7 @@ export function parseGuideSnapshot(input: unknown): GuideSnapshotParseResult {
     ok: true,
     value: {
       kind: GUIDE_SNAPSHOT_KIND,
-      version: GUIDE_SNAPSHOT_VERSION,
+      version: version as GuideSnapshotVersion,
       exportedAt: exportedAt.value,
       guide: guide.value,
       review: review.value,
@@ -487,7 +560,7 @@ export function parseGuideSnapshot(input: unknown): GuideSnapshotParseResult {
   };
 }
 
-/** Parse serialized JSON into a v1 snapshot. Never throws. */
+/** Parse serialized JSON into a snapshot (version 1 or 2). Never throws. */
 export function parseGuideSnapshotJson(text: string): GuideSnapshotParseResult {
   let input: unknown;
   try {
@@ -668,7 +741,7 @@ export function normalizeGuideViewerBaseUrl(input: string): URL | null {
   return parsed;
 }
 
-function describeSource(snapshot: GuideSnapshotV1): string {
+function describeSource(snapshot: GuideSnapshot): string {
   const s = snapshot.source;
   const parts: string[] = [];
   switch (s.kind) {
@@ -695,7 +768,7 @@ function describeSource(snapshot: GuideSnapshotV1): string {
  * list. Readable when guides.show is unreachable; replaced by the viewer once
  * it mounts. Deliberately simple (decision record, D6 note).
  */
-export function renderGuideFallbackHtml(snapshot: GuideSnapshotV1): string {
+export function renderGuideFallbackHtml(snapshot: GuideSnapshot): string {
   const g = snapshot.guide;
   const sections = g.sections
     .map((section, index) => {
@@ -726,7 +799,7 @@ ${files ? `<ul>${files}</ul>` : ""}
 <p class="meta">${escapeHtmlText(describeSource(snapshot))} · ${escapeHtmlText(snapshot.review.gitRef)}${prLink}</p>
 ${genLine ? `<p class="meta">${genLine}</p>` : ""}
 <pre class="prose">${escapeHtmlText(g.intent)}</pre>
-</header>
+${g.overview ? `<pre class="prose">${escapeHtmlText(g.overview.text)}</pre>\n` : ""}</header>
 ${sections}
 ${unplaced}
 <footer class="meta">This is the plain-text version of a Plannotator Guided Review. Connect to the internet to load the full diff viewer.</footer>
@@ -759,13 +832,14 @@ body.pgr-fallback-body{margin:0;background:#f5f7f6}
  * is referenced from `options.viewer`, never embedded (D1).
  * Throws only when `viewer.baseUrl` is not an https URL (or http localhost).
  */
-export function createGuideHtml(snapshot: GuideSnapshotV1, options: GuideHtmlOptions): string {
+export function createGuideHtml(snapshot: GuideSnapshot, options: GuideHtmlOptions): string {
   const head = buildGuideHead({
     viewer: options.viewer,
     title: snapshot.guide.title,
     description: snapshot.guide.intent,
     languages: detectGuideLanguages(snapshot.review.rawPatch),
     hosted: options.hosted,
+    version: snapshot.version,
   });
   const serialized = escapeJsonForHtmlScript(JSON.stringify(snapshot));
   return `<!doctype html>
@@ -826,6 +900,8 @@ interface GuideHeadInput {
   readonly languages: readonly string[];
   readonly hosted?: GuideHostedPage;
   readonly payloadUrl?: string;
+  /** Snapshot version for the export meta marker; defaults to the base version. */
+  readonly version?: GuideSnapshotVersion;
 }
 
 /** Shared `<head>` + viewer `<script>` for exported and hosted guide pages. */
@@ -880,7 +956,7 @@ function buildGuideHead(input: GuideHeadInput): { head: string; script: string }
   const head = [
     `<meta charset="utf-8">`,
     `<meta name="viewport" content="width=device-width,initial-scale=1">`,
-    `<meta name="${GUIDE_EXPORT_META_NAME}" content="v${GUIDE_SNAPSHOT_VERSION}">`,
+    `<meta name="${GUIDE_EXPORT_META_NAME}" content="v${input.version ?? GUIDE_SNAPSHOT_VERSION}">`,
     `<meta http-equiv="Content-Security-Policy" content="${csp}">`,
     referrerMeta,
     `<title>${escapeHtmlText(input.title)} · Guided Review</title>`,
