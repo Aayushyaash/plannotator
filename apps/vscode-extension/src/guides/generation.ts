@@ -145,8 +145,12 @@ export class GuideGeneration {
   /** The kind the agent reported for each tool call, for permission requests that leave it out. */
   private readonly toolKinds = new Map<string, ToolKind>();
   private readonly toolTitles = new Map<string, string>();
-  /** Set when the agent changed a file without asking: the run is stopped and fails with this. */
-  private writeViolation: string | null = null;
+  /** Set when the agent changed a file without asking, or left its read-only mode: the run is stopped and fails with this. */
+  private violation: string | null = null;
+  /** The read-only modes the session must stay in, once it is in one (null: the agent declares none). */
+  private allowedModes: readonly string[] | null = null;
+  /** The mode the agent last reported in a `current_mode_update` or `config_option_update`. */
+  private reportedMode: string | undefined;
   /** Whether the agent ever reached the builder's MCP server (an agent that drops the client's MCP servers never does). */
   private builderReached = false;
   private messageEntry: ActivityEntry | null = null;
@@ -271,6 +275,8 @@ export class GuideGeneration {
       const agent = this.deps.agent;
       if (agent.unsupported) return this.fail(`${agent.label} cannot write a guide: ${agent.unsupported}`);
       if (source.kind === "pr" && agent.refusePullRequests) return this.fail(`${agent.label} cannot write a guide for a pull request: ${agent.refusePullRequests}`);
+      const preflight = source.kind === "pr" ? agent.prPreflight?.(source.headRoot) : null;
+      if (preflight) return this.fail(`Guides does not run ${agent.label} on this pull request. ${preflight}`);
       this.persist();
       this.relaySession = this.deps.relay.openSession({
         listTools: () => {
@@ -289,7 +295,6 @@ export class GuideGeneration {
         env: Object.entries({ ...this.deps.mcpServer.env, ...this.relaySession.env }).map(([name, value]) => ({ name, value })),
       };
       this.addActivity({ kind: "info", title: `Starting ${this.input.agent.label}`, detail: `Read-only: ${agent.readOnly.summary}` });
-      if (source.kind === "pr" && agent.prNote) this.addActivity({ kind: "info", title: `Note for this pull request: ${agent.prNote}` });
       this.emit();
       this.client = await AcpClient.start(this.deps.agentLaunch(source.headRoot), {
         onUpdate: (n) => this.onUpdate(n),
@@ -300,6 +305,7 @@ export class GuideGeneration {
       const session = await this.client.newSession(source.headRoot, [mcpServer], sessionMetaFor(this.deps.agent, source));
       this.state.acpSessionId = session.sessionId;
       const configOptions = await this.enterReadOnlyMode(session);
+      if (this.deps.agent.readOnly.mode) this.allowedModes = this.deps.agent.readOnly.mode.ids;
       if (this.cancelled) return this.stop("Cancelled.");
       await this.applyChoices(session.sessionId, configOptions);
       if (this.cancelled) return this.stop("Cancelled.");
@@ -309,7 +315,7 @@ export class GuideGeneration {
       const prompt = buildGuidePrompt({ source, files: this.input.files, instructions: this.input.instructions, resume: !!this.input.resume });
       const response = await this.client.prompt(session.sessionId, prompt);
       await this.builderQueue;
-      if (this.writeViolation) return this.fail(this.writeViolation);
+      if (this.violation) return this.fail(this.violation);
       if (this.state.savedGuideId) return this.finish();
       if (this.cancelled || response.stopReason === "cancelled") return this.stop("Cancelled.");
       const why = !this.builderReached
@@ -318,7 +324,7 @@ export class GuideGeneration {
       return this.stop(why);
     } catch (err) {
       await this.builderQueue.catch(() => {});
-      if (this.writeViolation) return this.fail(this.writeViolation);
+      if (this.violation) return this.fail(this.violation);
       if (this.state.savedGuideId) return this.finish();
       if (this.cancelled) return this.stop("Cancelled.");
       const message = this.client ? await this.client.describeFailure(err) : err instanceof Error ? err.message : String(err);
@@ -377,7 +383,10 @@ export class GuideGeneration {
         const after = readModeSelect(options);
         if (!after || !want.ids.includes(after.current)) failure = `The agent stayed in ${after?.current ?? "a mode it did not report"}.`;
       } else if (targetMode) {
+        this.reportedMode = undefined;
         await this.client!.setMode(session.sessionId, targetMode);
+        // session/set_mode answers nothing: read back the mode the agent reported meanwhile, if it did.
+        if (this.reportedMode !== undefined && !want.ids.includes(this.reportedMode)) failure = `The agent reported ${this.reportedMode} after the change.`;
       } else {
         failure = `The agent offers no ${want.label}.`;
       }
@@ -608,6 +617,15 @@ export class GuideGeneration {
         else this.addActivity({ kind: "plan", title });
         break;
       }
+      case "current_mode_update": {
+        this.checkMode(u.currentModeId);
+        return;
+      }
+      case "config_option_update": {
+        const mode = readModeSelect(u.configOptions);
+        if (mode) this.checkMode(mode.current);
+        return;
+      }
       case "usage_update": {
         if (u.cost && typeof u.cost.amount === "number") this.state.cost = { amount: u.cost.amount, currency: u.cost.currency ?? "USD" };
         break;
@@ -634,13 +652,33 @@ export class GuideGeneration {
    * agent's own settings let it write without asking.
    */
   private checkWrite(toolCallId: string, status: string | null | undefined): void {
-    if (this.writeViolation || status !== "completed") return;
+    if (this.violation || status !== "completed") return;
     const kind = this.toolKinds.get(toolCallId);
     if (!kind || !WRITE_KINDS.includes(kind)) return;
     const what = this.toolTitles.get(toolCallId) || `a tool that ${kind === "edit" ? "edits" : kind === "delete" ? "deletes" : "moves"} files`;
     const where = this.input.source.kind === "pr" ? "in the pull request's worktree" : "in your working copy";
-    this.writeViolation = `${this.input.agent.label} changed files without asking (${what}), so the run was stopped. Guided reviews are read-only; check ${where} with \`git status\`. Its own settings let it write without asking: turn that off for ${this.input.agent.label}, or pick another agent.`;
-    this.addActivity({ kind: "error", title: `Wrote without asking: ${what}`, isError: true });
+    this.stopForViolation(
+      `${this.input.agent.label} changed files without asking (${what}), so the run was stopped. Guided reviews are read-only; check ${where} with \`git status\`. Its own settings let it write without asking: turn that off for ${this.input.agent.label}, or pick another agent.`,
+      `Wrote without asking: ${what}`,
+    );
+  }
+
+  /**
+   * The session must stay in its read-only mode: a mode the agent reports
+   * after the run entered it (a `current_mode_update`, or a `mode` config
+   * option in a `config_option_update`) that is not one of them stops the run.
+   */
+  private checkMode(mode: string): void {
+    this.reportedMode = mode;
+    if (!this.allowedModes || this.allowedModes.includes(mode)) return;
+    this.stopForViolation(`${this.input.agent.label} left its read-only mode for ${mode}, so the run was stopped. Guided reviews run only in ${this.deps.agent.readOnly.mode?.label ?? "a read-only mode"}.`, `Left the read-only mode for ${mode}`);
+  }
+
+  private stopForViolation(message: string, title: string): void {
+    if (this.violation) return;
+    this.violation = message;
+    this.addActivity({ kind: "error", title, isError: true });
+    this.emit();
     this.cancelled = true;
     const client = this.client;
     const sessionId = this.state.acpSessionId;

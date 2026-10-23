@@ -38,22 +38,36 @@ The **Guides** view (its own icon in the activity bar) turns a change into a gui
 
 The agent runs over the [Agent Client Protocol](https://agentclientprotocol.com). Guides finds these on your PATH and shows how to install the ones you don't have (it never installs anything itself):
 
-| Agent | Started as | Install |
-|---|---|---|
-| Claude Code | `claude-agent-acp` | `npm install -g @agentclientprotocol/claude-agent-acp` |
-| Codex (local changes only) | `codex-acp` | `npm install -g @agentclientprotocol/codex-acp` |
-| OpenCode | `opencode acp` | `curl -fsSL https://opencode.ai/install \| bash` |
-| GitHub Copilot CLI | `copilot --acp --stdio` | `npm install -g @github/copilot` |
-| Cursor | `cursor-agent acp` (or `agent acp`) | `curl https://cursor.com/install -fsS \| bash` |
-| Kiro CLI | `kiro-cli acp` | `curl -fsSL https://cli.kiro.dev/install \| bash` |
-| Kilo Code | `kilo acp` (or `kilocode acp`) | `npm install -g @kilocode/cli` |
+| Agent | Started as | Install | Pull requests |
+|---|---|---|---|
+| Claude Code | `claude-agent-acp` | `npm install -g @agentclientprotocol/claude-agent-acp` | yes |
+| OpenCode | `opencode acp` | `curl -fsSL https://opencode.ai/install \| bash` | yes |
+| Codex | `codex-acp` | `npm install -g @agentclientprotocol/codex-acp` | local changes only |
+| GitHub Copilot CLI | `copilot --acp --stdio` | `npm install -g @github/copilot` | local changes only |
+| Cursor | `cursor-agent acp` (or `agent acp`) | `curl https://cursor.com/install -fsS \| bash` | local changes only |
+| Kiro CLI | `kiro-cli acp` | `curl -fsSL https://cli.kiro.dev/install \| bash` | local changes only |
+| Kilo Code | `kilo acp` (or `kilocode acp`) | `npm install -g @kilocode/cli` | local changes only |
 
-Pi is listed but cannot write guides yet: `pi-acp` does not pass MCP servers to Pi, so it cannot reach the guide's tools. Any other ACP agent works through `plannotator.guides.customAgent.command` (and `.args`, `.label`); `plannotator.guides.agentCommands` overrides how a listed agent is started (`plannotator.guides.claudeCode.command` still works for Claude Code). These settings can only be set in your user settings, never by a workspace.
+Pi is listed but cannot write guides yet: `pi-acp` does not pass MCP servers to Pi, so it cannot reach the guide's tools. Any other ACP agent works through `plannotator.guides.customAgent.command` (and `.args`, `.label`), on local changes only. `plannotator.guides.agentCommands` overrides how a listed agent is started (`plannotator.guides.claudeCode.command` still works for Claude Code). These settings, and `plannotator.guides.ghPath`, can only be set in your user settings, never by a workspace.
 
-**A guide is read-only, for every agent.** Guides offers the agent no file system or terminal, and refuses every request to edit, delete or move a file, run a command or switch modes, without asking you; a pull request run also refuses network fetches. Reads and unknown tools are asked, with "allow once" and "reject" only. If an agent changes a file without asking, the run stops and says so. Where an agent has its own read-only switch, Guides turns it on too: Claude Code's default permission mode with its write tools disallowed, Codex's read-only mode, OpenCode's plan mode with edits and shell denied, Cursor's ask mode, Kilo's ask mode. Copilot CLI and Kiro CLI rely on asking first, which they do by default, and on Guides refusing.
+**A guide is read-only, for every agent.** Guides offers the agent no file system or terminal. It refuses every request to edit, delete or move a file, run a command or switch modes, without asking you, and a pull request run also refuses network fetches. Reads and unknown tools are asked, with "allow once" and "reject once" only (never an "always" answer, which could write a rule into the agent's settings). If an agent changes a file without asking, or leaves its read-only mode, the run stops and says so. Where an agent has its own switches, Guides turns them on too:
+- Claude Code: the default permission mode, its edit, write and shell tools disallowed, and no MCP server but the guide's.
+- OpenCode: Guides' own OpenCode agent, which denies edits, shell and subagents and asks about any other tool but reads and searches.
+- Codex: its read-only mode. Cursor and Kilo: their ask mode, and Kilo's web tools denied.
+- Copilot CLI and Kiro CLI rely on asking first, which they do by default, and on Guides refusing.
 
-- Pull requests need the GitHub CLI (`gh`).
-- A PR opens in a git worktree in the extension's storage, so your checkout is never touched. For a PR, Claude Code loads only your user settings, and OpenCode and Kilo skip the PR's own config; Codex is not offered for PRs, because it would load the PR's `.codex/` config.
+**Pull requests** open in a git worktree in the extension's storage, so your checkout is never touched, and need the GitHub CLI (`gh`). A PR is someone else's code, and its own agent config (hooks, allow rules, MCP servers) could start programs, so Guides takes PRs only with the agents it can keep from loading that config:
+- Claude Code loads only your user settings, and Guides refuses a PR whose `.claude/settings*.json` sets a command (`apiKeyHelper`, `env`, …), because the adapter's sign-in check runs in the PR's folder.
+- OpenCode skips the PR's `opencode.json` and `.opencode/`.
+
+The other agents are offered for local changes only.
+
+**What this does not cover:**
+- Guides can only refuse what an agent asks about. Anything an agent does without asking is up to its own settings and the switches above.
+- The write check runs after the fact: it stops the run once an edit has completed.
+- Codex, Kiro and Kilo still run commands they judge read-only (in Codex's read-only sandbox, or Kiro's and Kilo's read-only command lists) without asking.
+- On local changes the repository's own agent config is trusted, as it is when you run the agent yourself.
+- The agent runs with VS Code's environment, including any credentials in it.
 - Guides are saved where Plannotator's web app finds them: open and export them from either side.
 
 ## Features

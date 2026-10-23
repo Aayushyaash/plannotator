@@ -9,7 +9,9 @@ import {
   KNOWN_AGENTS,
   OPENCODE,
   PI,
+  claudePrSettingsRisk,
   customAgent,
+  openCodeConfig,
   detectAgents,
   engineLabel,
   findAgent,
@@ -74,9 +76,9 @@ describe("starting the adapter on Windows", () => {
 
 describe("agent session policy", () => {
   it("loads only the user's Claude Code settings, no project MCP config and no bypass for a pull request", () => {
-    const write = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
-    expect(sessionMetaFor(CLAUDE_CODE, { kind: "pr" })).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false, disallowedTools: write } } });
-    expect(sessionMetaFor(CLAUDE_CODE, { kind: "local" })).toEqual({ claudeCode: { options: { disallowedTools: write } } });
+    const tools = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "BashOutput", "KillShell", "KillBash"];
+    expect(sessionMetaFor(CLAUDE_CODE, { kind: "pr" })).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false, disallowedTools: [...tools, "WebFetch", "WebSearch"] } } });
+    expect(sessionMetaFor(CLAUDE_CODE, { kind: "local" })).toEqual({ claudeCode: { options: { strictMcpConfig: true, disallowedTools: tools } } });
     // Only Claude Code reads _meta.claudeCode.
     for (const a of KNOWN_AGENTS.filter((x) => x !== CLAUDE_CODE)) expect(sessionMetaFor(a, { kind: "pr" })).toBeUndefined();
   });
@@ -125,10 +127,52 @@ describe("the agent registry", () => {
     const layers = Object.fromEntries(KNOWN_AGENTS.map((a) => [a.id, a.readOnly.layer]));
     expect(layers).toEqual({ "claude-code": "agent", codex: "agent", opencode: "agent", copilot: "permissions", cursor: "agent", kiro: "permissions", kilo: "agent", pi: "permissions" });
     expect(CODEX.readOnly.mode?.ids).toEqual(["read-only"]);
-    expect(OPENCODE.readOnly.mode?.ids).toEqual(["plan"]);
+    expect(OPENCODE.readOnly.mode?.ids).toEqual(["plannotator-guide-review"]);
     expect(CURSOR.readOnly.mode?.ids).toEqual(["ask", "plan"]);
     expect(KILO.readOnly.mode?.ids).toEqual(["ask"]);
-    expect(JSON.parse(OPENCODE.readOnly.env!.OPENCODE_CONFIG_CONTENT)).toEqual({ permission: { edit: "deny", bash: "deny", webfetch: "ask" } });
+    expect(JSON.parse(KILO.readOnly.env!.KILO_CONFIG_CONTENT)).toEqual({ permission: { webfetch: "deny", websearch: "deny" } });
+  });
+
+  it("takes pull requests only for Claude Code and OpenCode (fails closed for the rest)", () => {
+    const prs = KNOWN_AGENTS.filter((a) => !a.refusePullRequests && !a.unsupported).map((a) => a.id);
+    expect(prs).toEqual(["claude-code", "opencode"]);
+    expect(customAgent({ command: "/opt/x" })?.refusePullRequests).toBeTruthy();
+    expect(KILO.refusePullRequests).toContain("mcp.json");
+  });
+
+  it("gives OpenCode its own read-only agent, '*' first so every later rule is an exception", () => {
+    for (const run of ["local", "pr"] as const) {
+      const cfg = JSON.parse(openCodeConfig(run));
+      expect(cfg.lsp).toBe(false);
+      expect(Object.keys(cfg)).toEqual(["lsp", "agent"]);
+      const agent = cfg.agent["plannotator-guide-review"];
+      expect(agent.mode).toBe("primary");
+      expect(Object.keys(agent.permission)[0]).toBe("*");
+      expect(agent.permission["*"]).toBe("ask");
+      for (const k of ["grep", "glob", "list", "todowrite", "plannotator-guide_*"]) expect(agent.permission[k]).toBe("allow");
+      expect(agent.permission.read["*"]).toBe("allow");
+      expect(agent.permission.read["*.env"]).toBe("ask");
+      for (const k of ["edit", "bash", "task", "lsp", "question", "websearch", "codesearch"]) expect(agent.permission[k]).toBe("deny");
+      expect(agent.permission.external_directory).toBe("ask");
+      expect(agent.permission.webfetch).toBe(run === "pr" ? "deny" : "ask");
+    }
+    expect(OPENCODE.readOnly.env?.OPENCODE_CONFIG_CONTENT).toBe(openCodeConfig("local"));
+    expect(OPENCODE.readOnly.prEnv?.OPENCODE_CONFIG_CONTENT).toBe(openCodeConfig("pr"));
+  });
+
+  it("refuses a Claude Code pull request whose own settings would start a program, and fails closed on an unreadable file", () => {
+    const files = (map: Record<string, string>) => (path: string) => {
+      const name = Object.keys(map).find((k) => path.endsWith(k));
+      if (name === undefined) throw Object.assign(new Error("no"), { code: "ENOENT" });
+      return map[name];
+    };
+    expect(claudePrSettingsRisk("/r", files({}))).toBeNull();
+    expect(claudePrSettingsRisk("/r", files({ "settings.json": JSON.stringify({ permissions: { allow: ["Bash(*)"] }, hooks: {} }) }))).toBeNull();
+    for (const key of ["apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh", "otelHeadersHelper", "env"]) {
+      expect(claudePrSettingsRisk("/r", files({ "settings.local.json": JSON.stringify({ [key]: "x" }) }))).toContain(`.claude/settings.local.json sets ${key}`);
+    }
+    expect(claudePrSettingsRisk("/r", files({ "settings.json": "{ // jsonc\n }" }))).toContain("is not plain JSON");
+    expect(claudePrSettingsRisk("/r", () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); })).toContain("could not be read");
   });
 
   it("refuses Codex for pull requests, and never starts Pi", () => {
@@ -147,12 +191,10 @@ describe("starting an agent", () => {
   });
 
   it("adds the pull-request environment only to a pull request run", () => {
-    const local = resolveAgentLaunch(KILO, {}, "local", FOUND(["kilo"]));
-    const pr = resolveAgentLaunch(KILO, {}, "pr", FOUND(["kilo"]));
-    expect(local).toEqual({ ok: true, command: "/bin/kilo", args: ["acp"], source: "path" });
-    expect(pr.ok && pr.env).toEqual({ KILO_DISABLE_PROJECT_CONFIG: "1", KILO_DISABLE_EXTERNAL_SKILLS: "1", KILO_DISABLE_CLAUDE_CODE: "1" });
-    const oc = resolveAgentLaunch(OPENCODE, {}, "pr", FOUND(["opencode"]));
-    expect(oc.ok && Object.keys(oc.env!).sort()).toEqual(["OPENCODE_CONFIG_CONTENT", "OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_PROJECT_CONFIG"]);
+    const local = resolveAgentLaunch(OPENCODE, {}, "local", FOUND(["opencode"]));
+    const pr = resolveAgentLaunch(OPENCODE, {}, "pr", FOUND(["opencode"]));
+    expect(local.ok && local.env).toEqual({ OPENCODE_CONFIG_CONTENT: openCodeConfig("local") });
+    expect(pr.ok && pr.env).toEqual({ OPENCODE_CONFIG_CONTENT: openCodeConfig("pr"), OPENCODE_DISABLE_PROJECT_CONFIG: "1", OPENCODE_DISABLE_CLAUDE_CODE: "1" });
   });
 
   it("tries the program's other names", () => {

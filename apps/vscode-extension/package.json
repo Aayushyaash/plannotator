@@ -411,7 +411,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "markdownDescription": "Any other ACP agent for Guided Reviews: the program that starts it in ACP mode on stdio. When set, it is offered as a choice beside the known agents. It runs under Guides' read-only permission policy only (edits, deletes, moves and commands are refused when it asks), so it is only as read-only as its own settings make it."
+          "markdownDescription": "Any other ACP agent for Guided Reviews: the program that starts it in ACP mode on stdio. When set, it is offered as a choice beside the known agents. It runs under Guides' read-only permission policy only (edits, deletes, moves and commands are refused when it asks), so it is only as read-only as its own settings make it, and only on local changes (never a pull request)."
         },
         "plannotator.guides.customAgent.args": {
           "type": "array",
@@ -431,6 +431,7 @@
         "plannotator.guides.ghPath": {
           "type": "string",
           "default": "",
+          "scope": "machine",
           "markdownDescription": "The GitHub CLI to use for pull requests. Empty means `gh` on PATH."
         }
       }

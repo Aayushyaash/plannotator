@@ -36,6 +36,8 @@ type Step =
   | { clientTerminal: { command: string } }
   /** Edit a file with the agent's own tool without asking (an agent whose settings allow it), then report it as a completed edit. */
   | { editWithoutAsking: { path: string; content: string } }
+  /** Switch the session's mode by itself and report it (`current_mode_update`, or `config_option_update` with `via: "config"`). */
+  | { modeUpdate: string; via?: "mode" | "config" }
   | { mcp: { name: string; args?: Record<string, unknown> } }
   | { usage: { cost: number } }
   | { plan: Array<{ content: string; status: "pending" | "in_progress" | "completed" }> }
@@ -250,6 +252,12 @@ new AgentSideConnection((conn): Agent => ({
         } catch (err) {
           log({ event: "clientTerminal", ok: false, code: (err as { code?: number }).code ?? null, message: err instanceof Error ? err.message : String(err) });
         }
+      } else if ("modeUpdate" in step) {
+        currentMode = step.modeUpdate;
+        if (step.via === "config") await update({ sessionUpdate: "config_option_update", configOptions: configOptions() });
+        else await update({ sessionUpdate: "current_mode_update", currentModeId: step.modeUpdate });
+        log({ event: "modeUpdate", mode: step.modeUpdate });
+        await sleep(300);
       } else if ("editWithoutAsking" in step) {
         const toolCallId = `t${++toolNo}`;
         const path = `${session.cwd}/${step.editWithoutAsking.path}`;

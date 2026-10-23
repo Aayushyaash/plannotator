@@ -47,13 +47,28 @@ describe("the read-only permission policy", () => {
   it("uses the kind from the earlier tool_call update when the request leaves it out", () => {
     expect(decidePermission(request(null), { run: "local", knownKind: "edit" }).action).toBe("refuse");
     expect(decidePermission(request(null), { run: "local", knownKind: "read" }).action).toBe("ask");
-    // The request's own kind wins.
-    expect(decidePermission(request("execute"), { run: "local", knownKind: "read" }).action).toBe("refuse");
   });
 
-  it("asks with allow once and reject only: never 'always allow'", () => {
-    const d = decidePermission(request("read"), { run: "local" });
-    expect(d.action === "ask" && d.options.map((o) => o.optionId)).toEqual(["allow-once", "reject-once", "reject-always"]);
+  it("refuses when either the request's kind or the earlier kind is refused: a request cannot downgrade a known execute", () => {
+    expect(decidePermission(request("read"), { run: "local", knownKind: "execute" }).action).toBe("refuse");
+    expect(decidePermission(request("execute"), { run: "local", knownKind: "read" }).action).toBe("refuse");
+    expect(decidePermission(request("search"), { run: "local", knownKind: "edit" }).action).toBe("refuse");
+    expect(decidePermission(request("read"), { run: "pr", knownKind: "fetch" }).action).toBe("refuse");
+    expect(decidePermission(request("read"), { run: "local", knownKind: "read" }).action).toBe("ask");
+    // A builder name is allowed only when no kind says otherwise.
+    expect(decidePermission(request("other", { name: "guide_finish" }), { run: "local", knownKind: "execute" }).action).toBe("refuse");
+    expect(decidePermission(request("other", { name: "guide_finish" }), { run: "local", knownKind: "read" }).action).toBe("ask");
+  });
+
+  it("never offers or answers an 'always' option, allow or reject", () => {
+    for (const kind of ALL_TOOL_KINDS) {
+      for (const run of ["local", "pr"] as const) {
+        const d = decidePermission(request(kind), { run });
+        if (d.action === "ask") expect(d.options.map((o) => o.kind)).toEqual(["allow_once", "reject_once"]);
+        const answer = d.action === "refuse" ? refusalResponse(request(kind)) : d.action === "allow" ? { outcome: { outcome: "selected", optionId: d.optionId } } : null;
+        if (answer?.outcome.outcome === "selected") expect(answer.outcome.optionId).not.toMatch(/always/);
+      }
+    }
   });
 
   it("refuses when the agent offers no once-only allow", () => {
@@ -77,9 +92,9 @@ describe("the read-only permission policy", () => {
     expect(decidePermission(request("edit", { title: "guide_finish" }), { run: "local" }).action).toBe("refuse");
   });
 
-  it("answers a refusal with the agent's reject option, else cancelled", () => {
+  it("answers a refusal with the agent's reject-once option, else cancelled (never reject-always)", () => {
     expect(refusalResponse(request("edit"))).toEqual({ outcome: { outcome: "selected", optionId: "reject-once" } });
-    expect(refusalResponse(request("edit", {}, [OPTIONS[0], OPTIONS[3]]))).toEqual({ outcome: { outcome: "selected", optionId: "reject-always" } });
+    expect(refusalResponse(request("edit", {}, [OPTIONS[0], OPTIONS[3]]))).toEqual({ outcome: { outcome: "cancelled" } });
     expect(refusalResponse(request("edit", {}, [OPTIONS[0], OPTIONS[1]]))).toEqual({ outcome: { outcome: "cancelled" } });
   });
 

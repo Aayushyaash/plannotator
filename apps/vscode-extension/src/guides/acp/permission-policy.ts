@@ -12,14 +12,17 @@
  * - `fetch`: reads the network. Asked in a local-changes run; refused in a
  *   pull request run, because a PR's text is someone else's and could steer the
  *   agent into sending what it read somewhere (read + fetch is a way out).
- * - `read`, `search`, `think`: asked (only "allow once" and "reject" are
- *   offered: an "always allow" would write a rule into the user's settings).
+ * - `read`, `search`, `think`: asked, offering only "allow once" and
+ *   "reject once". Never an "always" option, either way: an "always" answer
+ *   can write a rule into the agent's settings (Claude Code writes
+ *   `.claude/settings.local.json`), which outlives the run.
  * - `other`, or no kind: the builder's own tools (`guide_*`, matched by their
  *   exact programmatic name or title) are allowed once without asking; any
  *   other tool is asked, because a client cannot tell what it does.
  *
- * The kind is the request's own, else the kind the agent reported for the same
- * tool call in an earlier `tool_call` update.
+ * The request's kind and the kind the agent reported for the same tool call
+ * in an earlier `tool_call` update are both checked: if either is refused, the
+ * request is (a request cannot downgrade a known `execute` to `read`).
  */
 
 import type { PermissionOption, RequestPermissionRequest, RequestPermissionResponse, ToolKind } from "@agentclientprotocol/sdk";
@@ -70,28 +73,30 @@ export function isBuilderToolCall(toolCall: { name?: string | null; title?: stri
 
 /** Decide one permission request. `knownKind` is the kind from the earlier `tool_call` update, if any. */
 export function decidePermission(request: RequestPermissionRequest, context: { run: RunKind; knownKind?: ToolKind | null }): PermissionDecision {
-  const kind = (request.toolCall.kind ?? context.knownKind ?? null) as ToolKind | null;
-  if (kind && REFUSED_KINDS.includes(kind)) {
-    return { action: "refuse", reason: `It ${KIND_WORDS[kind]}; guided reviews are read-only.` };
-  }
-  if (kind === "fetch" && context.run === "pr") {
+  const kinds = [request.toolCall.kind, context.knownKind].filter((k): k is ToolKind => typeof k === "string");
+  const refused = kinds.find((k) => REFUSED_KINDS.includes(k));
+  if (refused) return { action: "refuse", reason: `It ${KIND_WORDS[refused] ?? "is not read-only"}; guided reviews are read-only.` };
+  if (kinds.includes("fetch") && context.run === "pr") {
     return { action: "refuse", reason: "It reads the network; a pull request run does not, so the PR's text cannot send what the agent read anywhere." };
   }
   const allowOnce = request.options.find((o) => o.kind === "allow_once");
-  if ((kind === null || kind === "other") && isBuilderToolCall(request.toolCall) && allowOnce) {
+  if (kinds.every((k) => k === "other") && isBuilderToolCall(request.toolCall) && allowOnce) {
     return { action: "allow", optionId: allowOnce.optionId };
   }
-  const options = request.options.filter((o) => o.kind === "allow_once" || o.kind === "reject_once" || o.kind === "reject_always");
+  const options = request.options.filter((o) => o.kind === "allow_once" || o.kind === "reject_once");
   if (!options.some((o) => o.kind === "allow_once")) {
-    // Only "always allow" offered: a once-only answer is not possible, so it is refused.
+    // No once-only allow offered: an "always" answer would change settings, so it is refused.
     return { action: "refuse", reason: "The agent offered only to allow it always, which would change your settings." };
   }
   return { action: "ask", options };
 }
 
-/** The agent's own reject option (once, else always), else `cancelled`. */
+/**
+ * The agent's own "reject once" option, else `cancelled`. Never "reject
+ * always": like "allow always" it can write a rule into the agent's settings.
+ */
 export function refusalResponse(request: RequestPermissionRequest): RequestPermissionResponse {
-  const reject = request.options.find((o) => o.kind === "reject_once") ?? request.options.find((o) => o.kind === "reject_always");
+  const reject = request.options.find((o) => o.kind === "reject_once");
   return reject ? { outcome: { outcome: "selected", optionId: reject.optionId } } : { outcome: { outcome: "cancelled" } };
 }
 

@@ -19,6 +19,8 @@
  * permission settings, plus the tripwire.
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { findExecutable } from "../sources/runner";
 import { readEffortSelect, readModelSelect, type ConfigChoice, type ConfigSelect } from "./client";
 import type { RunKind } from "./permission-policy";
@@ -69,36 +71,81 @@ export interface AgentDescriptor {
   defaultEffort?: RegExp;
   readOnly: ReadOnlyEnforcement;
   /**
-   * Why a pull request is not offered to this agent (its adapter would load
-   * the PR's own project config, which can start programs). Local changes only.
+   * Why a pull request is not offered to this agent: Guides cannot keep the
+   * PR's own project config (which can start programs or allow commands) from
+   * loading. Local changes only. Fails closed: every agent that Guides cannot
+   * isolate from a PR's config sets this.
    */
   refusePullRequests?: string;
-  /** Said in the activity when a pull request run starts: a risk Guides could not rule out. */
-  prNote?: string;
+  /**
+   * A check of the PR's checked-out head before a pull request run starts:
+   * a reason to refuse it, or null. Fails closed (an unreadable file refuses).
+   */
+  prPreflight?(headRoot: string): string | null;
   /** Why this agent cannot write a guide at all yet: shown, never started. */
   unsupported?: string;
   /** Sign in in a terminal when the agent lists no terminal sign-in of its own. */
   signIn?: { command: string; args: readonly string[] };
 }
 
-/** Claude Code's file-writing tools, refused by the adapter itself on every run (`disallowedTools`). */
-const CLAUDE_WRITE_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+/**
+ * Claude Code's tools that change files or run commands, refused by the
+ * adapter itself on every run (`disallowedTools`). Claude Code calls
+ * `canUseTool` (and so the client's permission request) only when its own
+ * rules say "ask": the user's allow rules (`Bash(npm test:*)` in
+ * ~/.claude/settings.json), sandbox auto-allow and its built-in read-only
+ * auto-approvals run commands without a request, so Bash is refused at the
+ * agent, not only by the permission policy.
+ */
+export const CLAUDE_DISALLOWED_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "BashOutput", "KillShell", "KillBash"];
+/** Also refused on a pull request run: the network (a PR's text must not send what the agent read anywhere). */
+export const CLAUDE_PR_DISALLOWED_TOOLS = ["WebFetch", "WebSearch"];
+
+/**
+ * Project settings keys that make Claude Code start a program. claude-agent-acp
+ * runs `claude auth status --json` with the session's folder as cwd and without
+ * `--setting-sources`, so the CLI may read the PR's own `.claude/settings*.json`
+ * there; whether it runs these then cannot be checked (the CLI is closed), so a
+ * PR that sets any of them is refused.
+ */
+export const CLAUDE_COMMAND_SETTINGS = ["apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh", "otelHeadersHelper", "env"];
+
+/** The reason to refuse a PR whose `.claude/settings*.json` would start a program, or null. */
+export function claudePrSettingsRisk(headRoot: string, read: (path: string) => string = (p) => readFileSync(p, "utf8")): string | null {
+  for (const name of ["settings.json", "settings.local.json"]) {
+    const rel = `.claude/${name}`;
+    let text: string;
+    try {
+      text = read(join(headRoot, ".claude", name));
+    } catch (err) {
+      if ((err as { code?: string }).code === "ENOENT" || (err as { code?: string }).code === "ENOTDIR") continue;
+      return `Its ${rel} could not be read, so Guides cannot tell whether Claude Code's sign-in check would run a program from it.`;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return `Its ${rel} is not plain JSON, so Guides cannot tell whether Claude Code's sign-in check would run a program from it.`;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const hit = CLAUDE_COMMAND_SETTINGS.filter((k) => Object.hasOwn(parsed as object, k));
+    if (hit.length) return `Its ${rel} sets ${hit.join(", ")}, which Claude Code's sign-in check (\`claude auth status\`, run in the PR's folder) could act on.`;
+  }
+  return null;
+}
 
 /**
  * Claude Code through its ACP adapter. Source: the adapter's README and
  * `src/acp-agent.ts`, https://github.com/agentclientprotocol/claude-agent-acp.
- * A pull request is someone else's code: its worktree may carry
- * `.claude/settings.json` hooks, allow rules and MCP servers, and a
- * `.mcp.json`, which Claude Code would load and run under the reviewer's
- * account (hooks need no prompt). The adapter reads `_meta.claudeCode.options`
- * and spreads it over its own options, so a PR run loads the user's settings
- * only and no MCP server but the ones we pass, and adapters that read
- * `allowDangerouslySkipPermissions` refuse bypass. Every run also adds
- * Claude Code's write tools to `disallowedTools` (merged with the adapter's
- * own list). The adapter still starts the session in the cwd's
- * `permissions.defaultMode` (`acceptEdits` or `bypassPermissions` would edit
- * without asking), so every run is set back to `default`, which asks before an
- * edit (and the permission policy refuses it).
+ * Every run sends `_meta.claudeCode.options` (the adapter spreads it over its
+ * own options and merges `disallowedTools` with its own list): the tools that
+ * write or run commands are disallowed, and `strictMcpConfig` keeps every MCP
+ * server out but ours (the user's MCP tools could be allowed without asking).
+ * A pull request also loads the user's settings only (no hooks, allow rules or
+ * MCP servers from the PR), refuses bypass, disallows the network, and is
+ * refused when its own `.claude/settings*.json` sets a command (see
+ * `claudePrSettingsRisk`). The adapter still starts the session in the cwd's
+ * `permissions.defaultMode`, so every run is set back to `default`.
  */
 export const CLAUDE_CODE: AgentDescriptor = {
   id: "claude-code",
@@ -112,17 +159,18 @@ export const CLAUDE_CODE: AgentDescriptor = {
   defaultEffort: /^low$/i,
   readOnly: {
     layer: "agent",
-    summary: "Runs in Claude Code's default permission mode with its edit and write tools disallowed; a pull request also loads only your user settings and no MCP server of its own.",
+    summary: "Runs in Claude Code's default permission mode with its edit, write and shell tools disallowed and no MCP server but Guides'; a pull request also loads only your user settings and has no network.",
     sessionMeta: (run) => ({
       claudeCode: {
         options:
           run === "pr"
-            ? { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false, disallowedTools: CLAUDE_WRITE_TOOLS }
-            : { disallowedTools: CLAUDE_WRITE_TOOLS },
+            ? { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false, disallowedTools: [...CLAUDE_DISALLOWED_TOOLS, ...CLAUDE_PR_DISALLOWED_TOOLS] }
+            : { strictMcpConfig: true, disallowedTools: [...CLAUDE_DISALLOWED_TOOLS] },
       },
     }),
     mode: { ids: ["default"], label: "the default permission mode" },
   },
+  prPreflight: (headRoot) => claudePrSettingsRisk(headRoot),
   signIn: { command: "claude", args: ["/login"] },
 };
 
@@ -131,9 +179,10 @@ export const CLAUDE_CODE: AgentDescriptor = {
  * (README; `src/AgentMode.ts`: the `read-only` mode is a read-only sandbox
  * that asks before edits and network; `INITIAL_AGENT_MODE` sets the starting
  * mode). Its default mode, `agent`, writes in the workspace without asking.
- * Pull requests are refused: codex-acp marks every session folder trusted
- * (`CodexAcpClient.ts`), so a PR's own `.codex/` config (MCP servers, hooks,
- * rules) would load.
+ * Commands it judges read-only still run in its read-only sandbox without a
+ * request. Pull requests are refused: codex-acp marks every session folder
+ * trusted (`CodexAcpClient.ts`), so a PR's own `.codex/` config (MCP servers,
+ * hooks, rules) would load.
  */
 export const CODEX: AgentDescriptor = {
   id: "codex",
@@ -153,18 +202,61 @@ export const CODEX: AgentDescriptor = {
   refusePullRequests: "codex-acp trusts the folder it runs in, so a pull request's own .codex/ config (MCP servers, hooks) would load and run. Guides runs Codex on local changes only.",
 };
 
+/** The OpenCode agent Guides defines and runs in (`agent.<name>` in the injected config). */
+export const OPENCODE_GUIDE_AGENT = "plannotator-guide-review";
+
+/**
+ * The config Guides gives OpenCode through `OPENCODE_CONFIG_CONTENT`: its own
+ * primary agent, whose permission rules no other config defines, so they are
+ * merged last (OpenCode v1.19.4 `agent/agent.ts`: an agent's rules are
+ * `defaults`, then the top-level `permission`, then `agent.<name>.permission`;
+ * last match wins). `"*"` comes first so every rule after it is an exception.
+ * Keys from v1.19.4's permission schema (`core/src/v1/config/permission.ts`)
+ * and tools; MCP tools are checked as `<server>_<tool>`. `lsp: false` keeps
+ * language servers (which can resolve from the PR's own node_modules) off.
+ */
+export function openCodeConfig(run: RunKind): string {
+  const permission = {
+    "*": "ask",
+    read: { "*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow" },
+    grep: "allow",
+    glob: "allow",
+    list: "allow",
+    todowrite: "allow",
+    "plannotator-guide_*": "allow",
+    external_directory: "ask",
+    edit: "deny",
+    bash: "deny",
+    task: "deny",
+    lsp: "deny",
+    question: "deny",
+    webfetch: run === "pr" ? "deny" : "ask",
+    websearch: "deny",
+    codesearch: "deny",
+  };
+  return JSON.stringify({
+    lsp: false,
+    agent: {
+      [OPENCODE_GUIDE_AGENT]: {
+        mode: "primary",
+        description: "Plannotator guided review: reads only.",
+        permission,
+      },
+    },
+  });
+}
+
 /**
  * OpenCode's `opencode acp`. Sources: https://opencode.ai/docs/acp/ and the
- * source (`packages/core/src/config.ts`, `config/plugin/agent.ts`,
- * `plugin/plan.ts`, `cli/src/server-process.ts` in anomalyco/opencode).
- * OpenCode's default permissions let edits and shell run without asking, and
- * the `plan` mode still lets shell commands run. Guides passes
- * `OPENCODE_CONFIG_CONTENT` (it loads after the project's config; config
- * permission rules apply to every agent, last match wins) denying edits and
- * shell and asking before web fetches, and runs in `plan`. A pull request
- * also gets `OPENCODE_DISABLE_PROJECT_CONFIG` (no `opencode.json` or
- * `.opencode/` from the PR, so no per-agent rules that would come after ours)
- * and `OPENCODE_DISABLE_CLAUDE_CODE`. Read from source, not tested live.
+ * v1.19.4 source (anomalyco/opencode `packages/opencode/src/agent/agent.ts`,
+ * `config/config.ts`, `config/paths.ts`, `lsp/lsp.ts`, `mcp/catalog.ts`).
+ * OpenCode's default permission is `"*": "allow"`: edits, shell, the user's
+ * MCP and plugin tools run without asking. Guides runs in its own agent
+ * (`openCodeConfig`), which asks about everything but reads, searches and the
+ * guide's tools, and denies edits, shell and subagents. A pull request also
+ * gets `OPENCODE_DISABLE_PROJECT_CONFIG` (no `opencode.json`, no `.opencode/`
+ * plugins, agents or MCP servers from the PR), `OPENCODE_DISABLE_CLAUDE_CODE`,
+ * and no network.
  */
 export const OPENCODE: AgentDescriptor = {
   id: "opencode",
@@ -176,10 +268,10 @@ export const OPENCODE: AgentDescriptor = {
   docsUrl: "https://opencode.ai/docs/acp/",
   readOnly: {
     layer: "agent",
-    summary: "Runs in OpenCode's plan mode with an added config that denies edits and shell commands; a pull request also skips the PR's own OpenCode config.",
-    env: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: { edit: "deny", bash: "deny", webfetch: "ask" } }) },
-    prEnv: { OPENCODE_DISABLE_PROJECT_CONFIG: "1", OPENCODE_DISABLE_CLAUDE_CODE: "1" },
-    mode: { ids: ["plan"], label: "its plan mode" },
+    summary: "Runs in Guides' own OpenCode agent, which denies edits, shell and subagents and asks about any tool but reads, searches and the guide's tools; a pull request also skips the PR's own OpenCode config and has no network.",
+    env: { OPENCODE_CONFIG_CONTENT: openCodeConfig("local") },
+    prEnv: { OPENCODE_CONFIG_CONTENT: openCodeConfig("pr"), OPENCODE_DISABLE_PROJECT_CONFIG: "1", OPENCODE_DISABLE_CLAUDE_CODE: "1" },
+    mode: { ids: [OPENCODE_GUIDE_AGENT], label: `Guides' read-only OpenCode agent (${OPENCODE_GUIDE_AGENT})` },
   },
   signIn: { command: "opencode", args: ["auth", "login"] },
 };
@@ -228,6 +320,7 @@ export const COPILOT: AgentDescriptor = {
     layer: "permissions",
     summary: "Copilot asks before it edits files or runs commands, and Guides refuses them.",
   },
+  refusePullRequests: "Guides cannot keep a pull request's own Copilot configuration from loading. Guides runs Copilot CLI on local changes only.",
 };
 
 /**
@@ -252,7 +345,7 @@ export const CURSOR: AgentDescriptor = {
     summary: "Runs in Cursor's ask mode (read-only Q&A); edits and commands it asks about are refused.",
     mode: { ids: ["ask", "plan"], label: "its ask or plan mode" },
   },
-  prNote: "Cursor reads the pull request's own .cursor/cli.json, which can allow commands without asking; Guides cannot turn that off for Cursor.",
+  refusePullRequests: "Cursor reads a pull request's own .cursor/cli.json (allow rules), .cursor/hooks.json and .cursor/mcp.json, and Guides cannot turn that off. Guides runs Cursor on local changes only.",
   signIn: { command: "agent", args: ["login"] },
 };
 
@@ -274,7 +367,7 @@ export const KIRO: AgentDescriptor = {
     layer: "permissions",
     summary: "Kiro asks before edits and commands other than read-only git and system queries, and Guides refuses them.",
   },
-  prNote: "Whether Kiro's workspace-trust gate (which keeps a new workspace's agents, MCP servers and skills from loading) applies to ACP sessions is not documented.",
+  refusePullRequests: "Kiro reads a pull request's own .kiro/ settings (MCP servers, agents and their hooks), and whether its workspace-trust gate applies to ACP sessions is not documented. Guides runs Kiro CLI on local changes only.",
 };
 
 /**
@@ -283,9 +376,12 @@ export const KIRO: AgentDescriptor = {
  * `config/paths.ts`, `core/src/flag/flag.ts` in Kilo-Org/kilocode); the npm
  * package `@kilocode/cli` installs `kilo` and `kilocode`. Its `ask` mode
  * denies edits, writes and shell commands other than read-only ones, and
- * config cannot widen it except per agent, which a pull request cannot set
- * with `KILO_DISABLE_PROJECT_CONFIG`. Its default `code` mode edits without
- * asking.
+ * config cannot widen it except per agent; it allows web fetch and search,
+ * which Guides denies with `KILO_CONFIG_CONTENT` (the user's denies land last
+ * in `kilocode/agent/index.ts`). Its default `code` mode edits without asking.
+ * Pull requests are refused: `KILO_DISABLE_PROJECT_CONFIG` does not stop a
+ * PR's `.kilocode/mcp.json` or `.kilo/mcp.json` (migrated by `config.ts`
+ * `loadLegacyConfigs` without the flag), whose stdio servers start with it.
  */
 export const KILO: AgentDescriptor = {
   id: "kilo",
@@ -298,10 +394,11 @@ export const KILO: AgentDescriptor = {
   docsUrl: "https://kilo.ai/docs/code-with-ai/platforms/cli",
   readOnly: {
     layer: "agent",
-    summary: "Runs in Kilo's ask mode, which denies edits and shell commands other than read-only ones; a pull request also skips the PR's own Kilo config.",
-    prEnv: { KILO_DISABLE_PROJECT_CONFIG: "1", KILO_DISABLE_EXTERNAL_SKILLS: "1", KILO_DISABLE_CLAUDE_CODE: "1" },
+    summary: "Runs in Kilo's ask mode, which denies edits and shell commands other than read-only ones, with web fetch and search denied.",
+    env: { KILO_CONFIG_CONTENT: JSON.stringify({ permission: { webfetch: "deny", websearch: "deny" } }) },
     mode: { ids: ["ask"], label: "its ask mode" },
   },
+  refusePullRequests: "Kilo starts the MCP servers in a pull request's own .kilocode/mcp.json or .kilo/mcp.json even with project config turned off. Guides runs Kilo Code on local changes only.",
   signIn: { command: "kilo", args: ["auth", "login"] },
 };
 
@@ -326,6 +423,7 @@ export function customAgent(setting: { command?: string; args?: string[]; label?
       layer: "permissions",
       summary: "Only the permission policy: Guides refuses its edits, deletes, moves and commands when it asks; an agent that writes without asking is stopped when Guides sees it.",
     },
+    refusePullRequests: "Guides cannot keep a pull request's own configuration from loading for a custom agent. The custom agent runs on local changes only.",
   };
 }
 
