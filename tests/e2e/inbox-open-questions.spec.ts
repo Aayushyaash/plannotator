@@ -7,8 +7,10 @@
  *
  * One session asks over eight messages; the person looks, picks on one card,
  * and the agent replaces one question and asks two more. Reopened, the first
- * messages fold. The "N open questions" button sits after Re-ask, its list
- * names each question's state and place, and choosing a folded one opens its
+ * messages fold. The "N open questions" button sits after Edit draft (no
+ * Re-ask button in the foot: Re-ask is the list's last item, owner,
+ * 2026-10-23), its list names each question's state and place with no drawn
+ * heading or foot line, and choosing a folded one opens its
  * message and rings its card. Then the list as a bottom sheet on a phone
  * (WebKit, iPhone 15). Then the foot's buttons on one row with a pick waiting
  * (beside a file at 1100, 1280 and 1440, and on phones), and the "N new" pill
@@ -79,7 +81,8 @@ async function expectOneRow(page: Page): Promise<void> {
         }),
       rowRight: row.parentElement!.getBoundingClientRect().right,
     }));
-    expect(boxes.length).toBeGreaterThanOrEqual(3);
+    // At least Reply (or Send and Edit draft) and the open questions button (Re-ask is in its list).
+    expect(boxes.length).toBeGreaterThanOrEqual(2);
     expect(new Set(boxes.map((b) => b.top)).size, JSON.stringify(boxes)).toBe(1);
     for (const b of boxes) expect(b.right, JSON.stringify({ boxes, rowRight })).toBeLessThanOrEqual(rowRight + 0.5);
   }).toPass({ timeout: 5000 });
@@ -159,7 +162,7 @@ test.afterAll(async () => {
   }
 });
 
-test('desktop: the button sits after Re-ask, its list names state and place, and a folded question opens and rings', async () => {
+test('desktop: the button sits after Edit draft, its list names state and place and ends with Re-ask, and a folded question opens and rings', async () => {
   const { page, ids } = world;
   await page.goto(`${world.url}#thread=${world.threadId}`);
   const pane = page.locator('section.ib-pane');
@@ -170,8 +173,9 @@ test('desktop: the button sits after Re-ask, its list names state and place, and
   await expect(button).toHaveText('6 open questions');
   await expect(button).toHaveAttribute('aria-haspopup', 'menu');
   await expect(button).toHaveAttribute('aria-expanded', 'false');
-  const reask = foot.getByRole('button', { name: 'Re-ask', exact: true });
-  const [re, oq] = await Promise.all([reask.boundingBox(), button.boundingBox()]);
+  await expect(foot.getByRole('button', { name: 'Re-ask', exact: true })).toHaveCount(0);
+  const edit = foot.getByRole('button', { name: 'Edit draft', exact: true });
+  const [re, oq] = await Promise.all([edit.boundingBox(), button.boundingBox()]);
   expect(Math.abs(re!.y - oq!.y)).toBeLessThanOrEqual(1);
   expect(oq!.x).toBeGreaterThan(re!.x);
   // The skip chip is unchanged beside it.
@@ -182,10 +186,15 @@ test('desktop: the button sits after Re-ask, its list names state and place, and
   await expect(list).toBeVisible();
   await expect(button).toHaveAttribute('aria-expanded', 'true');
   await expect(list).toHaveAttribute('role', 'menu');
-  await expect(list.locator('.ib-oq-head > b')).toHaveText('6 open questions in this thread');
-  await expect(list.locator('.ib-oq-sub')).toHaveText('1 in your draft · 1 replaced, left out');
-  const rows = list.getByRole('menuitem');
+  // Named, not titled: no drawn heading, count line or foot line.
+  await expect(list).toHaveAttribute('aria-label', '6 open questions in this thread');
+  await expect(list).not.toContainText('in this thread');
+  await expect(list).not.toContainText('Choose one');
+  const rows = list.locator('.ib-oq-row');
   await expect(rows).toHaveCount(6);
+  // Re-ask is the last menu item.
+  await expect(list.getByRole('menuitem')).toHaveCount(7);
+  await expect(list.getByRole('menuitem').last()).toHaveText('Re-ask in one new message');
   await expect(rows.nth(1)).toContainText('How many times should a rate-limited charge be retried?');
   await expect(rows.nth(1).locator('.ib-oq-when')).toHaveText(/ · in a folded message$/);
   await expect(rows.nth(2).locator('.ib-b-stop')).toHaveText('Stopped');
@@ -228,7 +237,7 @@ test('phone (WebKit, iPhone 15) with a pick waiting: the buttons on one row, and
       const page = await context.newPage();
       await page.goto(`${world.url}#thread=${world.threadId}`);
       const button = page.locator('.ib-pfoot [data-open-questions]');
-      // A pick waits: Send, Edit draft, Re-ask and this button share one row, so the label is as short as it must be.
+      // A pick waits: Send, Edit draft and this button share one row, so the label is as short as it must be.
       await expect(page.locator('.ib-pfoot [data-foot-status] [data-draft-foot]')).toContainText('1 pick');
       await expect(button).toHaveText(/^6( open)?$/);
       await expect(button).toHaveAttribute('aria-label', '6 open questions');
@@ -266,8 +275,9 @@ test('beside a file (the 440 px thread column) with a pick waiting: every foot b
     await expect(pane).toHaveClass(/ib-withfile/);
     await expect(pane.locator('.ib-pfoot [data-foot-status] [data-draft-foot]')).toContainText('1 pick');
     const button = pane.locator('.ib-pfoot [data-open-questions]');
-    await expect(button).toHaveAttribute('aria-label', '6 open questions');
-    await expect(button).toHaveText(/^6( open)?$/);
+    // Without a Re-ask button beside it (it is in the list now) the full words may fit; the name is whole either way.
+    await expect(button).toHaveAccessibleName('6 open questions');
+    await expect(button).toHaveText(/^6( open)?( questions)?$/);
     await expectOneRow(page);
     if (width === 1280) {
       await page.mouse.move(10, 10);
@@ -310,9 +320,9 @@ test('phone (Chromium, Pixel 7): the "N new" pill never lies over a foot button'
     const page = await context.newPage();
     await page.goto(`${world.url}#thread=${first.thread_id as string}`);
     const foot = page.locator('.ib-pfoot');
-    // Reply, Re-ask and "2 open": no empty middle in the row.
+    // Reply and "2 open" (Re-ask is in its list): the pill keeps clear of them.
     await expect(foot.locator('[data-open-questions]')).toHaveAttribute('aria-label', '2 open questions');
-    await expect(foot.getByRole('button', { name: 'Re-ask', exact: true })).toBeVisible();
+    await expect(foot.getByRole('button', { name: 'Re-ask', exact: true })).toHaveCount(0);
     const pill = page.locator('[data-new-pill]');
     await expect(pill).not.toHaveAttribute('data-off', '');
     await expect(pill).toBeVisible();

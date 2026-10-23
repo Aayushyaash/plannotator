@@ -72,7 +72,7 @@ import { splitInboxSkillsBlock } from '@plannotator/core/skill-reference-block';
 import { Tip } from './Tip';
 import { OpenQuestionsButton } from './OpenQuestions';
 import { laidOutChildren, pillHitsButtons } from '../footFit';
-import { openQuestionsShown, placeOf, threadOpenQuestions, type OpenQuestionPlace } from '../openQuestions';
+import { openQuestionsShown, placeOf, reaskItemLabel, threadOpenQuestions, type OpenQuestionPlace } from '../openQuestions';
 import { selectionToolbarShowing } from '../selectionToolbar';
 import { replyKeysToRenew, routeSendAnnotations, sendTargetAnswerIds, sendTargetsOf, type SendTarget, type SentContents } from '../sendTargets';
 
@@ -2498,6 +2498,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   const reaskList = resolved && !cameBack ? [] : reaskTargets(thread.messages, liveMessage);
   const reaskShown = reaskOffered(reaskList, thread.messages.filter(liveMessage));
   const reaskOpen = reaskList.reduce((n, t) => n + (t.kind === 'reask' ? t.open : 0), 0);
+  const reaskActions = reaskList.reduce((n, t) => n + (t.kind === 'reask' ? t.actions : 0), 0);
   const [reasking, setReasking] = useState(false);
   /** One idempotency key per target message, kept for a retry. */
   const reaskKeys = useRef<Map<string, string> | null>(null);
@@ -2570,10 +2571,10 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   };
 
   // Open questions in this thread (approval "inbox-thread-open-questions", option A): the "N open questions"
-  // button beside Re-ask lists them, and a row takes the person to the card (unfolding its message).
+  // button lists them (Re-ask at its foot), and a row takes the person to the card (unfolding its message).
   const openQ = resolved && !cameBack ? { questions: [], replaced: 0 } : threadOpenQuestions(thread.messages, liveMessage);
-  const isFolded = (messageId: string) => fold.folded.has(messageId) || hiddenNow.has(messageId);
-  const openQShown = openQuestionsShown(openQ.questions, { messageCount: thread.messages.length, folded: isFolded });
+  // Shown whenever a question waits, or Re-ask is offered (it lives in the list now, so never out of reach).
+  const openQShown = openQuestionsShown(openQ.questions, reaskShown);
   /** Where each listed card sits now: in a folded message, or above or below the middle of the thread's view. */
   const measureOpenQuestions = (): ReadonlyMap<string, OpenQuestionPlace> => {
     const places = new Map<string, OpenQuestionPlace>();
@@ -3484,20 +3485,18 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
                 <Icon name={waiting || draftKept ? 'pen' : 'reply'} size={15} />
                 {waiting || draftKept ? 'Edit draft' : 'Reply'}
               </button>
-              {/* Re-ask (approval "inbox-reask"): the open questions again, in one message per session. */}
-              {reaskShown && (
-                <Tip content={reaskTooltip(reaskList)}>
-                  <button type="button" className="ib-btn" ref={reaskRef} data-reask="" disabled={reasking} onClick={() => void sendReask()}>
-                    <Icon name="refresh" size={15} />
-                    Re-ask
-                  </button>
-                </Tip>
-              )}
-              {/* The thread's open questions (approval "inbox-thread-open-questions"): a list that takes the person to each card. */}
+              {/* The thread's open questions (approval "inbox-thread-open-questions"): a list that takes the person to each
+                  card, with Re-ask at its foot (owner, 2026-10-23: the open questions again, in one message per session). */}
               {openQShown && (
                 <OpenQuestionsButton
                   questions={openQ.questions}
-                  replaced={openQ.replaced}
+                  actions={reaskActions}
+                  reask={
+                    reaskShown
+                      ? { label: reaskItemLabel(reaskOpen), tooltip: reaskTooltip(reaskList), busy: reasking, onReask: () => void sendReask() }
+                      : null
+                  }
+                  triggerRef={reaskRef}
                   phone={phone}
                   measure={measureOpenQuestions}
                   onPick={(q) => jumpTo({ kind: 'question', messageId: q.messageId, key: q.key })}

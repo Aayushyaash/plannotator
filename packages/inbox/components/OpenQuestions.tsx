@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type Ref } from 'react';
 import { Menu } from '@base-ui/react/menu';
 import { whenTime } from '../format';
 import { Icon } from '../icons';
@@ -7,17 +7,36 @@ import {
   openQuestionState,
   openQuestionsHeading,
   openQuestionsLabel,
-  openQuestionsSub,
   type OpenQuestion,
   type OpenQuestionPlace,
+  type OpenQuestionsNoun,
 } from '../openQuestions';
+import { Tip } from './Tip';
 import { pickWords } from './ReplacedQuestion';
 import { fitFootRow, footFitCandidates, laidOutChildren, openQuestionsFormText, type FootFit, type OpenQuestionsLabelForm } from '../footFit';
 
+/** The Re-ask item at the list's foot (owner, 2026-10-23): what the foot's Re-ask button did. */
+export interface OpenQuestionsReask {
+  /** "Re-ask in one new message" / "Re-ask in a new message". */
+  label: string;
+  /** What pressing it does (the old button's tooltip). */
+  tooltip: string;
+  /** A Re-ask is being sent: the item is disabled. */
+  busy: boolean;
+  onReask: () => void;
+}
+
 export interface OpenQuestionsButtonProps {
   questions: readonly OpenQuestion[];
-  /** Replaced questions left out of the list: the heading's line names them. */
-  replaced: number;
+  /**
+   * Shown with no question listed (only action items wait, and Re-ask is
+   * offered): the button counts the open action items instead.
+   */
+  actions?: number;
+  /** Re-ask, when it is offered: one item at the list's foot. */
+  reask?: OpenQuestionsReask | null;
+  /** The button itself, for whoever puts focus back on it (the Re-ask route choice's Cancel). */
+  triggerRef?: Ref<HTMLButtonElement>;
   /** A phone: the button reads "5 open" at most, the list is a bottom sheet with 44 px targets. */
   phone: boolean;
   /** Where each card sits now, measured when the list opens. */
@@ -41,7 +60,7 @@ export interface OpenQuestionsButtonProps {
  * usual spacing and then a tighter one; a phone never takes the long form.
  * The name always holds the whole count.
  */
-export function OpenQuestionsButton({ questions, replaced, phone, measure, onPick }: OpenQuestionsButtonProps) {
+export function OpenQuestionsButton({ questions, actions = 0, reask = null, triggerRef, phone, measure, onPick }: OpenQuestionsButtonProps) {
   const [open, setOpen] = useState(false);
   const [places, setPlaces] = useState<ReadonlyMap<string, OpenQuestionPlace>>(new Map());
   const trigger = useRef<HTMLButtonElement>(null);
@@ -50,7 +69,10 @@ export function OpenQuestionsButton({ questions, replaced, phone, measure, onPic
   // The list is drawn inside the window's root, so the window's styles (and theme) reach it.
   const [portal, setPortal] = useState<HTMLElement | null>(null);
   useLayoutEffect(() => setPortal(trigger.current?.closest<HTMLElement>('.pn-inbox') ?? null), []);
-  const n = questions.length;
+  // Only action items wait (Re-ask is offered): the button counts them.
+  const noun: OpenQuestionsNoun = questions.length === 0 && actions > 0 ? 'action item' : 'question';
+  const n = noun === 'question' ? questions.length : actions;
+  const reaskTipId = useId();
   const max: OpenQuestionsLabelForm = phone ? 'short' : 'full';
   const [fitted, setFitted] = useState<FootFit>({ form: max, tight: false });
   const words = useRef<HTMLSpanElement>(null);
@@ -75,7 +97,7 @@ export function OpenQuestionsButton({ questions, replaced, phone, measure, onPic
       if (!force && key === fittedFor.current) return;
       fittedFor.current = key;
       const apply = ({ form, tight }: FootFit) => {
-        text.nodeValue = openQuestionsFormText(n, form);
+        text.nodeValue = openQuestionsFormText(n, form, noun);
         button.setAttribute('data-label-form', form);
         button.toggleAttribute('data-fit-tight', tight);
       };
@@ -84,7 +106,7 @@ export function OpenQuestionsButton({ questions, replaced, phone, measure, onPic
       apply(next);
       setFitted((current) => (current.form === next.form && current.tight === next.tight ? current : next));
     },
-    [n, max],
+    [n, max, noun],
   );
   // Every render: a button beside it may have come or gone (Send, 👍) with no resize.
   useLayoutEffect(() => fit());
@@ -114,10 +136,8 @@ export function OpenQuestionsButton({ questions, replaced, phone, measure, onPic
       }, 0);
     };
   }, []);
-  const label = openQuestionsLabel(n);
-  const heading = openQuestionsHeading(n);
-  const sub = openQuestionsSub(questions, replaced);
-  const anyFolded = questions.some((q) => places.get(q.id) === 'folded');
+  const label = openQuestionsLabel(n, noun);
+  const heading = openQuestionsHeading(n, noun);
   return (
     <Menu.Root
       open={open}
@@ -131,7 +151,11 @@ export function OpenQuestionsButton({ questions, replaced, phone, measure, onPic
       }}
     >
       <Menu.Trigger
-        ref={trigger}
+        ref={(el: HTMLButtonElement | null) => {
+          trigger.current = el;
+          if (typeof triggerRef === 'function') triggerRef(el);
+          else if (triggerRef) (triggerRef as { current: HTMLButtonElement | null }).current = el;
+        }}
         className="ib-btn ib-oq-btn"
         data-open-questions=""
         // A shorter form ("5 open", "5"): the name keeps the whole count.
@@ -140,7 +164,7 @@ export function OpenQuestionsButton({ questions, replaced, phone, measure, onPic
         data-fit-tight={fitted.tight ? '' : undefined}
       >
         <Icon name="question" size={15} />
-        <span ref={words}>{openQuestionsFormText(n, form)}</span>
+        <span ref={words}>{openQuestionsFormText(n, form, noun)}</span>
         <span className="ib-oq-chev" aria-hidden="true">
           <Icon name="chevU" size={13} />
         </span>
@@ -161,20 +185,14 @@ export function OpenQuestionsButton({ questions, replaced, phone, measure, onPic
             data-open-questions-list=""
             finalFocus={() => (picked.current ? false : true)}
           >
-            <div className="ib-oq-head">
-              {/* The popup is named by the heading already (aria-label): drawn for the eye. */}
-              <b aria-hidden="true">{heading}</b>
-              {sub && (
-                <span className="ib-oq-sub" aria-hidden="true">
-                  {sub}
-                </span>
-              )}
-              {phone && (
+            {/* No drawn heading or foot line (owner, 2026-10-23): the popup's name (aria-label) carries the count. */}
+            {phone && (
+              <div className="ib-oq-head">
                 <button type="button" className="ib-oq-x" aria-label="Close" data-open-questions-close="" onClick={() => setOpen(false)}>
                   <Icon name="x" size={16} />
                 </button>
-              )}
-            </div>
+              </div>
+            )}
             <div className="ib-oq-list">
               {questions.map((q, i) => {
                 const state = openQuestionState(q);
@@ -228,9 +246,32 @@ export function OpenQuestionsButton({ questions, replaced, phone, measure, onPic
                 );
               })}
             </div>
-            <div className="ib-oq-foot" aria-hidden="true">
-              {anyFolded ? 'Choose one to go to it. Folded messages open.' : 'Choose one to go to it.'}
-            </div>
+            {reask && (
+              <>
+                {questions.length > 0 && <Menu.Separator className="ib-oq-sep" />}
+                <Tip content={reask.tooltip}>
+                  <Menu.Item
+                    className="ib-oq-reask"
+                    data-reask=""
+                    label={reask.label}
+                    disabled={reask.busy}
+                    aria-describedby={reaskTipId}
+                    onClick={() => {
+                      // Focus goes back to the button (or to the route choice, which takes it).
+                      setOpen(false);
+                      reask.onReask();
+                    }}
+                  >
+                    <Icon name="refresh" size={15} />
+                    <span>{reask.label}</span>
+                  </Menu.Item>
+                </Tip>
+                {/* The tooltip tags nothing for a screen reader: the same words as the item's description. */}
+                <span id={reaskTipId} hidden>
+                  {reask.tooltip}
+                </span>
+              </>
+            )}
           </Menu.Popup>
         </Menu.Positioner>
       </Menu.Portal>

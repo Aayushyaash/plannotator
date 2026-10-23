@@ -1626,6 +1626,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
       ...((reply.reask?.length ?? 0) > 0 ? { reask: true } : {}),
       // What the note lists (#2059): the wake names action items only when it lists some.
       ...(inboxReaskItemsOf(reply.reask) ? { reask_items: inboxReaskItemsOf(reply.reask) } : {}),
+      // A note that lists one question or action item: the wake says it in the singular.
+      ...(reply.reask?.length === 1 ? { reask_one: true } : {}),
     };
   };
 

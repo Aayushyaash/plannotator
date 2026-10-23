@@ -3,7 +3,8 @@
  * option A): the "N open questions" button in the foot's button row and the
  * short list it opens. What is proved: the count (open and picked-not-sent;
  * replaced questions and action items left out), when the button shows, the
- * list's heading, rows, states and places, choosing a row unfolding its
+ * list's name (no drawn heading or foot line), rows, states and places, the
+ * Re-ask item at its foot (owner, 2026-10-23), choosing a row unfolding its
  * message and ringing the card, Escape putting focus back on the button, the
  * phone's bottom sheet, no button when nothing is open, the label forms and
  * the pill's place that keep the foot on one line (footFit.ts), and focus
@@ -18,7 +19,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { parseInboxQuestionBlocks } from '@plannotator/core/inbox-questions';
 import type { InboxAuthor, InboxMessageWire, InboxProject, InboxQuestion, InboxThread } from '@plannotator/core/inbox-types';
 import type { QuestionAnswer } from '@plannotator/core/question-block';
-import { openQuestionsShown, openQuestionsSub, openQuestionState, placeOf, threadOpenQuestions } from './openQuestions';
+import { openQuestionsShown, openQuestionState, placeOf, reaskItemLabel, threadOpenQuestions } from './openQuestions';
 import { footFitCandidates, onOneLine, openQuestionsFormText, pillHitsButtons } from './footFit';
 
 const hasDom = typeof document !== 'undefined';
@@ -116,7 +117,6 @@ describe('the rules (openQuestions.ts)', () => {
     expect(questions.map((q) => q.messageId)).toEqual([M2, M3, M5, M6]);
     expect(questions.map((q) => q.prompt)).not.toContain('Approve the 2FA prompt');
     expect(replaced).toBe(1);
-    expect(openQuestionsSub(questions, replaced)).toBe('1 in your draft · 1 replaced, left out');
   });
 
   test('a row shows the draft pick first, else Stopped, else Holds up', () => {
@@ -131,14 +131,17 @@ describe('the rules (openQuestions.ts)', () => {
     expect(questions.map((q) => q.messageId)).toEqual([M3, M5, M6]);
   });
 
-  test('two or more always show; one shows only when its card may be out of sight', () => {
+  test('shown whenever a question waits, or Re-ask is offered with only action items (owner, 2026-10-23)', () => {
     const { questions } = threadOpenQuestions(sample());
-    expect(openQuestionsShown([], { messageCount: 9, folded: () => true })).toBe(false);
-    expect(openQuestionsShown(questions.slice(0, 2), { messageCount: 2, folded: () => false })).toBe(true);
-    const one = questions.slice(0, 1);
-    expect(openQuestionsShown(one, { messageCount: 2, folded: () => false })).toBe(false);
-    expect(openQuestionsShown(one, { messageCount: 2, folded: () => true })).toBe(true);
-    expect(openQuestionsShown(one, { messageCount: 4, folded: () => false })).toBe(true);
+    expect(openQuestionsShown([])).toBe(false);
+    expect(openQuestionsShown([], true)).toBe(true);
+    expect(openQuestionsShown(questions.slice(0, 1))).toBe(true);
+    expect(openQuestionsShown(questions.slice(0, 2))).toBe(true);
+  });
+
+  test("the Re-ask item's words: singular for one thing asked again", () => {
+    expect(reaskItemLabel(1)).toBe('Re-ask in a new message');
+    expect(reaskItemLabel(3)).toBe('Re-ask in one new message');
   });
 
   test('above or below by the middle of the card against the middle of the view', () => {
@@ -254,7 +257,8 @@ function pane(t: InboxThread, options: { phone?: boolean } = {}) {
 
 const button = () => document.querySelector<HTMLButtonElement>('[data-open-questions]');
 const list = () => document.querySelector<HTMLElement>('[data-open-questions-list]');
-const rows = () => [...(list()?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
+const rows = () => [...(list()?.querySelectorAll<HTMLElement>('.ib-oq-row') ?? [])];
+const reaskItem = () => list()?.querySelector<HTMLElement>('[data-reask]') ?? null;
 
 /** Base UI opens on the pointer's press, as a person's click does. */
 async function press(el: HTMLElement) {
@@ -272,12 +276,14 @@ async function openList() {
   await until(() => !!list(), 'the list');
 }
 
-test.skipIf(!hasDom)('the button sits after Re-ask in the foot, counts 4 (no replaced question, no action item), and opens a menu', async () => {
+test.skipIf(!hasDom)('the button sits after Reply (no Re-ask in the foot), counts 4 (no replaced question, no action item), and opens a menu', async () => {
   const el = await render(thread(sample()));
   const b = button()!;
   expect(b.textContent?.trim()).toBe('4 open questions');
   const foot = [...el.querySelectorAll('[data-foot-buttons] button')].map((n) => n.textContent?.trim());
-  expect(foot.indexOf('4 open questions')).toBe(foot.indexOf('Re-ask') + 1);
+  expect(foot).not.toContain('Re-ask');
+  expect(el.querySelector('[data-foot-buttons] [data-reask]')).toBeNull();
+  expect(foot.indexOf('4 open questions')).toBe(foot.indexOf('Edit draft') + 1);
   expect(b.getAttribute('aria-haspopup')).toBe('menu');
   expect(b.getAttribute('aria-expanded')).toBe('false');
   expect(b.hasAttribute('title')).toBe(false);
@@ -285,7 +291,9 @@ test.skipIf(!hasDom)('the button sits after Re-ask in the foot, counts 4 (no rep
   expect(b.getAttribute('aria-expanded')).toBe('true');
   expect(list()!.getAttribute('role')).toBe('menu');
   expect(list()!.getAttribute('aria-label')).toBe('4 open questions in this thread');
-  expect(list()!.querySelector('.ib-oq-sub')!.textContent).toBe('1 in your draft · 1 replaced, left out');
+  // No drawn heading, count line or foot line: the name carries the count.
+  expect(list()!.textContent).not.toContain('in this thread');
+  expect(list()!.querySelector('.ib-oq-head, .ib-oq-sub, .ib-oq-foot')).toBeNull();
   expect(rows().map((r) => r.querySelector('.ib-oq-p')!.textContent)).toEqual([
     'How many times should a rate-limited charge be retried?',
     'Which way should the worker go on a Stripe 409?',
@@ -298,7 +306,13 @@ test.skipIf(!hasDom)('the button sits after Re-ask in the foot, counts 4 (no rep
   expect(rows()[0]!.querySelector('.ib-oq-when')!.textContent).toMatch(/· in a folded message$/);
   expect(rows()[1]!.querySelector('.ib-oq-when')!.textContent).toMatch(/· in a folded message$/);
   expect(rows()[3]!.querySelector('.ib-oq-when')!.textContent).toMatch(/· (below|above)$/);
-  expect(list()!.querySelector('.ib-oq-foot')!.textContent).toBe('Choose one to go to it. Folded messages open.');
+  expect(list()!.textContent).not.toContain('Choose one');
+  // Re-ask at the foot, a menu item after the rows.
+  const item = reaskItem()!;
+  expect(item.getAttribute('role')).toBe('menuitem');
+  expect(item.textContent?.trim()).toBe('Re-ask in one new message');
+  expect([...list()!.querySelectorAll('[role="menuitem"]')].at(-1)).toBe(item);
+  expect(document.getElementById(item.getAttribute('aria-describedby')!)?.textContent).toMatch(/^Ask Claude Code to ask the 3 open questions and 1 action item again, together in one message.* Your 1 pick is sent too\.$/);
   // No native tooltips anywhere in the list.
   expect(list()!.querySelector('[title]')).toBeNull();
 });
@@ -357,30 +371,48 @@ test.skipIf(!hasDom)('on a phone: "4 open" named in full, and the list is a bott
   const positioner = list()!.closest('.ib-oq-pos')!;
   expect(positioner.hasAttribute('data-phone')).toBe(true);
   expect(document.querySelector('[data-open-questions-scrim]')).not.toBeNull();
+  expect(reaskItem()?.textContent?.trim()).toBe('Re-ask in one new message');
   const close = list()!.querySelector<HTMLButtonElement>('[data-open-questions-close]')!;
   expect(close.getAttribute('aria-label')).toBe('Close');
   await act(async () => close.click());
   await until(() => !list(), 'the sheet to close');
 });
 
+const allSent = (keepAction: boolean) =>
+  sample().map((m) => ({
+    ...m,
+    ...(m.questions ? { questions: m.questions.map((q) => (q.state === 'superseded' ? q : { ...q, state: 'sent' as const, answer: q.answer })) } : {}),
+    ...(m.actions && !keepAction ? { actions: m.actions.map((a) => ({ ...a, state: 'sent' as const })) } : {}),
+  }));
+
 test.skipIf(!hasDom)('no button when nothing is open', async () => {
-  const closed = sample().map((m) => (m.questions ? { ...m, questions: m.questions.map((q) => (q.state === 'superseded' ? q : { ...q, state: 'sent' as const, answer: q.answer })) } : m));
-  await render(thread(closed));
+  await render(thread(allSent(false)));
   expect(button()).toBeNull();
 });
 
-test.skipIf(!hasDom)('one open question in a short, unfolded thread: no button', async () => {
+test.skipIf(!hasDom)('only an action item open: the button counts it, and its list is Re-ask alone', async () => {
+  await render(thread(allSent(true)));
+  expect(button()!.textContent?.trim()).toBe('1 open action item');
+  await openList();
+  expect(list()!.getAttribute('aria-label')).toBe('1 open action item in this thread');
+  expect(rows()).toHaveLength(0);
+  expect(reaskItem()!.textContent?.trim()).toBe('Re-ask in a new message');
+});
+
+test.skipIf(!hasDom)('one open question in a short, unfolded thread: the button shows, with Re-ask in the singular', async () => {
   await render(thread([agent(1, `One call.\n\n${block('Ship it?')}`, 1, () => ({}), { person_seen_seq: 0 })]));
-  expect(button()).toBeNull();
+  expect(button()!.textContent?.trim()).toBe('1 open question');
+  await openList();
+  expect(rows()).toHaveLength(1);
+  expect(reaskItem()!.textContent?.trim()).toBe('Re-ask in a new message');
 });
 
 test.skipIf(!hasDom)("the button going while its list is open puts focus on the foot's Reply, never the page", async () => {
   const el = await render(thread(sample()));
   await openList();
   await act(async () => rows()[0]!.focus());
-  // Every open question answered elsewhere: the button (and its list) goes.
-  const answered = sample().map((m) => (m.questions ? { ...m, questions: m.questions.map((q) => (q.state === 'superseded' ? q : { ...q, state: 'sent' as const })) } : m));
-  await act(async () => root!.render(pane(thread(answered))));
+  // Every open question and action item answered elsewhere: the button (and its list) goes.
+  await act(async () => root!.render(pane(thread(allSent(false)))));
   await settle();
   expect(button()).toBeNull();
   expect(list()).toBeNull();
