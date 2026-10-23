@@ -2,6 +2,12 @@ import { piUpdateAdvert } from "./update-advert.ts";
 import { isSameOriginOrNoOrigin } from "../generated/request-origin.ts";
 import { spawn } from "node:child_process";
 import { likelyAppHtmlEncoding, prewarmAppHtml } from "../generated/app-html.ts";
+import {
+	answerDiagramEngineRequest,
+	createDiagramEngineAssets,
+	isDiagramEngineRequest,
+	type DiagramEngineSource,
+} from "../generated/diagram-engine-assets.ts";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import os from "node:os";
@@ -347,6 +353,14 @@ export async function startReviewServer(options: {
 	rawPatch: string;
 	gitRef: string;
 	htmlContent: string;
+	/**
+	 * Code review's diagram engine files, or a function that reads them on
+	 * first need (the extension's `diagram-engine/` folder). Mirrors the Bun
+	 * server: with them `/api/diff` advertises `diagramEngine` and the files
+	 * are served under `/assets/diagram-engine/`; without them diagram fences
+	 * show as code.
+	 */
+	diagramEngine?: DiagramEngineSource;
 	origin?: string;
 	diffType?: DiffType | WorkspaceDiffType;
 	gitContext?: GitContext;
@@ -1889,6 +1903,9 @@ export async function startReviewServer(options: {
 	// it is offered wherever /api/file-content can read one (never a static
 	// patch). Its images (/api/review-markdown-image) follow imagePreviewSupported.
 	const markdownPreviewSupported = !isStaticPatchMode;
+	// Hashed off the request path, so `/api/diff` finds it ready.
+	const diagramEngineAssets = createDiagramEngineAssets(options.diagramEngine);
+	diagramEngineAssets.warm();
 	// Where the current mode reads one side of a repository path, as bytes:
 	// shared by /api/review-image (#1598) and the Markdown preview's
 	// /api/review-markdown-image, mirroring packages/server/review.ts.
@@ -2378,6 +2395,8 @@ export async function startReviewServer(options: {
 				serverSession,
 				imagePreviewSupported,
 				markdownPreviewSupported,
+				// Session-constant, read once by the page at mount.
+				diagramEngine: await diagramEngineAssets.advert(),
 				...sourceKindAdvert,
 				// Mount is the only place the pin matters, so it rides /api/diff
 				// alone (not the switch endpoints).
@@ -3857,6 +3876,18 @@ export async function startReviewServer(options: {
 			await handleReviewDraftRequest(req, res, currentDraftKeys(), reviewDrafts);
 		} else if (url.pathname === "/favicon.png") {
 			handleFavicon(res);
+		} else if (isDiagramEngineRequest(url.pathname)) {
+			// Code review's diagram engine, fetched by the page only for a
+			// preview or guide overview that holds a diagram fence.
+			const answer = await answerDiagramEngineRequest(
+				diagramEngineAssets,
+				url.pathname,
+				req.method,
+				req.headers["accept-encoding"],
+				isRemoteSession(),
+			);
+			res.writeHead(answer.status, answer.headers);
+			res.end(answer.body);
 		} else if (
 			isGitButlerCommittedView() &&
 			url.pathname === "/api/editor-annotations" &&

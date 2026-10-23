@@ -33,7 +33,7 @@ let scheduled = false;
 /**
  * The advert for a Pi review window's payload: read from the cache only, so
  * a page load never waits on the network. The first call in this process also
- * schedules the daily check (fire-and-forget; it answers from the cache within
+ * schedules the hourly release check (fire-and-forget; it answers from the cache within
  * its window). Nothing for another origin (oh-my-pi updates differently) or
  * while update checks are off.
  */

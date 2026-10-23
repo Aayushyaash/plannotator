@@ -49,7 +49,7 @@ delete process.env.PLANNOTATOR_INBOX_TAILSCALE;
 // connect proofs turn it on in their own spawned env, with a PATH of fakes.
 process.env.PLANNOTATOR_INBOX_CONNECT = "0";
 
-// The update check asks GitHub once a day from a release build (the Inbox with
+// The update check asks GitHub about once an hour from a release build (the Inbox with
 // an X.Y.Z version, the compiled CLI). Tests never reach GitHub: a closed
 // loopback port refuses at once, so an unintended check fails fast and is
 // cached as a failure. Tests that need an answer inject `fetchRelease` or

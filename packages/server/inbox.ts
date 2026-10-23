@@ -663,7 +663,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
   /** Event streams open now (health's `event_streams`): Inbox tabs of one origin share one. */
   let openEventStreams = 0;
   const binaryPath = options.binaryPath !== undefined ? options.binaryPath : version !== "dev" ? process.execPath : null;
-  // The sidebar's Update button (packages/server/inbox-updates.ts): the daily
+  // The sidebar's Update button (packages/server/inbox-updates.ts): the hourly
   // release check, the binary on disk, Update now, Remind me tomorrow.
   const updates = createInboxUpdates({
     dataDir,

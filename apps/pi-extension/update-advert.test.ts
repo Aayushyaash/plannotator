@@ -26,7 +26,7 @@ beforeEach(() => {
 	process.env.PLANNOTATOR_REMOTE = "0";
 	delete process.env.PLANNOTATOR_PORT;
 	delete process.env.PLANNOTATOR_UPDATE_CHECK;
-	// A fresh cache: the scheduled daily check answers from it, so no request is made.
+	// A fresh cache: the scheduled release check answers from it, so no request is made.
 	writeUpdateState({ latestRelease: { tag: "99.0.0", fetchedAt: Date.now() } }, dataDir);
 });
 

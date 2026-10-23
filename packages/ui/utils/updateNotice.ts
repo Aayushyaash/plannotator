@@ -82,7 +82,7 @@ export function describeUpdateToast(advert: UpdateAdvert): { title: string; desc
     case 'script':
       return {
         title: `Plannotator ${advert.version} is available`,
-        description: `You have ${advert.current}. Update from the Inbox, or turn on automatic updates in Settings.`,
+        description: `You have ${advert.current}. Update installs it in the background; this review keeps working.`,
         primary: 'update',
       };
     case 'copy':

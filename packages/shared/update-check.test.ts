@@ -11,7 +11,9 @@ import {
   readReleaseNotes,
   readUpdateState,
   RELEASE_CHECK_INTERVAL_MS,
+  RELEASE_CHECK_RATE_LIMITED_RETRY_MS,
   RELEASE_CHECK_RETRY_MS,
+  fetchLatestRelease,
   RELEASE_NOTES_MAX_BYTES,
   releaseSummary,
   runReleaseCheck,
@@ -58,7 +60,7 @@ const release = (tag = "v0.28.11", body = BODY): (() => Promise<FetchReleaseResu
 };
 const failing = (): (() => Promise<FetchReleaseResult>) => async () => {
   fetches++;
-  return { ok: false, error: "HTTP 403" };
+  return { ok: false, error: "HTTP 503" };
 };
 
 beforeEach(() => {
@@ -83,8 +85,8 @@ describe("resolveUpdateCheck", () => {
   });
 });
 
-describe("the 24h check", () => {
-  test("asks once, then answers from the cache for 24h", async () => {
+describe("the hourly check", () => {
+  test("asks once, then answers from the cache for an hour", async () => {
     const deps = { dataDir, enabled: () => true, fetchRelease: release() };
     expect(await runReleaseCheck({ ...deps, now: () => NOW })).toEqual({ outcome: "checked", version: "0.28.11" });
     expect(await runReleaseCheck({ ...deps, now: () => NOW + RELEASE_CHECK_INTERVAL_MS - 1 })).toEqual({
@@ -112,15 +114,21 @@ describe("the 24h check", () => {
     expect(fetches).toBe(2);
   });
 
-  test("a failure is logged, keeps the last known answer, and retries after 6h, not 24h, never sooner", async () => {
+  test("checks hourly, and a failure never waits longer than a success", () => {
+    // The owner's decision (2026-10-23): a new release shows within the hour.
+    expect(RELEASE_CHECK_INTERVAL_MS).toBe(60 * 60 * 1000);
+    expect(RELEASE_CHECK_RETRY_MS).toBeLessThanOrEqual(RELEASE_CHECK_INTERVAL_MS);
+  });
+
+  test("a failure is logged, keeps the last known answer, and retries after the back-off, never sooner", async () => {
     await runReleaseCheck({ dataDir, enabled: () => true, now: () => NOW, fetchRelease: release() });
     const later = NOW + RELEASE_CHECK_INTERVAL_MS;
     expect(await runReleaseCheck({ dataDir, enabled: () => true, now: () => later, fetchRelease: failing() })).toEqual({
       outcome: "failed",
-      error: "HTTP 403",
+      error: "HTTP 503",
     });
     expect(readUpdateState(dataDir).latestRelease?.tag).toBe("0.28.11");
-    expect(readFileSync(updateCheckPaths(dataDir).log, "utf-8")).toContain("HTTP 403");
+    expect(readFileSync(updateCheckPaths(dataDir).log, "utf-8")).toContain("HTTP 503");
     expect(await runReleaseCheck({ dataDir, enabled: () => true, now: () => later + RELEASE_CHECK_RETRY_MS - 1, fetchRelease: failing() }))
       .toMatchObject({ outcome: "fresh" });
     expect(fetches).toBe(2);
@@ -160,6 +168,88 @@ describe("the 24h check", () => {
     writeUpdateState({ snooze: { version: "0.28.10", until: NOW + 1000 } }, dataDir);
     await runReleaseCheck({ dataDir, enabled: () => true, now: () => NOW, fetchRelease: release() });
     expect(readUpdateState(dataDir).snooze).toBeUndefined();
+  });
+});
+
+describe("GitHub's rate limit", () => {
+  // A fake release API on loopback (the PLANNOTATOR_UPDATE_API_URL shape),
+  // answering what each test sets; never GitHub.
+  let server: ReturnType<typeof Bun.serve>;
+  let answer: () => Response;
+  let requests: number;
+  const HOUR = 60 * 60 * 1000;
+  beforeEach(() => {
+    requests = 0;
+    server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => {
+        requests++;
+        return answer();
+      },
+    });
+  });
+  afterEach(() => server.stop(true));
+  const check = (now: number) =>
+    runReleaseCheck({
+      dataDir,
+      enabled: () => true,
+      now: () => now,
+      fetchRelease: () => fetchLatestRelease(`http://127.0.0.1:${server.port}/repos/x/releases/latest`),
+    });
+  const due = (now: number) => isReleaseCheckDue(readUpdateState(dataDir), now);
+
+  test("offline or a 5xx: the hourly retry", async () => {
+    const t = Date.now();
+    answer = () => new Response("down", { status: 503 });
+    expect(await check(t)).toEqual({ outcome: "failed", error: "HTTP 503" });
+    expect(readUpdateState(dataDir).releaseCheck?.retryAt).toBeUndefined();
+    expect(due(t + RELEASE_CHECK_RETRY_MS - 1)).toBe(false);
+    expect(due(t + RELEASE_CHECK_RETRY_MS)).toBe(true);
+  });
+
+  test("403/429 with no time named: 6 h, never the hourly retry", async () => {
+    const t = Date.now();
+    answer = () => new Response("rate limited", { status: 429 });
+    expect(await check(t)).toEqual({ outcome: "failed", error: "HTTP 429" });
+    expect(readFileSync(updateCheckPaths(dataDir).log, "utf-8")).toContain("rate limited");
+    expect(due(t + RELEASE_CHECK_RETRY_MS)).toBe(false);
+    expect(await check(t + 5 * HOUR)).toMatchObject({ outcome: "fresh" });
+    expect(requests).toBe(1);
+    expect(due(t + RELEASE_CHECK_RATE_LIMITED_RETRY_MS - 1)).toBe(false);
+    answer = () => Response.json({ tag_name: "v0.28.11" });
+    expect(await check(t + RELEASE_CHECK_RATE_LIMITED_RETRY_MS)).toEqual({ outcome: "checked", version: "0.28.11" });
+    expect(requests).toBe(2);
+  });
+
+  test("x-ratelimit-reset names the time: wait until it", async () => {
+    const t = Date.now();
+    const reset = Math.ceil(t / 1000) + 2 * 60 * 60;
+    answer = () => new Response("rate limited", { status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) } });
+    expect(await check(t)).toMatchObject({ outcome: "failed", error: "HTTP 403" });
+    expect(due(t + RELEASE_CHECK_RETRY_MS)).toBe(false);
+    expect(due(reset * 1000 - 5_000)).toBe(false);
+    expect(due(reset * 1000 + 5_000)).toBe(true);
+  });
+
+  test("Retry-After is kept between the hourly retry and 6 h", async () => {
+    const t = Date.now();
+    answer = () => new Response("slow down", { status: 429, headers: { "retry-after": String(10 * 60 * 60) } });
+    await check(t);
+    expect(due(t + RELEASE_CHECK_RATE_LIMITED_RETRY_MS - 1)).toBe(false);
+    expect(due(t + RELEASE_CHECK_RATE_LIMITED_RETRY_MS)).toBe(true);
+
+    rmSync(updateCheckPaths(dataDir).state, { force: true });
+    answer = () => new Response("slow down", { status: 429, headers: { "retry-after": "60" } });
+    await check(t);
+    expect(due(t + 30 * 60 * 1000)).toBe(false);
+    expect(due(t + RELEASE_CHECK_RETRY_MS)).toBe(true);
+  });
+
+  test("a retryAt beyond 6 h on disk is read as 6 h", () => {
+    const state = { releaseCheck: { attemptedAt: NOW, failedAt: NOW, retryAt: NOW + 100 * HOUR } };
+    expect(isReleaseCheckDue(state, NOW + RELEASE_CHECK_RATE_LIMITED_RETRY_MS - 1)).toBe(false);
+    expect(isReleaseCheckDue(state, NOW + RELEASE_CHECK_RATE_LIMITED_RETRY_MS)).toBe(true);
   });
 });
 
