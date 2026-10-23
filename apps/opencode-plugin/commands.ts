@@ -5,6 +5,7 @@
  * slash commands. Extracted from the event hook for modularity.
  */
 
+import { diagramEngineSourcesFromDir } from "@plannotator/shared/diagram-engine-assets";
 import {
   startReviewServer,
   handleReviewServerReady,
@@ -64,6 +65,9 @@ export interface CommandDeps {
   client: any;
   htmlContent: string;
   reviewHtmlContent: string;
+  /** Code review's diagram engine folder (shipped beside review-editor.html);
+   *  absent or missing, diagram fences in the review show as code. */
+  reviewDiagramEngineDir?: string;
   getSharingEnabled: () => Promise<boolean>;
   getShareBaseUrl: () => string | undefined;
   getPasteApiUrl: () => string | undefined;
@@ -293,6 +297,7 @@ export async function handleReviewCommand(
     // prompt into — same per-session gating as the annotate command's advert.
     approvalNotesSupported: Boolean(sessionId),
     htmlContent: reviewHtmlContent,
+    diagramEngine: deps.reviewDiagramEngineDir ? diagramEngineSourcesFromDir(deps.reviewDiagramEngineDir) : undefined,
     opencodeClient: client,
     onReady: (url, isRemote, port) => {
       // announce: false. The embedded runtime shares stderr with OpenCode's

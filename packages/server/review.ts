@@ -11,6 +11,12 @@
 
 import { isSameOriginOrNoOrigin } from "@plannotator/shared/request-origin";
 import { appHtmlResponse, likelyAppHtmlEncoding, prewarmAppHtml } from "@plannotator/shared/app-html";
+import {
+  answerDiagramEngineRequest,
+  createDiagramEngineAssets,
+  isDiagramEngineRequest,
+  type DiagramEngineSource,
+} from "@plannotator/shared/diagram-engine-assets";
 import { isRemoteSession, getServerHostname, startBunServerOnAvailablePort, buildAdvertisedUrl } from "./remote";
 import { createRequestHostGuard } from "./request-host-guard";
 import { refuseCrossOriginWrite } from "./request-origin-guard";
@@ -209,6 +215,15 @@ export interface ReviewServerOptions {
   error?: string;
   /** HTML content to serve for the UI */
   htmlContent: string;
+  /**
+   * Code review's diagram engine files (apps/review/diagram-engine), or a
+   * function that reads them on first need. With them the server advertises
+   * `diagramEngine` on `/api/diff` and serves the files under
+   * `/assets/diagram-engine/`, and Markdown previews and guide overviews draw
+   * Mermaid and Graphviz fences; without them (absent, or the read answers
+   * null) the fences show as code. See @plannotator/shared/diagram-engine-assets.
+   */
+  diagramEngine?: DiagramEngineSource;
   /** Origin identifier for UI customization */
   origin?: Origin;
   /** Current diff type being displayed */
@@ -1879,6 +1894,9 @@ export async function startReviewServer(
   // The app page is served compressed only to sessions reachable from another
   // device: remote mode or --tailscale (#1617). Local sessions are unchanged.
   const compressAppHtml = isRemote || options.tailnetPublished === true;
+  // Hashed off the request path, so `/api/diff` finds it ready.
+  const diagramEngineAssets = createDiagramEngineAssets(options.diagramEngine);
+  diagramEngineAssets.warm();
   const wslFlag = await isWSL();
   const gitUser = detectGitUser(workspace?.root ?? gitContext?.cwd);
 
@@ -2340,6 +2358,8 @@ export async function startReviewServer(
               serverSession,
               imagePreviewSupported,
               markdownPreviewSupported,
+              // Session-constant, read once by the page at mount.
+              diagramEngine: await diagramEngineAssets.advert(),
               ...sourceKindAdvert,
               // Mount is the only place the pin matters, so it rides /api/diff
               // alone (not the switch endpoints).
@@ -4228,6 +4248,19 @@ export async function startReviewServer(
 
           // Favicon
           if (url.pathname === "/favicon.png") return handleFavicon();
+
+          // Code review's diagram engine, fetched by the page only for a
+          // preview or guide overview that holds a diagram fence.
+          if (isDiagramEngineRequest(url.pathname)) {
+            const answer = await answerDiagramEngineRequest(
+              diagramEngineAssets,
+              url.pathname,
+              req.method,
+              req.headers.get("accept-encoding"),
+              compressAppHtml,
+            );
+            return new Response(answer.body as BodyInit, { status: answer.status, headers: answer.headers });
+          }
 
           // API 404 guard: unknown /api/* routes should return JSON, not HTML
           if (url.pathname.startsWith("/api/")) {

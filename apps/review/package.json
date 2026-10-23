@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && bun diagram-engine/build.ts",
     "serve": "bun run server/index.ts"
   },
   "dependencies": {
