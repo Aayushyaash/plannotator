@@ -374,7 +374,7 @@ test('a thread with no artifact: no button; a link to the view says so', async (
   await page.goto(`${world.url}#thread=${world.emptyThread}&artifacts`);
   await expect(page.locator('[data-artifacts-empty]')).toContainText('No artifacts in this thread yet');
   await shot(page, '04-empty-desktop');
-  expect(world.errors.filter((e) => !/HTTP 4\d\d \/api\/inbox\/(attachments\/[^/]+\/(view|video))/.test(e))).toEqual([]);
+  expect(world.errors).toEqual([]);
 });
 
 test('a phone (iPhone 15, WebKit): a screen of its own, two columns, Back to the thread', async () => {

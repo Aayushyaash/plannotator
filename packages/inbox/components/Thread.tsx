@@ -1485,8 +1485,10 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     onOpenFile({ id: attachment.id, version, focus, view: view ?? kept ?? openingView(attachment) });
   };
   /** A tile, or a link in a message: the file as it is now, focus in its pane (a typed comment in the open file asks first). */
-  const openFromMessage = (attachment: Pick<InboxAttachmentState, 'id' | 'kind' | 'ref'> & { name?: string }, view: FileView | null = null) => {
+  /** `opening`: called only when the file does open (not after "Keep writing" on a typed comment). */
+  const openFromMessage = (attachment: Pick<InboxAttachmentState, 'id' | 'kind' | 'ref'> & { name?: string }, view: FileView | null = null, opening?: () => void) => {
     const go = () => {
+      opening?.();
       openFile(attachment, 'current', null, view);
       setPaneFocus((n) => n + 1);
     };
@@ -1826,9 +1828,10 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
   }, [passedIds]);
 
   // j / k move between messages (and the middle fold), n goes to the first
-  // new one; Enter and Space are the buttons' own. Never while typing.
+  // new one; Enter and Space are the buttons' own. Never while typing, and
+  // never while the Artifacts grid stands in for the messages.
   useEffect(() => {
-    if (one) return;
+    if (one || artifactsOn) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey || event.defaultPrevented) return;
       if (event.key !== 'j' && event.key !== 'k' && event.key !== 'n') return;
@@ -1866,7 +1869,7 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [one, jumpNew]);
+  }, [one, artifactsOn, jumpNew]);
 
   // Another window (or a phone's Send) saved, sent or discarded this thread's draft, or this one did:
   // its copy here follows. A box with no edits since its last save or read takes the new words (or
@@ -3390,18 +3393,13 @@ export function ThreadPane({ thread, sent, onQuestions, onChanged, draftChanged 
             artifacts={files === null ? null : artifactList}
             annotationCounts={countsByPath}
             openId={file && !shownFull ? file.id : null}
-            onOpen={(artifact) => {
-              artifactOpened.current = artifactKey(artifact);
-              openFromMessage(artifact.attachment);
-            }}
+            // Focus comes back to the tile only when it did open (a typed comment's "Keep writing" keeps the file).
+            onOpen={(artifact) => openFromMessage(artifact.attachment, null, () => (artifactOpened.current = artifactKey(artifact)))}
             onOpenGuide={(artifact) => {
               artifactOpened.current = artifactKey(artifact);
               onOpenGuide(artifact.messageId);
             }}
-            onOpenAs={phone || fileStacked ? undefined : (artifact, view) => {
-              artifactOpened.current = artifactKey(artifact);
-              openFromMessage(artifact.attachment, view);
-            }}
+            onOpenAs={phone || fileStacked ? undefined : (artifact, view) => openFromMessage(artifact.attachment, view, () => (artifactOpened.current = artifactKey(artifact)))}
             onBack={phone ? undefined : () => onArtifacts?.(false)}
             openIn={openIn}
             phone={phone}

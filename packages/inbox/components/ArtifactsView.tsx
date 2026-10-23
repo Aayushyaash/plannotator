@@ -89,44 +89,64 @@ export function artifactLabel(artifact: Artifact, comments: number): string {
     .join(', ');
 }
 
-/** Whether a tile is on screen or near it: previews load then, never for the whole grid at once. */
+/** A tile's preview loads once it comes this near the screen... */
+const LOAD_MARGIN = '300px 0px';
+/** ...and unloads (an HTML frame, a video, an image, a drawn diagram) once it is this far away. */
+const UNLOAD_MARGIN = '2000px 0px';
+
+/**
+ * Whether a tile is on screen or near it: its preview is drawn then, never
+ * for the whole grid at once, and dropped again once the tile is far off
+ * screen, so a long thread never keeps every page frame and video alive.
+ */
 function useNear<T extends Element>(): [React.RefObject<T | null>, boolean] {
   const ref = useRef<T>(null);
   const [near, setNear] = useState(false);
   useEffect(() => {
     const el = ref.current;
-    if (!el || near) return;
+    if (!el) return;
     if (typeof IntersectionObserver === 'undefined') {
       setNear(true);
       return;
     }
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) {
-        setNear(true);
-        observer.disconnect();
-      }
-    }, { rootMargin: '300px 0px' });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [near]);
+    const load = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) setNear(true);
+    }, { rootMargin: LOAD_MARGIN });
+    const unload = new IntersectionObserver((entries) => {
+      if (entries.every((e) => !e.isIntersecting)) setNear(false);
+    }, { rootMargin: UNLOAD_MARGIN });
+    load.observe(el);
+    unload.observe(el);
+    return () => {
+      load.disconnect();
+      unload.disconnect();
+    };
+  }, []);
   return [ref, near];
 }
 
 /** Text previews are read up to this size; a larger file keeps its typed face. */
 const PREVIEW_MAX_BYTES = 256 * 1024;
-/** One read per file version for the whole window: the grid opens and closes without reading again. */
+/** How many text previews the window keeps (the newest used; at most 256 KB each). */
+const PREVIEW_CACHE_MAX = 48;
+/** Reads kept by file version: the grid opens, closes and scrolls back without reading again. */
 const previewCache = new Map<string, Promise<{ text: string; html: string | null }>>();
 
 function previewOf(attachment: InboxAttachmentState): Promise<{ text: string; html: string | null }> {
   const version = readableVersion(attachment);
   const key = `${attachment.id}:${version}:${version === 'current' ? (attachment.current?.sha256 ?? '') : attachment.sent_sha256}`;
   let cached = previewCache.get(key);
-  if (!cached) {
-    cached = inboxApi.view(attachment.id, version).then((view) => ({ text: view.text, html: view.html ?? null }));
-    // A failed read is not kept: the next time the grid shows it, it reads again.
-    cached.catch(() => previewCache.delete(key));
+  if (cached) {
+    // The most recently used stays: move it to the end.
+    previewCache.delete(key);
     previewCache.set(key, cached);
+    return cached;
   }
+  cached = inboxApi.view(attachment.id, version).then((view) => ({ text: view.text, html: view.html ?? null }));
+  // A failed read is not kept: the next time the grid shows it, it reads again.
+  cached.catch(() => previewCache.delete(key));
+  previewCache.set(key, cached);
+  while (previewCache.size > PREVIEW_CACHE_MAX) previewCache.delete(previewCache.keys().next().value!);
   return cached;
 }
 
@@ -182,7 +202,7 @@ function PageFrame({ html }: { html: string }) {
     return () => observer.disconnect();
   }, []);
   return (
-    <span ref={box} className="ib-art-frame" aria-hidden="true">
+    <span ref={box} className="ib-art-frame" aria-hidden="true" inert>
       <iframe title="" srcDoc={html} sandbox="" tabIndex={-1} loading="lazy" style={{ transform: `scale(${scale})` }} />
     </span>
   );
@@ -199,7 +219,12 @@ function FileFace({ artifact, near }: { artifact: FileArtifact; near: boolean })
   const wantsText = kind === 'markdown' || kind === 'text' || kind === 'code' || kind === 'html' || kind === 'mermaid' || kind === 'graphviz';
   const small = (attachment.current?.size ?? attachment.size) <= PREVIEW_MAX_BYTES;
   useEffect(() => {
-    if (!near || !wantsText || !small || attachment.unavailable?.code === 'attachment_changed_type') return;
+    // Far off screen: the drawn preview goes (a page frame, a diagram); the read stays cached.
+    if (!near) {
+      setPreview(null);
+      return;
+    }
+    if (!wantsText || !small || attachment.unavailable?.code === 'attachment_changed_type') return;
     let cancelled = false;
     previewOf(attachment).then(
       (next) => !cancelled && setPreview(next),
@@ -218,7 +243,7 @@ function FileFace({ artifact, near }: { artifact: FileArtifact; near: boolean })
   if (kind === 'image') {
     return (
       <span className="ib-art-prev ib-art-f-img" data-face="image">
-        {near && !failed ? <img src={attachmentImageUrl(attachment, version)} alt="" decoding="async" draggable={false} onError={() => setFailed(true)} /> : typed}
+        {near && !failed ? <img src={attachmentImageUrl(attachment, version)} alt="" loading="lazy" decoding="async" draggable={false} onError={() => setFailed(true)} /> : typed}
       </span>
     );
   }

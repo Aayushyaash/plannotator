@@ -172,7 +172,7 @@ async function openThread() {
 test.skipIf(!hasDom)('the header: an Artifacts button with the count, icons at the right, Mark read keeping its label; none on a thread with nothing', async () => {
   const el = await openThread();
   const b = button(el)!;
-  // Six artifacts: the image in the text (also attached: one), the spec, the sketch, the after image, the ZIP, the guide, the SQL = 7.
+  // Seven artifacts: the image in the text (also attached: one), the spec, the sketch, the after image, the ZIP, the guide, the SQL.
   expect(b.getAttribute('aria-label')).toBe('Artifacts, 7');
   expect(b.getAttribute('aria-pressed')).toBe('false');
   expect(b.hasAttribute('title')).toBe(false);
@@ -241,7 +241,17 @@ test.skipIf(!hasDom)('Escape, the pressed button and Back to the thread return t
   const el = await openThread();
   act(() => button(el)!.click());
   await until(() => tiles(el).length === 7, 'the grid');
-  press('Escape', view(el)!.querySelector('h2')!);
+  // The thread's j / k / n stand down while the grid stands in for the messages.
+  const heading = view(el)!.querySelector('h2')!;
+  for (const key of ['j', 'k', 'n']) {
+    const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    act(() => {
+      document.body.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+  }
+  expect(document.activeElement).toBe(heading);
+  press('Escape', heading);
   await until(() => view(el) === null, 'the messages back');
   expect(window.location.hash).toBe(`#thread=${ids.artifacts.thread}`);
   expect(messagesBody(el).hidden).toBe(false);
