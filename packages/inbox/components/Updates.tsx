@@ -742,7 +742,7 @@ export function AboutBlock({
               <span className="ib-l" id="ib-upd-check">
                 Tell me when a new version is out
               </span>
-              <span className="ib-desc">Once a day, from this computer</span>
+              <span className="ib-desc">About once an hour, from this computer</span>
             </span>
             <span className="ib-ctl">
               <button
