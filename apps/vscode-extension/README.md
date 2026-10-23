@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://marketplace.visualstudio.com/items?itemName=backnotprop.plannotator-webview"><img src="https://img.shields.io/visual-studio-marketplace/v/backnotprop.plannotator-webview?label=Marketplace&logo=visualstudiocode" alt="VS Code Marketplace" /></a>
-  <a href="https://code.visualstudio.com/"><img src="https://img.shields.io/badge/VS%20Code-^1.90.0-blue?logo=visualstudiocode" alt="VS Code" /></a>
+  <a href="https://code.visualstudio.com/"><img src="https://img.shields.io/badge/VS%20Code-^1.85.0-blue?logo=visualstudiocode" alt="VS Code" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
 </p>
 

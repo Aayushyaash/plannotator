@@ -32,7 +32,7 @@
     "webview"
   ],
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.85.0"
   },
   "extensionKind": [
     "workspace",
@@ -437,7 +437,7 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "1.85.0",
     "@vscode/vsce": "^3.7.1",
     "esbuild": "^0.28.2",
     "typescript": "^5.0.0"
