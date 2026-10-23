@@ -34,10 +34,26 @@ Review code changes with a full diff viewer, file tree, inline annotations, and 
 
 ## Guided Reviews
 
-The **Guides** view (its own icon in the activity bar) turns a change into a guided review: a title, an intent, an overview with a diagram, and a few chapters in reading order, each with the files it covers. Pick this branch's pull request, another open PR, or your local changes; Claude Code writes the guide with your own Claude Code setup and permissions, and you watch it build. Then read it chapter by chapter in VS Code's own diff editor, with go to definition on the real files and ticks per chapter and file.
+The **Guides** view (its own icon in the activity bar) turns a change into a guided review: a title, an intent, an overview with a diagram, and a few chapters in reading order, each with the files it covers. Pick this branch's pull request, another open PR, or your local changes, then the agent that writes the guide, with your own setup and sign-in, and watch it build. Then read it chapter by chapter in VS Code's own diff editor, with go to definition on the real files and ticks per chapter and file.
 
-- Needs Claude Code's ACP adapter: `npm install -g @agentclientprotocol/claude-agent-acp` (or point `plannotator.guides.claudeCode.command` at it). Pull requests need the GitHub CLI (`gh`).
-- A PR opens in a git worktree in the extension's storage, so your checkout is never touched.
+The agent runs over the [Agent Client Protocol](https://agentclientprotocol.com). Guides finds these on your PATH and shows how to install the ones you don't have (it never installs anything itself):
+
+| Agent | Started as | Install |
+|---|---|---|
+| Claude Code | `claude-agent-acp` | `npm install -g @agentclientprotocol/claude-agent-acp` |
+| Codex (local changes only) | `codex-acp` | `npm install -g @agentclientprotocol/codex-acp` |
+| OpenCode | `opencode acp` | `curl -fsSL https://opencode.ai/install \| bash` |
+| GitHub Copilot CLI | `copilot --acp --stdio` | `npm install -g @github/copilot` |
+| Cursor | `cursor-agent acp` (or `agent acp`) | `curl https://cursor.com/install -fsS \| bash` |
+| Kiro CLI | `kiro-cli acp` | `curl -fsSL https://cli.kiro.dev/install \| bash` |
+| Kilo Code | `kilo acp` (or `kilocode acp`) | `npm install -g @kilocode/cli` |
+
+Pi is listed but cannot write guides yet: `pi-acp` does not pass MCP servers to Pi, so it cannot reach the guide's tools. Any other ACP agent works through `plannotator.guides.customAgent.command` (and `.args`, `.label`); `plannotator.guides.agentCommands` overrides how a listed agent is started (`plannotator.guides.claudeCode.command` still works for Claude Code). These settings can only be set in your user settings, never by a workspace.
+
+**A guide is read-only, for every agent.** Guides offers the agent no file system or terminal, and refuses every request to edit, delete or move a file, run a command or switch modes, without asking you; a pull request run also refuses network fetches. Reads and unknown tools are asked, with "allow once" and "reject" only. If an agent changes a file without asking, the run stops and says so. Where an agent has its own read-only switch, Guides turns it on too: Claude Code's default permission mode with its write tools disallowed, Codex's read-only mode, OpenCode's plan mode with edits and shell denied, Cursor's ask mode, Kilo's ask mode. Copilot CLI and Kiro CLI rely on asking first, which they do by default, and on Guides refusing.
+
+- Pull requests need the GitHub CLI (`gh`).
+- A PR opens in a git worktree in the extension's storage, so your checkout is never touched. For a PR, Claude Code loads only your user settings, and OpenCode and Kilo skip the PR's own config; Codex is not offered for PRs, because it would load the PR's `.codex/` config.
 - Guides are saved where Plannotator's web app finds them: open and export them from either side.
 
 ## Features

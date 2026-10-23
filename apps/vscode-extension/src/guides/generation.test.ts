@@ -10,6 +10,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GuideGeneration, type GenerationDeps, type GenerationInput } from "./generation";
+import { CLAUDE_CODE, type AgentDescriptor } from "./acp/agents";
 import { startRelayHost, type RelayHost } from "./mcp/relay-host";
 import { changedFilesFromPatch } from "./sources/git";
 import { listDraftRecords, loadDraftRecord, loadSavedGuide, listRecent } from "./store";
@@ -51,7 +52,7 @@ interface World {
   permissions: string[];
 }
 
-function world(steps: unknown[], options: { pace?: number; resume?: GenerationInput["resume"]; choose?: string; script?: Record<string, unknown> } = {}): World {
+function world(steps: unknown[], options: { pace?: number; resume?: GenerationInput["resume"]; choose?: string; script?: Record<string, unknown>; agent?: AgentDescriptor } = {}): World {
   const root = join(work, `repo-${++repoN}`);
   mkdirSync(join(root, "src"), { recursive: true });
   const files: Record<string, string[]> = {
@@ -81,17 +82,20 @@ function world(steps: unknown[], options: { pace?: number; resume?: GenerationIn
     },
     rawPatch,
     files: changedFilesFromPatch(rawPatch),
-    agent: { id: "claude-code", label: "Claude Code", model: { id: "sonnet", label: "Sonnet" }, effort: { id: "low", label: "Low" } },
+    agent: { id: (options.agent ?? CLAUDE_CODE).id, label: (options.agent ?? CLAUDE_CODE).label, model: { id: "sonnet", label: "Sonnet" }, effort: { id: "low", label: "Low" } },
     instructions: "Keep chapters short.",
     ...(options.resume && { resume: options.resume }),
   };
   const deps: GenerationDeps = {
     relay,
+    agent: options.agent ?? CLAUDE_CODE,
     agentLaunch: (cwd) => ({ command: process.execPath, args: [FAKE_AGENT], cwd, env: { FAKE_ACP_SCRIPT: scriptPath, FAKE_ACP_LOG: logPath } }),
     mcpServer: { command: process.execPath, args: [RELAY_SCRIPT] },
     clientInfo: { name: "plannotator-vscode", title: "Plannotator", version: "test" },
     requestPermission: async (req) => {
       permissions.push(req.toolCall.title ?? "");
+      // The policy never offers "always allow".
+      expect(req.options.map((o) => o.kind)).not.toContain("allow_always");
       const pick = req.options.find((o) => o.optionId === (options.choose ?? "allow-once"))!;
       return { outcome: { outcome: "selected", optionId: pick.optionId } };
     },
@@ -114,7 +118,7 @@ describe("guide generation over ACP", () => {
     const w = world([
       { say: "Reading the change first." },
       { tool: { title: "Read src/deliver.ts", locations: [{ path: "src/deliver.ts", line: 2 }] } },
-      { permission: { title: "Run git log --oneline" } },
+      { permission: { title: "Read ~/notes/design.md", kind: "read" } },
       header,
       ch1,
       ch2,
@@ -143,8 +147,8 @@ describe("guide generation over ACP", () => {
 
     const log = w.log();
     expect(log.find((e) => e.event === "initialize")?.clientCapabilities).toMatchObject({ fs: { readTextFile: false, writeTextFile: false }, terminal: false, auth: { terminal: true } });
-    // Local changes are the user's own checkout: their project settings apply, no _meta override.
-    expect(log.find((e) => e.event === "newSession")?.meta).toBeNull();
+    // Local changes are the user's own checkout: their project settings apply; only Claude Code's write tools are disallowed.
+    expect(log.find((e) => e.event === "newSession")?.meta).toEqual({ claudeCode: { options: { disallowedTools: ["Edit", "Write", "MultiEdit", "NotebookEdit"] } } });
     expect(log.find((e) => e.event === "mcpReady")?.tools).toContain("guide_place_file");
     expect(log.filter((e) => e.event === "setConfig").map((e) => `${e.configId}=${e.value}`)).toEqual(["model=sonnet", "effort=low"]);
     const prompt = log.find((e) => e.event === "prompt")!;
@@ -153,7 +157,7 @@ describe("guide generation over ACP", () => {
     expect(prompt.text).toContain("Keep chapters short.");
     expect(prompt.text).not.toContain("## Speed");
     expect(log.find((e) => e.event === "permission")?.outcome).toEqual({ outcome: "selected", optionId: "allow-once" });
-    expect(w.permissions).toEqual(["Run git log --oneline"]);
+    expect(w.permissions).toEqual(["Read ~/notes/design.md"]);
     const calls = log.filter((e) => e.event === "mcpCall");
     expect(calls.find((c) => c.name === "guide_place_file" && c.isError)?.text).toContain("already in chapter 2 (c2). Use guide_move_file");
     expect(calls.filter((c) => c.name === "guide_finish")[0].text).toContain("neither placed nor marked not in a chapter: `src/deliver.ts`");
@@ -236,7 +240,7 @@ describe("guide generation over ACP", () => {
   });
 
   it("passes a rejected permission back to the agent", async () => {
-    const w = world([{ permission: { title: "Run rm -rf build" } }, header], { choose: "reject-once" });
+    const w = world([{ permission: { title: "Search the web", kind: "fetch" } }, header], { choose: "reject-once" });
     const gen = new GuideGeneration(w.input, w.deps);
     await gen.run();
     expect(w.log().find((e) => e.event === "permission")?.outcome).toEqual({ outcome: "selected", optionId: "reject-once" });
@@ -265,7 +269,7 @@ describe("guide generation over ACP", () => {
     const gen = new GuideGeneration(w.input, w.deps);
     await gen.run();
     const newSession = w.log().find((e) => e.event === "newSession")!;
-    expect(newSession.meta).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false } } });
+    expect(newSession.meta).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true, allowDangerouslySkipPermissions: false, disallowedTools: ["Edit", "Write", "MultiEdit", "NotebookEdit"] } } });
     // Our builder server is still the one MCP server the agent gets.
     expect(newSession.mcpServers).toEqual([{ name: "plannotator-guide" }]);
   });
@@ -320,13 +324,22 @@ describe("guide generation over ACP", () => {
     }
   });
 
-  it("leaves a local-changes run in the mode it started in", async () => {
+  it("sets a local-changes run that starts in acceptEdits back to default too: a guide never edits", async () => {
     const w = world([header], { script: { startMode: "acceptEdits" } });
     const gen = new GuideGeneration(w.input, w.deps);
     await gen.run();
     const log = w.log();
-    expect(modeChangesBeforePrompt(log)).toEqual([]);
-    expect(log.find((e) => e.event === "prompt")!.mode).toBe("acceptEdits");
+    expect(modeChangesBeforePrompt(log)).toEqual([{ event: "setConfig", configId: "mode", value: "default" }]);
+    expect(log.find((e) => e.event === "prompt")!.mode).toBe("default");
+  });
+
+  it("refuses a local-changes run whose mode cannot be set back, naming the agent's own settings", async () => {
+    const w = world([header], { script: { startMode: "bypassPermissions", refuseModeChange: true } });
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    expect(gen.state.status).toBe("failed");
+    expect(gen.state.statusMessage).toStartWith("Claude Code's settings ask for bypassPermissions; Guides runs only in the default permission mode.");
+    expect(w.log().some((e) => e.event === "prompt")).toBe(false);
   });
 
   it("leaves a pull request run that already starts in default alone", async () => {
@@ -434,6 +447,137 @@ describe("guide generation over ACP", () => {
     await gen.run();
     expect(gen.state.diagramUnchecked).toBeUndefined();
     expect(loadSavedGuide(w.input.repoKey, gen.state.savedGuideId!)?.sidecar.diagramCheck).toBe("ok");
+  });
+});
+
+describe("read-only over ACP, for every agent", () => {
+  /** A codex-like agent: no Claude `_meta`, a read-only session mode. */
+  const READ_ONLY_MODE_AGENT: AgentDescriptor = {
+    id: "test-agent",
+    label: "Test Agent",
+    engine: "test-agent",
+    command: "test-agent-acp",
+    args: [],
+    installCommand: "",
+    docsUrl: "https://example.invalid",
+    readOnly: { layer: "agent", summary: "Read-only mode.", mode: { ids: ["read-only"], label: "its read-only mode" } },
+  };
+  const GENERIC_AGENT: AgentDescriptor = { ...READ_ONLY_MODE_AGENT, id: "generic", label: "Generic", readOnly: { layer: "permissions", summary: "Only the policy." } };
+
+  for (const kind of ["edit", "delete", "move", "execute", "switch_mode"]) {
+    it(`refuses a ${kind} request without asking, and the agent writes nothing`, async () => {
+      const w = world([{ permission: { title: `${kind} src/deliver.ts`, kind, writeOnAllow: "WRITTEN" } }, header], { agent: GENERIC_AGENT });
+      const gen = new GuideGeneration(w.input, w.deps);
+      await gen.run();
+      expect(w.permissions).toEqual([]); // the user was never asked
+      expect(w.log().find((e) => e.event === "permission")?.outcome).toEqual({ outcome: "selected", optionId: "reject-once" });
+      expect(existsSync(join(w.input.source.headRoot, "WRITTEN"))).toBe(false);
+      const entry = gen.state.activity.find((a) => a.kind === "permission")!;
+      expect(entry.title).toBe(`Refused: ${kind} src/deliver.ts`);
+      expect(entry.status).toBe("failed");
+    });
+  }
+
+  it("refuses a write whose kind came only in the earlier tool_call update", async () => {
+    const w = world([{ permission: { title: "Apply patch", kind: "edit", kindOnlyInUpdate: true, writeOnAllow: "WRITTEN" } }, header], { agent: GENERIC_AGENT });
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    expect(w.permissions).toEqual([]);
+    expect(w.log().find((e) => e.event === "permission")?.outcome).toEqual({ outcome: "selected", optionId: "reject-once" });
+    expect(existsSync(join(w.input.source.headRoot, "WRITTEN"))).toBe(false);
+  });
+
+  it("refuses network reads in a pull request run, and asks in a local one", async () => {
+    const pr = world([{ permission: { title: "Fetch https://example.invalid", kind: "fetch" } }, header], { agent: GENERIC_AGENT });
+    pr.input.source = { ...pr.input.source, kind: "pr", label: "PR #1", pr: { number: 1, url: "https://github.com/a/b/pull/1", title: "x" }, worktreePath: pr.input.source.headRoot };
+    await new GuideGeneration(pr.input, pr.deps).run();
+    expect(pr.permissions).toEqual([]);
+    expect(pr.log().find((e) => e.event === "permission")?.outcome).toEqual({ outcome: "selected", optionId: "reject-once" });
+
+    const local = world([{ permission: { title: "Fetch https://example.invalid", kind: "fetch" } }, header], { agent: GENERIC_AGENT });
+    await new GuideGeneration(local.input, local.deps).run();
+    expect(local.permissions).toEqual(["Fetch https://example.invalid"]);
+  });
+
+  it("allows the builder's own tools once without asking, and asks about an unknown tool with allow once and reject only", async () => {
+    const w = world([
+      { permission: { title: "mcp__plannotator-guide__guide_set_header", kind: "other", name: "guide_set_header" } },
+      { permission: { title: "Run guide_finish && touch WRITTEN", kind: "other" } },
+    ], { agent: GENERIC_AGENT });
+    await new GuideGeneration(w.input, w.deps).run();
+    const outcomes = w.log().filter((e) => e.event === "permission").map((e) => e.outcome);
+    expect(outcomes[0]).toEqual({ outcome: "selected", optionId: "allow-once" });
+    // The second only mentions a builder name: it is asked (and the test's user allows it once).
+    expect(w.permissions).toEqual(["Run guide_finish && touch WRITTEN"]);
+  });
+
+  it("refuses when the agent offers only 'always allow'", async () => {
+    const w = world([{ permission: { title: "Read a.ts", kind: "read", options: [{ optionId: "always", name: "Always", kind: "allow_always" }, { optionId: "no", name: "No", kind: "reject_once" }] } }], { agent: GENERIC_AGENT });
+    await new GuideGeneration(w.input, w.deps).run();
+    expect(w.permissions).toEqual([]);
+    expect(w.log().find((e) => e.event === "permission")?.outcome).toEqual({ outcome: "selected", optionId: "no" });
+  });
+
+  it("offers no file system or terminal, and refuses fs/write_text_file and terminal/create when called anyway", async () => {
+    const w = world([{ clientWrite: { path: "WRITTEN", content: "x" } }, { clientTerminal: { command: "touch WRITTEN" } }, header], { agent: GENERIC_AGENT });
+    await new GuideGeneration(w.input, w.deps).run();
+    const log = w.log();
+    expect(log.find((e) => e.event === "initialize")?.clientCapabilities).toMatchObject({ fs: { readTextFile: false, writeTextFile: false }, terminal: false });
+    const write = log.find((e) => e.event === "clientWrite")!;
+    const term = log.find((e) => e.event === "clientTerminal")!;
+    expect(write.ok).toBe(false);
+    expect(write.code).toBe(-32601);
+    expect(term.ok).toBe(false);
+    expect(existsSync(join(w.input.source.headRoot, "WRITTEN"))).toBe(false);
+  });
+
+  it("stops the run and says so plainly when the agent edits a file without asking", async () => {
+    const w = world([header, { editWithoutAsking: { path: "src/deliver.ts", content: "changed\n" } }, ch1, { sleep: 2000 }], { agent: GENERIC_AGENT });
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    expect(gen.state.status).toBe("failed");
+    expect(gen.state.statusMessage).toStartWith("Generic changed files without asking (Edit src/deliver.ts), so the run was stopped.");
+    expect(gen.state.statusMessage).toContain("in your working copy");
+    expect(gen.state.activity.some((a) => a.title === "Wrote without asking: Edit src/deliver.ts" && a.isError)).toBe(true);
+    // The draft is kept (stopped runs can be resumed or saved as is).
+    expect(loadDraftRecord(w.input.repoKey, gen.state.id)?.status).toBe("failed");
+  });
+
+  it("puts an agent with a read-only mode in it before the first prompt, local and PR alike, and sends no Claude _meta", async () => {
+    for (const asPr of [false, true]) {
+      const w = world([header], { agent: READ_ONLY_MODE_AGENT, script: { startMode: "auto", modes: [{ id: "auto", name: "Auto" }, { id: "read-only", name: "Read Only" }] } });
+      if (asPr) w.input.source = { ...w.input.source, kind: "pr", label: "PR #1", pr: { number: 1, url: "https://github.com/a/b/pull/1", title: "x" }, worktreePath: w.input.source.headRoot };
+      const gen = new GuideGeneration(w.input, w.deps);
+      await gen.run();
+      const log = w.log();
+      expect(log.find((e) => e.event === "newSession")?.meta).toBeNull();
+      expect(log.find((e) => e.event === "prompt")!.mode).toBe("read-only");
+      expect(gen.state.draft.generator?.engine).toBe("test-agent");
+    }
+  });
+
+  it("refuses to run an agent whose read-only mode is missing: nothing is prompted", async () => {
+    const w = world([header], { agent: READ_ONLY_MODE_AGENT, script: { startMode: "auto", modes: [{ id: "auto", name: "Auto" }] } });
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    expect(gen.state.status).toBe("failed");
+    expect(gen.state.statusMessage).toContain("Guides runs only in its read-only mode. The agent offers no its read-only mode.");
+    expect(w.log().some((e) => e.event === "prompt")).toBe(false);
+  });
+
+  it("refuses to run an agent with a read-only mode that advertises no modes at all", async () => {
+    const w = world([header], { agent: READ_ONLY_MODE_AGENT });
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    expect(gen.state.status).toBe("failed");
+    expect(gen.state.statusMessage).toStartWith("Test Agent did not offer its read-only mode");
+    expect(w.log().some((e) => e.event === "prompt")).toBe(false);
+  });
+
+  it("tells the agent the run is read-only", async () => {
+    const w = world([header], { agent: GENERIC_AGENT });
+    await new GuideGeneration(w.input, w.deps).run();
+    expect(w.log().find((e) => e.event === "prompt")!.text).toContain("This run is read-only.");
   });
 });
 

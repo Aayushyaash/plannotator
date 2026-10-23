@@ -372,7 +372,8 @@
         "plannotator.guides.claudeCode.command": {
           "type": "string",
           "default": "",
-          "markdownDescription": "The Claude Code ACP adapter to start for Guided Reviews. Empty means `claude-agent-acp` on PATH (install it with `npm install -g @agentclientprotocol/claude-agent-acp`)."
+          "scope": "machine",
+          "markdownDescription": "The Claude Code ACP adapter to start for Guided Reviews. Empty means `claude-agent-acp` on PATH (install it with `npm install -g @agentclientprotocol/claude-agent-acp`). An entry for `claude-code` in `#plannotator.guides.agentCommands#` takes precedence."
         },
         "plannotator.guides.claudeCode.args": {
           "type": "array",
@@ -380,7 +381,52 @@
             "type": "string"
           },
           "default": [],
+          "scope": "machine",
           "description": "Arguments for the Claude Code ACP adapter."
+        },
+        "plannotator.guides.agentCommands": {
+          "type": "object",
+          "default": {},
+          "scope": "machine",
+          "markdownDescription": "Override how Guided Reviews start a known agent, by its id (`claude-code`, `codex`, `opencode`, `pi`, `copilot`, `cursor`, `kiro`, `kilo`): `{ \"codex\": { \"command\": \"/opt/bin/codex-acp\", \"args\": [] } }`. `command` replaces the program found on PATH; `args`, when given, replace the agent's own ACP arguments. Guides' read-only flags for that agent are always added.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        },
+        "plannotator.guides.customAgent.command": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Any other ACP agent for Guided Reviews: the program that starts it in ACP mode on stdio. When set, it is offered as a choice beside the known agents. It runs under Guides' read-only permission policy only (edits, deletes, moves and commands are refused when it asks), so it is only as read-only as its own settings make it."
+        },
+        "plannotator.guides.customAgent.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine",
+          "description": "Arguments for the custom ACP agent (for example [\"acp\"])."
+        },
+        "plannotator.guides.customAgent.label": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "The name the custom ACP agent is shown under. Empty means \"Custom agent\"."
         },
         "plannotator.guides.ghPath": {
           "type": "string",

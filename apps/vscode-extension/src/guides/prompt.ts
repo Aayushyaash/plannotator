@@ -10,6 +10,10 @@ import type { ReviewSourceRecord } from "./store";
 
 const MAX_LISTED_FILES = 400;
 
+/** Every agent runs under the read-only permission policy; saying so keeps it from retrying refused tools. */
+export const READ_ONLY_NOTE =
+  "This run is read-only. Plannotator refuses every request to edit, delete or move a file, run a command, or switch modes. If one is refused, do not retry it: read and search the files instead, and write the guide only with the guide_* tools.";
+
 /** What to review, one line: core's prompt reads "Write a guided review of <target>." */
 export function shortTarget(source: ReviewSourceRecord): string {
   if (source.kind === "pr" && source.pr) return `pull request #${source.pr.number}, "${source.pr.title}" (${source.pr.url})`;
@@ -54,6 +58,6 @@ export function buildGuidePrompt(input: {
   });
   // Core's first paragraph names the target; where the files are, how to see the diff and the exact paths follow it.
   const cut = prompt.indexOf("\n\n");
-  const context = `${describeTarget(input.source)}\n\n${changedFilesBlock(input.files)}`;
+  const context = `${describeTarget(input.source)}\n\n${changedFilesBlock(input.files)}\n\n${READ_ONLY_NOTE}`;
   return cut < 0 ? `${prompt}\n\n${context}` : `${prompt.slice(0, cut)}\n\n${context}${prompt.slice(cut)}`;
 }

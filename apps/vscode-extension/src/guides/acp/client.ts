@@ -2,7 +2,8 @@
  * The extension as an ACP v1 client (SPEC 4.1). It starts the agent as a
  * child process over stdio, with the user's own environment, and adds no
  * tools of its own beyond the builder's MCP server: no `fs/*`, no
- * `terminal/*` (the agent reads with its own tools). It advertises terminal
+ * `terminal/*` (not advertised, and refused when an agent calls them anyway;
+ * the agent reads with its own tools). It advertises terminal
  * sign-in (`auth.terminal`), so the agent lists its own login commands for
  * the "Sign in" button. Permission requests go to
  * a callback that shows the agent's own options; this module never answers
@@ -15,6 +16,7 @@ import { Readable, Writable } from "node:stream";
 import {
   ClientSideConnection,
   PROTOCOL_VERSION,
+  RequestError,
   ndJsonStream,
   type Agent,
   type AuthMethod,
@@ -56,6 +58,21 @@ export interface AcpClientInfo {
 const STDERR_TAIL = 8 * 1024;
 /** How long a stopped agent gets to end before its whole process group is killed. */
 const KILL_GRACE_MS = 3000;
+
+/**
+ * What the client offers the agent: no file system and no terminal (the agent
+ * reads with its own tools, and Guides never lets it write or run commands
+ * through the client), only terminal sign-in so it can list its login commands.
+ */
+export const CLIENT_CAPABILITIES = {
+  fs: { readTextFile: false, writeTextFile: false },
+  terminal: false,
+  auth: { terminal: true },
+} as const;
+
+function refuse(method: string): never {
+  throw RequestError.methodNotFound(`${method} (Guides offers no file system or terminal: guided reviews are read-only)`);
+}
 
 /** The ACP JSON-RPC error code for "authentication required". */
 export const ACP_AUTH_REQUIRED_CODE = -32000;
@@ -121,6 +138,15 @@ export class AcpClient {
       sessionUpdate: async (params) => {
         this.handlers.onUpdate(params);
       },
+      // Not advertised (see `CLIENT_CAPABILITIES`), and refused if asked anyway:
+      // left out, the SDK would answer `fs/write_text_file` with an empty success.
+      writeTextFile: async () => refuse("fs/write_text_file"),
+      readTextFile: async () => refuse("fs/read_text_file"),
+      createTerminal: async () => refuse("terminal/create"),
+      terminalOutput: async () => refuse("terminal/output"),
+      releaseTerminal: async () => refuse("terminal/release"),
+      waitForTerminalExit: async () => refuse("terminal/wait_for_exit"),
+      killTerminal: async () => refuse("terminal/kill"),
     };
     this.connection = new ClientSideConnection((_agent: Agent) => client, stream);
     child.stderr?.setEncoding("utf8");
@@ -158,7 +184,7 @@ export class AcpClient {
       client.initializeResult = await client.raceExit(
         client.connection.initialize({
           protocolVersion: PROTOCOL_VERSION,
-          clientCapabilities: { auth: { terminal: true } },
+          clientCapabilities: CLIENT_CAPABILITIES,
           clientInfo,
         }),
         "initialize",
@@ -333,4 +359,35 @@ export function readConfigSelect(configOptions: readonly SessionConfigOption[] |
     return { configId: option.id, name: option.name, current: String(option.currentValue), options: flat };
   }
   return null;
+}
+
+/**
+ * The first select option among `configOptions` with this category, else with
+ * one of these ids (agents name the same thing differently: Mistral Vibe's
+ * effort is category `thinking`, Kiro's effort id is `effortLevel`).
+ */
+function readSelectBy(configOptions: readonly SessionConfigOption[] | null | undefined, category: string, ids: readonly string[]): ConfigSelect | null {
+  const byCategory = readConfigSelect(configOptions, category);
+  if (byCategory) return byCategory;
+  for (const id of ids) {
+    const option = (configOptions ?? []).find((o) => o.id === id && o.type === "select");
+    if (option) return readConfigSelect([{ ...option, category }] as SessionConfigOption[], category);
+  }
+  return null;
+}
+
+/** The session's model select. */
+export function readModelSelect(configOptions: readonly SessionConfigOption[] | null | undefined): ConfigSelect | null {
+  return readSelectBy(configOptions, "model", ["model"]);
+}
+
+/** The session's effort (reasoning, thinking) select. */
+export function readEffortSelect(configOptions: readonly SessionConfigOption[] | null | undefined): ConfigSelect | null {
+  return readSelectBy(configOptions, "thought_level", ["thought_level", "thinking", "thinking_effort", "reasoning_effort", "effort", "effortLevel"])
+    ?? readSelectBy(configOptions, "thinking", []);
+}
+
+/** The session's mode select. */
+export function readModeSelect(configOptions: readonly SessionConfigOption[] | null | undefined): ConfigSelect | null {
+  return readSelectBy(configOptions, "mode", ["mode"]);
 }

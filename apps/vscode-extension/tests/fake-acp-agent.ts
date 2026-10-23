@@ -9,7 +9,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
 import {
   AgentSideConnection,
@@ -23,7 +23,19 @@ import {
 type Step =
   | { say: string }
   | { tool: { title: string; kind?: string; locations?: Array<{ path: string; line?: number }>; fail?: boolean } }
-  | { permission: { title: string } }
+  /**
+   * Ask `session/request_permission`. `kind` defaults to "execute"; with
+   * `kindOnlyInUpdate` the kind is sent only in the `tool_call` update before
+   * the request (the request leaves it out). `options` replaces the usual
+   * allow once / always allow / reject set. `name` is the programmatic tool name.
+   */
+  | { permission: { title: string; kind?: string; kindOnlyInUpdate?: boolean; options?: Array<{ optionId: string; name: string; kind: string }>; name?: string; writeOnAllow?: string } }
+  /** Call the client's `fs/write_text_file` (the client must refuse it) and log the answer. */
+  | { clientWrite: { path: string; content: string } }
+  /** Call the client's `terminal/create` (the client must refuse it) and log the answer. */
+  | { clientTerminal: { command: string } }
+  /** Edit a file with the agent's own tool without asking (an agent whose settings allow it), then report it as a completed edit. */
+  | { editWithoutAsking: { path: string; content: string } }
   | { mcp: { name: string; args?: Record<string, unknown> } }
   | { usage: { cost: number } }
   | { plan: Array<{ content: string; status: "pending" | "in_progress" | "completed" }> }
@@ -56,6 +68,8 @@ interface Script {
   refuseModeChange?: boolean;
   /** Accept a mode change but stay in the start mode. */
   ignoreModeChange?: boolean;
+  /** The modes offered (default: Claude Code's four), e.g. another agent's read-only or plan mode. */
+  modes?: Array<{ id: string; name: string }>;
 }
 
 const script: Script = JSON.parse(readFileSync(process.env.FAKE_ACP_SCRIPT ?? "", "utf8"));
@@ -114,7 +128,7 @@ let currentModel = models[0].value;
 let currentEffort = efforts[efforts.length - 1].value;
 let currentMode = script.startMode;
 const modeSurface = script.modeSurface ?? "both";
-const availableModes = [
+const availableModes = script.modes ?? [
   { id: "default", name: "Default" },
   { id: "acceptEdits", name: "Accept Edits" },
   { id: "plan", name: "Plan Mode" },
@@ -206,18 +220,44 @@ new AgentSideConnection((conn): Agent => ({
         await update({ sessionUpdate: "tool_call_update", toolCallId, status: step.tool.fail ? "failed" : "completed" });
       } else if ("permission" in step) {
         const toolCallId = `t${++toolNo}`;
-        await update({ sessionUpdate: "tool_call", toolCallId, title: step.permission.title, kind: "execute", status: "pending" });
+        const p = step.permission;
+        const kind = p.kind ?? "execute";
+        await update({ sessionUpdate: "tool_call", toolCallId, title: p.title, kind, status: "pending" });
         const answer = await conn.requestPermission({
           sessionId: params.sessionId,
-          toolCall: { toolCallId, title: step.permission.title, kind: "execute", status: "pending" },
-          options: [
+          toolCall: { toolCallId, title: p.title, ...(!p.kindOnlyInUpdate && { kind }), ...(p.name && { name: p.name }), status: "pending" } as never,
+          options: (p.options ?? [
             { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
             { optionId: "allow-always", name: "Always allow", kind: "allow_always" },
             { optionId: "reject-once", name: "Reject", kind: "reject_once" },
-          ],
+          ]) as never,
         });
-        log({ event: "permission", outcome: answer.outcome });
-        await update({ sessionUpdate: "tool_call_update", toolCallId, status: answer.outcome.outcome === "selected" && answer.outcome.optionId.startsWith("allow") ? "completed" : "failed" });
+        const allowed = answer.outcome.outcome === "selected" && /^allow/.test(answer.outcome.optionId);
+        log({ event: "permission", title: p.title, kind, outcome: answer.outcome });
+        if (allowed && p.writeOnAllow) writeFileSync(`${session.cwd}/${p.writeOnAllow}`, "written after an allow\n");
+        await update({ sessionUpdate: "tool_call_update", toolCallId, status: allowed ? "completed" : "failed" });
+      } else if ("clientWrite" in step) {
+        try {
+          const res = await conn.writeTextFile({ sessionId: params.sessionId, path: `${session.cwd}/${step.clientWrite.path}`, content: step.clientWrite.content });
+          log({ event: "clientWrite", ok: true, result: res ?? null });
+        } catch (err) {
+          log({ event: "clientWrite", ok: false, code: (err as { code?: number }).code ?? null, message: err instanceof Error ? err.message : String(err) });
+        }
+      } else if ("clientTerminal" in step) {
+        try {
+          const res = await conn.createTerminal({ sessionId: params.sessionId, command: step.clientTerminal.command });
+          log({ event: "clientTerminal", ok: true, id: (res as { id?: string }).id ?? null });
+        } catch (err) {
+          log({ event: "clientTerminal", ok: false, code: (err as { code?: number }).code ?? null, message: err instanceof Error ? err.message : String(err) });
+        }
+      } else if ("editWithoutAsking" in step) {
+        const toolCallId = `t${++toolNo}`;
+        const path = `${session.cwd}/${step.editWithoutAsking.path}`;
+        await update({ sessionUpdate: "tool_call", toolCallId, title: `Edit ${step.editWithoutAsking.path}`, kind: "edit", status: "in_progress", locations: [{ path }] });
+        writeFileSync(path, step.editWithoutAsking.content);
+        await update({ sessionUpdate: "tool_call_update", toolCallId, status: "completed" });
+        log({ event: "editedWithoutAsking", path });
+        await sleep(300);
       } else if ("mcp" in step) {
         if (!session.mcp) throw new Error("no MCP server was given");
         const toolCallId = `t${++toolNo}`;

@@ -50,7 +50,8 @@ export interface ReviewSourceRecord {
 }
 
 export interface AgentChoiceRecord {
-  id: "claude-code";
+  /** The agent's id in `acp/agents.ts` (`claude-code`, `codex`, …), or `custom`. */
+  id: string;
   label: string;
   model?: { id: string; label: string };
   effort?: { id: string; label: string };

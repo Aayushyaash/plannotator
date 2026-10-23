@@ -13,7 +13,22 @@ import { GUIDE_VIEWER_MANIFEST } from "@plannotator/core/guide-viewer-manifest";
 import { findSavedGuideById } from "@plannotator/shared/guide-store";
 import { readGuideInstructions } from "@plannotator/shared/guide-instructions-store";
 import { AcpClient } from "../acp/client";
-import { CLAUDE_CODE, readAgentOptions, resolveAgentLaunch, type AgentOptionsCache, type LoginCommand } from "../acp/agents";
+import {
+  CLAUDE_CODE,
+  CUSTOM_AGENT_ID,
+  customAgent,
+  detectAgents,
+  engineLabel,
+  findAgent,
+  readAgentOptions,
+  resolveAgentLaunch,
+  type AdapterResolution,
+  type AgentDescriptor,
+  type AgentOptionsCache,
+  type AgentStatus,
+  type CommandOverride,
+  type LoginCommand,
+} from "../acp/agents";
 import { planSpawn } from "../acp/spawn-plan";
 import { parseGuideLink } from "../core/adapter";
 import { loadDashboard, type DashboardModel } from "../dashboard";
@@ -41,7 +56,7 @@ import {
 } from "../store";
 import type { ChapterViewState, GeneratingViewState, GuideViewState, HomeViewState } from "../webview-protocol";
 import { chapterColorCss, linkInfo, locateLink, resolveSymbolForBuilder } from "./intel";
-import { pickAgentAndEffort, pickPullRequest, pickSource, type SourceChoice } from "./new-review";
+import { pickAgentAndEffort, pickPullRequest, pickSource, type RememberedChoice, type SourceChoice } from "./new-review";
 import { ReaderUi } from "./reader-ui";
 import { getChildren, getParent, getTreeItem, nodeId, relativeTime, type TreeData, type TreeNode } from "./tree";
 import { GuideContentProvider, GUIDE_SCHEME, baseUri, headPathOf, headUri } from "./uris";
@@ -71,7 +86,8 @@ interface RunEntry {
   running: Promise<void> | null;
 }
 
-const OPTIONS_KEY = "plannotator.guides.agentOptions.claude-code";
+/** The models and efforts an agent listed, cached per agent. */
+const optionsKey = (agentId: string) => `plannotator.guides.agentOptions.${agentId}`;
 const DEFAULTS_KEY = "plannotator.guides.defaults";
 const OPTIONS_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
 
@@ -177,15 +193,17 @@ export class GuidesController implements vscode.Disposable {
 
   private homeState(): HomeViewState {
     const d = this.dashboard;
-    const defaults = this.context.globalState.get<{ model?: string; effort?: string }>(DEFAULTS_KEY);
-    const options = this.agentOptions();
-    const modelName = options?.model?.options.find((o) => o.value === defaults?.model)?.name ?? (defaults?.model ? defaults.model : "Sonnet");
-    const effortName = options?.effort?.options.find((o) => o.value === defaults?.effort)?.name ?? (defaults?.effort ? defaults.effort : "low effort");
+    const defaults = this.context.globalState.get<RememberedChoice>(DEFAULTS_KEY);
+    const agent = this.agentById(defaults?.agent ?? CLAUDE_CODE.id) ?? CLAUDE_CODE;
+    const options = this.agentOptions(agent.id);
+    const isClaude = agent.id === CLAUDE_CODE.id;
+    const modelName = options?.model?.options.find((o) => o.value === defaults?.model)?.name ?? (defaults?.model ? defaults.model : isClaude ? "Sonnet" : "its default model");
+    const effortName = options?.effort?.options.find((o) => o.value === defaults?.effort)?.name ?? (defaults?.effort ? defaults.effort : isClaude ? "low effort" : "default effort");
     const ghNote = !d ? null : d.gh.state === "missing" ? "Install the GitHub CLI (gh) to see pull requests." : d.gh.state === "signed-out" ? "Run `gh auth login` to see pull requests." : d.gh.state === "error" ? "gh did not answer." : null;
     return {
       mode: "home",
       repo: d?.repo ? { name: d.repo.displayName, branch: d.repo.branch, host: d.repo.github ? "GitHub" : "local repository" } : null,
-      defaults: { agent: CLAUDE_CODE.label, model: modelName, effort: /effort/.test(effortName) ? effortName : `${effortName.toLowerCase()} effort` },
+      defaults: { agent: agent.label, model: modelName, effort: /effort/.test(effortName) ? effortName : `${effortName.toLowerCase()} effort` },
       ghNote,
       cards: {
         pr: d && d.gh.state === "ok" && d.repo?.github
@@ -364,64 +382,118 @@ export class GuidesController implements vscode.Disposable {
   // Agent options (models and efforts), cached per agent
   // -------------------------------------------------------------------------
 
-  private agentOptions(): AgentOptionsCache | null {
-    const cached = this.context.globalState.get<AgentOptionsCache>(OPTIONS_KEY);
+  private agentOptions(agentId: string): AgentOptionsCache | null {
+    const cached = this.context.globalState.get<AgentOptionsCache>(optionsKey(agentId));
     return cached && Date.now() - cached.fetchedAt < OPTIONS_MAX_AGE_MS ? cached : null;
   }
 
-  private agentSetting(): { command?: string; args?: string[] } {
-    const cfg = vscode.workspace.getConfiguration("plannotator.guides.claudeCode");
-    return { command: cfg.get<string>("command") ?? "", args: cfg.get<string[]>("args") ?? [] };
+  /**
+   * The command override for a known agent: `plannotator.guides.agentCommands`
+   * (`{ "<id>": { "command": "…", "args": [] } }`), else for Claude Code the
+   * older `plannotator.guides.claudeCode.command` / `.args`.
+   */
+  private agentOverride(agentId: string): CommandOverride {
+    const cfg = vscode.workspace.getConfiguration("plannotator.guides");
+    const map = cfg.get<Record<string, { command?: unknown; args?: unknown }>>("agentCommands") ?? {};
+    const entry = map[agentId];
+    if (entry && typeof entry.command === "string" && entry.command.trim()) {
+      return { command: entry.command, args: Array.isArray(entry.args) ? entry.args.filter((a): a is string => typeof a === "string") : undefined };
+    }
+    if (agentId === CLAUDE_CODE.id) {
+      const claude = vscode.workspace.getConfiguration("plannotator.guides.claudeCode");
+      return { command: claude.get<string>("command") ?? "", args: claude.get<string[]>("args") ?? [] };
+    }
+    return {};
   }
 
-  /** Start the adapter once, read its config options, stop it. Nothing is prompted. */
-  private async probeAgentOptions(): Promise<AgentOptionsCache | null> {
-    const launch = resolveAgentLaunch(CLAUDE_CODE, this.agentSetting());
+  /** The custom agent (`plannotator.guides.customAgent.*`), when a command is set. */
+  private customAgent(): AgentDescriptor | null {
+    const cfg = vscode.workspace.getConfiguration("plannotator.guides.customAgent");
+    return customAgent({ command: cfg.get<string>("command") ?? "", args: cfg.get<string[]>("args") ?? [], label: cfg.get<string>("label") ?? "" });
+  }
+
+  private agentById(agentId: string): AgentDescriptor | null {
+    return findAgent(agentId, this.customAgent());
+  }
+
+  private agentStatuses(): AgentStatus[] {
+    return detectAgents((id) => this.agentOverride(id), this.customAgent());
+  }
+
+  private launchFor(agent: AgentDescriptor, run: "local" | "pr" = "local"): AdapterResolution {
+    return resolveAgentLaunch(agent, agent.id === CUSTOM_AGENT_ID ? {} : this.agentOverride(agent.id), run);
+  }
+
+  /** Start the agent once, read its config options, stop it. Nothing is prompted. */
+  private async probeAgentOptions(agent: AgentDescriptor): Promise<AgentOptionsCache | null> {
+    const launch = this.launchFor(agent);
     if (!launch.ok) {
-      this.showAdapterMissing(launch.message);
+      this.showAdapterMissing(agent, launch.message);
       return null;
     }
     const cwd = this.dashboard?.repo?.root ?? this.cwd() ?? this.context.globalStorageUri.fsPath;
     let client: AcpClient | null = null;
     try {
-      client = await AcpClient.start({ command: launch.command, args: launch.args, cwd }, {
+      client = await AcpClient.start({ command: launch.command, args: launch.args, cwd, ...(launch.env && { env: launch.env }) }, {
         onUpdate: () => {},
         requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
         onStderr: (t) => this.log.info(`[agent] ${t.trimEnd()}`),
       }, { name: "plannotator-vscode", title: "Plannotator", version: this.version });
       const session = await Promise.race([
         client.newSession(cwd, []),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Claude Code did not answer within 60 seconds.")), 60_000)),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${agent.label} did not answer within 60 seconds.`)), 60_000)),
       ]);
-      const options = readAgentOptions(CLAUDE_CODE.id, session.configOptions);
-      await this.context.globalState.update(OPTIONS_KEY, options);
+      const options = readAgentOptions(agent.id, session.configOptions);
+      await this.context.globalState.update(optionsKey(agent.id), options);
       return options;
     } catch (err) {
-      void vscode.window.showErrorMessage(`Could not read Claude Code's models: ${err instanceof Error ? err.message : String(err)}`);
+      void vscode.window.showErrorMessage(`Could not read ${agent.label}'s models: ${err instanceof Error ? err.message : String(err)}`);
       return null;
     } finally {
       client?.dispose();
     }
   }
 
-  private showAdapterMissing(message: string): void {
-    void vscode.window.showErrorMessage(message, "Copy install command", "Open settings").then((choice) => {
-      if (choice === "Copy install command") void vscode.env.clipboard.writeText(CLAUDE_CODE.installCommand);
-      if (choice === "Open settings") void vscode.commands.executeCommand("workbench.action.openSettings", "plannotator.guides.claudeCode");
-    });
+  private showAdapterMissing(agent: AgentDescriptor, message: string): void {
+    const buttons = [...(agent.installCommand ? ["Copy install command"] : []), "Open docs", "Open settings"];
+    void vscode.window.showErrorMessage(message, ...buttons).then((choice) => this.onMissingChoice(agent, choice));
+  }
+
+  private onMissingChoice(agent: AgentDescriptor, choice: string | undefined): void {
+    if (choice === "Copy install command") void vscode.env.clipboard.writeText(agent.installCommand);
+    if (choice === "Open docs") void vscode.env.openExternal(vscode.Uri.parse(agent.docsUrl));
+    if (choice === "Open settings") void vscode.commands.executeCommand("workbench.action.openSettings", agent.id === CUSTOM_AGENT_ID ? "plannotator.guides.customAgent" : "plannotator.guides.agentCommands");
+  }
+
+  /** A missing agent picked in the agent step: how to install it, then back to the list. */
+  private async agentMissing(status: AgentStatus): Promise<void> {
+    const { agent, launch } = status;
+    const message = launch.ok ? "" : launch.message;
+    if (agent.unsupported) {
+      const choice = await vscode.window.showInformationMessage(message, "Open docs");
+      this.onMissingChoice(agent, choice);
+      return;
+    }
+    const buttons = [...(agent.installCommand ? ["Copy install command"] : []), "Open docs", "Open settings"];
+    const choice = await vscode.window.showInformationMessage(`${message} Guides never installs anything itself.`, { modal: false }, ...buttons);
+    this.onMissingChoice(agent, choice);
+  }
+
+  private pickerInput(remembered: RememberedChoice | undefined) {
+    return {
+      agents: this.agentStatuses(),
+      optionsFor: (id: string) => this.agentOptions(id),
+      loadOptions: (agent: AgentDescriptor) => this.probeAgentOptions(agent),
+      onMissing: (status: AgentStatus) => this.agentMissing(status),
+      remembered: remembered ? { agent: remembered.agent ?? CLAUDE_CODE.id, model: remembered.model, effort: remembered.effort } : undefined,
+    };
   }
 
   private async changeDefaults(): Promise<void> {
-    const defaults = this.context.globalState.get<{ model?: string; effort?: string }>(DEFAULTS_KEY);
-    const picked = await pickAgentAndEffort({
-      options: this.agentOptions(),
-      loadOptions: () => this.probeAgentOptions(),
-      remembered: defaults,
-      standingInstructions: "",
-      defaultsOnly: true,
-    });
+    const defaults = this.context.globalState.get<RememberedChoice>(DEFAULTS_KEY);
+    const picked = await pickAgentAndEffort({ ...this.pickerInput(defaults), standingInstructions: "", defaultsOnly: true });
     if (!picked) return;
-    await this.context.globalState.update(DEFAULTS_KEY, { model: picked.agent.model?.id, effort: picked.agent.effort?.id });
+    await this.context.globalState.update(DEFAULTS_KEY, { agent: picked.agent.id, model: picked.agent.model?.id, effort: picked.agent.effort?.id });
     this.updateHome();
   }
 
@@ -443,15 +515,10 @@ export class GuidesController implements vscode.Disposable {
     }
     const source = preset ?? (await pickSource(model));
     if (!source) return;
-    const remembered = this.context.workspaceState.get<{ model?: string; effort?: string }>(`plannotator.guides.choices:${model.repo.root}`) ?? this.context.globalState.get(DEFAULTS_KEY);
-    const picked = await pickAgentAndEffort({
-      options: this.agentOptions(),
-      loadOptions: () => this.probeAgentOptions(),
-      remembered,
-      standingInstructions: readGuideInstructions(),
-    });
+    const remembered = this.context.workspaceState.get<RememberedChoice>(`plannotator.guides.choices:${model.repo.root}`) ?? this.context.globalState.get<RememberedChoice>(DEFAULTS_KEY);
+    const picked = await pickAgentAndEffort({ ...this.pickerInput(remembered), standingInstructions: readGuideInstructions(), run: source.kind });
     if (!picked) return;
-    await this.context.workspaceState.update(`plannotator.guides.choices:${model.repo.root}`, { model: picked.agent.model?.id, effort: picked.agent.effort?.id });
+    await this.context.workspaceState.update(`plannotator.guides.choices:${model.repo.root}`, { agent: picked.agent.id, model: picked.agent.model?.id, effort: picked.agent.effort?.id });
     await this.startRun(source, picked.agent, picked.instructions);
   }
 
@@ -512,12 +579,23 @@ export class GuidesController implements vscode.Disposable {
   }
 
   private async startRun(choice: SourceChoice, agent: AgentChoiceRecord, instructions?: string, resume?: DraftRecord): Promise<void> {
-    const launch = resolveAgentLaunch(CLAUDE_CODE, this.agentSetting());
-    if (!launch.ok) return this.showAdapterMissing(launch.message);
+    const descriptor = this.agentById(agent.id);
+    if (!descriptor) {
+      void vscode.window.showErrorMessage(agent.id === CUSTOM_AGENT_ID ? "This guide was started with the custom agent, which is no longer set (plannotator.guides.customAgent.command)." : `Guides does not know the agent ${agent.label}.`);
+      return;
+    }
+    const available = this.launchFor(descriptor);
+    if (!available.ok) return this.showAdapterMissing(descriptor, available.message);
     let prepared: { source: ReviewSourceRecord; rawPatch: string } | null;
     if (resume) prepared = { source: resume.source, rawPatch: resume.draft.review.rawPatch };
     else prepared = await this.prepareSource(choice);
     if (!prepared) return;
+    if (prepared.source.kind === "pr" && descriptor.refusePullRequests) {
+      void vscode.window.showWarningMessage(`${descriptor.label} cannot write a guide for a pull request: ${descriptor.refusePullRequests}`);
+      return;
+    }
+    const launch = this.launchFor(descriptor, prepared.source.kind);
+    if (!launch.ok) return this.showAdapterMissing(descriptor, launch.message);
     const repoKey = resume?.repoKey ?? this.dashboard?.repo?.repoKey;
     if (!repoKey) throw new Error("No repository.");
     const relay = await this.relayHost();
@@ -526,7 +604,8 @@ export class GuidesController implements vscode.Disposable {
       { repoKey, source: prepared.source, rawPatch: prepared.rawPatch, files, agent, ...(instructions && { instructions }), ...(resume && { resume }) },
       {
         relay,
-        agentLaunch: (cwd) => ({ command: launch.command, args: launch.args, cwd }),
+        agent: descriptor,
+        agentLaunch: (cwd) => ({ command: launch.command, args: launch.args, cwd, ...(launch.env && { env: launch.env }) }),
         mcpServer: {
           command: process.execPath,
           args: [vscode.Uri.joinPath(this.context.extensionUri, "dist", "guide-mcp.cjs").fsPath],
@@ -655,6 +734,7 @@ export class GuidesController implements vscode.Disposable {
    * one closes with the run). Closing it is a "no": the agent's reject option.
    */
   private async askPermission(req: RequestPermissionRequest, signal: AbortSignal, agentLabel: string): Promise<RequestPermissionResponse> {
+    // The read-only policy has already refused edits, commands and mode switches; these are reads and unknown tools.
     if (signal.aborted) return { outcome: { outcome: "cancelled" } };
     const title = req.toolCall.title ?? "a tool";
     const raw = req.toolCall.rawInput as Record<string, unknown> | undefined;
@@ -663,7 +743,7 @@ export class GuidesController implements vscode.Disposable {
       : undefined;
     const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { optionId: string }>();
     qp.title = `${agentLabel} asks to run: ${title}`;
-    qp.placeholder = detail ?? "The guide's agent asks before running this tool, under your own settings.";
+    qp.placeholder = detail ?? "Guides are read-only: allow it only if this tool does not change anything.";
     qp.ignoreFocusOut = true;
     qp.items = req.options.map((o) => ({ label: o.name, optionId: o.optionId, ...(o.kind.startsWith("reject") && { description: "no" }) }));
     const chosen = await new Promise<string | null | "aborted">((resolve) => {
@@ -694,11 +774,12 @@ export class GuidesController implements vscode.Disposable {
   private async signIn(label?: string): Promise<void> {
     const state = this.run?.gen.state;
     const logins: LoginCommand[] = state?.signIn?.logins ?? [];
-    const launch = resolveAgentLaunch(CLAUDE_CODE, this.agentSetting());
+    const agent = (state && this.agentById(state.agent.id)) ?? CLAUDE_CODE;
+    const launch = this.launchFor(agent);
     let choice = label;
     if (!choice) {
       const buttons = logins.length ? logins.map((l) => l.label) : ["Sign in"];
-      choice = await vscode.window.showErrorMessage(`${CLAUDE_CODE.label} is not signed in. Sign in in a terminal, then resume the guide.`, ...buttons);
+      choice = await vscode.window.showErrorMessage(`${agent.label} is not signed in. Sign in in a terminal, then resume the guide.`, ...buttons);
       if (!choice) return;
     }
     const login = logins.find((l) => l.label === choice) ?? (logins.length === 1 ? logins[0] : undefined);
@@ -708,13 +789,14 @@ export class GuidesController implements vscode.Disposable {
       command = launch.command;
       args = [...launch.args, ...login.args];
     } else {
-      const claude = findExecutable("claude");
-      if (!claude) {
-        void vscode.window.showErrorMessage(`Run \`claude\` in a terminal and sign in with /login, then resume the guide.`);
+      const fallback = agent.signIn;
+      const found = fallback ? findExecutable(fallback.command) : null;
+      if (!fallback || !found) {
+        void vscode.window.showErrorMessage(fallback ? `Run \`${[fallback.command, ...fallback.args].join(" ")}\` in a terminal to sign in, then resume the guide.` : `Sign in to ${agent.label} in a terminal (see ${agent.docsUrl}), then resume the guide.`);
         return;
       }
-      command = claude;
-      args = ["/login"];
+      command = found;
+      args = [...fallback.args];
     }
     let plan;
     try {
@@ -724,7 +806,7 @@ export class GuidesController implements vscode.Disposable {
       return;
     }
     const terminal = vscode.window.createTerminal({
-      name: `${CLAUDE_CODE.label} sign-in`,
+      name: `${agent.label} sign-in`,
       shellPath: plan.command,
       shellArgs: plan.args,
       cwd: state?.source.repoRoot ?? this.cwd(),
@@ -780,16 +862,17 @@ export class GuidesController implements vscode.Disposable {
     p.panel.onDidDispose(() => this.draftPanels.delete(record.id));
     const gen = new GuideGeneration(
       { repoKey: record.repoKey, source: record.source, rawPatch: record.draft.review.rawPatch, files: changedFilesFromPatch(record.draft.review.rawPatch), agent: record.agent, ...(record.instructions && { instructions: record.instructions }), resume: record },
-      this.idleDeps(),
+      this.idleDeps(record.agent.id),
     );
     const state = { ...gen.state, status: record.status === "running" ? "stopped" : record.status, statusMessage: record.statusMessage ?? "The run stopped before the guide was finished.", startedAt: record.createdAt, endedAt: record.updatedAt } as GenerationState;
     p.host.show(this.generatingState(state));
   }
 
   /** Deps for a generation that is never run (Save as is). */
-  private idleDeps(): ConstructorParameters<typeof GuideGeneration>[1] {
+  private idleDeps(agentId: string): ConstructorParameters<typeof GuideGeneration>[1] {
     return {
       relay: null as unknown as RelayHost,
+      agent: this.agentById(agentId) ?? CLAUDE_CODE,
       agentLaunch: () => {
         throw new Error("not running");
       },
@@ -822,7 +905,7 @@ export class GuidesController implements vscode.Disposable {
     if (!record) return;
     const gen = new GuideGeneration(
       { repoKey: record.repoKey, source: record.source, rawPatch: record.draft.review.rawPatch, files: changedFilesFromPatch(record.draft.review.rawPatch), agent: record.agent, ...(record.instructions && { instructions: record.instructions }), resume: record },
-      this.idleDeps(),
+      this.idleDeps(record.agent.id),
     );
     const result = await gen.saveAsIs();
     if (!result.ok) {
@@ -943,7 +1026,7 @@ export class GuidesController implements vscode.Disposable {
     if (!this.reader) return null;
     const { model, sides } = this.reader;
     const env = model.loaded.envelope;
-    const engine = env.engine === "claude" ? "Claude Code" : env.engine ?? "";
+    const engine = engineLabel(env.engine);
     const kicker = ["Guided review", env.label, engine, model.loaded.sidecar.agent?.model?.label ?? env.model, env.generatedAt ? relativeTime(env.generatedAt) : ""].filter(Boolean).join(" · ");
     return {
       mode: "guide",
