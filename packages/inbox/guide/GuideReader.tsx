@@ -131,6 +131,7 @@ export default function GuideReader({ snapshot, reviewed, onReviewedChange, comm
     () => ({
       title: snapshot.guide.title,
       intent: snapshot.guide.intent,
+      ...(snapshot.guide.overview && { overview: snapshot.guide.overview }),
       sections: snapshot.guide.sections,
       unplacedFiles: snapshot.guide.unplacedFiles,
       reviewed: [...snapshot.guide.reviewed],

@@ -2,8 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CodeGuideData, GuideSection } from '@plannotator/core/guide';
 import type { DiffFile } from './types';
 import { useGuideHost } from './host';
-import { renderInlineMarkdown } from './renderInlineMarkdown';
+import { parseGuideLink } from '@plannotator/core/guide-links';
+import { renderInlineMarkdown, type GuideLinkRenderer } from './renderInlineMarkdown';
 import { GuideSectionCard } from './GuideSectionCard';
+import { GuideOverview } from './GuideOverview';
 import { GUIDE_EAGER_MOUNT_MAX_FILES, GuideViewportProvider } from './GuideViewportManager';
 
 interface GuideViewProps {
@@ -121,6 +123,51 @@ export const GuideView: React.FC<GuideViewProps> = ({
     handleRequestReveal(activeSearchMatch.filePath);
   }, [activeSearchMatch?.id, activeSearchMatch?.filePath, handleRequestReveal]);
 
+  // Guide links (overview and chapter prose): `chapter:N` jumps to that
+  // chapter; `code:path` jumps to that file's diff when the guide shows it.
+  // Everything else (symbols, files outside the guide) stays plain text: the
+  // chain has no language server and no file to open outside the change.
+  const guideFilePaths = useMemo(
+    () => new Set([...resolved.sectionFiles.flat(), ...resolved.unplacedFiles].map((file) => file.path)),
+    [resolved],
+  );
+  const viewRef = useRef<HTMLDivElement>(null);
+  const jumpToChapter = useCallback(
+    (index: number) => {
+      const first = resolved.sectionFiles[index]?.[0];
+      if (first) {
+        handleRequestReveal(first.path);
+        return;
+      }
+      viewRef.current?.querySelector(`[data-guide-section="${index}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    },
+    [resolved, handleRequestReveal],
+  );
+  const renderLink = useCallback<GuideLinkRenderer>(
+    (href, label, key) => {
+      const parsed = parseGuideLink(href);
+      if (!parsed?.ok) return null;
+      const link = parsed.link;
+      let onClick: (() => void) | null = null;
+      if (link.kind === 'chapter' && link.chapter <= guide.sections.length) onClick = () => jumpToChapter(link.chapter - 1);
+      if (link.kind === 'code' && guideFilePaths.has(link.path)) onClick = () => handleRequestReveal(link.path);
+      if (!onClick) return null;
+      return (
+        <button
+          key={key}
+          type="button"
+          onClick={onClick}
+          data-guide-link={href}
+          title={link.kind === 'chapter' ? `Go to chapter ${link.chapter}` : `Go to ${link.kind === 'code' ? link.path : ''}`}
+          className="text-primary underline-offset-2 hover:underline"
+        >
+          {label}
+        </button>
+      );
+    },
+    [guide.sections.length, guideFilePaths, jumpToChapter, handleRequestReveal],
+  );
+
   const unplacedSection = useMemo<GuideSection | null>(
     () =>
       hasUnplaced
@@ -179,7 +226,9 @@ export const GuideView: React.FC<GuideViewProps> = ({
         )}
       </div>
 
-      <div className="mt-6 space-y-4">
+      {guide.overview && <GuideOverview overview={guide.overview} renderLink={renderLink} />}
+
+      <div ref={viewRef} className="mt-6 space-y-4">
         {guide.sections.map((section, index) => (
           <GuideSectionCard
             key={`${section.title}:${index}`}
@@ -193,6 +242,7 @@ export const GuideView: React.FC<GuideViewProps> = ({
             revealTarget={revealTarget}
             onActivate={onFocusFile}
             onRequestReveal={handleRequestReveal}
+            renderLink={renderLink}
           />
         ))}
 

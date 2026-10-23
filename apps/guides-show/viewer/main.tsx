@@ -21,7 +21,7 @@
  */
 import '@plannotator/review-editor/styles';
 import './portable.css';
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { createRoot } from 'react-dom/client';
 // setStorageBackend directly (not configurePlannotatorUI): the configure barrel
 // statically imports every host seam and their UI, which drags markdown/math
@@ -31,6 +31,7 @@ import { ThemeProvider } from '@plannotator/ui/components/ThemeProvider';
 import { ModeToggle } from '@plannotator/ui/components/ModeToggle';
 import { TooltipProvider } from '@plannotator/ui/components/Tooltip';
 import { readEmbeddedGuideSnapshot, type GuideSnapshot } from '@plannotator/core/guide-format';
+import type { GuideOverviewDiagram } from '@plannotator/core/guide';
 import { GuideSectionSkeleton, GuideViewer } from '@plannotator/guide-viewer';
 import { ReadOnlyDiffRenderer, getReadOnlyDiffRendererProps } from './ReadOnlyDiffRenderer';
 import { PortableWorkerPool, preparePortableWorkerFactory } from './portablePool';
@@ -56,6 +57,19 @@ setStorageBackend({
   setItem: (key, value) => { if (local) local.setItem(PREFIX + key, value); else memory.set(key, value); },
   removeItem: (key) => { if (local) local.removeItem(PREFIX + key); else memory.delete(key); },
 });
+
+// The overview diagram's engine loads only for a guide that has one (its own
+// chunk; see OverviewDiagram.tsx). HTML pictures are not drawn yet: the chain
+// shows its note for them.
+const OverviewDiagram = lazy(() => import('./OverviewDiagram'));
+function renderOverviewDiagram(diagram: GuideOverviewDiagram): React.ReactNode | null {
+  if (diagram.kind !== 'mermaid') return null;
+  return (
+    <Suspense fallback={<pre className="overflow-x-auto whitespace-pre rounded-md bg-muted/50 p-3 font-mono text-[11px] text-muted-foreground"><code>{diagram.source}</code></pre>}>
+      <OverviewDiagram source={diagram.source} />
+    </Suspense>
+  );
+}
 
 function SourceLine({ snapshot }: { snapshot: GuideSnapshot }) {
   const s = snapshot.source;
@@ -128,6 +142,7 @@ function App({ snapshot, workerFactory, hosted }: { snapshot: GuideSnapshot; wor
       getDiffRendererProps={getReadOnlyDiffRendererProps}
       sourceLine={<SourceLine snapshot={snapshot} />}
       headerActions={headerActions}
+      renderOverviewDiagram={renderOverviewDiagram}
       className="min-h-screen bg-background text-foreground"
     />
   );

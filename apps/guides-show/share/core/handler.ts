@@ -22,7 +22,7 @@ import {
   createGuideShellHtml,
   escapeHtmlText,
   parseGuideSnapshotJson,
-  type GuideSnapshotV1,
+  type GuideSnapshot,
   type GuideViewerAssets,
 } from '@plannotator/core/guide-format';
 import { isStoredGuideExpired, type GuideStore, type SharedGuideMode, type StoredGuideMeta, type StoredGuideViewerPin } from './storage';
@@ -221,7 +221,7 @@ async function handlePage(req: Request, url: URL, id: string, ctx: GuideShareCon
   return htmlPage(req.method === 'HEAD' ? null : html, 200, { 'Cache-Control': PAGE_CACHE_CONTROL });
 }
 
-function renderGuidePage(snapshot: GuideSnapshotV1, viewer: GuideViewerAssets, hosted: { url: string }): string {
+function renderGuidePage(snapshot: GuideSnapshot, viewer: GuideViewerAssets, hosted: { url: string }): string {
   return createGuideHtml(snapshot, { viewer, hosted });
 }
 

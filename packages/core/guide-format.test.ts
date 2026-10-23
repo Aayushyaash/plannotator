@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   GUIDE_SNAPSHOT_SCRIPT_ID,
+  buildGuideSnapshot,
   createGuideHtml,
   detectGuideLanguages,
   escapeJsonForHtmlScript,
@@ -11,9 +12,10 @@ import {
   parseGuideSnapshot,
   parseGuideSnapshotJson,
   readEmbeddedGuideSnapshot,
+  type GuideSnapshot,
   type GuideSnapshotV1,
 } from "./guide-format";
-import { FIXTURE_PATCH_TS_JSON, FIXTURE_V1_LOCAL, FIXTURE_V1_PR, GUIDE_SNAPSHOT_FIXTURES } from "./guide-format-fixtures";
+import { FIXTURE_PATCH_TS_JSON, FIXTURE_V1_LOCAL, FIXTURE_V1_PR, FIXTURE_V2_OVERVIEW, GUIDE_SNAPSHOT_FIXTURES } from "./guide-format-fixtures";
 
 const VIEWER = {
   baseUrl: "https://guides.show/v1/",
@@ -29,7 +31,7 @@ const VIEWER = {
  * `readEmbeddedGuideSnapshot` over a document that resolves elements by id, so a
  * writer/reader script-id divergence fails every export test below.
  */
-function snapshotFromHtml(html: string): GuideSnapshotV1 {
+function snapshotFromHtml(html: string): GuideSnapshot {
   const doc = {
     getElementById(id: string) {
       const match = new RegExp(`<script id="${id}" type="application/json">([\\s\\S]*?)</script>`).exec(html);
@@ -53,6 +55,9 @@ describe("compatibility: every shipped fixture parses with the current parser", 
       if (parsed.ok) {
         expect(parsed.value.guide.reviewed).toHaveLength(parsed.value.guide.sections.length);
         expect(parsed.value.source.kind).toBe(snapshot.source.kind);
+        expect(parsed.value.version).toBe(snapshot.version);
+        // Parsing a shipped document gives it back unchanged.
+        expect(parsed.value).toEqual(JSON.parse(JSON.stringify(snapshot)));
       }
     });
   }
@@ -63,7 +68,14 @@ describe("parseGuideSnapshot rejects what it must", () => {
     ["unknown top-level field", (s) => (s.annotations = []), "$"],
     ["unknown guide field", (s) => (s.guide.saved = true), "$.guide"],
     ["unknown section field", (s) => (s.guide.sections[0].order = 1), "$.guide.sections[0]"],
-    ["wrong version", (s) => (s.version = 2), "$.version"],
+    ["unknown version", (s) => (s.version = 3), "$.version"],
+    // Version 1 has no overview: a v1 reader never sees one.
+    ["overview on a version-1 snapshot", (s) => (s.guide.overview = { text: "x" }), "$.guide"],
+    ["empty overview text", (s) => { s.version = 2; s.guide.overview = { text: "  " }; }, "$.guide.overview.text"],
+    ["unknown overview field", (s) => { s.version = 2; s.guide.overview = { text: "x", links: [] }; }, "$.guide.overview"],
+    ["bad diagram kind", (s) => { s.version = 2; s.guide.overview = { text: "x", diagram: { kind: "svg", source: "<svg/>" } }; }, "$.guide.overview.diagram.kind"],
+    ["empty diagram source", (s) => { s.version = 2; s.guide.overview = { text: "x", diagram: { kind: "mermaid", source: "" } }; }, "$.guide.overview.diagram.source"],
+    ["unknown diagram field", (s) => { s.version = 2; s.guide.overview = { text: "x", diagram: { kind: "mermaid", source: "graph TD", theme: "x" } }; }, "$.guide.overview.diagram"],
     ["wrong kind", (s) => (s.kind = "nope"), "$.kind"],
     ["non-boolean reviewed", (s) => (s.guide.reviewed = ["yes"]), "$.guide.reviewed[0]"],
     ["empty sections", (s) => (s.guide.sections = []), "$.guide.sections"],
@@ -203,5 +215,50 @@ describe("guideExportFilename", () => {
     expect(guideExportFilename("Éclair déjà vu")).toBe("guided-review-eclair-deja-vu.html");
     expect(guideExportFilename("🎉🎉")).toBe("guided-review-export.html");
     expect(guideExportFilename("x".repeat(200)).length).toBeLessThanOrEqual("guided-review-".length + 80 + ".html".length);
+  });
+});
+
+describe("format version 2: the overview", () => {
+  const pieces = {
+    reviewed: [true, false],
+    review: { rawPatch: FIXTURE_PATCH_TS_JSON, gitRef: "origin/main..HEAD", diffType: "since-base", base: "origin/main", source: FIXTURE_V1_LOCAL.source },
+    generator: FIXTURE_V1_LOCAL.generator,
+    exportedAt: FIXTURE_V1_LOCAL.exportedAt,
+  };
+
+  test("a guide without an overview still builds the version-1 document, byte for byte", () => {
+    const { reviewed: _r, ...guide } = FIXTURE_V1_LOCAL.guide;
+    const built = buildGuideSnapshot({ ...pieces, guide });
+    expect(JSON.stringify(built)).toBe(JSON.stringify(FIXTURE_V1_LOCAL));
+    expect(createGuideHtml(built, { viewer: VIEWER })).toBe(createGuideHtml(FIXTURE_V1_LOCAL, { viewer: VIEWER }));
+    expect(createGuideHtml(built, { viewer: VIEWER })).toContain('content="v1"');
+  });
+
+  test("a guide with an overview builds version 2, the overview after the intent", () => {
+    const { reviewed: _r, ...guide } = FIXTURE_V2_OVERVIEW.guide;
+    const built = buildGuideSnapshot({ ...pieces, guide });
+    expect(built.version).toBe(2);
+    expect(JSON.stringify(built)).toBe(JSON.stringify(FIXTURE_V2_OVERVIEW));
+    expect(Object.keys(built.guide)).toEqual(["title", "intent", "overview", "sections", "unplacedFiles", "reviewed"]);
+  });
+
+  test("stray overview fields never reach the snapshot", () => {
+    const { reviewed: _r, ...guide } = FIXTURE_V2_OVERVIEW.guide;
+    const sloppy = { ...guide, overview: { ...guide.overview!, extra: 1, diagram: { ...guide.overview!.diagram!, theme: "x" } } };
+    const built = buildGuideSnapshot({ ...pieces, guide: sloppy as typeof guide });
+    expect(parseGuideSnapshot(JSON.parse(JSON.stringify(built))).ok).toBe(true);
+  });
+
+  test("a version-2 document without an overview is read (forward-tolerant)", () => {
+    const parsed = parseGuideSnapshot({ ...JSON.parse(JSON.stringify(FIXTURE_V1_LOCAL)), version: 2 });
+    expect(parsed.ok && parsed.value.version).toBe(2);
+  });
+
+  test("version-2 exports round-trip through the HTML and say v2; the fallback body carries the overview text", () => {
+    const html = createGuideHtml(FIXTURE_V2_OVERVIEW, { viewer: VIEWER });
+    expect(html).toContain('content="v2"');
+    expect(snapshotFromHtml(html)).toEqual(JSON.parse(JSON.stringify(FIXTURE_V2_OVERVIEW)));
+    const body = html.slice(html.indexOf('<div id="root">'), html.indexOf(`<script id="${GUIDE_SNAPSHOT_SCRIPT_ID}"`));
+    expect(body).toContain("The guard in [`refresh`](symbol:src/auth.ts#refresh) runs first");
   });
 });

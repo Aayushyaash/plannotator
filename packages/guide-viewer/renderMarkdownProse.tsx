@@ -1,5 +1,5 @@
 import React from 'react';
-import { renderInlineMarkdown } from './renderInlineMarkdown';
+import { renderInlineMarkdown, type GuideLinkRenderer } from './renderInlineMarkdown';
 
 const HEADING = /^#{1,6} (.*)$/;
 
@@ -19,9 +19,12 @@ export function renderMarkdownProse(
     /** 'muted' renders paragraph/bullet text in muted-foreground — used by
      *  Guided Review's narrow overview column; Tour keeps the default. */
     tone?: 'foreground' | 'muted';
+    /** Renders guide links (`code:`, `symbol:`, `chapter:`); see renderInlineMarkdown. */
+    renderLink?: GuideLinkRenderer;
   },
 ): React.ReactNode[] {
   if (!text) return [];
+  const inline = (t: string) => renderInlineMarkdown(t, opts?.renderLink ? { renderLink: opts.renderLink } : undefined);
   const bodyText = opts?.tone === 'muted' ? 'text-muted-foreground' : 'text-foreground';
   const nodes: React.ReactNode[] = [];
   const lines = text.split('\n');
@@ -82,7 +85,7 @@ export function renderMarkdownProse(
           <span className="font-semibold text-[10px] uppercase tracking-wider block mb-0.5 opacity-70">
             {calloutLabel[type]}
           </span>
-          <span className="leading-relaxed">{renderInlineMarkdown(calloutLines.join(' '))}</span>
+          <span className="leading-relaxed">{inline(calloutLines.join(' '))}</span>
         </div>
       );
       i = j;
@@ -97,7 +100,7 @@ export function renderMarkdownProse(
     if (heading) {
       nodes.push(
         <h3 key={key++} className="text-[12px] font-semibold text-foreground mt-3 mb-1">
-          {renderInlineMarkdown(heading[1])}
+          {inline(heading[1])}
         </h3>
       );
       i++;
@@ -116,7 +119,7 @@ export function renderMarkdownProse(
         <ul key={key++} className="my-1.5 space-y-0.5 pl-4">
           {bullets.map((b, bi) => (
             <li key={bi} className={`text-[13px] ${bodyText} list-disc leading-relaxed`}>
-              {renderInlineMarkdown(b)}
+              {inline(b)}
             </li>
           ))}
         </ul>
@@ -141,7 +144,7 @@ export function renderMarkdownProse(
     }
     nodes.push(
       <p key={key++} className={`text-[13px] ${bodyText} leading-relaxed`}>
-        {renderInlineMarkdown(paraLines.join(' '))}
+        {inline(paraLines.join(' '))}
       </p>
     );
     i = j;

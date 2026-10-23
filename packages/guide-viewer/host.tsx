@@ -1,4 +1,5 @@
 import React, { createContext, useContext } from 'react';
+import type { GuideOverviewDiagram } from '@plannotator/core/guide';
 import type { DiffFile } from './types';
 
 /**
@@ -70,6 +71,14 @@ export interface GuideHostValue<P extends object = Record<string, unknown>> {
    * files, source maps). Used only to sort a chapter's files by kind.
    */
   generatedFiles?: ReadonlySet<string>;
+  /**
+   * Draws the guide overview's diagram (format version 2). The guide chain
+   * never imports a diagram engine itself (the review app's bundle must not
+   * carry one; tests/entry-assets.test.ts), so a host that can draw Mermaid
+   * passes it here. Absent, or answering null: the diagram's source is shown
+   * as text (Mermaid) or a note says the viewer does not draw it (HTML).
+   */
+  renderOverviewDiagram?: (diagram: GuideOverviewDiagram) => React.ReactNode | null;
 }
 
 // The context erases the renderer's extra-prop generic; hosts recover typing at the provider site.
