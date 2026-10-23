@@ -51,7 +51,7 @@ interface World {
   permissions: string[];
 }
 
-function world(steps: unknown[], options: { pace?: number; resume?: GenerationInput["resume"]; choose?: string } = {}): World {
+function world(steps: unknown[], options: { pace?: number; resume?: GenerationInput["resume"]; choose?: string; script?: Record<string, unknown> } = {}): World {
   const root = join(work, `repo-${++repoN}`);
   mkdirSync(join(root, "src"), { recursive: true });
   const files: Record<string, string[]> = {
@@ -63,7 +63,7 @@ function world(steps: unknown[], options: { pace?: number; resume?: GenerationIn
   const rawPatch = Object.entries(files).map(([p, l]) => addedFilePatch(p, l)).join("");
   const scriptPath = join(root, "script.json");
   const logPath = join(root, "agent.log");
-  writeFileSync(scriptPath, JSON.stringify({ steps, pace: options.pace ?? 0 }));
+  writeFileSync(scriptPath, JSON.stringify({ steps, pace: options.pace ?? 0, ...options.script }));
   const permissions: string[] = [];
   const input: GenerationInput = {
     repoKey: `test__repo-${repoN}`,
@@ -142,7 +142,9 @@ describe("guide generation over ACP", () => {
     expect(gen.state.appliedEffort).toBe("Low");
 
     const log = w.log();
-    expect(log.find((e) => e.event === "initialize")?.clientCapabilities).toMatchObject({ fs: { readTextFile: false, writeTextFile: false }, terminal: false });
+    expect(log.find((e) => e.event === "initialize")?.clientCapabilities).toMatchObject({ fs: { readTextFile: false, writeTextFile: false }, terminal: false, auth: { terminal: true } });
+    // Local changes are the user's own checkout: their project settings apply, no _meta override.
+    expect(log.find((e) => e.event === "newSession")?.meta).toBeNull();
     expect(log.find((e) => e.event === "mcpReady")?.tools).toContain("guide_place_file");
     expect(log.filter((e) => e.event === "setConfig").map((e) => `${e.configId}=${e.value}`)).toEqual(["model=sonnet", "effort=low"]);
     const prompt = log.find((e) => e.event === "prompt")!;
@@ -256,4 +258,133 @@ describe("guide generation over ACP", () => {
     expect(saved.envelope.guide.unplacedFiles?.sort()).toEqual(["src/deliver.test.ts", "src/deliver.ts"]);
     expect(gen.state.status).toBe("finished");
   });
+
+  it("never loads a pull request's own Claude Code settings or MCP config: settingSources user only, strict MCP", async () => {
+    const w = world([header]);
+    w.input.source = { ...w.input.source, kind: "pr", label: "PR #482", pr: { number: 482, url: "https://github.com/northwind/checkout-service/pull/482", title: "Retry" }, worktreePath: w.input.source.headRoot };
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    const newSession = w.log().find((e) => e.event === "newSession")!;
+    expect(newSession.meta).toEqual({ claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true } } });
+    // Our builder server is still the one MCP server the agent gets.
+    expect(newSession.mcpServers).toEqual([{ name: "plannotator-guide" }]);
+  });
+
+  it("fails a signed-out run with the agent's own sign-in commands", async () => {
+    const w = world([header, { authRequired: true }]);
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    expect(gen.state.status).toBe("failed");
+    expect(gen.state.statusMessage).toStartWith("Claude Code is not signed in.");
+    expect(gen.state.signIn?.logins).toEqual([{ label: "Claude Subscription", args: ["--cli", "auth", "login", "--claudeai"] }]);
+    expect(loadDraftRecord(w.input.repoKey, gen.state.id)?.status).toBe("failed");
+  });
+
+  it("refuses an agent that speaks another ACP protocol version", async () => {
+    const w = world([header], { script: { protocolVersion: 2 } });
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    expect(gen.state.status).toBe("failed");
+    expect(gen.state.statusMessage).toContain("ACP protocol version 2");
+    expect(w.log().some((e) => e.event === "newSession")).toBe(false);
+  });
+
+  it("kills what the agent started when the run ends, even after the agent itself exited", async () => {
+    const w = world([{ spawnStubborn: true }, header]);
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    const pid = w.log().find((e) => e.event === "stubborn")?.pid as number;
+    expect(typeof pid).toBe("number");
+    expect(await gone(pid, 6000)).toBe(true);
+  });
+
+  it("kill() stops the agent and everything it started at once (VS Code closing)", async () => {
+    const w = world([{ spawnStubborn: true }, header, { sleep: 20000 }]);
+    const gen = new GuideGeneration(w.input, w.deps);
+    const running = gen.run();
+    let pid: number | undefined;
+    for (let i = 0; i < 100 && !pid; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      pid = w.log().find((e) => e.event === "stubborn")?.pid;
+    }
+    expect(pid).toBeDefined();
+    gen.kill();
+    expect(await gone(pid!, 1500)).toBe(true);
+    await running;
+  });
+
+  it("with guide history off, writes no draft and no guide: the guide is kept in memory", async () => {
+    const w = world([header, ch1, ch2, place("src/retryPolicy.ts", "c1"), place("src/deliver.ts", "c2"), place("src/deliver.test.ts", "c2"), { mcp: { name: "guide_finish" } }]);
+    w.deps.history = false;
+    const seenDrafts: number[] = [];
+    const gen = new GuideGeneration(w.input, w.deps);
+    gen.onChange(() => seenDrafts.push(listDraftRecords(w.input.repoKey).length));
+    await gen.run();
+    expect(gen.state.status).toBe("finished");
+    expect(gen.state.memoryOnly).toBe(true);
+    expect(gen.state.statusMessage).toContain("Not saved: guide history is off");
+    expect(seenDrafts.every((n) => n === 0)).toBe(true);
+    expect(listRecent(w.input.repoKey)).toEqual([]);
+    expect(loadSavedGuide(w.input.repoKey, gen.state.savedGuideId!)).toBeNull();
+    expect(gen.memoryGuide?.id).toBe(gen.state.savedGuideId);
+    expect(gen.memoryGuide?.envelope.title).toBe("Retry failed webhook deliveries");
+    expect(gen.memoryGuide?.rawPatch).toBe(w.input.rawPatch);
+    expect(gen.toDraftRecord().draft.chapters).toHaveLength(2);
+  });
+
+  it("says so when the overview diagram could not be render-checked, and records it for the reader", async () => {
+    const w = world([
+      header,
+      ch1,
+      place("src/retryPolicy.ts", "c1"),
+      place("src/deliver.ts", "c1"),
+      place("src/deliver.test.ts", "c1"),
+      { mcp: { name: "guide_set_overview", args: { text: "Start here.", diagram: { kind: "mermaid", source: "flowchart LR\n a-->b" } } } },
+      { mcp: { name: "guide_finish" } },
+    ]);
+    w.deps.checkMermaid = async () => ({ ok: true, checked: false });
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    expect(gen.state.status).toBe("finished");
+    expect(gen.state.diagramUnchecked).toBe(true);
+    expect(gen.state.statusMessage).toContain("not render-checked");
+    expect(w.log().filter((e) => e.event === "mcpCall" && e.name === "guide_finish")[0].text).toContain("could not be render-checked");
+    expect(loadSavedGuide(w.input.repoKey, gen.state.savedGuideId!)?.sidecar.diagramCheck).toBe("unchecked");
+  });
+
+  it("records a checked diagram as ok", async () => {
+    const w = world([
+      header,
+      ch1,
+      place("src/retryPolicy.ts", "c1"),
+      place("src/deliver.ts", "c1"),
+      place("src/deliver.test.ts", "c1"),
+      { mcp: { name: "guide_set_overview", args: { text: "Start here.", diagram: { kind: "mermaid", source: "flowchart LR\n a-->b" } } } },
+      { mcp: { name: "guide_finish" } },
+    ]);
+    const gen = new GuideGeneration(w.input, w.deps);
+    await gen.run();
+    expect(gen.state.diagramUnchecked).toBeUndefined();
+    expect(loadSavedGuide(w.input.repoKey, gen.state.savedGuideId!)?.sidecar.diagramCheck).toBe("ok");
+  });
 });
+
+/** Wait until a process no longer exists. */
+async function gone(pid: number, timeoutMs: number): Promise<boolean> {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  try {
+    process.kill(pid, 0);
+    process.kill(pid, "SIGKILL");
+    return false;
+  } catch {
+    return true;
+  }
+}

@@ -11,6 +11,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getPlannotatorDataDir } from "@plannotator/shared/data-dir";
+import { loadConfig, resolveGuideHistory } from "@plannotator/shared/config";
 import {
   deleteGuide,
   isValidGuideId,
@@ -23,7 +24,7 @@ import {
   updateGuideReviewed,
   type SavedGuideEnvelope,
 } from "@plannotator/shared/guide-store";
-import type { GuideSnapshot, GuideSnapshotSource } from "@plannotator/core/guide-format";
+import { buildGuideSnapshot, type GuideSnapshot, type GuideSnapshotSource } from "@plannotator/core/guide-format";
 import { guideDraftProgress, parseGuideDraft, type GuideDraft, type GuideFocusRange } from "./core/adapter";
 
 /** What a guide is of, recorded with drafts and guides so a run can resume and a reader can find its files. */
@@ -83,6 +84,17 @@ export interface GuideSidecar {
   agent?: AgentChoiceRecord;
   acpSessionId?: string;
   cost?: { amount: number; currency: string };
+  /** The overview diagram's render check when the guide was saved: "unchecked" until the reader checks it. */
+  diagramCheck?: "ok" | "unchecked" | "failed";
+}
+
+/**
+ * Whether guides are written to disk: Plannotator's own guide-history switch
+ * (`PLANNOTATOR_GUIDE_HISTORY`, then `guideHistory` in config.json), read on
+ * every run so a change applies to the next guide.
+ */
+export function guideHistoryEnabled(): boolean {
+  return resolveGuideHistory(loadConfig());
 }
 
 function guidesDir(repoKey: string): string {
@@ -174,6 +186,7 @@ export interface SaveFinishedInput {
   focus: Record<string, readonly GuideFocusRange[]>;
   acpSessionId?: string;
   cost?: { amount: number; currency: string };
+  diagramCheck?: GuideSidecar["diagramCheck"];
   now?: number;
 }
 
@@ -193,11 +206,19 @@ export function sourceGitRef(source: ReviewSourceRecord): string {
 
 /** Save a finished guide where the web app finds it. Returns the guide id. */
 export function saveFinishedGuide(input: SaveFinishedInput): string {
+  const built = buildFinishedGuide(input);
+  if (!saveGuidePatch(input.repoKey, built.id, built.rawPatch ?? "")) throw new Error("Could not write the guide's patch.");
+  if (!saveGuide(input.repoKey, built.id, built.envelope)) throw new Error("Could not write the guide.");
+  writeSidecar(input.repoKey, built.id, built.sidecar);
+  return built.id;
+}
+
+/** A finished guide as it would be stored (envelope, patch, sidecar), without writing anything. */
+export function buildFinishedGuide(input: SaveFinishedInput): LoadedGuide {
   const now = input.now ?? Date.now();
   const { snapshot } = input;
   const { reviewed: _reviewed, ...guide } = snapshot.guide;
   const id = makeGuideId(guide.title, now);
-  if (!saveGuidePatch(input.repoKey, id, snapshot.review.rawPatch)) throw new Error("Could not write the guide's patch.");
   const generator = snapshot.generator;
   const envelope: SavedGuideEnvelope = {
     version: 1,
@@ -221,8 +242,7 @@ export function saveFinishedGuide(input: SaveFinishedInput): string {
     guide: guide as SavedGuideEnvelope["guide"],
     reviewed: guide.sections.map(() => false),
   };
-  if (!saveGuide(input.repoKey, id, envelope)) throw new Error("Could not write the guide.");
-  writeSidecar(input.repoKey, id, {
+  const sidecar: GuideSidecar = {
     v: 1,
     fileTicks: [],
     focus: input.focus,
@@ -230,8 +250,9 @@ export function saveFinishedGuide(input: SaveFinishedInput): string {
     agent: input.agent,
     ...(input.acpSessionId && { acpSessionId: input.acpSessionId }),
     ...(input.cost && { cost: input.cost }),
-  });
-  return id;
+    ...(input.diagramCheck && { diagramCheck: input.diagramCheck }),
+  };
+  return { repoKey: input.repoKey, id, envelope, rawPatch: snapshot.review.rawPatch, sidecar };
 }
 
 export interface LoadedGuide {
@@ -259,6 +280,7 @@ export function readSidecar(repoKey: string, id: string): GuideSidecar {
     ...(r.agent && { agent: r.agent }),
     ...(typeof r.acpSessionId === "string" && { acpSessionId: r.acpSessionId }),
     ...(r.cost && { cost: r.cost }),
+    ...((r.diagramCheck === "ok" || r.diagramCheck === "unchecked" || r.diagramCheck === "failed") && { diagramCheck: r.diagramCheck }),
   };
 }
 
@@ -266,6 +288,23 @@ export function writeSidecar(repoKey: string, id: string, sidecar: GuideSidecar)
   if (!isValidGuideId(id)) return;
   mkdirSync(vscodeDir(repoKey), { recursive: true });
   writeAtomic(join(vscodeDir(repoKey), `${id}.json`), JSON.stringify(sidecar, null, 2));
+}
+
+/** A guide as the portable snapshot exports are built from (null when its diff was not kept). */
+export function snapshotOfGuide(loaded: LoadedGuide): GuideSnapshot | null {
+  const env = loaded.envelope;
+  if (loaded.rawPatch === null || !env.review) return null;
+  return buildGuideSnapshot({
+    guide: env.guide,
+    reviewed: env.reviewed,
+    review: { rawPatch: loaded.rawPatch, gitRef: env.review.gitRef, diffType: env.review.diffType, base: env.review.base, source: env.review.source },
+    generator: {
+      engine: env.engine,
+      model: env.model,
+      generatedAt: env.generatedAt ? new Date(env.generatedAt).toISOString() : undefined,
+      customInstructions: env.customInstructions,
+    },
+  });
 }
 
 export function setChapterReviewed(repoKey: string, id: string, reviewed: boolean[]): boolean {
@@ -292,6 +331,8 @@ export interface RecentEntry {
   /** Drafts: chapters so far and files left. */
   draftInfo?: { chapters: number; filesLeft: number; status: DraftRecord["status"] };
   prNumber?: number;
+  /** Kept in memory only (guide history is off). */
+  sessionOnly?: boolean;
 }
 
 /**

@@ -6,7 +6,7 @@
 
 import { findExecutable } from "../sources/runner";
 import { readConfigSelect, type ConfigChoice, type ConfigSelect } from "./client";
-import type { SessionConfigOption } from "@agentclientprotocol/sdk";
+import type { AuthMethod, SessionConfigOption } from "@agentclientprotocol/sdk";
 
 export interface AgentDescriptor {
   id: "claude-code";
@@ -81,4 +81,41 @@ export function pickDefault(select: ConfigSelect | null, pattern: RegExp, rememb
   }
   const byPattern = select.options.find((o) => pattern.test(o.value) || pattern.test(o.name));
   return byPattern ?? select.options.find((o) => o.value === select.current) ?? select.options[0];
+}
+
+/**
+ * The `_meta` sent with `session/new` for a run. A pull request is someone
+ * else's code: its worktree may carry `.claude/settings.json` hooks, allow
+ * rules and MCP servers, and a `.mcp.json`, which Claude Code would load and
+ * run under the reviewer's account (hooks need no prompt). The adapter reads
+ * `_meta.claudeCode.options` and spreads it over its own options, so a PR run
+ * loads the user's settings only and no MCP server but the ones we pass.
+ * Local changes are the user's own checkout: their project settings apply.
+ */
+export function sessionMetaFor(source: { kind: "local" | "pr" }): Record<string, unknown> | undefined {
+  if (source.kind !== "pr") return undefined;
+  return { claudeCode: { options: { settingSources: ["user"], strictMcpConfig: true } } };
+}
+
+/** A sign-in the agent offers: run the agent's own command with these args in a terminal. */
+export interface LoginCommand {
+  label: string;
+  description?: string;
+  args: string[];
+  env?: Record<string, string>;
+}
+
+/**
+ * The terminal sign-ins the agent advertised in `initialize` (ACP terminal
+ * auth: run the agent's command with `args`). Empty when it offered none.
+ */
+export function loginCommands(authMethods: readonly AuthMethod[] | null | undefined): LoginCommand[] {
+  const out: LoginCommand[] = [];
+  for (const m of authMethods ?? []) {
+    if (!("type" in m) || m.type !== "terminal") continue;
+    const t = m as { name: string; description?: string | null; args?: string[]; env?: Record<string, string> };
+    if (!Array.isArray(t.args) || !t.args.every((a) => typeof a === "string")) continue;
+    out.push({ label: t.name, ...(t.description && { description: t.description }), args: t.args, ...(t.env && { env: t.env }) });
+  }
+  return out;
 }

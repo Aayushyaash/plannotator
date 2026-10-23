@@ -2,7 +2,9 @@
  * The extension as an ACP v1 client (SPEC 4.1). It starts the agent as a
  * child process over stdio, with the user's own environment, and adds no
  * tools of its own beyond the builder's MCP server: no `fs/*`, no
- * `terminal/*` (the agent reads with its own tools). Permission requests go to
+ * `terminal/*` (the agent reads with its own tools). It advertises terminal
+ * sign-in (`auth.terminal`), so the agent lists its own login commands for
+ * the "Sign in" button. Permission requests go to
  * a callback that shows the agent's own options; this module never answers
  * one by itself, except "cancelled" for a request still open when the turn is
  * cancelled, which ACP requires.
@@ -15,6 +17,7 @@ import {
   PROTOCOL_VERSION,
   ndJsonStream,
   type Agent,
+  type AuthMethod,
   type Client,
   type InitializeResponse,
   type McpServer,
@@ -26,6 +29,7 @@ import {
   type SessionNotification,
 } from "@agentclientprotocol/sdk";
 import { augmentedPath } from "../sources/runner";
+import { planSpawn } from "./spawn-plan";
 
 export interface AgentLaunch {
   command: string;
@@ -50,6 +54,36 @@ export interface AcpClientInfo {
 }
 
 const STDERR_TAIL = 8 * 1024;
+/** How long a stopped agent gets to end before its whole process group is killed. */
+const KILL_GRACE_MS = 3000;
+
+/** The ACP JSON-RPC error code for "authentication required". */
+export const ACP_AUTH_REQUIRED_CODE = -32000;
+
+/**
+ * Signal a process and everything it started. POSIX: the agent runs as the
+ * leader of its own process group, so the group is signalled even after the
+ * leader exited (its children stay in the group). Windows: `taskkill /T /F`
+ * kills the tree while the leader still runs; Windows has no group signal for
+ * a tree whose leader is gone (untested on Windows).
+ */
+export function killProcessTree(pid: number, signal: "SIGTERM" | "SIGKILL"): void {
+  if (process.platform === "win32") {
+    try {
+      const t = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+      t.on("error", () => {});
+      t.unref();
+    } catch {
+      // nothing more to do
+    }
+    return;
+  }
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // ESRCH: the whole group is gone
+  }
+}
 
 export class AcpClient {
   private readonly connection: ClientSideConnection;
@@ -59,6 +93,8 @@ export class AcpClient {
   private exited = false;
   private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null = null;
   private readonly exitWaiters: Array<() => void> = [];
+  private killTimer: ReturnType<typeof setTimeout> | null = null;
+  private stopped = false;
   initializeResult: InitializeResponse | null = null;
 
   private constructor(child: ChildProcess, private readonly handlers: AcpClientHandlers) {
@@ -103,9 +139,10 @@ export class AcpClient {
 
   /** Start the agent process and run `initialize`. */
   static async start(launch: AgentLaunch, handlers: AcpClientHandlers, clientInfo: AcpClientInfo): Promise<AcpClient> {
-    const child = spawn(launch.command, launch.args, {
+    const plan = planSpawn(launch.command, launch.args);
+    const child = spawn(plan.command, plan.args, {
       cwd: launch.cwd,
-      env: { ...process.env, PATH: augmentedPath(), ...launch.env },
+      env: { ...process.env, PATH: augmentedPath(), ...plan.env, ...launch.env },
       stdio: ["pipe", "pipe", "pipe"],
       // Its own process group, so Cancel can stop everything the agent started.
       detached: process.platform !== "win32",
@@ -121,7 +158,7 @@ export class AcpClient {
       client.initializeResult = await client.raceExit(
         client.connection.initialize({
           protocolVersion: PROTOCOL_VERSION,
-          clientCapabilities: {},
+          clientCapabilities: { auth: { terminal: true } },
           clientInfo,
         }),
         "initialize",
@@ -129,6 +166,11 @@ export class AcpClient {
     } catch (err) {
       client.dispose();
       throw err;
+    }
+    const agentVersion = client.initializeResult.protocolVersion;
+    if (agentVersion !== PROTOCOL_VERSION) {
+      client.dispose();
+      throw new Error(`The agent speaks ACP protocol version ${String(agentVersion)}; this extension speaks version ${PROTOCOL_VERSION}. Update the adapter, then try again.`);
     }
     return client;
   }
@@ -143,6 +185,11 @@ export class AcpClient {
 
   get hasExited(): boolean {
     return this.exited;
+  }
+
+  /** The sign-ins the agent offered in `initialize`. */
+  get authMethods(): readonly AuthMethod[] {
+    return this.initializeResult?.authMethods ?? [];
   }
 
   /** Reject when the process exits before the request answers, with its stderr. */
@@ -172,8 +219,8 @@ export class AcpClient {
     });
   }
 
-  newSession(cwd: string, mcpServers: McpServer[]): Promise<NewSessionResponse> {
-    return this.raceExit(this.connection.newSession({ cwd, mcpServers }), "session/new");
+  newSession(cwd: string, mcpServers: McpServer[], meta?: Record<string, unknown>): Promise<NewSessionResponse> {
+    return this.raceExit(this.connection.newSession({ cwd, mcpServers, ...(meta && { _meta: meta }) }), "session/new");
   }
 
   async setConfigOption(sessionId: string, configId: string, value: string): Promise<SessionConfigOption[]> {
@@ -196,26 +243,33 @@ export class AcpClient {
     }
   }
 
-  /** Stop the agent and everything it started (its process group). */
+  /**
+   * Stop the agent and everything it started: SIGTERM to its process group,
+   * then SIGKILL to the group after a grace period, whether or not the agent
+   * itself has exited by then (what it started may still run).
+   */
   dispose(): void {
     for (const c of this.pendingPermissions) c.abort();
-    if (this.exited || this.child.pid === undefined) return;
-    try {
-      if (process.platform !== "win32") process.kill(-this.child.pid, "SIGTERM");
-      else this.child.kill();
-    } catch {
-      this.child.kill();
-    }
     const pid = this.child.pid;
-    setTimeout(() => {
-      if (this.exited) return;
-      try {
-        if (process.platform !== "win32") process.kill(-pid, "SIGKILL");
-        else this.child.kill("SIGKILL");
-      } catch {
-        // already gone
-      }
-    }, 3000).unref?.();
+    if (pid === undefined || this.stopped) return;
+    this.stopped = true;
+    if (process.platform === "win32") {
+      killProcessTree(pid, "SIGKILL");
+      return;
+    }
+    killProcessTree(pid, "SIGTERM");
+    this.killTimer = setTimeout(() => killProcessTree(pid, "SIGKILL"), KILL_GRACE_MS);
+    this.killTimer.unref?.();
+  }
+
+  /** Kill the agent and everything it started now (VS Code is shutting down). */
+  kill(): void {
+    for (const c of this.pendingPermissions) c.abort();
+    const pid = this.child.pid;
+    if (pid === undefined) return;
+    this.stopped = true;
+    if (this.killTimer) clearTimeout(this.killTimer);
+    killProcessTree(pid, "SIGKILL");
   }
 
   /**

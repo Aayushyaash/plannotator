@@ -14,6 +14,7 @@ import { Readable, Writable } from "node:stream";
 import {
   AgentSideConnection,
   PROTOCOL_VERSION,
+  RequestError,
   ndJsonStream,
   type Agent,
   type SessionConfigOption,
@@ -27,7 +28,11 @@ type Step =
   | { usage: { cost: number } }
   | { plan: Array<{ content: string; status: "pending" | "in_progress" | "completed" }> }
   | { sleep: number }
-  | { exit: number };
+  | { exit: number }
+  /** Fail the turn with ACP's authRequired error, as the real adapter does when Claude Code is signed out. */
+  | { authRequired: true }
+  /** Start a grandchild that ignores SIGTERM and log its pid (process-tree cleanup). */
+  | { spawnStubborn: true };
 
 interface Script {
   models?: Array<{ value: string; name: string }>;
@@ -37,6 +42,8 @@ interface Script {
   steps: Step[];
   /** Delay between steps, ms. */
   pace?: number;
+  /** Answer `initialize` with this protocol version instead of ours. */
+  protocolVersion?: number;
 }
 
 const script: Script = JSON.parse(readFileSync(process.env.FAKE_ACP_SCRIPT ?? "", "utf8"));
@@ -113,13 +120,17 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 new AgentSideConnection((conn): Agent => ({
   async initialize(params) {
     log({ event: "initialize", clientCapabilities: params.clientCapabilities, clientInfo: params.clientInfo });
-    return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: { loadSession: false }, authMethods: [] };
+    // Like claude-agent-acp: terminal sign-ins only for a client that can run them.
+    const authMethods = params.clientCapabilities?.auth?.terminal
+      ? [{ id: "claude-ai-login", name: "Claude Subscription", type: "terminal" as const, args: ["--cli", "auth", "login", "--claudeai"] }]
+      : [];
+    return { protocolVersion: (script.protocolVersion ?? PROTOCOL_VERSION) as typeof PROTOCOL_VERSION, agentCapabilities: { loadSession: false }, authMethods };
   },
   async authenticate() {
     return {};
   },
   async newSession(params) {
-    log({ event: "newSession", cwd: params.cwd, mcpServers: params.mcpServers.map((s) => ({ name: s.name })) });
+    log({ event: "newSession", cwd: params.cwd, mcpServers: params.mcpServers.map((s) => ({ name: s.name })), meta: params._meta ?? null });
     if (script.newSessionError) throw new Error(script.newSessionError);
     const sessionId = `fake-${Date.now()}`;
     let mcp: McpClient | null = null;
@@ -189,6 +200,13 @@ new AgentSideConnection((conn): Agent => ({
         await sleep(step.sleep);
       } else if ("exit" in step) {
         process.exit(step.exit);
+      } else if ("authRequired" in step) {
+        throw RequestError.authRequired(undefined, "Not logged in · Please run /login");
+      } else if ("spawnStubborn" in step) {
+        // Same process group as the agent (not detached), ignores SIGTERM like a stuck tool.
+        const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: "ignore" });
+        await sleep(200);
+        log({ event: "stubborn", pid: child.pid });
       }
     }
     if (session.cancelled) {

@@ -5,7 +5,9 @@
  * No `vscode` here: the VS Code layer passes in how to ask for a permission,
  * how to resolve a symbol and how to render-check Mermaid, and draws `state`.
  * The draft is written to disk after every builder call, so a stopped run can
- * be resumed or saved as is.
+ * be resumed or saved as is; with guide history off (`PLANNOTATOR_GUIDE_HISTORY=0`
+ * or `{ "guideHistory": false }`) nothing is written and the guide lives in
+ * memory for this VS Code session only.
  */
 
 import { readFile } from "node:fs/promises";
@@ -25,15 +27,18 @@ import {
   type GuideSymbolResolution,
 } from "./core/adapter";
 import type { GuideLaunchReview, GuideSnapshot } from "@plannotator/core/guide-format";
-import { AcpClient, readConfigSelect, type AcpClientInfo, type AgentLaunch } from "./acp/client";
+import { ACP_AUTH_REQUIRED_CODE, AcpClient, readConfigSelect, type AcpClientInfo, type AgentLaunch } from "./acp/client";
+import { loginCommands, sessionMetaFor, type LoginCommand } from "./acp/agents";
 import type { RelayHost, RelaySession } from "./mcp/relay-host";
 import type { ChangedFileInfo } from "./sources/git";
 import { buildGuidePrompt } from "./prompt";
 import {
+  buildFinishedGuide,
   deleteDraftRecord,
   newDraftId,
   saveDraftRecord,
   saveFinishedGuide,
+  type LoadedGuide,
   snapshotSource,
   sourceGitRef,
   type AgentChoiceRecord,
@@ -82,6 +87,12 @@ export interface GenerationState {
   /** Model and effort the agent reports after our choice was applied. */
   appliedModel?: string;
   appliedEffort?: string;
+  /** The run failed because the agent is not signed in; these are its own login commands. */
+  signIn?: { logins: LoginCommand[] };
+  /** Guide history is off: nothing of this run is written to disk. */
+  memoryOnly?: boolean;
+  /** The overview diagram was saved without a render check (no Guides webview could run one). */
+  diagramUnchecked?: boolean;
 }
 
 export interface GenerationDeps {
@@ -97,6 +108,8 @@ export interface GenerationDeps {
   checkMermaid(source: string): Promise<{ ok: true; checked: boolean } | { ok: false; message: string; line?: number }>;
   log?(line: string): void;
   now?(): number;
+  /** Guide history (default on). Off: no draft or guide is written; the guide is kept in memory. */
+  history?: boolean;
 }
 
 export interface GenerationInput {
@@ -125,12 +138,18 @@ export class GuideGeneration {
   private builderQueue: Promise<unknown> = Promise.resolve();
   private readonly hooks: GuideBuilderHooks;
   private readonly now: () => number;
+  private readonly history: boolean;
+  /** Render-check results per Mermaid source: "ok", or "unchecked" when no webview could run it. */
+  private readonly diagramChecks = new Map<string, "ok" | "unchecked">();
+  /** With history off, the finished guide (nothing on disk). */
+  memoryGuide: LoadedGuide | null = null;
 
   constructor(
     private readonly input: GenerationInput,
     private readonly deps: GenerationDeps,
   ) {
     this.now = deps.now ?? Date.now;
+    this.history = deps.history !== false;
     const draft = input.resume?.draft ?? createGuideDraft({
       review: launchReview(input),
       generator: {
@@ -155,6 +174,7 @@ export class GuideGeneration {
       draft,
       progress: guideDraftProgress(draft),
       marks: { added: [], moved: {} },
+      ...(!this.history && { memoryOnly: true }),
     };
   }
 
@@ -186,6 +206,7 @@ export class GuideGeneration {
       resolveSymbol: ({ name, path }) => this.deps.resolveSymbol(name, path, files, headRoot),
       checkMermaid: async (src) => {
         const r = await this.deps.checkMermaid(src);
+        if (r.ok) this.diagramChecks.set(src, r.checked ? "ok" : "unchecked");
         return r.ok ? { ok: true } : { ok: false, error: `${r.line ? `Line ${r.line}: ` : ""}${r.message}` };
       },
       now: () => new Date(this.now()).toISOString(),
@@ -199,9 +220,9 @@ export class GuideGeneration {
     return full;
   }
 
-  private persist(): void {
-    if (this.state.status === "finished") return;
-    const record: DraftRecord = {
+  /** The run as a draft record (what is written to disk after every builder call). */
+  toDraftRecord(): DraftRecord {
+    return {
       v: 1,
       id: this.state.id,
       repoKey: this.state.repoKey,
@@ -216,6 +237,11 @@ export class GuideGeneration {
       ...(this.state.acpSessionId && { acpSessionId: this.state.acpSessionId }),
       ...(this.state.cost && { cost: this.state.cost }),
     };
+  }
+
+  private persist(): void {
+    if (this.state.status === "finished" || !this.history) return;
+    const record = this.toDraftRecord();
     try {
       saveDraftRecord(record);
     } catch (err) {
@@ -246,7 +272,7 @@ export class GuideGeneration {
         onStderr: (text) => this.deps.log?.(`[agent] ${text.trimEnd()}`),
       }, this.deps.clientInfo);
       if (this.cancelled) return this.stop("Cancelled before the agent started.");
-      const session = await this.client.newSession(source.headRoot, [mcpServer]);
+      const session = await this.client.newSession(source.headRoot, [mcpServer], sessionMetaFor(source));
       this.state.acpSessionId = session.sessionId;
       await this.applyChoices(session.sessionId, session.configOptions ?? []);
       if (this.cancelled) return this.stop("Cancelled.");
@@ -265,8 +291,10 @@ export class GuideGeneration {
       if (this.state.savedGuideId) return this.finish();
       if (this.cancelled) return this.stop("Cancelled.");
       const message = this.client ? await this.client.describeFailure(err) : err instanceof Error ? err.message : String(err);
+      const needsSignIn = (err as { code?: unknown } | null)?.code === ACP_AUTH_REQUIRED_CODE || AUTH_TEXT.test(message);
       this.state.status = "failed";
-      this.state.statusMessage = authHint(message) ?? message;
+      this.state.statusMessage = needsSignIn ? `${this.input.agent.label} is not signed in. Sign in, then resume the guide.\n${message}` : message;
+      if (needsSignIn) this.state.signIn = { logins: loginCommands(this.client?.authMethods) };
       this.state.endedAt = this.now();
       this.addActivity({ kind: "error", title: "The run failed", detail: this.state.statusMessage, isError: true });
       this.persist();
@@ -302,9 +330,18 @@ export class GuideGeneration {
   private finish(): void {
     this.state.status = "finished";
     this.state.endedAt = this.now();
-    this.state.statusMessage = "Saved.";
-    deleteDraftRecord(this.input.repoKey, this.state.id);
+    const notes = [this.history ? "Saved." : "Done. Not saved: guide history is off, so this guide is kept only until VS Code closes."];
+    if (this.state.diagramUnchecked) notes.push("The overview diagram was not render-checked (no Guides tab was open); it is checked when the guide opens.");
+    this.state.statusMessage = notes.join(" ");
+    if (this.history) deleteDraftRecord(this.input.repoKey, this.state.id);
     this.emit();
+  }
+
+  /** Stop the agent and everything it started at once (VS Code is closing). */
+  kill(): void {
+    this.cancelled = true;
+    this.client?.kill();
+    this.relaySession?.dispose();
   }
 
   private stop(message: string): void {
@@ -351,7 +388,10 @@ export class GuideGeneration {
   }
 
   private saveGuide(snapshot: GuideSnapshot, draft: GuideDraft): string {
-    return saveFinishedGuide({
+    const diagram = (snapshot.guide as { overview?: { diagram?: { source?: string } } }).overview?.diagram?.source;
+    const diagramCheck = diagram === undefined ? undefined : this.diagramChecks.get(diagram) ?? "unchecked";
+    if (diagramCheck === "unchecked") this.state.diagramUnchecked = true;
+    const input = {
       repoKey: this.input.repoKey,
       snapshot,
       source: this.input.source,
@@ -359,8 +399,12 @@ export class GuideGeneration {
       focus: focusMap(draft),
       ...(this.state.acpSessionId && { acpSessionId: this.state.acpSessionId }),
       ...(this.state.cost && { cost: this.state.cost }),
+      ...(diagramCheck && { diagramCheck }),
       now: this.now(),
-    });
+    };
+    if (this.history) return saveFinishedGuide(input);
+    this.memoryGuide = buildFinishedGuide(input);
+    return this.memoryGuide.id;
   }
 
   // -------------------------------------------------------------------------
@@ -394,9 +438,11 @@ export class GuideGeneration {
         this.emit();
         return { text: `The guide could not be saved: ${message}`, isError: true };
       }
-      this.addActivity({ kind: "builder", title: name, detail: "saved", status: "completed" });
+      this.addActivity({ kind: "builder", title: name, detail: this.history ? "saved" : "done (not saved: guide history is off)", status: "completed" });
+      if (this.state.diagramUnchecked) this.addActivity({ kind: "info", title: "The overview diagram was not render-checked here; it is checked when the guide opens." });
       this.emit();
-      return { text: `${answer.text}\nThe reader opens the guide now; end your turn.`, isError: false };
+      const unchecked = this.state.diagramUnchecked ? "\nThe overview diagram could not be render-checked (no Guides tab is open); the reader checks it when the guide opens." : "";
+      return { text: `${answer.text}${unchecked}\nThe reader opens the guide now; end your turn.`, isError: false };
     }
     this.addActivity({
       kind: "builder",
@@ -501,12 +547,7 @@ export class GuideGeneration {
   }
 }
 
-function authHint(message: string): string | null {
-  if (/auth(entication)?[_ ]required|not (logged|signed) in|please (log|sign) in|\/login/i.test(message)) {
-    return `Claude Code is not signed in. Run \`claude\` in a terminal and sign in (/login), then try again.\n${message}`;
-  }
-  return null;
-}
+const AUTH_TEXT = /auth(entication)?[_ ]required|not (logged|signed) in|please (log|sign) in|\/login/i;
 
 /** One-line description of a builder call for the activity stream. */
 export function builderDetail(name: string, args: unknown, draft: GuideDraft, ok: boolean, answer: string): string {
