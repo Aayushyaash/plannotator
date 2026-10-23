@@ -81,7 +81,7 @@ a:hover { text-decoration: underline; color: var(--vscode-textLink-activeForegro
 }
 .pn-banner b { color: var(--vscode-editor-foreground); font-weight: 600; }
 .pn-banner .pn-action { margin-left: auto; }
-.pn-agent-mark { color: #d97757; }
+.pn-agent-mark { color: var(--vscode-textLink-foreground); }
 .pn-note { margin: 8px 0; color: var(--vscode-descriptionForeground); }
 .pn-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 28px; }
 .pn-card {

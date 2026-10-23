@@ -108,8 +108,19 @@ const shots: Array<{ name: string; state: GeneratingViewState; element?: string 
       ...base,
       agent: "Codex",
       modelEffort: "gpt-5.5-codex · Low",
+      cost: null,
       pendingPermissions: [],
       offerAutoApprove: false,
+      activity: [
+        { id: 1, at: "0:00", kind: "info", title: "Starting Codex", detail: "With your own settings: you approve what it asks about." },
+        { id: 2, at: "0:05", kind: "message", title: "I'll read the retry policy and the delivery loop, then group them into chapters." },
+        { id: 3, at: "0:08", kind: "tool", title: "Read src/retryPolicy.ts", status: "completed", locations: [{ path: "src/retryPolicy.ts", line: 1 }] },
+        { id: 4, at: "0:14", kind: "builder", title: "guide_set_header", detail: "title and intent", status: "completed" },
+        { id: 5, at: "0:20", kind: "builder", title: "guide_add_chapter", detail: "1 · The retry budget", status: "completed" },
+        { id: 6, at: "0:51", kind: "permission", title: "Turned down: Run npm test -- retryPolicy", detail: "No", status: "failed" },
+        { id: 7, at: "0:58", kind: "tool", title: "Run git fetch", status: "failed", isError: true },
+        { id: 8, at: "0:58", kind: "info", title: "Codex's sandbox blocked Run git fetch", isError: true },
+      ],
       bottlenecks: [
         { key: "turned-down", title: "You turned down Run npm test -- retryPolicy", detail: "Codex will try another way. Approve automatically to let its requests through for the rest of this run.", action: "approveRun" },
         { key: "blocked:sandbox:Run git fetch", title: "Codex's sandbox blocked Run git fetch", detail: "\"error: cannot open .git/FETCH_HEAD: Read-only file system\" The guide can still be written without it. Approving automatically switches Codex to a mode that lets it run, where it has one.", action: "approveRun" },
@@ -120,11 +131,18 @@ const shots: Array<{ name: string; state: GeneratingViewState; element?: string 
     name: "bottleneck-stopped",
     state: {
       ...base,
+      kicker: "Draft guided review · PR #482",
       status: "stopped",
       endedAt: Date.now(),
       statusMessage: "The agent ended its turn without calling guide_finish.",
       pendingPermissions: [],
       offerAutoApprove: false,
+      activity: [
+        ...base.activity.slice(0, 5),
+        { id: 6, at: "1:12", kind: "permission", title: "Turned down: Run npm test -- retryPolicy", detail: "No", status: "failed" },
+        { id: 7, at: "1:13", kind: "info", title: "You turned down Run npm test -- retryPolicy", isError: true },
+        { id: 8, at: "1:40", kind: "info", title: "The agent ended its turn without calling guide_finish." },
+      ],
       bottlenecks: [
         { key: "turned-down", title: "You turned down Run npm test -- retryPolicy", detail: "Claude Code will try another way. Approve automatically to let its requests through for the rest of this run.", action: "approveRun" },
         { key: "ended-blocked", title: "The run ended after requests were turned down or blocked", detail: "Resume it with automatic approval to let the agent's requests through.", action: "resumeWithApproval" },
@@ -132,6 +150,36 @@ const shots: Array<{ name: string; state: GeneratingViewState; element?: string 
     },
   },
 ];
+
+/**
+ * A MOCK of the start flow's last Quick Pick step (VS Code draws the real one;
+ * the item texts are the ones `pickModelAndEffort` in new-review.ts builds).
+ */
+const QUICK_PICK_MOCK = `
+<div class="qp">
+  <div class="qp-title"><span>New Guided Review</span><span class="qp-step">4/4</span></div>
+  <div class="qp-input">Effort for Sonnet</div>
+  <div class="qp-item qp-active"><span>Low</span><span class="qp-desc">default</span></div>
+  <div class="qp-item"><span>Medium</span></div>
+  <div class="qp-item"><span>High</span></div>
+  <div class="qp-sep"></div>
+  <div class="qp-item qp-two"><div><span class="codicon codicon-edit"></span> Add instructions for this guide… <span class="qp-desc">optional</span></div><div class="qp-detail">Standing instructions: none (set them in Plannotator's web app)</div></div>
+  <div class="qp-item qp-two"><div><span class="codicon codicon-lock"></span> Approve the agent's requests automatically: off <span class="qp-desc">you approve each request</span></div><div class="qp-detail">Off: Claude Code runs with your own settings and you answer what it asks about. Pick to turn on for this guide.</div></div>
+</div>
+<div class="qp-note">Mock of VS Code's Quick Pick: the start flow's effort step with the automatic-approval toggle.</div>
+<style>
+.qp { width: 640px; margin: 24px auto 8px; background: #252526; border: 1px solid #454545; border-radius: 6px; box-shadow: 0 8px 24px #0008; font-size: 13px; color: #cccccc; padding-bottom: 6px; }
+.qp-title { display: flex; justify-content: space-between; padding: 6px 10px; font-weight: 600; }
+.qp-step { color: #9d9d9d; font-weight: 400; }
+.qp-input { margin: 0 8px 6px; padding: 4px 6px; border: 1px solid #0078d4; border-radius: 2px; color: #8b8b8b; background: #313131; }
+.qp-item { padding: 3px 12px; display: flex; gap: 8px; }
+.qp-two { display: block; padding: 4px 12px; }
+.qp-active { background: #04395e; outline: 1px solid #0078d4; }
+.qp-desc { color: #9d9d9d; font-size: 12px; margin-left: 6px; }
+.qp-detail { color: #9d9d9d; font-size: 12px; margin-left: 20px; }
+.qp-sep { border-top: 1px solid #454545; margin: 4px 0; }
+.qp-note { text-align: center; color: #9d9d9d; font-size: 12px; }
+</style>`;
 
 const work = mkdtempSync(join(tmpdir(), "pn-approvals-shots-"));
 try {
@@ -156,6 +204,11 @@ try {
       else await page.screenshot({ path, fullPage: true });
       console.log(path);
     }
+    await page.setContent(`<html><head><link rel="stylesheet" href="${pathToFileURL(join(dist, "codicons", "codicon.css"))}"><style>${THEME}</style></head><body><div id="mock">${QUICK_PICK_MOCK}</div></body></html>`);
+    await page.waitForTimeout(150);
+    const mockPath = join(outDir, "start-flow-quickpick-mock.png");
+    await page.locator("#mock").screenshot({ path: mockPath });
+    console.log(mockPath);
   } finally {
     await browser.close();
   }
