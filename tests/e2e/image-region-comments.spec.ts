@@ -327,6 +327,10 @@ test('phone: the switch sits at the bottom, one finger draws, the composer and t
       expect(stripBox.y).toBeGreaterThan(stageBox.y + stageBox.height / 2);
       await viewer.getByRole('radio', { name: 'Region' }).tap();
       await expect(viewer.locator('[data-region-hint]')).toHaveText('One finger draws · two fingers move the image');
+      // In Region a tap beside the image does not close the viewer (in Move it does, #2067).
+      await page.touchscreen.tap(stageBox.x + stageBox.width / 2, stageBox.y + 90);
+      await page.waitForTimeout(400);
+      await expect(viewer).toBeVisible();
       // One finger, through the DevTools protocol (a real touch, pointerType "touch").
       const { at } = await stageGeometry(page);
       const a = at(scheme === 'light' ? 1240 : 2400, 300);

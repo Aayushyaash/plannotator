@@ -408,3 +408,27 @@ test.skipIf(!hasDom)('a comment is anchored only while the document references i
   await mountHost('# Doc\n\n![one](data.png)\n\n![two](a.png.bak)\n', [saved], reports);
   expect(reports.filter((r) => r.attempted.includes('r2')).at(-1)!.unanchored).toContain('r2');
 });
+
+test.skipIf(!hasDom)('a single image: in Move a tap beside the image closes the viewer (its click swallowed, #2067); in Region it does not', async () => {
+  await mountHost(MARKDOWN);
+  const { stage } = await openViewer();
+  // At Fit the image spans y 50 to 550: (500, 10) is beside it.
+  const tapBeside = async () => {
+    await pointer(stage, 'pointerdown', 500, 10);
+    await pointer(stage, 'pointerup', 500, 10);
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    await act(async () => { stage.dispatchEvent(click); });
+    await settle();
+    return click;
+  };
+
+  await act(async () => document.querySelector<HTMLButtonElement>('[data-region-tool="region"]')!.click());
+  await tapBeside();
+  expect(document.querySelector('[data-image-lightbox]')).not.toBeNull();
+
+  await act(async () => document.querySelector<HTMLButtonElement>('[data-region-tool="move"]')!.click());
+  const click = await tapBeside();
+  expect(document.querySelector('[data-image-lightbox]')).toBeNull();
+  // The overlay takes the click with it, so nothing beneath receives it.
+  expect(click.defaultPrevented).toBe(true);
+});

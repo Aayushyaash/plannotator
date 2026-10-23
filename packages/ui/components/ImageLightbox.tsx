@@ -719,6 +719,10 @@ export const ImageLightbox: React.FC<{
                 onModeChange={setZoomMode}
                 onScaleChange={setScale}
                 onImageLoad={setDims}
+                // A single image keeps #2067's tap beside the image to close
+                // (its click swallowed so the page beneath never gets it), in
+                // Move only: in Region a press there may start a box.
+                onBackgroundTap={!stepping && !drawing ? onClose : undefined}
                 onViewChange={regionsOn ? (v, stage, eased) => setView({ view: v, stage, eased }) : undefined}
                 drawing={drawing}
                 onDraw={drawing ? onDraw : undefined}
