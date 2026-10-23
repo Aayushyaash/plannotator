@@ -5,9 +5,11 @@
  * background auto-update (packages/server/auto-update.ts).
  *
  * The machine asks GitHub: at most once an hour per data dir, and after a
- * failed check (offline, 403/429, a proxy) no sooner than an hour later.
- * One unauthenticated request an hour is well inside GitHub's 60 per hour
- * per IP.
+ * failed check (offline, a 5xx, a proxy) no sooner than an hour later. One
+ * unauthenticated request an hour per machine; machines behind one IP (an
+ * office NAT, a CI fleet) share GitHub's 60 per hour per IP, so a rate-limited
+ * answer (403/429) waits longer: until GitHub's `Retry-After` or
+ * `x-ratelimit-reset`, at least an hour and at most 6 h, else 6 h.
  * The answer is cached in `update-state.json` beside auto-update's own state,
  * and the release notes in `update-notes/<version>.json`, so a check made by
  * one process reaches every other one without a second request.
@@ -30,6 +32,11 @@ import { getPlannotatorDataDir } from "./data-dir";
 export const RELEASE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 /** After a failed check: try again no sooner than this, never in a loop. */
 export const RELEASE_CHECK_RETRY_MS = 60 * 60 * 1000;
+/**
+ * After GitHub refused for its rate limit (403/429): wait until the time it
+ * names, kept between RELEASE_CHECK_RETRY_MS and this; this when it names none.
+ */
+export const RELEASE_CHECK_RATE_LIMITED_RETRY_MS = 6 * 60 * 60 * 1000;
 /**
  * One release's notes or images (by its tag): asked again no sooner than
  * this after an answer that carried nothing new (the release body is edited
@@ -113,6 +120,11 @@ export interface UpdateState {
     /** Set when that attempt failed; the next one waits RELEASE_CHECK_RETRY_MS. */
     failedAt?: number;
     error?: string;
+    /**
+     * Set when GitHub refused for its rate limit: no request before this
+     * (read as at most RELEASE_CHECK_RATE_LIMITED_RETRY_MS after the attempt).
+     */
+    retryAt?: number;
   };
   /** The install this process (or an earlier one) started. */
   pending?: {
@@ -217,16 +229,20 @@ export function knownLatestRelease(state: UpdateState): { version: string; fetch
 /**
  * Whether it is time to ask GitHub: never while the cached answer is under
  * an hour old, and never within an hour of the last attempt (a failure, or
- * another process's request still in flight).
+ * another process's request still in flight), or before the time a
+ * rate-limited answer named (`retryAt`, at most 6 h after the attempt).
  */
 export function isReleaseCheckDue(state: UpdateState, now: number): boolean {
   if (cachedLatestTag(state, now)) return false;
   const attempt = state.releaseCheck?.attemptedAt;
   // A clock that moved backwards must not freeze checks until it catches up.
-  if (typeof attempt === "number" && Number.isFinite(attempt) && attempt <= now && now - attempt < RELEASE_CHECK_RETRY_MS) {
-    return false;
-  }
-  return true;
+  if (typeof attempt !== "number" || !Number.isFinite(attempt) || attempt > now) return true;
+  const retryAt = state.releaseCheck?.retryAt;
+  const wait =
+    typeof retryAt === "number" && Number.isFinite(retryAt) && retryAt > attempt
+      ? Math.min(Math.max(retryAt - attempt, RELEASE_CHECK_RETRY_MS), RELEASE_CHECK_RATE_LIMITED_RETRY_MS)
+      : RELEASE_CHECK_RETRY_MS;
+  return now - attempt >= wait;
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +350,36 @@ export interface FetchedRelease {
   body?: string;
 }
 
-export type FetchReleaseResult = { ok: true; release: FetchedRelease } | { ok: false; error: string };
+export type FetchReleaseResult =
+  | { ok: true; release: FetchedRelease }
+  | {
+      ok: false;
+      error: string;
+      /** GitHub refused for its rate limit (403/429). */
+      rateLimited?: boolean;
+      /** How long GitHub asked us to wait (`Retry-After` or `x-ratelimit-reset`), when it said. */
+      retryAfterMs?: number;
+    };
+
+/**
+ * How long a rate-limited answer asks to wait: `Retry-After` (seconds or an
+ * HTTP date), else `x-ratelimit-reset` (epoch seconds). Undefined when neither
+ * parses to a time in the future.
+ */
+export function rateLimitWaitMs(headers: Headers, now: number = Date.now()): number | undefined {
+  const retryAfter = headers.get("retry-after")?.trim();
+  if (retryAfter) {
+    if (/^\d+$/.test(retryAfter)) return Number(retryAfter) * 1000;
+    const at = Date.parse(retryAfter);
+    if (Number.isFinite(at) && at > now) return at - now;
+  }
+  const reset = headers.get("x-ratelimit-reset")?.trim();
+  if (reset && /^\d+$/.test(reset)) {
+    const at = Number(reset) * 1000;
+    if (at > now) return at - now;
+  }
+  return undefined;
+}
 
 /**
  * The API URL: PLANNOTATOR_UPDATE_API_URL, a testing / proxy knob like
@@ -374,12 +419,16 @@ export function releaseTagApiUrl(version: string, env: NodeJS.ProcessEnv = proce
 async function fetchReleaseObject(
   url: string,
   fetchImpl: typeof fetch,
-): Promise<{ ok: true; release: FetchedRelease; draft: boolean; prerelease: boolean } | { ok: false; error: string }> {
+): Promise<{ ok: true; release: FetchedRelease; draft: boolean; prerelease: boolean } | Extract<FetchReleaseResult, { ok: false }>> {
   try {
     const res = await fetchImpl(url, {
       headers: { accept: "application/vnd.github+json", "user-agent": "plannotator-update-check" },
       signal: AbortSignal.timeout(10_000),
     });
+    if (res.status === 403 || res.status === 429) {
+      const wait = rateLimitWaitMs(res.headers);
+      return { ok: false, error: `HTTP ${res.status}`, rateLimited: true, ...(wait !== undefined && { retryAfterMs: wait }) };
+    }
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
     const body = (await res.json()) as { tag_name?: unknown; draft?: unknown; prerelease?: unknown; published_at?: unknown; body?: unknown };
     if (typeof body.tag_name !== "string") return { ok: false, error: "no tag_name in the answer" };
@@ -462,9 +511,28 @@ export async function runReleaseCheck(deps: ReleaseCheckDeps): Promise<ReleaseCh
   const version = result.ok ? normalizeStableVersion(result.release.tag) : null;
   if (!result.ok || !version) {
     const error = result.ok ? `not a stable version: ${JSON.stringify(result.release.tag).slice(0, 80)}` : result.error;
-    updateLog(`could not read the latest release (${error}); next try in 1h`, dataDir);
+    const rateLimited = !result.ok && result.rateLimited === true;
+    const waitMs = rateLimited
+      ? Math.min(
+          Math.max(!result.ok && result.retryAfterMs !== undefined ? result.retryAfterMs : RELEASE_CHECK_RATE_LIMITED_RETRY_MS, RELEASE_CHECK_RETRY_MS),
+          RELEASE_CHECK_RATE_LIMITED_RETRY_MS,
+        )
+      : RELEASE_CHECK_RETRY_MS;
+    const wait = waitMs >= 60 * 60 * 1000 ? `${Math.round((waitMs / 3_600_000) * 10) / 10}h` : `${Math.round(waitMs / 60_000)}m`;
+    updateLog(`could not read the latest release (${error}${rateLimited ? ", rate limited" : ""}); next try in ${wait}`, dataDir);
     try {
-      patchUpdateState((s) => ({ ...s, releaseCheck: { attemptedAt: now, failedAt: now, error: error.slice(0, 200) } }), dataDir);
+      patchUpdateState(
+        (s) => ({
+          ...s,
+          releaseCheck: {
+            attemptedAt: now,
+            failedAt: now,
+            error: error.slice(0, 200),
+            ...(rateLimited && { retryAt: now + waitMs }),
+          },
+        }),
+        dataDir,
+      );
     } catch {}
     return { outcome: "failed", error };
   }

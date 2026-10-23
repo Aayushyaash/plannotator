@@ -410,7 +410,8 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
       await probeBinary();
       if (release) {
         // The hourly check: answers from the cache within its window, so this
-        // asks GitHub at most once an hour (also an hour after a failure).
+        // asks GitHub at most once an hour (an hour after a failure, up to
+        // 6 h after GitHub's rate limit).
         await runReleaseCheck({
           dataDir: options.dataDir,
           now,

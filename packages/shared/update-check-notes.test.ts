@@ -15,6 +15,7 @@ import {
   readUpdateState,
   RELEASE_ASSETS_FETCH_INTERVAL_MS,
   RELEASE_ASSETS_FETCH_RETRY_MS,
+  RELEASE_CHECK_RETRY_MS,
   releaseTagApiUrl,
   writeReleaseNotes,
 } from "./update-check";
@@ -112,6 +113,8 @@ describe("fetchReleaseNotesFor", () => {
     expect(await fetchNotes("0.28.19")).toEqual({ outcome: "failed", error: "HTTP 403" });
     expect(readUpdateState(dataDir).notesFetch?.["0.28.19"]).toMatchObject({ attemptedAt: NOW, failedAt: NOW, error: "HTTP 403" });
     expect((await fetchNotes("0.28.19", { now: NOW + 60_000 })).outcome).toBe("not-due");
+    // Notes keep their own back-off, not the hourly release check's.
+    expect((await fetchNotes("0.28.19", { now: NOW + RELEASE_CHECK_RETRY_MS })).outcome).toBe("not-due");
     expect((await fetchNotes("0.28.19", { now: NOW + RELEASE_ASSETS_FETCH_RETRY_MS - 1 })).outcome).toBe("not-due");
     expect(seen.length).toBe(1);
     answer = (path) => Response.json({ tag_name: "v0.28.19", body: bodyFor("0.28.19"), path });

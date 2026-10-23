@@ -357,7 +357,8 @@ export async function runAutoUpdateCheck(deps: AutoUpdateDeps): Promise<AutoUpda
   const others = otherOpenSessions(deps.listSessions(), deps.pid);
   if (others.length > 0) {
     // Do not spend the 24h install window: the next session start retries,
-    // answering from the cached release instead of querying GitHub again.
+    // answering from the cached release while it is under an hour old, and
+    // otherwise through the release check's own throttle.
     restoreWindow();
     log(
       `${latest} is available; skipped because ${others.length} other Plannotator session(s) are open`,
