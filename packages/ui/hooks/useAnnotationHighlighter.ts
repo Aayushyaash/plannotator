@@ -1253,6 +1253,10 @@ export function useAnnotationHighlighter({
       // verdict, so it is neither attempted nor unanchored here (the same
       // rule the raw-HTML pinpoints follow on their surface).
       if (ann.diagramAnchor) return;
+      // A comment on part of an image has no text either: the image viewer
+      // draws its box, and the Viewer reports it unanchored when its image is
+      // gone from the document.
+      if (ann.imageRegion != null) return;
       // An answer to a `:::question` block quotes the prompt but is not a
       // selection: the question block draws it from the annotation, so it is
       // never painted as a highlight (and never reported as unanchored here).

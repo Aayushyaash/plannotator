@@ -45,6 +45,7 @@ import type { AnnotationRestoreReport } from '@plannotator/ui/hooks/useAnnotatio
 import { HtmlViewer } from '@plannotator/ui/components/html-viewer';
 import { MarkdownEditor, type MarkdownEditorHandle } from '@plannotator/ui/components/MarkdownEditor';
 import { AnnotationPanel } from '@plannotator/ui/components/AnnotationPanel';
+import { loadableImageSrc } from '@plannotator/ui/components/ImageRegions';
 import { DocumentAIChatPanel } from '@plannotator/ui/components/ai/DocumentAIChatPanel';
 import { SparklesIcon } from '@plannotator/ui/components/SparklesIcon';
 import { ExportModal } from '@plannotator/ui/components/ExportModal';
@@ -7044,6 +7045,11 @@ const App: React.FC = () => {
     );
   };
 
+  // Region cards (#2100) show a crop of their image, loaded the way the
+  // document loads it.
+  const regionImageBaseDir = linkedDocHook.isActive ? activeDocBaseDir : imageBaseDir;
+  const imageRegionThumbSrc = useCallback((src: string) => loadableImageSrc(src, regionImageBaseDir), [regionImageBaseDir]);
+
   const renderAnnotationPanel = (presentation: 'panel' | 'embedded', isOpen = true) => (
     <AnnotationPanel
       isOpen={isOpen}
@@ -7091,6 +7097,7 @@ const App: React.FC = () => {
       readOnly={documentReadOnly}
       questionRows={questionRows.length > 0 ? questionRows : undefined}
       onSelectQuestion={handleSelectQuestionRow}
+      imageRegionSrc={imageRegionThumbSrc}
     />
   );
 
@@ -7693,6 +7700,10 @@ const App: React.FC = () => {
                     ref={viewerRef}
                     // The light version of the Inbox's one viewer: the lightbox steps through the document's images (approval "inbox-image-viewer").
                     imageLightboxStepping
+                    // Comments on part of an image (#2100, approval "image-region-comments").
+                    imageRegionComments
+                    onDeleteAnnotation={handleDeleteAnnotation}
+                    onEditAnnotation={handleEditAnnotation}
                     onRestoreReport={handleRestoreReport}
                     blocks={blocks}
                     markdown={displayedMarkdown}
