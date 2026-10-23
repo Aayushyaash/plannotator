@@ -103,4 +103,44 @@ describe("builder MCP relay", () => {
     const code = await new Promise<number | null>((r) => child.once("exit", r));
     expect(code).toBe(2);
   });
+
+  it("closes a connection that never proves its session", async () => {
+    host = await startRelayHost({ serverVersion: "test", helloTimeoutMs: 200 });
+    host.openSession(tools);
+    const socket = connect(host.socketPath);
+    await new Promise((r) => socket.once("connect", r));
+    const started = Date.now();
+    await new Promise((r) => socket.once("close", r));
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  it("counts the line limit in bytes and keeps a character split across chunks whole", async () => {
+    host = await startRelayHost({ serverVersion: "test", maxLineBytes: 128 });
+    const seen: unknown[] = [];
+    const session = host.openSession({ ...tools, callTool: async (_name, args) => (seen.push(args), { text: "ok", isError: false }) });
+    const hello = (socket: ReturnType<typeof connect>) => socket.write(`${JSON.stringify({ hello: RELAY_HELLO, token: session.token })}\n`);
+
+    // 50 three-byte characters: 50 characters but 150 bytes. Over a 128-byte limit, so the connection ends.
+    const over = connect(host.socketPath);
+    await new Promise((r) => over.once("connect", r));
+    hello(over);
+    over.write(`${"\u20ac".repeat(50)}`);
+    await new Promise((r) => over.once("close", r));
+
+    // Under the limit (about 100 bytes), a multi-byte character sent in two chunks arrives whole.
+    const ok = connect(host.socketPath);
+    await new Promise((r) => ok.once("connect", r));
+    hello(ok);
+    const line = Buffer.from(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "guide_read", arguments: { s: "\u20ac" } } })}\n`, "utf8");
+    const cut = line.indexOf(0xe2) + 1;
+    let received = "";
+    ok.on("data", (d) => (received += d.toString()));
+    ok.write(line.subarray(0, cut));
+    await new Promise((r) => setTimeout(r, 50));
+    ok.write(line.subarray(cut));
+    for (let i = 0; i < 50 && !received.includes("\n"); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(JSON.parse(received.split("\n")[0]).result.content[0].text).toBe("ok");
+    expect(seen).toEqual([{ s: "\u20ac" }]);
+    ok.destroy();
+  });
 });

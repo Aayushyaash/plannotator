@@ -20,8 +20,10 @@ export const RELAY_SOCKET_ENV = "PLANNOTATOR_GUIDE_MCP_SOCKET";
 export const RELAY_TOKEN_ENV = "PLANNOTATOR_GUIDE_MCP_TOKEN";
 /** First line the relay script sends. */
 export const RELAY_HELLO = "plannotator-guide-mcp/1";
-/** Lines longer than this end the connection (the relay never needs more). */
+/** Lines longer than this many bytes end the connection (the relay never needs more). */
 const MAX_LINE_BYTES = 8 * 1024 * 1024;
+/** A connection that has not proved its session by then is closed. */
+const HELLO_TIMEOUT_MS = 10_000;
 
 export interface RelaySession {
   readonly token: string;
@@ -44,7 +46,9 @@ interface SessionEntry {
   sockets: Set<Socket>;
 }
 
-export async function startRelayHost(options: { serverVersion: string; log?: (line: string) => void }): Promise<RelayHost> {
+export async function startRelayHost(options: { serverVersion: string; log?: (line: string) => void; maxLineBytes?: number; helloTimeoutMs?: number }): Promise<RelayHost> {
+  const maxLineBytes = options.maxLineBytes ?? MAX_LINE_BYTES;
+  const helloTimeoutMs = options.helloTimeoutMs ?? HELLO_TIMEOUT_MS;
   const log = options.log ?? (() => {});
   let socketDir: string | null = null;
   let socketPath: string;
@@ -67,55 +71,82 @@ export async function startRelayHost(options: { serverVersion: string; log?: (li
   };
 
   const server: Server = createServer((socket) => {
-    let buffer = "";
+    // Raw bytes: a line is cut at the newline byte and decoded whole, so the
+    // limit counts bytes and a character split across chunks stays intact.
+    let pending: Buffer[] = [];
+    let pendingBytes = 0;
     let session: SessionEntry | null = null;
     let queue: Promise<void> = Promise.resolve();
-    socket.setEncoding("utf8");
+    const helloTimer = setTimeout(() => {
+      if (!session) {
+        log("[guide-mcp] closed a relay connection that never proved its session");
+        end();
+      }
+    }, helloTimeoutMs);
+    helloTimer.unref?.();
     const end = () => {
+      clearTimeout(helloTimer);
       session?.sockets.delete(socket);
       socket.destroy();
     };
     socket.on("error", () => end());
-    socket.on("close", () => session?.sockets.delete(socket));
-    socket.on("data", (chunk: string) => {
-      buffer += chunk;
-      if (buffer.length > MAX_LINE_BYTES && !buffer.includes("\n")) return end();
-      let nl: number;
-      while ((nl = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, nl).replace(/\r$/, "");
-        buffer = buffer.slice(nl + 1);
-        if (!line.trim()) continue;
-        if (!session) {
-          let hello: { hello?: unknown; token?: unknown };
-          try {
-            hello = JSON.parse(line);
-          } catch {
-            return end();
-          }
-          const found = hello.hello === RELAY_HELLO && typeof hello.token === "string" ? findSession(hello.token) : null;
-          if (!found) {
-            log("[guide-mcp] refused a relay connection with an unknown token");
-            return end();
-          }
-          session = found;
-          session.sockets.add(socket);
-          continue;
-        }
-        const current = session;
-        // Answer in order: an agent's client may pipeline calls.
-        queue = queue.then(async () => {
-          let message: unknown;
-          try {
-            message = JSON.parse(line);
-          } catch {
-            socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } })}\n`);
-            return;
-          }
-          const response = await current.handle(message);
-          if (response && !socket.destroyed) socket.write(`${JSON.stringify(response)}\n`);
-        });
-      }
+    socket.on("close", () => {
+      clearTimeout(helloTimer);
+      session?.sockets.delete(socket);
     });
+    socket.on("data", (chunk: Buffer) => {
+      let start = 0;
+      for (let nl = chunk.indexOf(0x0a); nl >= 0; nl = chunk.indexOf(0x0a, start)) {
+        if (pendingBytes + (nl - start) > maxLineBytes) return end();
+        pending.push(chunk.subarray(start, nl));
+        const raw = Buffer.concat(pending).toString("utf8");
+        pending = [];
+        pendingBytes = 0;
+        start = nl + 1;
+        if (!handleLine(raw.replace(/\r$/, ""))) return;
+      }
+      const rest = chunk.subarray(start);
+      pendingBytes += rest.length;
+      if (pendingBytes > maxLineBytes) return end();
+      if (rest.length) pending.push(Buffer.from(rest));
+    });
+    /** Handle one line; false when the connection was closed. */
+    const handleLine = (line: string): boolean => {
+      if (!line.trim()) return true;
+      if (!session) {
+        let hello: { hello?: unknown; token?: unknown };
+        try {
+          hello = JSON.parse(line);
+        } catch {
+          end();
+          return false;
+        }
+        const found = hello.hello === RELAY_HELLO && typeof hello.token === "string" ? findSession(hello.token) : null;
+        if (!found) {
+          log("[guide-mcp] refused a relay connection with an unknown token");
+          end();
+          return false;
+        }
+        session = found;
+        clearTimeout(helloTimer);
+        session.sockets.add(socket);
+        return true;
+      }
+      const current = session;
+      // Answer in order: an agent's client may pipeline calls.
+      queue = queue.then(async () => {
+        let message: unknown;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } })}\n`);
+          return;
+        }
+        const response = await current.handle(message);
+        if (response && !socket.destroyed) socket.write(`${JSON.stringify(response)}\n`);
+      });
+      return true;
+    };
   });
 
   await new Promise<void>((resolve, reject) => {

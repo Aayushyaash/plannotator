@@ -10,28 +10,34 @@ import { mkdirSync } from "node:fs";
 import type { RequestPermissionRequest, RequestPermissionResponse } from "@agentclientprotocol/sdk";
 import { createGuideHtml, guideExportFilename, resolveGuideViewerAssets } from "@plannotator/core/guide-format";
 import { GUIDE_VIEWER_MANIFEST } from "@plannotator/core/guide-viewer-manifest";
-import { buildSavedGuideSnapshot, findSavedGuideById } from "@plannotator/shared/guide-store";
+import { findSavedGuideById, listGuides } from "@plannotator/shared/guide-store";
 import { readGuideInstructions } from "@plannotator/shared/guide-instructions-store";
 import { AcpClient } from "../acp/client";
-import { CLAUDE_CODE, readAgentOptions, resolveAgentLaunch, type AgentOptionsCache } from "../acp/agents";
+import { CLAUDE_CODE, readAgentOptions, resolveAgentLaunch, type AgentOptionsCache, type LoginCommand } from "../acp/agents";
+import { planSpawn } from "../acp/spawn-plan";
 import { parseGuideLink } from "../core/adapter";
 import { loadDashboard, type DashboardModel } from "../dashboard";
 import { GuideGeneration, type GenerationState } from "../generation";
 import { startRelayHost, type RelayHost } from "../mcp/relay-host";
-import { ReaderModel, resolveReaderSides, type ReaderSides } from "../reader-model";
+import { ReaderModel, guideWorktreePath, resolveReaderSides, type ReaderSides } from "../reader-model";
+import { removeShareBeforeDelete } from "../share";
 import { buildLocalChangesPatch, changedFilesFromPatch, getRepoInfo, type LocalChangesMode } from "../sources/git";
-import { preparePullRequestWorktree, removePullRequestWorktree, viewPullRequest } from "../sources/github";
-import { defaultRunner, type Runner } from "../sources/runner";
+import { preparePullRequestWorktree, pullRequestWorktreePath, removePullRequestWorktree, viewPullRequest } from "../sources/github";
+import { defaultRunner, findExecutable, type Runner } from "../sources/runner";
 import {
   deleteDraftRecord,
   deleteSavedGuide,
+  guideHistoryEnabled,
   listDraftRecords,
   loadDraftRecord,
   loadSavedGuide,
   setChapterReviewed,
+  snapshotOfGuide,
   writeSidecar,
   type AgentChoiceRecord,
   type DraftRecord,
+  type LoadedGuide,
+  type RecentEntry,
   type ReviewSourceRecord,
 } from "../store";
 import type { ChapterViewState, GeneratingViewState, GuideViewState, HomeViewState } from "../webview-protocol";
@@ -86,6 +92,8 @@ export class GuidesController implements vscode.Disposable {
   private chapterView: { view: vscode.WebviewView; host: WebviewHost } | null = null;
   private reader: { model: ReaderModel; sides: ReaderSides } | null = null;
   private currentFile: string | null = null;
+  /** Guides made while guide history is off: kept in memory for this session only. */
+  private readonly sessionGuides = new Map<string, LoadedGuide>();
   private readonly ui: ReaderUi;
   private readonly version: string;
 
@@ -155,7 +163,7 @@ export class GuidesController implements vscode.Disposable {
     this.loading = (async () => {
       this.fireTree();
       try {
-        this.dashboard = await loadDashboard(this.runner, this.cwd());
+        this.dashboard = withSessionGuides(await loadDashboard(this.runner, this.cwd()), [...this.sessionGuides.values()], guideHistoryEnabled());
       } catch (err) {
         this.log.error(`[guides] dashboard: ${err instanceof Error ? err.stack ?? err.message : err}`);
       } finally {
@@ -191,7 +199,7 @@ export class GuidesController implements vscode.Disposable {
         title: r.title,
         sub: [d?.repo?.displayName.split("/").pop(), r.label].filter(Boolean).join(" · "),
         progress: r.kind === "guide" && r.progress && !r.moved ? r.progress : null,
-        note: r.moved ? "head moved since the guide" : r.kind === "draft" ? `Draft · ${r.draftInfo?.chapters ?? 0} chapters · ${r.draftInfo?.filesLeft ?? 0} files left` : null,
+        note: r.sessionOnly ? "not saved: this session only" : r.moved ? "head moved since the guide" : r.kind === "draft" ? `Draft · ${r.draftInfo?.chapters ?? 0} chapters · ${r.draftInfo?.filesLeft ?? 0} files left` : null,
         warn: !!r.moved,
         when: relativeTime(r.at),
       })),
@@ -272,6 +280,7 @@ export class GuidesController implements vscode.Disposable {
       openExternal: "openPullRequestOnGitHub",
       refresh: "refresh",
       exportGuide: "exportGuide",
+      signIn: "signIn",
     };
     if (command === "guideCurrentPR" && this.dashboard?.currentBranchPR) args = [this.dashboard.currentBranchPR.number];
     const target = map[command];
@@ -334,6 +343,8 @@ export class GuidesController implements vscode.Disposable {
         return this.toggleFileReviewed(str(args[0]) ?? (args[0] && typeof args[0] === "object" && "path" in (args[0] as object) ? (args[0] as { path: string }).path : undefined));
       case "changeDefaults":
         return this.changeDefaults();
+      case "signIn":
+        return this.signIn(str(args[0]));
       case "openPullRequestOnGitHub": {
         const target = str(args[0]) ?? (args[0] && typeof args[0] === "object" ? ((args[0] as { pr?: { url: string }; row?: { url: string } }).pr?.url ?? (args[0] as { row?: { url: string } }).row?.url) : undefined);
         if (target && /^https:\/\//.test(target)) await vscode.env.openExternal(vscode.Uri.parse(target));
@@ -526,6 +537,7 @@ export class GuidesController implements vscode.Disposable {
         resolveSymbol: (name, path, f, headRoot) => resolveSymbolForBuilder(name, path, headRoot, f.map((x) => x.path)),
         checkMermaid: (source) => this.checkMermaid(source),
         log: (line) => this.log.info(line),
+        history: guideHistoryEnabled(),
       },
     );
     const entry: RunEntry = { gen, background: false, panel: null, running: null };
@@ -550,7 +562,12 @@ export class GuidesController implements vscode.Disposable {
     const state = entry.gen.state;
     void vscode.commands.executeCommand("setContext", "plannotator.guides.generating", false);
     this.updateBadge(state);
+    if (entry.gen.memoryGuide) this.sessionGuides.set(entry.gen.memoryGuide.id, entry.gen.memoryGuide);
     await this.refresh();
+    if (state.status === "failed" && state.signIn) {
+      void this.signIn();
+      return;
+    }
     if (state.status === "finished" && state.savedGuideId) {
       if (entry.background || !entry.panel) {
         const choice = await vscode.window.showInformationMessage(`Guide ready: ${state.draft.title || state.source.label}`, "Open guide");
@@ -627,23 +644,93 @@ export class GuidesController implements vscode.Disposable {
       left: [...s.progress.remaining],
       summary: s.progress.line,
       savedGuideId: s.savedGuideId ?? null,
+      signIn: s.signIn ? (s.signIn.logins.length ? s.signIn.logins.map((l) => l.label) : ["Sign in"]) : null,
+      memoryOnly: !!s.memoryOnly,
     };
   }
 
+  /**
+   * The agent's own permission options, as a Quick Pick that stays open until
+   * answered (a modal dialog cannot be closed when the run is cancelled; this
+   * one closes with the run). Closing it is a "no": the agent's reject option.
+   */
   private async askPermission(req: RequestPermissionRequest, signal: AbortSignal, agentLabel: string): Promise<RequestPermissionResponse> {
+    if (signal.aborted) return { outcome: { outcome: "cancelled" } };
     const title = req.toolCall.title ?? "a tool";
     const raw = req.toolCall.rawInput as Record<string, unknown> | undefined;
     const detail = raw && typeof raw === "object"
-      ? Object.entries(raw).slice(0, 4).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`.slice(0, 300)).join("\n")
+      ? Object.entries(raw).slice(0, 4).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`.slice(0, 300)).join(" · ")
       : undefined;
-    const names = req.options.map((o) => o.name);
-    const answer = await vscode.window.showInformationMessage(`${agentLabel} asks to run: ${title}`, { modal: true, detail: detail ?? "The guide's agent asks before running this tool, under your own settings." }, ...names);
-    if (signal.aborted) return { outcome: { outcome: "cancelled" } };
-    const chosen = req.options.find((o) => o.name === answer);
-    if (chosen) return { outcome: { outcome: "selected", optionId: chosen.optionId } };
-    // Closing the dialog is a "no": pass the agent's own reject option.
+    const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { optionId: string }>();
+    qp.title = `${agentLabel} asks to run: ${title}`;
+    qp.placeholder = detail ?? "The guide's agent asks before running this tool, under your own settings.";
+    qp.ignoreFocusOut = true;
+    qp.items = req.options.map((o) => ({ label: o.name, optionId: o.optionId, ...(o.kind.startsWith("reject") && { description: "no" }) }));
+    const chosen = await new Promise<string | null | "aborted">((resolve) => {
+      let done = false;
+      const finish = (v: string | null | "aborted") => {
+        if (done) return;
+        done = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+        qp.dispose();
+      };
+      const onAbort = () => finish("aborted");
+      signal.addEventListener("abort", onAbort, { once: true });
+      qp.onDidAccept(() => finish(qp.selectedItems[0]?.optionId ?? null));
+      qp.onDidHide(() => finish(null));
+      qp.show();
+    });
+    if (chosen === "aborted" || signal.aborted) return { outcome: { outcome: "cancelled" } };
+    if (chosen) return { outcome: { outcome: "selected", optionId: chosen } };
     const reject = req.options.find((o) => o.kind === "reject_once") ?? req.options.find((o) => o.kind.startsWith("reject"));
     return reject ? { outcome: { outcome: "selected", optionId: reject.optionId } } : { outcome: { outcome: "cancelled" } };
+  }
+
+  /**
+   * Sign in to the agent: a terminal running the agent's own login command
+   * (the terminal sign-ins it listed in `initialize`), else `claude /login`.
+   */
+  private async signIn(label?: string): Promise<void> {
+    const state = this.run?.gen.state;
+    const logins: LoginCommand[] = state?.signIn?.logins ?? [];
+    const launch = resolveAgentLaunch(CLAUDE_CODE, this.agentSetting());
+    let choice = label;
+    if (!choice) {
+      const buttons = logins.length ? logins.map((l) => l.label) : ["Sign in"];
+      choice = await vscode.window.showErrorMessage(`${CLAUDE_CODE.label} is not signed in. Sign in in a terminal, then resume the guide.`, ...buttons);
+      if (!choice) return;
+    }
+    const login = logins.find((l) => l.label === choice) ?? (logins.length === 1 ? logins[0] : undefined);
+    let command: string;
+    let args: string[];
+    if (login && launch.ok) {
+      command = launch.command;
+      args = [...launch.args, ...login.args];
+    } else {
+      const claude = findExecutable("claude");
+      if (!claude) {
+        void vscode.window.showErrorMessage(`Run \`claude\` in a terminal and sign in with /login, then resume the guide.`);
+        return;
+      }
+      command = claude;
+      args = ["/login"];
+    }
+    let plan;
+    try {
+      plan = planSpawn(command, args);
+    } catch (err) {
+      void vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    const terminal = vscode.window.createTerminal({
+      name: `${CLAUDE_CODE.label} sign-in`,
+      shellPath: plan.command,
+      shellArgs: plan.args,
+      cwd: state?.source.repoRoot ?? this.cwd(),
+      env: { ...plan.env, ...login?.env },
+    });
+    terminal.show();
   }
 
   /** The Mermaid render check, in whichever Guides webview is open. */
@@ -663,6 +750,8 @@ export class GuidesController implements vscode.Disposable {
 
   private findDraft(id: string | undefined): DraftRecord | null {
     if (!id) return null;
+    // With guide history off the run's draft is only in memory.
+    if (this.run?.gen.state.id === id && this.run.gen.state.memoryOnly) return this.run.gen.toDraftRecord();
     const keys = new Set([this.dashboard?.repo?.repoKey, this.run?.gen.state.repoKey].filter((k): k is string => !!k));
     for (const key of keys) {
       const r = loadDraftRecord(key, id);
@@ -709,6 +798,7 @@ export class GuidesController implements vscode.Disposable {
       requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
       resolveSymbol: (name, path, f, headRoot) => resolveSymbolForBuilder(name, path, headRoot, f.map((x) => x.path)),
       checkMermaid: (source) => this.checkMermaid(source),
+      history: guideHistoryEnabled(),
     };
   }
 
@@ -739,6 +829,10 @@ export class GuidesController implements vscode.Disposable {
       void vscode.window.showWarningMessage(`The draft was not saved: ${result.problems.join(" ")}`);
       return;
     }
+    if (gen.memoryGuide) {
+      this.sessionGuides.set(gen.memoryGuide.id, gen.memoryGuide);
+      void vscode.window.showInformationMessage("Guide history is off, so this guide is kept only until VS Code closes.");
+    }
     this.draftPanels.get(record.id)?.panel.dispose();
     if (this.run?.gen.state.id === record.id) {
       this.run.panel?.panel.dispose();
@@ -763,10 +857,17 @@ export class GuidesController implements vscode.Disposable {
   // -------------------------------------------------------------------------
 
   private locateGuide(id: string): { repoKey: string } | null {
+    const memory = this.sessionGuides.get(id);
+    if (memory) return { repoKey: memory.repoKey };
     const key = this.dashboard?.repo?.repoKey;
     if (key && loadSavedGuide(key, id)) return { repoKey: key };
     const found = findSavedGuideById(id);
     return found ? { repoKey: found.repoKey } : null;
+  }
+
+  /** A saved guide, or one kept in memory because guide history is off. */
+  private loadGuide(repoKey: string, id: string): LoadedGuide | null {
+    return this.sessionGuides.get(id) ?? loadSavedGuide(repoKey, id);
   }
 
   async openGuide(id: string | undefined): Promise<void> {
@@ -778,7 +879,7 @@ export class GuidesController implements vscode.Disposable {
         void vscode.window.showWarningMessage("That guide is gone.");
         return;
       }
-      const loaded = loadSavedGuide(where.repoKey, id);
+      const loaded = this.loadGuide(where.repoKey, id);
       if (!loaded) return;
       if (!loaded.rawPatch) {
         void vscode.window.showWarningMessage("This guide predates portable guides: its diff was not kept, so it opens in Plannotator's web app only.");
@@ -801,6 +902,30 @@ export class GuidesController implements vscode.Disposable {
     this.showGuidePanel();
     this.updateReaderViews();
     void vscode.commands.executeCommand(`${"plannotator.guides.tree"}.focus`);
+    void this.recheckDiagram();
+  }
+
+  /**
+   * A guide whose overview diagram was saved without a render check (no
+   * Guides webview was open during a background run) is checked once its tab
+   * is open, and the reader is told when it does not render.
+   */
+  private async recheckDiagram(): Promise<void> {
+    const reader = this.reader;
+    if (!reader || reader.model.loaded.sidecar.diagramCheck !== "unchecked") return;
+    const source = reader.model.overview?.diagram?.source;
+    const host = this.guidePanels.get(reader.model.id)?.host;
+    if (!source || !host) return;
+    let result: Awaited<ReturnType<WebviewHost["checkMermaid"]>> = null;
+    for (let i = 0; i < 20 && !result; i++) {
+      result = await host.checkMermaid(source);
+      if (!result) await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!result || this.reader !== reader) return;
+    const loaded = reader.model.loaded;
+    loaded.sidecar.diagramCheck = result.ok ? "ok" : "failed";
+    if (!this.sessionGuides.has(loaded.id)) writeSidecar(loaded.repoKey, loaded.id, loaded.sidecar);
+    if (!result.ok) void vscode.window.showWarningMessage(`The overview diagram of this guide does not render: ${result.message ?? "Mermaid refused it"}${result.line ? ` (line ${result.line})` : ""}.`);
   }
 
   private closeGuide(): void {
@@ -906,8 +1031,10 @@ export class GuidesController implements vscode.Disposable {
   private persistTicks(): void {
     if (!this.reader) return;
     const { model } = this.reader;
-    setChapterReviewed(model.loaded.repoKey, model.id, model.reviewed);
-    writeSidecar(model.loaded.repoKey, model.id, { ...model.loaded.sidecar, fileTicks: [...model.fileTicks] });
+    if (!this.sessionGuides.has(model.id)) {
+      setChapterReviewed(model.loaded.repoKey, model.id, model.reviewed);
+      writeSidecar(model.loaded.repoKey, model.id, { ...model.loaded.sidecar, fileTicks: [...model.fileTicks] });
+    }
     model.loaded.sidecar.fileTicks = [...model.fileTicks];
     model.loaded.envelope.reviewed = [...model.reviewed];
   }
@@ -1066,9 +1193,9 @@ export class GuidesController implements vscode.Disposable {
     const guideId = id ?? this.reader?.model.id;
     if (!guideId) return;
     const where = this.locateGuide(guideId);
-    const loaded = where ? loadSavedGuide(where.repoKey, guideId) : null;
+    const loaded = where ? this.loadGuide(where.repoKey, guideId) : null;
     if (!where || !loaded) return;
-    const snapshot = buildSavedGuideSnapshot(where.repoKey, loaded.envelope);
+    const snapshot = snapshotOfGuide(loaded);
     if (!snapshot) {
       void vscode.window.showWarningMessage("This guide's diff was not kept, so it cannot be exported.");
       return;
@@ -1084,22 +1211,59 @@ export class GuidesController implements vscode.Disposable {
   private async deleteGuide(id: string | undefined): Promise<void> {
     if (!id) return;
     const where = this.locateGuide(id);
-    const loaded = where ? loadSavedGuide(where.repoKey, id) : null;
+    const loaded = where ? this.loadGuide(where.repoKey, id) : null;
     if (!where || !loaded) return;
-    const ok = await vscode.window.showWarningMessage(`Delete the guide "${loaded.envelope.title}"? The web app's list loses it too.`, { modal: true }, "Delete");
+    const memory = this.sessionGuides.has(id);
+    const share = loaded.envelope.share;
+    const ok = await vscode.window.showWarningMessage(
+      memory ? `Delete the guide "${loaded.envelope.title}"? It was never saved (guide history is off).` : `Delete the guide "${loaded.envelope.title}"? The web app's list loses it too.${share ? " Its share link is removed first." : ""}`,
+      { modal: true },
+      "Delete",
+    );
     if (ok !== "Delete") return;
-    if (this.reader?.model.id === id) this.closeGuide();
-    deleteSavedGuide(where.repoKey, id);
-    const wt = loaded.sidecar.source?.worktreePath;
-    if (wt && loaded.sidecar.source) {
-      const stillUsed = listDraftRecords(where.repoKey).some((d) => d.source.worktreePath === wt);
-      if (!stillUsed) await removePullRequestWorktree(this.runner, loaded.sidecar.source.repoRoot, wt);
+    // The envelope is the only copy of the share link's delete token: remove the link first.
+    const unshared = await removeShareBeforeDelete(share);
+    if (!unshared.ok) {
+      const choice = await vscode.window.showWarningMessage(
+        `Could not remove the share link ${unshared.url}: ${unshared.reason}. Deleting the guide now loses the only copy of its delete token.`,
+        { modal: true, detail: `To remove the link later: ${unshared.command}` },
+        "Copy command and delete",
+      );
+      if (choice !== "Copy command and delete") return;
+      await vscode.env.clipboard.writeText(unshared.command);
     }
+    if (this.reader?.model.id === id) this.closeGuide();
+    if (memory) this.sessionGuides.delete(id);
+    else deleteSavedGuide(where.repoKey, id);
+    const storage = this.context.globalStorageUri.fsPath;
+    const wt = guideWorktreePath(loaded, storage);
+    const repoRoot = loaded.sidecar.source?.repoRoot ?? this.dashboard?.repo?.root;
+    if (wt && repoRoot && !this.worktreeInUse(where.repoKey, wt, id)) await removePullRequestWorktree(this.runner, repoRoot, wt, storage);
     await this.refresh();
   }
 
+  /** Whether another guide, a draft, the live run or the open reader reads this worktree. */
+  private worktreeInUse(repoKey: string, path: string, exceptGuideId: string): boolean {
+    const storage = this.context.globalStorageUri.fsPath;
+    if (this.run && this.run.gen.state.source.headRoot === path) return true;
+    if (this.reader && this.reader.sides.gitRoot === path) return true;
+    for (const d of listDraftRecords(repoKey)) {
+      if (d.source.kind === "pr" && d.source.pr && pullRequestWorktreePath(storage, repoKey, d.source.pr.number, d.source.headSha) === path) return true;
+    }
+    for (const { id } of listGuides(repoKey)) {
+      if (id === exceptGuideId) continue;
+      const other = loadSavedGuide(repoKey, id);
+      if (other && guideWorktreePath(other, storage) === path) return true;
+    }
+    for (const other of this.sessionGuides.values()) {
+      if (other.id !== exceptGuideId && guideWorktreePath(other, storage) === path) return true;
+    }
+    return false;
+  }
+
   dispose(): void {
-    void this.run?.gen.cancel();
+    // VS Code is closing: no grace period for the agent or anything it started.
+    this.run?.gen.kill();
     for (const d of this.disposables) d.dispose();
   }
 }
@@ -1117,3 +1281,13 @@ function treeArg(arg: unknown): string | undefined {
 }
 
 export { nodeId };
+
+/** The dashboard with this session's unsaved guides (guide history off) and a note when history is off. */
+function withSessionGuides(model: DashboardModel, guides: LoadedGuide[], history: boolean): DashboardModel {
+  const key = model.repo?.repoKey;
+  const entries: RecentEntry[] = guides
+    .filter((g) => g.repoKey === key)
+    .map((g) => ({ kind: "guide", id: g.id, title: g.envelope.title, label: g.envelope.label, at: g.envelope.savedAt, progress: { reviewed: g.envelope.reviewed.filter(Boolean).length, total: g.envelope.guide.sections.length }, sessionOnly: true }));
+  const notes = history ? model.notes : [...model.notes, "Guide history is off (PLANNOTATOR_GUIDE_HISTORY or guideHistory in Plannotator's config.json): new guides and drafts are not saved, only kept until VS Code closes."];
+  return { ...model, recent: [...entries, ...model.recent].sort((a, b) => b.at - a.at), notes };
+}

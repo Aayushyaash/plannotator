@@ -177,13 +177,16 @@ function renderGenerating(s: GeneratingViewState): HTMLElement {
     : s.status === "finished"
       ? h("div", { class: "pn-actions" }, s.savedGuideId ? h("button", { class: "pn-btn pn-btn-primary", onclick: () => command("openGuide", s.savedGuideId) }, "Open guide") : null)
       : h("div", { class: "pn-actions" },
-          h("button", { class: "pn-btn pn-btn-primary", onclick: () => command("resumeDraft", s.id) }, "Resume"),
+          ...(s.signIn ?? []).map((label, i) => h("button", { class: `pn-btn${i === 0 ? " pn-btn-primary" : ""}`, onclick: () => command("signIn", label) }, s.signIn!.length === 1 ? "Sign in" : `Sign in: ${label}`)),
+          h("button", { class: `pn-btn${s.signIn ? "" : " pn-btn-primary"}`, onclick: () => command("resumeDraft", s.id) }, "Resume"),
           h("button", { class: "pn-btn", onclick: () => command("saveDraftAsIs", s.id) }, "Save as is"),
         );
   const statusLine = s.statusMessage && !live
     ? h("div", { class: `pn-status ${s.status === "failed" ? "pn-status-error" : s.status === "finished" ? "pn-status-ok" : ""}` },
         icon(s.status === "failed" ? "error" : s.status === "finished" ? "pass" : "debug-pause"), " ", s.statusMessage)
-    : null;
+    : s.memoryOnly && live
+      ? h("div", { class: "pn-status" }, icon("info"), " Guide history is off: this guide and its draft are not saved, only kept until VS Code closes.")
+      : null;
   const header = h("div", { class: "pn-gen-head" },
     h("div", { class: `pn-spinner${live ? "" : " pn-spinner-off"}` }),
     h("div", { class: "pn-gen-titles" },

@@ -20,11 +20,21 @@ const ALERT_KINDS: Record<string, string> = {
 
 const LINK_RE = /^(code|symbol|chapter):/i;
 
+type Purifier = typeof DOMPurify;
+let purifier: Purifier | null = null;
+
+/** DOMPurify bound to this window (a browser build binds itself; a DOM test runtime gets the factory). */
+function purify(): Purifier {
+  if (purifier) return purifier;
+  purifier = typeof DOMPurify.sanitize === "function" ? DOMPurify : (DOMPurify as unknown as (w: Window) => Purifier)(window);
+  return purifier;
+}
+
 let hooked = false;
 function hookOnce(): void {
   if (hooked) return;
   hooked = true;
-  DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+  purify().addHook("afterSanitizeAttributes", (node) => {
     if (node.nodeName === "A") {
       const href = node.getAttribute("href") ?? "";
       node.removeAttribute("href");
@@ -50,20 +60,35 @@ const PURIFY_CONFIG = {
   FORBID_ATTR: ["style", "id", "class"],
 };
 
+/** Plain text, for a page where DOMPurify cannot run: agent text is never trusted as HTML. */
+function textOnly(text: string): DocumentFragment {
+  const fragment = document.createDocumentFragment();
+  const p = document.createElement("p");
+  p.textContent = text;
+  fragment.appendChild(p);
+  return fragment;
+}
+
 /** Markdown to a sanitized fragment. */
 export function renderMarkdown(text: string): DocumentFragment {
+  if (!purify().isSupported) return textOnly(text);
   hookOnce();
   const html = marked.parse(text, { async: false }) as string;
-  const fragment = DOMPurify.sanitize(html, { ...PURIFY_CONFIG, RETURN_DOM_FRAGMENT: true }) as DocumentFragment;
+  const fragment = purify().sanitize(html, { ...PURIFY_CONFIG, RETURN_DOM_FRAGMENT: true }) as DocumentFragment;
   for (const quote of Array.from(fragment.querySelectorAll("blockquote"))) markAlert(quote);
   return fragment;
 }
 
 /** Inline markdown (a file summary) to a sanitized fragment without the wrapping paragraph. */
 export function renderInlineMarkdown(text: string): DocumentFragment {
+  if (!purify().isSupported) {
+    const fragment = document.createDocumentFragment();
+    fragment.appendChild(document.createTextNode(text));
+    return fragment;
+  }
   hookOnce();
   const html = marked.parseInline(text, { async: false }) as string;
-  return DOMPurify.sanitize(html, { ...PURIFY_CONFIG, RETURN_DOM_FRAGMENT: true }) as DocumentFragment;
+  return purify().sanitize(html, { ...PURIFY_CONFIG, RETURN_DOM_FRAGMENT: true }) as DocumentFragment;
 }
 
 /** `> [!IMPORTANT]` blockquotes become callouts (GitHub alert syntax, as in the web app). */

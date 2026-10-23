@@ -58,6 +58,10 @@ export interface GeneratingViewState {
   left: string[];
   summary: string;
   savedGuideId: string | null;
+  /** The run failed because the agent is not signed in: one button per login the agent offers. */
+  signIn: string[] | null;
+  /** Guide history is off: nothing of this run is saved. */
+  memoryOnly: boolean;
 }
 
 export interface OverviewData {
@@ -140,6 +144,7 @@ export const WEBVIEW_COMMANDS = [
   "openExternal",
   "refresh",
   "exportGuide",
+  "signIn",
 ] as const;
 
 export type WebviewCommand = (typeof WEBVIEW_COMMANDS)[number];

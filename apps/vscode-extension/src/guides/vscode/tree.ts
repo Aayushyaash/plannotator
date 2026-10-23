@@ -228,7 +228,7 @@ export function getTreeItem(data: TreeData, node: TreeNode): vscode.TreeItem {
       } else {
         const done = e.progress && e.progress.total > 0 && e.progress.reviewed === e.progress.total;
         t.iconPath = e.moved ? new vscode.ThemeIcon("warning", new vscode.ThemeColor("editorWarning.foreground")) : new vscode.ThemeIcon(done ? "pass" : "book", done ? new vscode.ThemeColor("testing.iconPassed") : undefined);
-        t.description = [e.label, e.moved ? "head moved" : e.progress ? `${e.progress.reviewed}/${e.progress.total}` : "", relativeTime(e.at)].filter(Boolean).join(" · ");
+        t.description = [e.label, e.sessionOnly ? "not saved (this session only)" : e.moved ? "head moved" : e.progress ? `${e.progress.reviewed}/${e.progress.total}` : "", relativeTime(e.at)].filter(Boolean).join(" · ");
         t.contextValue = "pn.guide";
         t.command = { command: "plannotator.guides.openGuide", title: "Open guide", arguments: [e.id] };
       }

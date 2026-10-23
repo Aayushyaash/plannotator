@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { buildGuideSnapshot } from "@plannotator/core/guide-format";
 import { ReaderModel } from "./reader-model";
-import { loadSavedGuide, readSidecar, saveFinishedGuide, setChapterReviewed, writeSidecar } from "./store";
+import { buildFinishedGuide, guideStorePaths, loadSavedGuide, readSidecar, saveFinishedGuide, setChapterReviewed, snapshotOfGuide, writeSidecar } from "./store";
 
 const patch = [
   "diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts", "@@ -1,2 +1,3 @@", " x", "+y", " z",
@@ -101,6 +101,15 @@ describe("guides cross between the web app and VS Code", () => {
     expect(snapshot.guide.overview?.text).toBe("See [b](code:b.ts#L1).");
     const html = createGuideHtml(snapshot, { viewer: resolveGuideViewerAssets(GUIDE_VIEWER_MANIFEST) });
     expect(html).toContain("plannotator-guided-review");
+  });
+
+  it("exports a guide kept in memory (guide history off) exactly as the same guide saved", () => {
+    const g = saved("test__export-mem");
+    const fromDisk = buildSavedGuideSnapshot(g.repoKey, g.envelope)!;
+    expect(snapshotOfGuide(g)).toEqual(fromDisk);
+    const memory = buildFinishedGuide({ repoKey: "test__never-written", snapshot: fromDisk, source: g.sidecar.source!, agent: { id: "claude-code", label: "Claude Code" }, focus: {} });
+    expect(guideStorePaths("test__never-written").exists).toBe(false);
+    expect(parseGuideSnapshot(snapshotOfGuide(memory)!).ok).toBe(true);
   });
 
   it("a guide made in the web app (no VS Code sidecar) opens: base at the merge base, head in the working tree", async () => {

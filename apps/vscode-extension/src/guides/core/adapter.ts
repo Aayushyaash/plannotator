@@ -30,23 +30,29 @@ export { findGuideLinks, isGuideLinkHref, parseGuideLink, type GuideLink } from 
 export type { GuideOverview, GuideOverviewDiagram } from "@plannotator/core/guide";
 
 const CLICK_LINE = /^\s*click\s+([A-Za-z0-9_\-.]+)\s+(?:href\s+)?(?:"([^"]*)"|'([^']*)')/;
+const ANY_CLICK_LINE = /^\s*click\s/i;
+/** Mermaid directives (`%%{init: …}%%`), which can carry config such as `securityLevel`. */
+const DIRECTIVE = /%%\{[\s\S]*?\}%%/g;
 
 /**
  * Mermaid `click` lines as a node id → guide link map, and the source without
  * them: the renderer never sees a click binding, the webview attaches the
- * links to the drawn nodes itself. Click lines whose target is not a guide
- * link are dropped too.
+ * links to the drawn nodes itself. Every other `click` line (`call …`, a
+ * `javascript:` or web href) is dropped, and so are `%%{…}%%` directives, so
+ * an agent's diagram cannot ask Mermaid for a looser security level or a
+ * different config; the renderer's own `securityLevel: 'strict'` stands.
  */
 export function splitMermaidClicks(source: string): { source: string; clicks: Map<string, string> } {
   const clicks = new Map<string, string>();
   const kept: string[] = [];
-  for (const line of source.split("\n")) {
+  for (const line of source.replace(DIRECTIVE, "").split("\n")) {
     const m = CLICK_LINE.exec(line);
     if (m) {
       const href = (m[2] ?? m[3] ?? "").trim();
       if (isGuideLinkHref(href)) clicks.set(m[1], href);
       continue;
     }
+    if (ANY_CLICK_LINE.test(line)) continue;
     kept.push(line);
   }
   return { source: kept.join("\n"), clicks };

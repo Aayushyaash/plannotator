@@ -23,6 +23,9 @@ export async function renderMermaid(source: string): Promise<DiagramResult> {
   const result = await renderDiagram("mermaid", id, clean, { colorTheme: "vscode", mode: currentMode() });
   if (!result.ok) return { ok: false, message: result.message, line: result.line };
   const svg = result.svgNode;
+  // An agent's diagram never needs pictures: a label's <img> or an svg <image> is dropped,
+  // so nothing in a guide fetches from the network (the webview's CSP blocks it too).
+  for (const el of Array.from(svg.querySelectorAll("img, image"))) el.remove();
   for (const [nodeId, link] of clicks) {
     const el = findNode(svg, nodeId);
     if (!el) continue;

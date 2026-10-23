@@ -52,7 +52,7 @@ export class WebviewHost {
   private state: ViewState | null = null;
   private ready = false;
   private nextReq = 1;
-  private readonly mermaidChecks = new Map<number, (r: { ok: boolean; message?: string; line?: number }) => void>();
+  private readonly mermaidChecks = new Map<number, (r: { ok: boolean; message?: string; line?: number } | null) => void>();
   private readonly subscription: vscode.Disposable;
 
   constructor(readonly webview: vscode.Webview, private readonly handlers: WebviewHandlers) {
@@ -113,7 +113,8 @@ export class WebviewHost {
 
   dispose(): void {
     this.subscription.dispose();
-    for (const done of this.mermaidChecks.values()) done({ ok: true });
+    // Not checked (null), never a silent pass.
+    for (const done of this.mermaidChecks.values()) done(null);
     this.mermaidChecks.clear();
   }
 }
