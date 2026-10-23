@@ -5488,9 +5488,13 @@ const App: React.FC = () => {
     return { prompt, markSent };
   }, [agentTerminalSessionId, getAIDraftList, aiDocumentPath, aiRenderAs, askScopeFromContext, displayedMarkdown, rawHtml, terminalAskReadableFilePath]);
 
-  const aiDocumentKey = aiContext
-    ? `${aiDocumentMode ? 'document' : 'plan'}:${aiRenderAs}:${aiDocumentPath}:${versionInfo?.version ?? 'current'}`
-    : 'none';
+  // Annotate navigation shares one conversation, including an empty folder's
+  // first file. Archive and goal contexts still end that conversation.
+  const aiDocumentKey = annotateMode && !archive.archiveMode && !goalSetupMode
+    ? 'annotate-session'
+    : aiContext
+      ? `${aiDocumentMode ? 'document' : 'plan'}:${aiRenderAs}:${aiDocumentPath}:${versionInfo?.version ?? 'current'}`
+      : 'none';
   const previousAIDocumentKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!aiSessionEnabled) return;
@@ -5569,6 +5573,20 @@ const App: React.FC = () => {
     askAI({
       prompt: question,
       scope: askScopeFromContext(context),
+      // Capture at submission: retries must keep this document even if the
+      // reviewer navigates. Annotation feedback travels separately below.
+      contextPreamble: aiContext?.mode === 'annotate'
+        ? [
+            'Current document for this question (supersedes the initial document context):',
+            JSON.stringify({
+              filePath: aiContext.annotate.filePath,
+              sourceInfo: aiContext.annotate.sourceInfo,
+              sourceConverted: aiContext.annotate.sourceConverted,
+              renderAs: aiContext.annotate.renderAs,
+              content: aiContext.annotate.content,
+            }),
+          ].join('\n')
+        : undefined,
       ...askAIAnnotationParams({
         sessionBridge: hasSessionBridge,
         hasSession: !!aiSessionId,
@@ -5578,6 +5596,7 @@ const App: React.FC = () => {
     });
     return true;
   }, [
+    aiContext,
     aiAnnotationsContext,
     aiSessionId,
     getAIDraftList,
