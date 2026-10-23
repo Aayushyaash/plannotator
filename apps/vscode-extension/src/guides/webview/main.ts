@@ -74,34 +74,47 @@ function render(): void {
 function renderHome(s: HomeViewState): HTMLElement {
   const repoLine = s.repo
     ? h("div", { class: "pn-meta" }, icon("repo"), ` ${s.repo.name}`, h("span", { class: "pn-dot" }, "·"), icon("git-branch"), ` ${s.repo.branch}`, h("span", { class: "pn-dot" }, "·"), s.repo.host)
-    : h("div", { class: "pn-meta" }, "Open a folder that is a git repository to see its changes and pull requests.");
+    : h("div", { class: "pn-meta" }, icon("folder"), " No folder open: guided reviews and pull requests from all your repositories.");
   const banner = h("div", { class: "pn-banner" },
     icon("sparkle", "pn-agent-mark"),
     h("span", {}, "New guides use ", h("b", {}, s.defaults.agent), " · ", h("b", {}, s.defaults.model), " · ", h("b", {}, s.defaults.effort), ", with your own ", s.defaults.agent, " settings."),
     h("a", { class: "pn-action", href: "#", onclick: (e) => { e.preventDefault(); command("changeDefaults"); } }, "Change defaults"),
   );
   const cards = h("div", { class: "pn-cards" });
-  const pr = s.cards.pr;
-  cards.append(
-    h("button", { class: `pn-card${pr?.current ? " pn-card-primary" : ""}`, onclick: () => command(pr?.current ? "guideCurrentPR" : "guidePullRequest"), disabled: !pr },
-      h("div", { class: "pn-card-title" }, icon("git-pull-request"), " Pull request"),
-      h("div", { class: "pn-card-body" }, pr ? (pr.current ? `Guide #${pr.current.number}, the PR for this branch, or pick another open PR.` : "Guide any open PR in this repo, or paste its link.") : s.ghNote ?? "Needs the GitHub CLI (gh)."),
-      pr ? h("div", { class: "pn-card-foot" }, h("span", { class: "pn-chip" }, `${pr.open} open`), pr.waiting ? h("span", { class: "pn-chip pn-chip-warn" }, `${pr.waiting} waiting on you`) : null) : null,
-    ),
-  );
-  const local = s.cards.local;
-  cards.append(
-    h("button", { class: "pn-card", onclick: () => command("guideLocal"), disabled: !local || local.files === 0 },
-      h("div", { class: "pn-card-title" }, icon("git-compare"), " Local changes"),
-      h("div", { class: "pn-card-body" }, local ? `Everything since ${local.baseLabel}, uncommitted and untracked files included.` : "No repository open."),
-      local ? h("div", { class: "pn-card-foot" }, h("span", { class: "pn-add" }, `+${local.additions}`), h("span", { class: "pn-del" }, `−${local.deletions}`), ` ${local.files} ${local.files === 1 ? "file" : "files"}`) : null,
-    ),
-  );
+  if (s.repo) {
+    const pr = s.cards.pr;
+    cards.append(
+      h("button", { class: `pn-card${pr?.current ? " pn-card-primary" : ""}`, onclick: () => command(pr?.current ? "guideCurrentPR" : "guidePullRequest"), disabled: !pr },
+        h("div", { class: "pn-card-title" }, icon("git-pull-request"), " Pull request"),
+        h("div", { class: "pn-card-body" }, pr ? (pr.current ? `Guide #${pr.current.number}, the PR for this branch, or pick another open PR.` : "Guide any open PR in this repo, or paste its link.") : s.ghNote ?? "Needs the GitHub CLI (gh)."),
+        pr ? h("div", { class: "pn-card-foot" }, h("span", { class: "pn-chip" }, `${pr.open} open`), pr.waiting ? h("span", { class: "pn-chip pn-chip-warn" }, `${pr.waiting} waiting on you`) : null) : null,
+      ),
+    );
+    const local = s.cards.local;
+    cards.append(
+      h("button", { class: "pn-card", onclick: () => command("guideLocal"), disabled: !local || local.files === 0 },
+        h("div", { class: "pn-card-title" }, icon("git-compare"), " Local changes"),
+        h("div", { class: "pn-card-body" }, local ? `Everything since ${local.baseLabel}, uncommitted and untracked files included.` : "No changes to guide."),
+        local ? h("div", { class: "pn-card-foot" }, h("span", { class: "pn-add" }, `+${local.additions}`), h("span", { class: "pn-del" }, `−${local.deletions}`), ` ${local.files} ${local.files === 1 ? "file" : "files"}`) : null,
+      ),
+    );
+  } else {
+    cards.append(
+      h("button", { class: "pn-card pn-card-primary", onclick: () => command("openFolder") },
+        h("div", { class: "pn-card-title" }, icon("folder-opened"), " Open a repository"),
+        h("div", { class: "pn-card-body" }, "Open a folder that is a git repository to guide its local changes and its pull requests."),
+      ),
+      h("button", { class: "pn-card", onclick: () => command("guidePullRequest"), disabled: !!s.ghNote },
+        h("div", { class: "pn-card-title" }, icon("git-pull-request"), " Guide a pull request by link"),
+        h("div", { class: "pn-card-body" }, s.ghNote ?? "Paste any GitHub PR link. Guided Reviews clones the repository into its own storage; nothing of yours is checked out."),
+      ),
+    );
+  }
 
   const recent = h("section", { class: "pn-col" },
-    h("div", { class: "pn-section-head" }, h("span", {}, "Recent guides")),
+    h("div", { class: "pn-section-head" }, h("span", {}, s.repo ? "Recent guides" : "Recent guides, all repositories")),
     s.recent.length === 0
-      ? h("div", { class: "pn-empty" }, "No guided reviews for this repo yet. Guided reviews made in Plannotator's web app show here too.")
+      ? h("div", { class: "pn-empty" }, s.repo ? "No guided reviews for this repo yet. Guided reviews made in Plannotator's web app show here too." : "No guided reviews yet. Guided reviews made in Plannotator's web app show here too.")
       : h("div", { class: "pn-rows" }, ...s.recent.map((r) =>
           h("button", { class: "pn-row", onclick: () => command(r.kind === "draft" ? "resumeDraft" : "openGuide", r.id) },
             h("div", { class: "pn-row-main" }, h("div", { class: "pn-row-title" }, r.title), h("div", { class: "pn-row-sub" }, r.sub, r.note ? h("span", { class: r.warn ? "pn-warn" : "pn-muted" }, ` · ${r.note}`) : null)),
@@ -115,11 +128,13 @@ function renderHome(s: HomeViewState): HTMLElement {
     s.waiting.length === 0
       ? h("div", { class: "pn-empty" }, s.ghNote ?? "No pull requests are waiting on your review.")
       : h("div", { class: "pn-rows" }, ...s.waiting.map((w) =>
-          h("div", { class: "pn-row pn-row-static" },
-            h("div", { class: "pn-row-main" }, h("div", { class: "pn-row-title" }, `#${w.number} ${w.title}`), h("div", { class: "pn-row-sub" }, w.sub)),
-            w.inThisRepo
-              ? h("button", { class: "pn-btn", onclick: () => command("guidePullRequest", w.number) }, icon("sparkle"), " Guide")
-              : h("button", { class: "pn-btn pn-btn-ghost", title: "Open on GitHub", onclick: () => command("openExternal", w.url) }, icon("link-external")),
+          // The row opens the PR's guided review (or starts one); only the small button goes to GitHub.
+          h("div", { class: "pn-row pn-row-split" },
+            h("button", { class: "pn-row-open", title: w.inThisRepo || !s.repo ? "Open its guided review, or start one" : `${w.sub.split(" · ")[0]} is not open here: Guided Reviews clones it into its own storage`, onclick: () => command("openPullRequest", { number: w.number, url: w.url }) },
+              h("div", { class: "pn-row-main" }, h("div", { class: "pn-row-title" }, `#${w.number} ${w.title}`), h("div", { class: "pn-row-sub" }, w.sub)),
+              h("span", { class: "pn-pill" }, icon("sparkle"), " Guide"),
+            ),
+            h("button", { class: "pn-btn pn-btn-ghost", title: "Open on GitHub", "aria-label": `Open #${w.number} on GitHub`, onclick: () => command("openExternal", w.url) }, icon("link-external")),
           ),
         )),
   );
@@ -129,7 +144,7 @@ function renderHome(s: HomeViewState): HTMLElement {
     banner,
     ...s.notes.map((n) => h("div", { class: "pn-note" }, icon("info"), ` ${n}`)),
     cards,
-    h("div", { class: "pn-two" }, recent, waiting),
+    h("div", { class: "pn-two" }, s.repo ? recent : waiting, s.repo ? waiting : recent),
   );
 }
 

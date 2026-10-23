@@ -5,8 +5,8 @@
  */
 
 import * as vscode from "vscode";
-import { basename } from "node:path";
-import { mkdirSync } from "node:fs";
+import { basename, join } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
 import { createGuideHtml, guideExportFilename, resolveGuideViewerAssets } from "@plannotator/core/guide-format";
 import { GUIDE_VIEWER_MANIFEST } from "@plannotator/core/guide-viewer-manifest";
 import { findSavedGuideById } from "@plannotator/shared/guide-store";
@@ -39,11 +39,25 @@ import { startRelayHost, type RelayHost } from "../mcp/relay-host";
 import { ReaderModel, guideWorktreePath, resolveReaderSides, type ReaderSides } from "../reader-model";
 import { removeShareBeforeDelete } from "../share";
 import { buildLocalChangesPatch, changedFilesFromPatch, getRepoInfo, type LocalChangesMode } from "../sources/git";
-import { preparePullRequestWorktree, removePullRequestWorktree, viewPullRequest } from "../sources/github";
+import {
+  ensureRepoClone,
+  ghRepoArg,
+  ghRepoOfKey,
+  parseGhRepoArg,
+  parsePullRequestUrl,
+  preparePullRequestWorktree,
+  pullRequestHead,
+  removePullRequestWorktree,
+  repoClonePath,
+  repoKeyForGhRepo,
+  viewPullRequest,
+} from "../sources/github";
 import { defaultRunner, findExecutable, type Runner } from "../sources/runner";
 import {
   deleteDraftRecord,
   deleteSavedGuide,
+  allRepoKeys,
+  guideForPullRequest,
   guideHistoryEnabled,
   loadDraftRecord,
   loadSavedGuide,
@@ -58,7 +72,7 @@ import {
 } from "../store";
 import type { ChapterViewState, GeneratingViewState, GuideViewState, HomeViewState } from "../webview-protocol";
 import { chapterColorCss, linkInfo, locateLink, resolveSymbolForBuilder } from "./intel";
-import { autoApproveChoice, pickAgentAndEffort, pickPullRequest, pickSource, type RememberedChoice, type SourceChoice } from "./new-review";
+import { autoApproveChoice, pickAgentAndEffort, pickPullRequest, pickPullRequestByLink, pickSource, type RememberedChoice, type SourceChoice } from "./new-review";
 import { ReaderUi } from "./reader-ui";
 import { getChildren, getParent, getTreeItem, nodeId, relativeTime, type TreeData, type TreeNode } from "./tree";
 import { GuideContentProvider, GUIDE_SCHEME, baseUri, headPathOf, headUri } from "./uris";
@@ -218,7 +232,7 @@ export class GuidesController implements vscode.Disposable {
         kind: r.kind,
         id: r.id,
         title: r.title,
-        sub: [d?.repo?.displayName.split("/").pop(), r.label].filter(Boolean).join(" · "),
+        sub: [r.repoName ?? d?.repo?.displayName.split("/").pop(), r.label].filter(Boolean).join(" · "),
         progress: r.kind === "guide" && r.progress && !r.moved ? r.progress : null,
         note: r.sessionOnly ? "not saved: this session only" : r.moved ? "head moved since the guide" : r.kind === "draft" ? `Draft · ${r.draftInfo?.chapters ?? 0} chapters · ${r.draftInfo?.filesLeft ?? 0} files left` : null,
         warn: !!r.moved,
@@ -239,7 +253,13 @@ export class GuidesController implements vscode.Disposable {
     this.home?.host.show(this.homeState());
   }
 
-  openHome(): void {
+  /**
+   * The Guided Reviews dashboard tab. `auto`: opened because the view was
+   * shown from the activity bar, so it stays away when a dashboard, guide or
+   * run tab is already open (the extension asks at most once per session).
+   */
+  openHome(auto = false): void {
+    if (auto && (this.home || this.guidePanels.size > 0 || this.draftPanels.size > 0 || this.run?.panel)) return;
     if (this.home) {
       this.home.panel.reveal();
       this.updateHome();
@@ -299,6 +319,8 @@ export class GuidesController implements vscode.Disposable {
       openFile: "openFile",
       changeDefaults: "changeDefaults",
       openExternal: "openPullRequestOnGitHub",
+      openPullRequest: "openPullRequest",
+      openFolder: "openFolder",
       refresh: "refresh",
       exportGuide: "exportGuide",
       signIn: "signIn",
@@ -319,19 +341,24 @@ export class GuidesController implements vscode.Disposable {
       case "refresh":
         return this.refresh();
       case "openHome":
-        return this.openHome();
+        return this.openHome(!!args[0] && typeof args[0] === "object" && (args[0] as { auto?: unknown }).auto === true);
       case "newReview":
         return this.newReview();
       case "guideLocal":
         return this.newReview({ kind: "local", mode: "since-base" });
       case "guidePullRequest": {
-        const node = args[0] && typeof args[0] === "object" ? (args[0] as TreeNode) : null;
-        const n = num(args[0]) ?? (node?.kind === "pr" ? node.pr.number : node?.kind === "waiting" ? node.row.number : undefined);
-        if (n !== undefined) return this.newReview({ kind: "pr", number: n });
+        const target = this.pullRequestTarget(args[0]);
+        if (target) return this.newReview(target);
         await this.ensureDashboard();
-        const choice = this.dashboard ? await pickPullRequest(this.dashboard) : undefined;
+        const choice = this.dashboard?.repo ? await pickPullRequest(this.dashboard) : await pickPullRequestByLink();
         return choice ? this.newReview(choice) : undefined;
       }
+      case "openPullRequest": {
+        const target = this.pullRequestTarget(args[0]);
+        return target ? this.openPullRequest(target) : this.dispatch("guidePullRequest", []);
+      }
+      case "openFolder":
+        return vscode.commands.executeCommand("workbench.action.files.openFolder");
       case "openGuide":
         return this.openGuide(str(args[0]));
       case "closeGuide":
@@ -398,6 +425,50 @@ export class GuidesController implements vscode.Disposable {
         this.log.warn(`[guides] unknown command ${name}`);
         return undefined;
     }
+  }
+
+  /**
+   * A pull request named by a tree row, a dashboard row, a number (this
+   * repository) or a link: as a source choice, with `repo` when it belongs to
+   * another repository than the one open.
+   */
+  private pullRequestTarget(arg: unknown): Extract<SourceChoice, { kind: "pr" }> | null {
+    const open = this.dashboard?.repo ?? null;
+    const fromUrl = (url: string, number?: number): Extract<SourceChoice, { kind: "pr" }> | null => {
+      const ref = parsePullRequestUrl(url);
+      if (!ref) return number !== undefined && open ? { kind: "pr", number } : null;
+      const ghRepo = ghRepoArg(ref);
+      return open && repoKeyForGhRepo(ghRepo) === open.repoKey ? { kind: "pr", number: ref.number } : { kind: "pr", number: ref.number, repo: ghRepo };
+    };
+    if (typeof arg === "number") return open ? { kind: "pr", number: arg } : null;
+    if (typeof arg === "string") return /^\d+$/.test(arg) ? (open ? { kind: "pr", number: Number(arg) } : null) : fromUrl(arg);
+    if (!arg || typeof arg !== "object") return null;
+    const node = arg as TreeNode | { number?: unknown; url?: unknown };
+    if ("kind" in node && node.kind === "pr") return { kind: "pr", number: node.pr.number };
+    if ("kind" in node && node.kind === "waiting") return fromUrl(node.row.url, node.row.number);
+    const n = typeof (node as { number?: unknown }).number === "number" ? ((node as { number: number }).number) : undefined;
+    const url = typeof (node as { url?: unknown }).url === "string" ? ((node as { url: string }).url) : undefined;
+    return url ? fromUrl(url, n) : n !== undefined && open ? { kind: "pr", number: n } : null;
+  }
+
+  /**
+   * Clicking a pull request: open its guide when one was made at the PR's
+   * current head, show the run when one is building it, else start a new
+   * guided review of it. Never the browser ("Open on GitHub" does that).
+   */
+  private async openPullRequest(target: Extract<SourceChoice, { kind: "pr" }>): Promise<void> {
+    const open = this.dashboard?.repo ?? null;
+    const repoKey = target.repo ? repoKeyForGhRepo(target.repo) : open?.repoKey;
+    const ghRepo = target.repo ?? (open?.github ? ghRepoArg(open.github) : null);
+    const live = this.run && isLive(this.run.gen.state) ? this.run.gen.state : null;
+    if (live && live.repoKey === repoKey && live.source.pr?.number === target.number) return this.showGeneration(live.id);
+    if (repoKey) {
+      const known = !target.repo ? this.dashboard?.prs.find((p) => p.number === target.number)?.headRefOid : undefined;
+      const head = known || (ghRepo ? await pullRequestHead(this.runner, ghRepo, target.number) : null);
+      const id = guideForPullRequest(repoKey, target.number, head);
+      if (id) return this.openGuide(id);
+    }
+    return this.newReview(target);
   }
 
   private async ensureDashboard(): Promise<void> {
@@ -634,21 +705,24 @@ export class GuidesController implements vscode.Disposable {
     }
     await this.ensureDashboard();
     const model = this.dashboard;
-    if (!model?.repo) {
-      void vscode.window.showWarningMessage("Open a folder that is a git repository to start a guided review.");
+    // With no repository open, only a pull request (by link) can be guided: from a clone in the extension's storage.
+    const source = preset ?? (model ? await pickSource(model) : await pickPullRequestByLink());
+    if (!source) return;
+    if (!model?.repo && !(source.kind === "pr" && source.repo)) {
+      void vscode.window.showWarningMessage("Open a folder that is a git repository, or paste a pull request link, to start a guided review.");
       return;
     }
-    const source = preset ?? (await pickSource(model));
-    if (!source) return;
-    const remembered = this.context.workspaceState.get<RememberedChoice>(`plannotator.guides.choices:${model.repo.root}`) ?? this.context.globalState.get<RememberedChoice>(DEFAULTS_KEY);
+    const choicesKey = model?.repo ? `plannotator.guides.choices:${model.repo.root}` : null;
+    const remembered = (choicesKey && this.context.workspaceState.get<RememberedChoice>(choicesKey)) || this.context.globalState.get<RememberedChoice>(DEFAULTS_KEY);
     const picked = await pickAgentAndEffort({ ...this.pickerInput(remembered), standingInstructions: readGuideInstructions(), autoApprove: this.autoApproveSetting() });
     if (!picked) return;
-    await this.context.workspaceState.update(`plannotator.guides.choices:${model.repo.root}`, { agent: picked.agent.id, model: picked.agent.model?.id, effort: picked.agent.effort?.id });
+    if (choicesKey) await this.context.workspaceState.update(choicesKey, { agent: picked.agent.id, model: picked.agent.model?.id, effort: picked.agent.effort?.id });
     // The start flow's toggle (seeded from the setting) decides, for this run.
     await this.startRun(source, picked.agent, picked.instructions, undefined, autoApproveChoice(picked));
   }
 
-  private async prepareSource(choice: SourceChoice): Promise<{ source: ReviewSourceRecord; rawPatch: string } | null> {
+  private async prepareSource(choice: SourceChoice): Promise<{ source: ReviewSourceRecord; rawPatch: string; repoKey: string } | null> {
+    if (choice.kind === "pr" && choice.repo) return this.prepareOtherRepoPullRequest(choice.number, choice.repo);
     const repo = this.dashboard?.repo ?? (this.cwd() ? await getRepoInfo(this.runner, this.cwd()!) : null);
     if (!repo) throw new Error("No git repository is open.");
     if (choice.kind === "local") {
@@ -659,6 +733,7 @@ export class GuidesController implements vscode.Disposable {
       }
       return {
         rawPatch: patch.rawPatch,
+        repoKey: repo.repoKey,
         source: {
           kind: "local",
           repoRoot: repo.root,
@@ -680,6 +755,7 @@ export class GuidesController implements vscode.Disposable {
       const wt = await preparePullRequestWorktree(this.runner, repo, pr, storage, (step) => progress.report({ message: step }));
       return {
         rawPatch: wt.rawPatch,
+        repoKey: repo.repoKey,
         source: {
           kind: "pr",
           repoRoot: repo.root,
@@ -694,6 +770,50 @@ export class GuidesController implements vscode.Disposable {
         },
       };
     });
+  }
+
+  /**
+   * A pull request of a repository that is not open in VS Code: a blobless
+   * clone of it in the extension's storage (made once, reused), then the
+   * same per-PR worktree as any PR. When that cannot work (no gh, not signed
+   * in, no access), says why in one line and how to fix it.
+   */
+  private async prepareOtherRepoPullRequest(number: number, ghRepo: string): Promise<{ source: ReviewSourceRecord; rawPatch: string; repoKey: string } | null> {
+    const storage = this.context.globalStorageUri.fsPath;
+    mkdirSync(storage, { recursive: true });
+    try {
+      return await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Preparing ${ghRepo}#${number}` }, async (progress) => {
+        const step = (m: string) => progress.report({ message: m });
+        const repo = await ensureRepoClone(this.runner, ghRepo, storage, step);
+        const pr = await viewPullRequest(this.runner, repo.root, number, ghRepo);
+        const wt = await preparePullRequestWorktree(this.runner, repo, pr, storage, step);
+        return {
+          rawPatch: wt.rawPatch,
+          repoKey: repo.repoKey,
+          source: {
+            kind: "pr" as const,
+            repoRoot: repo.root,
+            headRoot: wt.path,
+            repoName: repo.displayName,
+            label: `PR #${pr.number}`,
+            headSha: wt.headSha,
+            baseSha: wt.mergeBase,
+            baseLabel: pr.baseRefName,
+            pr: { number: pr.number, url: pr.url, title: pr.title, author: pr.author },
+            worktreePath: wt.path,
+          },
+        };
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message.split("\n")[0] : String(err);
+      const choice = await vscode.window.showErrorMessage(`Could not guide ${ghRepo}#${number}: ${message} Open the repository in VS Code and guide it from there, or check \`gh auth status\`.`, "Open a folder…", "Open on GitHub");
+      if (choice === "Open a folder…") void vscode.commands.executeCommand("workbench.action.files.openFolder");
+      if (choice === "Open on GitHub") {
+        const ref = parseGhRepoArg(ghRepo);
+        if (ref) void vscode.env.openExternal(vscode.Uri.parse(`https://${ref.host}/${ref.owner}/${ref.repo}/pull/${number}`));
+      }
+      return null;
+    }
   }
 
   private relayHost(): Promise<RelayHost> {
@@ -712,12 +832,12 @@ export class GuidesController implements vscode.Disposable {
     }
     const available = await this.ensureLaunch(descriptor);
     if (!available) return;
-    let prepared: { source: ReviewSourceRecord; rawPatch: string } | null;
-    if (resume) prepared = { source: resume.source, rawPatch: resume.draft.review.rawPatch };
+    let prepared: { source: ReviewSourceRecord; rawPatch: string; repoKey?: string } | null;
+    if (resume) prepared = { source: resume.source, rawPatch: resume.draft.review.rawPatch, repoKey: resume.repoKey };
     else prepared = await this.prepareSource(choice);
     if (!prepared) return;
     const launch = available;
-    const repoKey = resume?.repoKey ?? this.dashboard?.repo?.repoKey;
+    const repoKey = resume?.repoKey ?? prepared.repoKey ?? this.dashboard?.repo?.repoKey;
     if (!repoKey) throw new Error("No repository.");
     const relay = await this.relayHost();
     const files = changedFilesFromPatch(prepared.rawPatch);
@@ -940,7 +1060,7 @@ export class GuidesController implements vscode.Disposable {
     if (!id) return null;
     // With guide history off the run's draft is only in memory.
     if (this.run?.gen.state.id === id && this.run.gen.state.memoryOnly) return this.run.gen.toDraftRecord();
-    const keys = new Set([this.dashboard?.repo?.repoKey, this.run?.gen.state.repoKey].filter((k): k is string => !!k));
+    const keys = new Set([this.dashboard?.repo?.repoKey, this.run?.gen.state.repoKey, ...allRepoKeys()].filter((k): k is string => !!k));
     for (const key of keys) {
       const r = loadDraftRecord(key, id);
       if (r) return r;
@@ -1055,6 +1175,28 @@ export class GuidesController implements vscode.Disposable {
     return found ? { repoKey: found.repoKey } : null;
   }
 
+  /**
+   * The repository a guide is read from: the open one when it is the guide's
+   * own, else the extension's clone of it (made now for a GitHub repository
+   * when there is none, so a PR guide of another repository opens without
+   * that repository open). Null when there is no way to reach it.
+   */
+  private async readerRepoRoot(repoKey: string, onStep: (m: string) => void): Promise<string | null> {
+    const open = this.dashboard?.repo;
+    if (open && open.repoKey === repoKey) return open.root;
+    const storage = this.context.globalStorageUri.fsPath;
+    const clone = repoClonePath(storage, repoKey);
+    if (existsSync(join(clone, ".git"))) return clone;
+    const ghRepo = ghRepoOfKey(repoKey);
+    if (!ghRepo) return null;
+    try {
+      return (await ensureRepoClone(this.runner, ghRepo, storage, onStep)).root;
+    } catch (err) {
+      this.log.warn(`[guides] ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
   /** A saved guide, or one kept in memory because guide history is off. */
   private loadGuide(repoKey: string, id: string): LoadedGuide | null {
     return this.sessionGuides.get(id) ?? loadSavedGuide(repoKey, id);
@@ -1076,7 +1218,9 @@ export class GuidesController implements vscode.Disposable {
         return;
       }
       const sides = await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: "Opening the guide" }, (progress) =>
-        resolveReaderSides(this.runner, loaded, { repoRoot: this.dashboard?.repo?.root ?? null, storageDir: this.context.globalStorageUri.fsPath, onStep: (m) => progress.report({ message: m }) }),
+        this.readerRepoRoot(where.repoKey, (m) => progress.report({ message: m })).then((repoRoot) =>
+          resolveReaderSides(this.runner, loaded, { repoRoot, storageDir: this.context.globalStorageUri.fsPath, onStep: (m) => progress.report({ message: m }) }),
+        ),
       );
       if ("error" in sides) {
         void vscode.window.showWarningMessage(sides.error);

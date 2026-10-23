@@ -151,8 +151,9 @@ export function parsePullRequestRef(input: string, repo?: RepoInfo): number | nu
   return Number(url[4]);
 }
 
-export async function viewPullRequest(runner: Runner, cwd: string, number: number): Promise<PullRequestDetail> {
-  const r = await gh(runner, cwd, ["pr", "view", String(number), "--json", "number,title,url,body,author,headRefName,headRefOid,baseRefName,baseRefOid"]);
+/** `ghRepo` names the repository (`[host/]owner/repo`) instead of the one gh finds from `cwd`'s remotes. */
+export async function viewPullRequest(runner: Runner, cwd: string, number: number, ghRepo?: string): Promise<PullRequestDetail> {
+  const r = await gh(runner, cwd, ["pr", "view", String(number), ...(ghRepo ? ["--repo", ghRepo] : []), "--json", "number,title,url,body,author,headRefName,headRefOid,baseRefName,baseRefOid"]);
   if (r.code !== 0) throw new Error(r.stderr.trim() || `gh pr view exited with ${r.code}`);
   const p = parseJson<Record<string, unknown>>(r.stdout);
   if (!p) throw new Error("gh pr view returned something that is not JSON");
@@ -327,6 +328,13 @@ export function parseGhRepoArg(arg: string): { host: string; owner: string; repo
 export function repoKeyForGhRepo(arg: string): string | null {
   const ref = parseGhRepoArg(arg);
   return ref ? deriveGuideRepoKeyFromRemote(`https://${ref.host}/${ref.owner}/${ref.repo}.git`) : null;
+}
+
+/** A shelf key (`github.com__owner__repo`) back into the form gh takes, or null for a key that is not a GitHub repository. */
+export function ghRepoOfKey(repoKey: string): string | null {
+  const parts = repoKey.split("__");
+  if (parts.length !== 3 || !parts[0].includes(".")) return null;
+  return ghRepoArg({ host: parts[0], owner: parts[1], repo: parts[2] });
 }
 
 /** Where the extension keeps its clone of a repository, by its shelf key. */

@@ -70,9 +70,21 @@
       },
       {
         "command": "plannotator.guides.openHome",
-        "title": "Open Home",
+        "title": "Open Dashboard",
         "category": "Guided Reviews",
         "icon": "$(home)"
+      },
+      {
+        "command": "plannotator.guides.openPullRequest",
+        "title": "Open Pull Request",
+        "category": "Guided Reviews",
+        "icon": "$(git-pull-request)"
+      },
+      {
+        "command": "plannotator.guides.openFolder",
+        "title": "Open a Folder…",
+        "category": "Guided Reviews",
+        "icon": "$(folder-opened)"
       },
       {
         "command": "plannotator.guides.refresh",
@@ -244,7 +256,7 @@
         {
           "command": "plannotator.guides.openHome",
           "when": "view == plannotator.guides.tree",
-          "group": "overflow@1"
+          "group": "navigation@0"
         },
         {
           "command": "plannotator.guides.changeDefaults",
@@ -302,6 +314,14 @@
       "commandPalette": [
         {
           "command": "plannotator.guides.openGuide",
+          "when": "false"
+        },
+        {
+          "command": "plannotator.guides.openPullRequest",
+          "when": "false"
+        },
+        {
+          "command": "plannotator.guides.openFolder",
           "when": "false"
         },
         {

@@ -114,6 +114,14 @@ a:hover { text-decoration: underline; color: var(--vscode-textLink-activeForegro
 .pn-row:hover { background: var(--vscode-list-hoverBackground); }
 .pn-row-static { cursor: default; grid-template-columns: 1fr auto; }
 .pn-row-static:hover { background: transparent; }
+.pn-row-split { cursor: default; grid-template-columns: 1fr auto; padding: 0 6px 0 0; gap: 4px; }
+.pn-row-split:hover { background: transparent; }
+.pn-row-open {
+  font: inherit; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer;
+  display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 10px; border-radius: 4px; min-width: 0;
+}
+.pn-row-open:hover { background: var(--vscode-list-hoverBackground); }
+.pn-row-open:focus-visible, .pn-row:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 .pn-row-title { font-weight: 500; }
 .pn-row-sub { color: var(--vscode-descriptionForeground); font-size: 12px; }
 .pn-row-when { color: var(--vscode-descriptionForeground); font-size: 12px; text-align: right; }

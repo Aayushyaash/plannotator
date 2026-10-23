@@ -10,11 +10,42 @@ import * as vscode from "vscode";
 import type { ConfigChoice } from "../acp/client";
 import { canStart, pickDefault, type AgentDescriptor, type AgentOptionsCache, type AgentStatus } from "../acp/agents";
 import type { DashboardModel } from "../dashboard";
-import { parsePullRequestRef, type PullRequestRow } from "../sources/github";
+import { ghRepoArg, parsePullRequestRef, parsePullRequestUrl, repoKeyForGhRepo, type PullRequestRow } from "../sources/github";
+import type { RepoInfo } from "../sources/git";
 import type { LocalChangesMode } from "../sources/git";
 import type { AgentChoiceRecord } from "../store";
 
-export type SourceChoice = { kind: "local"; mode: LocalChangesMode } | { kind: "pr"; number: number };
+/** `repo` (`[host/]owner/repo`): a pull request of a repository that is not the one open in VS Code. */
+export type SourceChoice = { kind: "local"; mode: LocalChangesMode } | { kind: "pr"; number: number; repo?: string };
+
+/**
+ * What a typed PR number or link means: a PR of the open repository, or a
+ * PR of another repository (a link), which is guided from a clone in the
+ * extension's storage. Null when it is neither.
+ */
+export function pullRequestChoice(text: string, repo: RepoInfo | null): SourceChoice | null {
+  const url = parsePullRequestUrl(text);
+  if (url) {
+    const ghRepo = ghRepoArg(url);
+    if (repo && repoKeyForGhRepo(ghRepo) === repo.repoKey) return { kind: "pr", number: url.number };
+    return { kind: "pr", number: url.number, repo: ghRepo };
+  }
+  if (!repo) return null;
+  const n = parsePullRequestRef(text, repo);
+  return n !== null ? { kind: "pr", number: n } : null;
+}
+
+/** With no repository open: paste a pull request link. */
+export async function pickPullRequestByLink(): Promise<SourceChoice | undefined> {
+  const text = await vscode.window.showInputBox({
+    title: "Guide a pull request",
+    prompt: "Paste a GitHub pull request link. Guided Reviews clones the repository into its own storage (no checkout of yours is touched).",
+    placeHolder: "https://github.com/owner/repo/pull/123",
+    ignoreFocusOut: true,
+    validateInput: (v) => (v.trim() === "" || pullRequestChoice(v, null) ? null : "Paste a link like https://github.com/owner/repo/pull/123"),
+  });
+  return text ? pullRequestChoice(text, null) ?? undefined : undefined;
+}
 
 interface Item<T> extends vscode.QuickPickItem {
   value?: T;
@@ -48,10 +79,7 @@ function pick<T>(qp: vscode.QuickPick<Item<T>>, acceptValue?: (text: string) => 
 const PICK_PR = Symbol("pick-pr");
 
 export async function pickSource(model: DashboardModel): Promise<SourceChoice | undefined> {
-  if (!model.repo) {
-    void vscode.window.showWarningMessage("Open a folder that is a git repository to start a guided review.");
-    return undefined;
-  }
+  if (!model.repo) return pickPullRequestByLink();
   const qp = vscode.window.createQuickPick<Item<SourceChoice | typeof PICK_PR>>();
   qp.title = "New Guided Review";
   qp.step = 1;
@@ -80,10 +108,7 @@ export async function pickSource(model: DashboardModel): Promise<SourceChoice | 
   }
   qp.items = items;
   if (cur) qp.activeItems = [items[1]];
-  const choice = await pick(qp, (text) => {
-    const n = parsePullRequestRef(text, model.repo ?? undefined);
-    return n !== null ? ({ kind: "pr", number: n } as SourceChoice) : undefined;
-  });
+  const choice = await pick(qp, (text) => pullRequestChoice(text, model.repo) ?? undefined);
   if (choice === PICK_PR) return pickPullRequest(model);
   return choice as SourceChoice | undefined;
 }
@@ -96,11 +121,7 @@ export async function pickPullRequest(model: DashboardModel): Promise<SourceChoi
   qp.placeholder = "Pick a PR, or paste its number or link";
   qp.matchOnDetail = true;
   qp.items = model.prs.map((p) => ({ label: `#${p.number} ${p.title}`, detail: prDetail(p), value: { kind: "pr", number: p.number } }));
-  const choice = await pick(qp, (text) => {
-    const n = parsePullRequestRef(text, model.repo ?? undefined);
-    return n !== null ? ({ kind: "pr", number: n } as SourceChoice) : undefined;
-  });
-  return choice;
+  return pick(qp, (text) => pullRequestChoice(text, model.repo) ?? undefined);
 }
 
 /** Whether a run approves automatically: exactly what the start flow's toggle ended on (it starts from the setting). */

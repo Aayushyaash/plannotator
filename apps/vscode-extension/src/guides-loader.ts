@@ -36,6 +36,8 @@ export const GUIDE_COMMANDS = [
   "plannotator.guides.changeDefaults",
   "plannotator.guides.updateAdapters",
   "plannotator.guides.openPullRequestOnGitHub",
+  "plannotator.guides.openPullRequest",
+  "plannotator.guides.openFolder",
 ] as const;
 
 export const GUIDES_TREE_VIEW = "plannotator.guides.tree";
@@ -67,8 +69,13 @@ export interface GuidesApi {
   dispose(): void;
 }
 
+interface LoaderTreeView extends Disposable {
+  visible?: boolean;
+  onDidChangeVisibility?(listener: (e: { visible: boolean }) => unknown): Disposable;
+}
+
 interface LoaderWindow {
-  createTreeView(id: string, options: { treeDataProvider: unknown; showCollapseAll?: boolean; manageCheckboxStateManually?: boolean }): Disposable;
+  createTreeView(id: string, options: { treeDataProvider: unknown; showCollapseAll?: boolean; manageCheckboxStateManually?: boolean }): LoaderTreeView;
   registerWebviewViewProvider(id: string, provider: { resolveWebviewView(view: unknown): void }, options?: unknown): Disposable;
 }
 
@@ -115,8 +122,22 @@ export function registerGuidesLoader(
   };
 
   const win = vscode.window as unknown as LoaderWindow;
-  treeView = win.createTreeView(GUIDES_TREE_VIEW, { treeDataProvider, showCollapseAll: true, manageCheckboxStateManually: true });
-  context.subscriptions.push(treeView);
+  const view = win.createTreeView(GUIDES_TREE_VIEW, { treeDataProvider, showCollapseAll: true, manageCheckboxStateManually: true });
+  treeView = view;
+  context.subscriptions.push(view);
+  // Showing the view from the activity bar opens the Guided Reviews dashboard tab, once per session
+  // (not when VS Code restores the view at startup, and not when a guided review tab is already open).
+  let autoOpened = view.visible === true;
+  const visibility = view.onDidChangeVisibility?.((e) => {
+    if (!e.visible || autoOpened) return;
+    autoOpened = true;
+    try {
+      void load().runCommand("plannotator.guides.openHome", [{ auto: true }]);
+    } catch (err) {
+      log.error(`[guides] openHome: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+    }
+  });
+  if (visibility) context.subscriptions.push(visibility);
   context.subscriptions.push(
     win.registerWebviewViewProvider(GUIDES_CHAPTER_VIEW, { resolveWebviewView: (view) => safe(() => load().resolveChapterView(view), undefined) }, { webviewOptions: { retainContextWhenHidden: true } }),
   );
