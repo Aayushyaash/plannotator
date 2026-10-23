@@ -342,8 +342,28 @@ export function useImageRegionAnnotations(all: readonly Annotation[], src: strin
  */
 export function imageSourceLine(block: { content: string; startLine?: number }, src: string): number | null {
   if (typeof block.startLine !== 'number' || block.startLine < 1) return null;
-  let at = block.content.indexOf(`](${src}`);
+  let at = imageReferenceIndex(block.content, src);
   if (at < 0) at = block.content.indexOf(src);
   if (at < 0) return block.startLine;
   return block.startLine + (block.content.slice(0, at).match(/\n/g)?.length ?? 0);
+}
+
+/**
+ * Where the markdown image reference to `src` starts in `text` (`](src)`,
+ * `](src "title")`, `](<src>)`), or -1. The src must be the whole reference:
+ * `a.png` never matches `](data.png)` or `](a.png.bak)`.
+ */
+export function imageReferenceIndex(text: string, src: string): number {
+  if (!src) return -1;
+  for (const opener of [`](${src}`, `](<${src}>`]) {
+    let from = 0;
+    for (;;) {
+      const at = text.indexOf(opener, from);
+      if (at < 0) break;
+      const next = text.charAt(at + opener.length);
+      if (next === ')' || /\s/.test(next)) return at;
+      from = at + 1;
+    }
+  }
+  return -1;
 }

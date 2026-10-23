@@ -2,7 +2,7 @@ import { generateId } from '../utils/generateId';
 import React, { useRef, useState, useEffect, useLayoutEffect, useMemo, forwardRef, useImperativeHandle, useCallback, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
 import { collectDocumentImages, ImageLightbox, type LightboxImage, type LightboxRegionComments } from './ImageLightbox';
-import { imageSourceLine, regionOf } from './ImageRegions';
+import { imageReferenceIndex, imageSourceLine, regionOf } from './ImageRegions';
 import { AnnotationType, type Block, type Annotation, type EditorMode, type InputMethod, type ImageAttachment, type ActionsLabelMode, type HostDraft } from '../types';
 import { applyHighlight, codeBlockClassName, onCodeHighlightSwap } from '../utils/codeHighlight';
 import { paintCodeBlockMark } from '../utils/codeBlockMark';
@@ -1543,9 +1543,12 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   }, [annotations, authoringOff, imageRegionComments, lightbox?.focusId, mentionSource, onAddAnnotation, onAskAI, onDeleteAnnotation, onEditAnnotation]);
 
   const closeLightbox = () => {
-    // Closing the viewer lets go of a region comment it was showing, so the
-    // same card in the panel opens it again.
-    if (lightbox?.focusId && selectedAnnotationId === lightbox.focusId) onSelectAnnotation(null);
+    // Closing the viewer lets go of the region comment selected while it was
+    // open (one it was opened on, or one just made in it), so the same card
+    // in the panel opens it again.
+    const selected = selectedAnnotationId ? annotations.find((a) => a.id === selectedAnnotationId) : undefined;
+    if (selected && regionOf(selected)) onSelectAnnotation(null);
+    regionCreatedHere.current.clear();
     setLightboxState(null);
   };
 
@@ -1553,7 +1556,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   // panel) opens the lightbox on its image, zoomed to its box.
   useEffect(() => {
     if (!imageRegionComments || !selectedAnnotationId || hostImageClick) return;
-    if (regionCreatedHere.current.has(selectedAnnotationId)) return;
+    // The host selects what the viewer just added: skip that one selection.
+    if (regionCreatedHere.current.delete(selectedAnnotationId)) return;
     const ann = annotations.find((a) => a.id === selectedAnnotationId);
     const region = ann ? regionOf(ann) : null;
     if (!region) return;
@@ -1578,7 +1582,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     const unanchored = rows
       .filter((ann) => {
         const region = regionOf(ann);
-        return region === null || !text.includes(region.src);
+        return region === null || imageReferenceIndex(text, region.src) < 0;
       })
       .map((ann) => ann.id);
     onRestoreReport({ attempted: rows.map((ann) => ann.id), unanchored });

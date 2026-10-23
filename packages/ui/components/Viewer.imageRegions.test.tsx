@@ -328,3 +328,83 @@ test.skipIf(!hasDom)('selecting a region card in the document\'s panel opens the
   expect(viewer).not.toBeNull();
   expect(viewer.querySelector('[data-region-drawer] [data-annotation-id="r9"]')).not.toBeNull();
 });
+
+/** Draw a box at Fit from stage (x0, y0) to (x1, y1) and save `text` with Mod+Enter. */
+async function drawAndSave(stage: HTMLElement, from: [number, number], to: [number, number], text: string) {
+  await act(async () => document.querySelector<HTMLButtonElement>('[data-region-tool="region"]')!.click());
+  await pointer(stage, 'pointerdown', ...from);
+  await pointer(stage, 'pointermove', (from[0] + to[0]) / 2, (from[1] + to[1]) / 2);
+  await pointer(stage, 'pointermove', ...to);
+  await pointer(stage, 'pointerup', ...to);
+  await settle();
+  const textarea = document.querySelector<HTMLTextAreaElement>('[data-comment-popover] textarea')!;
+  await typeInto(textarea, text);
+  textarea.focus();
+  await act(async () => { press('Enter', { metaKey: true }); });
+  await settle();
+}
+
+test.skipIf(!hasDom)('a comment made in the viewer opens it again from its card after the viewer is closed', async () => {
+  // Regression: the viewer's own add was remembered for good, so the card of
+  // a comment made in this session never reopened the viewer (until a reload).
+  const state = await mountHost(MARKDOWN);
+  const { stage } = await openViewer();
+  await drawAndSave(stage, [100, 150], [300, 250], 'grey, not orange');
+  const id = state.annotations[0]!.id;
+  // The add's own selection does not refocus the open viewer.
+  expect(document.querySelector('[data-region-drawer]')).toBeNull();
+  await act(async () => document.querySelector<HTMLButtonElement>('[data-lightbox-close]')!.click());
+  await settle();
+  expect(document.querySelector('[data-image-lightbox]')).toBeNull();
+  // Closing let go of the selection, so the card is a fresh pick.
+  expect(state.selected).toBeNull();
+
+  await act(async () => document.querySelector<HTMLElement>(`[data-test-panel] [data-annotation-id="${id}"]`)!.click());
+  await settle();
+  const viewer = document.querySelector<HTMLElement>('[data-image-lightbox]')!;
+  expect(viewer).not.toBeNull();
+  const { img } = await loadImage();
+  await settle();
+  // Zoomed to the box (400 × 200 image pixels fill half the stage: 500/400 = 1.25), its card selected.
+  const scale = Number(/scale\(([\d.]+)\)/.exec(img.style.transform)![1]);
+  expect(scale).toBeCloseTo(Math.min(500 / 400, 300 / 200), 5);
+  expect(viewer.querySelector(`[data-region-box="${id}"]`)!.hasAttribute('data-region-selected')).toBe(true);
+  expect(viewer.querySelector(`[data-region-drawer] [data-annotation-id="${id}"]`)).not.toBeNull();
+});
+
+test.skipIf(!hasDom)('a box waiting for its comment keeps the viewer on its image: stepping away is refused, the words stay', async () => {
+  const TWO = `${MARKDOWN}\n![Second](figures/second.png)\n`;
+  await mountHost(TWO);
+  const { stage } = await openViewer();
+  await act(async () => document.querySelector<HTMLButtonElement>('[data-region-tool="region"]')!.click());
+  await pointer(stage, 'pointerdown', 100, 150);
+  await pointer(stage, 'pointermove', 300, 250);
+  await pointer(stage, 'pointerup', 300, 250);
+  await settle();
+  const textarea = document.querySelector<HTMLTextAreaElement>('[data-comment-popover] textarea')!;
+  await typeInto(textarea, 'half written');
+  const viewer = document.querySelector<HTMLElement>('[data-image-lightbox]')!;
+  expect(viewer.querySelector('[data-lightbox-count]')!.textContent).toBe('1 of 2');
+  await act(async () => viewer.querySelector<HTMLButtonElement>('[data-lightbox-next]')!.click());
+  expect(viewer.querySelector('[data-lightbox-count]')!.textContent).toBe('1 of 2');
+  expect(viewer.querySelector('[data-lightbox-end-note]')!.textContent).toBe('Save or close the comment first');
+  expect(document.querySelector<HTMLTextAreaElement>('[data-comment-popover] textarea')!.value).toBe('half written');
+});
+
+test.skipIf(!hasDom)('a comment is anchored only while the document references its image as a whole', async () => {
+  const saved: Annotation = {
+    id: 'r2',
+    blockId: 'b',
+    startOffset: 0,
+    endOffset: 0,
+    type: AnnotationType.COMMENT,
+    text: 'x',
+    originalText: 'a.png',
+    createdA: 1,
+    imageRegion: { v: 1, src: 'a.png', sourceLine: 3, box: { x: 0, y: 0, w: 1, h: 1 }, naturalWidth: 10, naturalHeight: 10 },
+  };
+  const reports: Report[] = [];
+  // `data.png` and `a.png.bak` contain the text "a.png" but are other images.
+  await mountHost('# Doc\n\n![one](data.png)\n\n![two](a.png.bak)\n', [saved], reports);
+  expect(reports.filter((r) => r.attempted.includes('r2')).at(-1)!.unanchored).toContain('r2');
+});

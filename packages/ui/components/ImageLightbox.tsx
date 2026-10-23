@@ -262,7 +262,7 @@ export const ImageLightbox: React.FC<{
   /** A card (or a box) was picked: select it, show its image, zoom to its box. */
   const pickComment = (id: string) => {
     const hit = allRegions.find((r) => r.ann.id === id);
-    if (!hit) return;
+    if (!hit || waitingComment()) return;
     setSelectedId(id);
     setPending(null);
     setDraft(null);
@@ -342,20 +342,29 @@ export const ImageLightbox: React.FC<{
       }
     : undefined;
 
+  const showNote = (note: string) => {
+    setEndNote(note);
+    setAnnounced(note);
+    if (endTimer.current) clearTimeout(endTimer.current);
+    endTimer.current = setTimeout(() => setEndNote(null), 1800);
+  };
+  /** A box waiting for its comment keeps the viewer on it: stepping away would throw the words away. */
+  const waitingComment = () => {
+    if (!pending) return false;
+    showNote('Save or close the comment first');
+    return true;
+  };
   const step = (dir: 1 | -1) => {
     if (!stepping) return;
     const next = index + dir;
     if (next < 0 || next >= list!.length) {
-      const note = dir > 0 ? 'Last image in this document' : 'First image in this document';
-      setEndNote(note);
-      setAnnounced(note);
-      if (endTimer.current) clearTimeout(endTimer.current);
-      endTimer.current = setTimeout(() => setEndNote(null), 1800);
+      showNote(dir > 0 ? 'Last image in this document' : 'First image in this document');
       return;
     }
     go(next);
   };
   const go = (next: number) => {
+    if (waitingComment()) return;
     // The stage is keyed by image, so stepping remounts it: keep focus on it
     // when it had focus (its scroll keys, and Tab staying inside the dialog).
     refocusStage.current = !!stageRef.current?.element && document.activeElement === stageRef.current.element;

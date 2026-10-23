@@ -209,8 +209,8 @@ test('annotate: draw a box, comment, see it drawn and listed, zoom to it from th
 
       const before = scheme === 'light' ? 0 : 1;
       await expect(viewer.locator('[data-region-count]')).toHaveText(String(before));
-      // The "paused" chip (image pixels about 1270–1650 × 330–460 at 2×).
-      const target: [[number, number], [number, number]] = scheme === 'light' ? [[1240, 300], [1660, 470]] : [[3220, 260], [3600, 920]];
+      // Light: the "paused" chip; dark: the Legend (image pixels at 2×).
+      const target: [[number, number], [number, number]] = scheme === 'light' ? [[1240, 300], [1660, 470]] : [[2380, 290], [2750, 730]];
       await drawBox(page, target[0], target[1], async () => {
         await expect(viewer.locator('[data-region-draft]')).toBeVisible();
         await expect(viewer.locator('[data-region-size]')).toHaveText(/^\d+ × \d+$/);
@@ -226,7 +226,11 @@ test('annotate: draw a box, comment, see it drawn and listed, zoom to it from th
       const text = scheme === 'light' ? 'The paused chip should be grey, not orange.' : 'The legend still lists Blocked; we removed that state in v2.0.';
       await composer.locator('textarea').fill(text);
       await shot(page, `desk-composer-${scheme}`);
+      // The draft autosave is debounced: wait for it to land, so the next
+      // session's Restore finds it (it is not flushed when the page closes).
+      const draftSaved = page.waitForResponse((r) => r.url().endsWith('/api/draft') && r.request().method() === 'POST' && r.ok() && (r.request().postData() ?? '').includes(text));
       await composer.getByRole('button', { name: 'Save' }).click();
+      await draftSaved;
       await expect(composer).toBeHidden();
       await expect(viewer.locator('[data-region-count]')).toHaveText(String(before + 1));
       await expect(viewer.locator('[data-region-box]')).toHaveCount(before + 1);
