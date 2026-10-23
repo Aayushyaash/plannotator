@@ -9,4 +9,4 @@ allowed-tools: shell(plannotator:*)
 
 ## Your task
 
-If the review above contains feedback or annotations, address them. If no changes were requested, acknowledge and continue.
+If the review above contains feedback or annotations, address them. If no changes were requested, acknowledge and continue. If the session closes without feedback (the output is "Review session closed without feedback." or empty), acknowledge it in one sentence and stop. Do not begin any work: closing the session is not approval.
