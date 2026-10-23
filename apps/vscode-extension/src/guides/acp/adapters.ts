@@ -48,6 +48,8 @@ export interface ManagedLaunch {
 }
 
 const POINTER = "current.json";
+/** Written into a copy when the pointer moves away from it: `{ replacedAt }`. */
+const REPLACED_MARKER = ".plannotator-replaced.json";
 const INSTALL_TIMEOUT_MS = 10 * 60_000;
 /** A copy that is no longer current (or an install that never finished) is removed once older than this. */
 const STALE_COPY_MS = 6 * 3600_000;
@@ -170,9 +172,18 @@ export async function installAdapter(root: string, agentId: string, agentLabel: 
     return fail(`npm finished but ${spec.bin} is missing`);
   }
   try {
+    const previous = readJson<Pointer>(join(agentDir, POINTER))?.copy;
     const tmp = join(agentDir, `${POINTER}.${process.pid}-${now()}.tmp`);
     writeFileSync(tmp, `${JSON.stringify({ package: spec.package, version: spec.version, copy } satisfies Pointer, null, 2)}\n`);
     renameSync(tmp, join(agentDir, POINTER));
+    // The copy that was current until now: when it stopped being current is what makes it old, not when it was installed.
+    if (isCopyName(previous) && previous !== copy && existsSync(join(agentDir, previous))) {
+      try {
+        writeFileSync(join(agentDir, previous, REPLACED_MARKER), `${JSON.stringify({ replacedAt: now() })}\n`);
+      } catch {
+        // Without the marker the copy is judged by its folder's age, as an unfinished install is.
+      }
+    }
   } catch (err) {
     rmSync(dir, { recursive: true, force: true });
     return fail(oneLine(err instanceof Error ? err.message : String(err)));
@@ -186,24 +197,39 @@ export function hasManagedCopy(root: string, agentId: string): boolean {
 }
 
 /**
- * Remove what no run can be using any more: copies that are not current and
- * older than a few hours (installs that never finished included), stray
- * pointer temp files, and the staging folders and files of the first
- * layout (`<agent>.installing-*`, a copy written straight into the agent's
- * folder). The current copy is never touched.
+ * Remove what no run can be using any more: copies that stopped being current
+ * a few hours ago (judged by the time stamped into them when the pointer
+ * moved away, so a long run in another window keeps its copy), installs that
+ * never finished (by their folder's age), stray pointer temp files, and the
+ * staging folders and files of the first layout (`<agent>.installing-*`, a
+ * copy written straight into the agent's folder). The current copy is never
+ * touched; when `current.json` is there but cannot be read (corrupt, or
+ * caught mid-write), nothing is removed at all.
  */
 export function sweepCopies(root: string, agentDir: string, now: number): void {
-  const old = (path: string) => {
+  const pointerPath = join(agentDir, POINTER);
+  let current: string | undefined;
+  if (existsSync(pointerPath)) {
+    const pointer = readJson<Pointer>(pointerPath);
+    if (!pointer || !isCopyName(pointer.copy)) return;
+    current = pointer.copy;
+  }
+  const ageOf = (path: string): number | null => {
+    const marker = readJson<{ replacedAt?: unknown }>(join(path, REPLACED_MARKER));
+    if (marker && typeof marker.replacedAt === "number") return now - marker.replacedAt;
     try {
-      return now - statSync(path).mtimeMs > STALE_COPY_MS;
+      return now - statSync(path).mtimeMs;
     } catch {
-      return false;
+      return null;
     }
+  };
+  const old = (path: string) => {
+    const age = ageOf(path);
+    return age !== null && age > STALE_COPY_MS;
   };
   const remove = (path: string) => rmSync(path, { recursive: true, force: true });
   const agent = agentDir.slice(dirname(agentDir).length + 1);
   for (const name of safeList(root)) if (name.startsWith(`${agent}.installing-`) && old(join(root, name))) remove(join(root, name));
-  const current = readJson<Pointer>(join(agentDir, POINTER))?.copy;
   for (const name of safeList(agentDir)) {
     if (name === POINTER || name === current) continue;
     const path = join(agentDir, name);

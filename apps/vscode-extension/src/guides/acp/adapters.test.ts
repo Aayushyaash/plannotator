@@ -211,6 +211,38 @@ describe("installing an adapter", () => {
   });
 });
 
+describe("removing old adapter copies", () => {
+  const deps = (stamp: string) => ({ runner: fakeNpm().runner, findExecutable: FOUND(["npm", "node"]), stamp });
+  const hoursAgo = (path: string, h: number) => utimesSync(path, new Date(Date.now() - h * 3600_000), new Date(Date.now() - h * 3600_000));
+
+  it("judges a replaced copy by when it stopped being current, not when it was installed", async () => {
+    const root = tempRoot();
+    const agentDir = managedDir(root, "codex");
+    await installAdapter(root, "codex", "Codex", CODEX.adapter!, deps("a"));
+    hoursAgo(join(agentDir, "a"), 30); // installed long ago, and a run in another window still uses it
+    await installAdapter(root, "codex", "Codex", CODEX.adapter!, deps("b"));
+    sweepCopies(root, agentDir, Date.now());
+    expect(existsSync(join(agentDir, "a"))).toBe(true);
+    sweepCopies(root, agentDir, Date.now() + 7 * 3600_000);
+    expect(existsSync(join(agentDir, "a"))).toBe(false);
+    expect(existsSync(join(agentDir, "b"))).toBe(true);
+  });
+
+  it("removes nothing when current.json is there but cannot be read", async () => {
+    const root = tempRoot();
+    const agentDir = managedDir(root, "codex");
+    await installAdapter(root, "codex", "Codex", CODEX.adapter!, deps("a"));
+    mkdirSync(join(agentDir, "stale"), { recursive: true });
+    mkdirSync(`${agentDir}.installing-1-2`, { recursive: true });
+    for (const p of [join(agentDir, "a"), join(agentDir, "stale"), `${agentDir}.installing-1-2`]) hoursAgo(p, 30);
+    for (const pointer of ["{", "", JSON.stringify({ copy: "../x" })]) {
+      writeFileSync(join(agentDir, "current.json"), pointer);
+      sweepCopies(root, agentDir, Date.now());
+      expect([pointer, existsSync(join(agentDir, "a")), existsSync(join(agentDir, "stale")), existsSync(`${agentDir}.installing-1-2`)]).toEqual([pointer, true, true, true]);
+    }
+  });
+});
+
 describe("getting an agent ready before a run", () => {
   const ok = { ok: true as const, command: "/x/node", args: ["entry.js"], source: "managed" as const };
   const missingAdapter = resolveAgentLaunch(CLAUDE_CODE, {}, FOUND([]), () => null);

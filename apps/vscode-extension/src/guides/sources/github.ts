@@ -431,7 +431,18 @@ async function useGhForCredentials(runner: Runner, clone: string, ghRepo: string
   const key = `credential.https://${ref.host}.helper`;
   const g = gitIn(runner, clone);
   await g(["config", "--local", key, ""]);
-  await g(["config", "--local", "--add", key, `!${JSON.stringify(ghPath)} auth git-credential`]);
+  await g(["config", "--local", "--add", key, `!${shellQuoteForGit(ghPath)} auth git-credential`]);
+}
+
+/**
+ * A program path for a git `!` credential helper, which git runs with
+ * `sh -c` (Git for Windows too, through its bundled sh): POSIX single quotes,
+ * so `$`, backticks and backslashes stay literal (`'` becomes `'\''`). A
+ * Windows path comes out as `gh auth setup-git` itself writes it
+ * (`'C:\Program Files\GitHub CLI\gh.exe'`).
+ */
+export function shellQuoteForGit(path: string): string {
+  return `'${path.replace(/'/g, "'\\''")}'`;
 }
 
 /** Folders left by a clone that never finished (its window closed or was killed). */

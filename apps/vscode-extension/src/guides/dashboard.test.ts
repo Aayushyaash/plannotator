@@ -268,13 +268,27 @@ describe("a pull request of a repository that is not open", () => {
       expect(clone[0]).toMatch(new RegExp(`^gh repo clone northwind/ledger-ui ${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.cloning-\\d+-\\d+ -- --filter=blob:none --no-checkout --quiet$`));
       expect(calls.filter((c) => c.startsWith("git --no-pager config"))).toEqual([
         "git --no-pager config --local credential.https://github.com.helper ",
-        'git --no-pager config --local --add credential.https://github.com.helper !"/opt/gh bin/gh" auth git-credential',
+        "git --no-pager config --local --add credential.https://github.com.helper !'/opt/gh bin/gh' auth git-credential",
       ]);
       expect(readdirSync(storage, { recursive: true }).some((n) => String(n).includes(".cloning-"))).toBe(false);
       await ensureRepoClone(runner, "northwind/ledger-ui", storage);
       expect(calls.filter((c) => c.startsWith("gh repo clone"))).toHaveLength(1);
     } finally {
       rmSync(storage, { recursive: true, force: true });
+    }
+  });
+
+  it("quotes gh's path for git's sh -c so nothing in it expands, the same shape gh auth setup-git writes on Windows", async () => {
+    const { shellQuoteForGit } = await import("./sources/github");
+    expect(shellQuoteForGit("/opt/homebrew/bin/gh")).toBe("'/opt/homebrew/bin/gh'");
+    expect(shellQuoteForGit("C:\\Program Files\\GitHub CLI\\gh.exe")).toBe("'C:\\Program Files\\GitHub CLI\\gh.exe'");
+    expect(shellQuoteForGit("/tmp/it's/gh")).toBe("'/tmp/it'\\''s/gh'");
+    if (process.platform === "win32") return;
+    const { execFileSync } = await import("node:child_process");
+    for (const path of ["/opt/a b/gh", "/tmp/$HOME/`id`/gh", "/tmp/it's/$(echo x)/gh", "C:\\Program Files\\GitHub CLI\\gh.exe"]) {
+      // What git does with a `!` helper: sh -c "<helper> get". The first word must come back as the path, untouched.
+      const out = execFileSync("/bin/sh", ["-c", `printf '%s' ${shellQuoteForGit(path)}`], { encoding: "utf8" });
+      expect(out).toBe(path);
     }
   });
 
