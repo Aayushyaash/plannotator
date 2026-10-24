@@ -2031,7 +2031,7 @@ const App: React.FC = () => {
   const handleFileBrowserSelect = React.useCallback(async (
     absolutePath: string,
     dirPath: string,
-    selectOptions?: { revealSidebar?: boolean },
+    selectOptions?: { revealSidebar?: boolean; restoreScroll?: boolean },
   ): Promise<void> => {
     const normalizedAbsolutePath = normalizeBrowserPath(absolutePath);
     const dirState = fileBrowser.dirs.find(d => d.path === dirPath);
@@ -2058,7 +2058,7 @@ const App: React.FC = () => {
         markdown: editableRecord.currentText,
         renderAs: 'markdown',
         sourceSave: editableRecord.sourceSave,
-      }, 'files', { notifyDocumentLoaded: false });
+      }, 'files', { notifyDocumentLoaded: false, restoreScroll: selectOptions?.restoreScroll });
       editableDocuments.setActiveKey(editableKey);
       if (isEditingMarkdown) {
         editSessionBaseRef.current = editableRecord.currentText;
@@ -2083,6 +2083,7 @@ const App: React.FC = () => {
     fileBrowser.setActiveFile(absolutePath);
     await linkedDocHook.open(absolutePath, buildUrl, 'files', {
       revealSidebar: selectOptions?.revealSidebar,
+      restoreScroll: selectOptions?.restoreScroll,
     });
   }, [editableDocuments, linkedDocHook, fileBrowser, convertHtml, isEditingMarkdown]);
 
@@ -2094,7 +2095,7 @@ const App: React.FC = () => {
   const bundleIndex = bundleFiles
     ? annotateBundleIndexOf(bundleFiles, linkedDocHook.isActive ? linkedDocHook.filepath : null)
     : -1;
-  const openBundleFile = React.useCallback((path: string, options?: { revealSidebar?: boolean }) => {
+  const openBundleFile = React.useCallback((path: string, options?: { revealSidebar?: boolean; restoreScroll?: boolean }) => {
     if (!bundleDirState) return Promise.resolve();
     return handleFileBrowserSelect(path, bundleDirState.path, options);
   }, [bundleDirState, handleFileBrowserSelect]);
@@ -2252,7 +2253,13 @@ const App: React.FC = () => {
   // The header's Back passes its click event, which never turns it off.
   const handleLinkedDocBack = React.useCallback((options?: { restoreScroll?: boolean }) => {
     if (bundleBackPath) {
-      void openBundleFile(bundleBackPath, { revealSidebar: false });
+      // The bundle file is reopened (it is a linked document, not the root),
+      // so ask for the reader's place in it explicitly, as back() restores
+      // the root's.
+      void openBundleFile(bundleBackPath, {
+        revealSidebar: false,
+        restoreScroll: options?.restoreScroll !== false,
+      });
       return;
     }
     linkedDocHook.back(options?.restoreScroll === false ? { restoreScroll: false } : undefined);

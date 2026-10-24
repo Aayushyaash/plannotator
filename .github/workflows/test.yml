@@ -372,6 +372,7 @@ jobs:
           packages/editor/App.restoreAcrossEdit.test.tsx
           packages/editor/App.documentDrafts.test.tsx
           packages/editor/App.bundle.test.tsx
+          packages/editor/App.bundleBackScroll.test.tsx
           packages/editor/annotationDraftStaleRetry.test.tsx
           packages/ui/components/blocks/AlertBlock.title.test.tsx
           packages/ui/components/blocks/AlertBlock.seam.test.tsx
