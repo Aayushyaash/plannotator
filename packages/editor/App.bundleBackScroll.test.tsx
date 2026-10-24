@@ -131,7 +131,7 @@ const fakeFetch: typeof fetch = async (input, init) => {
 
 const BLOCK_HEIGHT = 100;
 const VIEWPORT_HEIGHT = 500;
-const originalRect = HTMLElement.prototype.getBoundingClientRect;
+const originalRect = hasDom ? HTMLElement.prototype.getBoundingClientRect : (undefined as unknown as () => DOMRect);
 const scrollTops = new WeakMap<HTMLElement, number>();
 let ownScrollTop: PropertyDescriptor | undefined;
 let clampObserver: MutationObserver | null = null;
